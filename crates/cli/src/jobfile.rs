@@ -37,6 +37,10 @@ pub const FORMAT_TAG: &str = "campanion-job/1";
 /// Major version accepted by [`FORMAT_TAG`].
 pub const FORMAT_MAJOR: u32 = 1;
 
+/// Default chord tolerance for curve fitting in job files; the geometry engine's 1e-6 mm
+/// default would turn every curve into thousands of tiny arcs.
+pub const DEFAULT_JOB_CHORD_MM: f64 = 0.01;
+
 /// FNV-1a 64 offset basis.
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 /// FNV-1a 64 prime.
@@ -502,8 +506,10 @@ fn parse_units(value: &Value) -> Result<Units, JobFileError> {
 }
 
 fn parse_tolerance(value: Option<&Value>, scale: f64) -> Result<Tolerance, JobFileError> {
+    // Chord defaults are already millimetres. Only an explicit `chord` is multiplied by `scale`.
     let Some(value) = value else {
-        return Ok(Tolerance::default());
+        return Tolerance::with_chord(Tolerance::DEFAULT_LINEAR_MM, Tolerance::DEFAULT_ANGULAR_RAD, DEFAULT_JOB_CHORD_MM)
+            .map_err(|err| JobFileError::Invalid { message: err.to_string() });
     };
     let map = object(value, "tolerance").map_err(from_cli)?;
     check_keys(map, &["linear", "angular", "chord"], "tolerance").map_err(from_cli)?;
@@ -517,7 +523,7 @@ fn parse_tolerance(value: Option<&Value>, scale: f64) -> Result<Tolerance, JobFi
     };
     let chord = match optional(map, "chord") {
         Some(value) => cap_under(scale_f64(value, scale, "chord tolerance")?, MAX_MM, "chord tolerance")?,
-        None => Tolerance::DEFAULT_CHORD_MM,
+        None => DEFAULT_JOB_CHORD_MM,
     };
     Tolerance::with_chord(linear, angular, chord).map_err(|err| JobFileError::Invalid { message: err.to_string() })
 }
@@ -1064,6 +1070,36 @@ mod tests {
         assert_eq!(op.params().post_delay_s(), 0.2);
         assert!(!op.params().pierce_process_on_during_delay());
         assert!(op.params().post_process_on_during_delay());
+    }
+
+    fn tolerance_job(units: &str, tolerance: &str) -> String {
+        let tolerance = if tolerance.is_empty() { String::new() } else { format!(r#","tolerance":{tolerance}"#) };
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"{units}"{tolerance},"tools":[],"operations":[]}}"#
+        )
+    }
+
+    #[test]
+    fn chord_defaults_to_job_tolerance_and_keeps_an_explicit_value() {
+        let omitted = load(&write_job("tol-absent", &tolerance_job("mm", ""))).expect("no tolerance");
+        assert_eq!(omitted.tolerance().linear(), Tolerance::DEFAULT_LINEAR_MM);
+        assert_eq!(omitted.tolerance().angular(), Tolerance::DEFAULT_ANGULAR_RAD);
+        assert_eq!(omitted.tolerance().chord(), 0.01);
+        assert_eq!(omitted.tolerance().chord(), DEFAULT_JOB_CHORD_MM);
+
+        let linear_only = load(&write_job("tol-linear", &tolerance_job("mm", r#"{"linear":0.001}"#))).expect("linear only");
+        near(linear_only.tolerance().linear(), 0.001);
+        assert_eq!(linear_only.tolerance().angular(), Tolerance::DEFAULT_ANGULAR_RAD);
+        assert_eq!(linear_only.tolerance().chord(), 0.01);
+
+        // The omitted chord is already millimetres, so inch jobs do not scale it.
+        let inch_linear = load(&write_job("tol-inch-linear", &tolerance_job("inch", r#"{"linear":0.001}"#))).expect("inch linear");
+        near(inch_linear.tolerance().linear(), 0.001 * 25.4);
+        assert_eq!(inch_linear.tolerance().chord(), DEFAULT_JOB_CHORD_MM);
+
+        let explicit = load(&write_job("tol-chord", &tolerance_job("mm", r#"{"linear":0.001,"chord":0.05}"#))).expect("explicit");
+        near(explicit.tolerance().linear(), 0.001);
+        assert_eq!(explicit.tolerance().chord(), 0.05);
     }
 
     fn height_job(units_and_heights: &str) -> String {

@@ -213,8 +213,10 @@ pub fn verify_with(program: &Program, options: &VerifyOptions) -> VerifyReport {
         rapid_retract_warnings: Vec::new(),
     };
     let heights = resolve_heights(program, options, &mut out);
+    // The tip carries across toolpaths in program order. The program's first motion still has no start.
+    let mut cursor = None;
     for (index, path) in program.toolpaths().iter().enumerate() {
-        verify_toolpath(index, path, heights, &mut out);
+        verify_toolpath(index, path, heights, &mut cursor, &mut out);
     }
     for channel_program in program.channel_programs() {
         verify_channel(program.machine(), channel_program, heights, &mut out);
@@ -293,12 +295,11 @@ fn raise_z(max_z: &mut Option<f64>, z: f64) {
     });
 }
 
-fn verify_toolpath(index: usize, path: &ClPath, heights: Heights, out: &mut VerifyReport) {
-    let mut cursor: Option<Vec3> = None;
+fn verify_toolpath(index: usize, path: &ClPath, heights: Heights, cursor: &mut Option<Vec3>, out: &mut VerifyReport) {
     let mut open: Vec<ProcessKind> = Vec::new();
     for (block_index, block) in path.blocks().iter().enumerate() {
         match block {
-            ClBlock::Motion(motion) => verify_cl_motion(index, block_index, motion, &mut cursor, heights, out),
+            ClBlock::Motion(motion) => verify_cl_motion(index, block_index, motion, cursor, heights, out),
             ClBlock::Event(event) => verify_event(event, &mut open, out),
         }
     }
@@ -871,6 +872,11 @@ mod tests {
         Program::try_new(None, Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new()).expect("program")
     }
 
+    fn program_with_paths(paths: Vec<Vec<ClBlock>>) -> Program {
+        let paths = paths.into_iter().map(path).collect();
+        Program::try_new(None, Vec::new(), None, paths, Vec::new(), Vec::new()).expect("program")
+    }
+
     fn axis_machine(limits: Option<(f64, f64)>) -> Machine {
         let limits = limits.map(|(min, max)| AxisLimits::try_new(min, max).expect("limits"));
         let axis = Axis::try_new(
@@ -1131,5 +1137,32 @@ mod tests {
         let report = verify(&program_with_path(low));
         assert!(report.rapid_retract_warnings().is_empty(), "{:?}", report.rapid_retract_warnings());
         assert!(report.rapid_safe_errors().is_empty(), "{:?}", report.rapid_safe_errors());
+    }
+
+    fn ended_at_retract_then(second: Vec<ClBlock>) -> Program {
+        // First toolpath ends with a rapid to Z5 at the origin. The next path continues from that tip.
+        program_with_paths(vec![vec![rapid(0.0, 0.0, 5.0)], second])
+    }
+
+    #[test]
+    fn sideways_rapid_at_the_start_of_the_next_toolpath_is_an_error() {
+        let report = verify_with(&ended_at_retract_then(vec![rapid(50.0, 40.0, 2.0)]), &heights(Some(5.0), None));
+        assert!(report.issues().is_empty(), "{:?}", report.issues());
+        assert_eq!(report.rapid_safe_errors(), &[(Some(1), None, 0, 2.0, 5.0)]);
+    }
+
+    #[test]
+    fn rapid_to_safe_z_then_down_at_the_start_of_the_next_toolpath_is_allowed() {
+        let second = vec![rapid(50.0, 40.0, 5.0), rapid(50.0, 40.0, 2.0)];
+        let report = verify_with(&ended_at_retract_then(second), &heights(Some(5.0), None));
+        assert!(report.rapid_safe_errors().is_empty(), "{:?}", report.rapid_safe_errors());
+        assert!(report.rapid_retract_warnings().is_empty(), "{:?}", report.rapid_retract_warnings());
+        assert!(report.issues().is_empty(), "{:?}", report.issues());
+    }
+
+    #[test]
+    fn inferred_safe_z_flags_a_sideways_rapid_at_the_start_of_the_next_toolpath() {
+        let report = verify(&ended_at_retract_then(vec![rapid(50.0, 40.0, 2.0)]));
+        assert_eq!(report.rapid_safe_errors(), &[(Some(1), None, 0, 2.0, 5.0)]);
     }
 }
