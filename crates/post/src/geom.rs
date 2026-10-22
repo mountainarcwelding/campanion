@@ -53,13 +53,14 @@ pub(crate) fn forward_delta(a0: f64, a1: f64, ccw: bool) -> f64 {
     if ccw { delta } else { (TAU - delta).rem_euclid(TAU) }
 }
 
-pub(crate) fn same_radius(start: Xyz, end: Xyz, center: Xyz, plane: Plane) -> Result<f64> {
+pub(crate) fn same_radius(start: Xyz, end: Xyz, center: Xyz, plane: Plane, extra_slack: f64) -> Result<f64> {
     let radius = in_plane_len(plane, start, center);
     let end_radius = in_plane_len(plane, end, center);
     if !(radius.is_finite() && radius > 1e-12) {
         return Err(invalid("arc radius must be positive"));
     }
-    let slack = 1e-4_f64.max(radius * 1e-5);
+    let extra = if extra_slack.is_finite() && extra_slack > 0.0 { extra_slack } else { 0.0 };
+    let slack = 1e-4_f64.max(radius * 1e-5).max(extra);
     if (radius - end_radius).abs() > slack {
         return Err(invalid("arc end radius does not match the start radius"));
     }
@@ -67,8 +68,10 @@ pub(crate) fn same_radius(start: Xyz, end: Xyz, center: Xyz, plane: Plane) -> Re
 }
 
 /// In-plane sweep of an arc, in `(0, τ]`. A coincident start and end is a full turn.
-pub(crate) fn arc_sweep(start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: ArcSense) -> Result<f64> {
-    same_radius(start, end, center, plane)?;
+///
+/// `extra_slack` covers a start point that was already rounded to the post's linear decimals.
+pub(crate) fn arc_sweep(start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: ArcSense, extra_slack: f64) -> Result<f64> {
+    same_radius(start, end, center, plane, extra_slack)?;
     let a0 = angle_of(plane, start, center);
     let a1 = angle_of(plane, end, center);
     if !a0.is_finite() || !a1.is_finite() {
@@ -144,7 +147,10 @@ pub(crate) fn chord_segments(sweep: f64, radius: f64, tol: f64) -> Result<u32> {
 }
 
 /// Absolute centre from a signed radius word. Negative `radius` is the major arc.
-pub(crate) fn center_from_radius(start: Xyz, end: Xyz, radius: f64, sense: ArcSense, plane: Plane) -> Result<Xyz> {
+///
+/// `quantum` is the linear rounding step (0.001 for three decimals). A chord within two quanta
+/// of the diameter is a semicircle: rounding must not push the centre off the midpoint.
+pub(crate) fn center_from_radius(start: Xyz, end: Xyz, radius: f64, sense: ArcSense, plane: Plane, quantum: f64) -> Result<Xyz> {
     if !(radius.is_finite() && radius.abs() > 0.0) {
         return Err(invalid("arc radius must be non-zero"));
     }
@@ -156,11 +162,13 @@ pub(crate) fn center_from_radius(start: Xyz, end: Xyz, radius: f64, sense: ArcSe
         return Err(invalid("R word cannot describe a full circle"));
     }
     let abs_r = radius.abs();
-    if chord > 2.0 * abs_r + 1e-6 {
+    let quantum = if quantum.is_finite() && quantum > 0.0 { quantum } else { 0.0 };
+    let slack = (quantum * 2.0).max(1e-6);
+    if chord > 2.0 * abs_r + slack {
         return Err(invalid("arc radius is smaller than the chord"));
     }
     let half = chord * 0.5;
-    let h = (abs_r * abs_r - half * half).max(0.0).sqrt();
+    let h = if (2.0 * abs_r - chord).abs() <= slack { 0.0 } else { (abs_r * abs_r - half * half).max(0.0).sqrt() };
     let (lx, ly) = (-dv / chord, du / chord);
     let ccw = matches!(sense, ArcSense::Ccw);
     let sign = if ccw == (radius > 0.0) { 1.0 } else { -1.0 };

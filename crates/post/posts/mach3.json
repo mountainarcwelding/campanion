@@ -1,0 +1,37 @@
+{
+  "id": "mach3",
+  "name": "Mach3",
+  "description": "Millimetre dialect for Mach3. Absolute moves, cutter compensation and tool length cancelled, incremental IJK arcs and helices, dwell P in seconds, no line numbers.",
+  "units": "mm",
+  "line_numbers": { "enabled": false, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 4, "feed": 3, "dwell": 3 },
+  "trailing_zeros": false,
+  "header": [
+    "({program_name})",
+    "G21",
+    "G90",
+    "G17",
+    "G40",
+    "G49",
+    "G80"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "s" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M30"],
+  "max_line_length": 256,
+  "axis_letters": "XYZ"
+}

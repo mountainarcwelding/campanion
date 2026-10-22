@@ -4,7 +4,7 @@ G90
 G17
 (toolpath dome)
 G0 X-20 Y-20 Z5
-M3 S0
+M3
 G1 X-20 Y-20 Z0 F300
 X20 Y-20 Z0 F1000
 X20 Y-19.5 Z0

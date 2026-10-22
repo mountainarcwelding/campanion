@@ -43,7 +43,7 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64) -> Result<()> {
                     let start = pos.ok_or_else(|| invalid(format!("motion {index}: arc needs a prior position")))?;
                     let end = tip(*to);
                     let center = xyz(*center);
-                    let sweep = geom::arc_sweep(start, end, center, *plane, *sense)?;
+                    let sweep = geom::arc_sweep(start, end, center, *plane, *sense, 0.0)?;
                     consume_curve(&motions, &mut cursor, start, end, center, *plane, *sense, sweep, tol, index)?;
                     pos = Some(end);
                 }
@@ -111,20 +111,21 @@ fn consume_curve(
         if guard > 100_001 {
             return Err(invalid(format!("motion {index}: too many blocks")));
         }
+        let point = end_of(mv);
         match mv {
             ReadMove::Rapid { .. } => return Err(invalid(format!("motion {index}: arc was posted as a rapid"))),
             ReadMove::Arc { sense: got, center: got_center, radius, .. } => {
                 if *got != sense {
                     return Err(invalid(format!("motion {index}: arc sense differs")));
                 }
-                if !centre_ok(*got_center, center, plane, radius.is_some(), tol) {
+                let centre_tol = if radius.is_some() { radius_centre_limit(prev, point, center, plane, tol) } else { tol };
+                if !centre_ok(*got_center, center, plane, radius.is_some(), centre_tol) {
                     return Err(invalid(format!("motion {index}: arc centre differs")));
                 }
             }
             ReadMove::Linear { .. } => {}
             _ => return Err(invalid(format!("motion {index}: expected a motion"))),
         }
-        let point = end_of(mv);
         if !on_curve(point, start, end, center, plane, sense, sweep, tol) {
             return Err(invalid(format!("motion {index}: point is off the arc")));
         }
@@ -139,8 +140,27 @@ fn consume_curve(
     }
 }
 
-fn centre_ok(got: Xyz, expect: Xyz, plane: Plane, radius_mode: bool, tol: f64) -> bool {
-    if radius_mode { geom::in_plane_len(plane, got, expect) <= tol } else { geom::dist3(got, expect) <= tol }
+/// `R` recovers the centre from rounded endpoints. Short sweeps swing a distant centre by about
+/// `radius/chord` quanta, and a near-semicircle swings it by about `sqrt(radius * quantum)`.
+/// `tol` is that quantum for the built-in posts. The factor covers the amplification.
+fn radius_centre_limit(prev: Xyz, point: Xyz, center: Xyz, plane: Plane, tol: f64) -> f64 {
+    let radius = geom::in_plane_len(plane, prev, center);
+    let chord = geom::in_plane_len(plane, prev, point).max(1e-6);
+    if !(radius.is_finite() && radius > 1e-12 && tol.is_finite()) {
+        return tol;
+    }
+    let swing = radius / chord * tol;
+    let half = (chord * 0.5).min(radius);
+    let height = (radius * radius - half * half).max(0.0).sqrt();
+    let toward = if height > radius * 1e-3 { radius / height * tol } else { (radius * tol).max(0.0).sqrt() };
+    let scaled = swing.max(toward).max(tol) * 4.0;
+    if scaled.is_finite() { scaled } else { tol }
+}
+
+fn centre_ok(got: Xyz, expect: Xyz, plane: Plane, _radius_mode: bool, tol: f64) -> bool {
+    // `K` on G17 (and the other out-of-plane offset) is not part of the arc. A helix keeps one
+    // centre while Z moves, so later blocks reconstruct that centre in the plane of the block start.
+    geom::in_plane_len(plane, got, expect) <= tol
 }
 
 fn on_curve(point: Xyz, start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: ArcSense, sweep: f64, tol: f64) -> bool {

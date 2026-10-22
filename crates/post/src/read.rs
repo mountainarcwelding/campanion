@@ -1,7 +1,8 @@
 //! Read the G-code dialect a post just wrote.
 //!
 //! The parser is modal and absolute. `I` `J` `K` are centre offsets from the start of the block.
-//! A signed `R` is the radius. Comments and line numbers are skipped. `G4` is a dwell.
+//! A signed `R` is the radius. Comments, line numbers, `%` tape edges and `O` program numbers are
+//! skipped. `G4` is a dwell.
 
 use campanion_ir::{ArcSense, Plane};
 
@@ -74,6 +75,9 @@ impl<'a> Parser<'a> {
 
     fn line(&mut self, raw: &str) -> Result<Option<ReadMove>> {
         let stripped = strip_comments(raw);
+        if stripped.trim() == "%" {
+            return Ok(None);
+        }
         let mut words = tokenize(&stripped)?;
         if self.post.line_numbers.enabled {
             strip_line_number(&mut words, self.post.line_numbers.prefix.chars().next().unwrap_or('N'))?;
@@ -108,6 +112,15 @@ pub fn read_back(text: &str, post: &PostDef) -> Result<Vec<ReadMove>> {
 
 impl<'a> Parser<'a> {
     fn interpret(&mut self, words: Vec<(char, f64)>, raw: &str) -> Result<Option<ReadMove>> {
+        if let Some((letter, value)) = words.first().copied()
+            && letter == 'O'
+            && words.len() == 1
+        {
+            if !(value.is_finite() && value >= 0.0 && (value - value.round()).abs() <= 1e-6) {
+                return Err(invalid("program number must be a whole number"));
+            }
+            return Ok(None);
+        }
         let axes = axis_letters(self.post);
         let dwell_letter = self.post.dwell.word.chars().next().unwrap_or('P');
         let mut g_codes = Vec::new();
@@ -230,7 +243,8 @@ impl<'a> Parser<'a> {
                     return Err(invalid("arc has both R and IJK"));
                 }
                 let center = if let Some(radius) = radius {
-                    geom::center_from_radius(start, end, radius, sense, plane)?
+                    let quantum = 10_f64.powi(-i32::from(self.post.decimals.linear));
+                    geom::center_from_radius(start, end, radius, sense, plane, quantum)?
                 } else if i.is_some() || j.is_some() || k.is_some() {
                     [start[0] + i.unwrap_or(0.0), start[1] + j.unwrap_or(0.0), start[2] + k.unwrap_or(0.0)]
                 } else {
