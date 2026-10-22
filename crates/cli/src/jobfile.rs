@@ -23,11 +23,14 @@
 //!
 //! An STL source, a path ending in `.stl` in any case, is a triangle mesh. Its hash is those
 //! raw bytes. A mesh job may only contain `surface` operations, and `surface` is rejected on
-//! every other source. A surface rasters the mesh: `stepover` is required, `sample_step`
-//! defaults to half of that, `angle_deg` is 0 or 90, `margin` grows the mesh XY bounds, and
-//! `floor_z` defaults to the mesh minimum Z. `stock_to_leave` on a surface is one length that
-//! raises every cutter-location Z. That is an axial offset, not a 3D rest offset. `layers`,
-//! `depth`, `step_down` and `side` are rejected.
+//! every other source. A surface rasters the mesh. It requires exactly one of `stepover` and
+//! `scallop_height`. `scallop_height` is a flat-floor cusp height; the run turns it into an XY
+//! stepover and caps that stepover at the tool diameter. On a slope the real cusp is larger
+//! for the same XY stepover, because raster spacing is measured in XY. `sample_step` defaults
+//! to half of the stepover that is used. `angle_deg` is 0 or 90, `margin` grows the mesh XY
+//! bounds, and `floor_z` defaults to the mesh minimum Z. `stock_to_leave` on a surface is one
+//! length that raises every cutter-location Z. That is an axial offset, not a 3D rest offset.
+//! `layers`, `depth`, `step_down` and `side` are rejected.
 //!
 //! A tool may set `shape`: `"flat"` (the default), `"ball"`, or `{"bull": corner_radius}`.
 //! A shape other than flat is only used by a surface operation. Two-dimensional operations
@@ -382,6 +385,8 @@ pub struct Operation {
     depth: f64,
     step_down: f64,
     stepover: Option<f64>,
+    /// Flat-floor scallop height in millimetres. `None` except on a surface that sets it instead of `stepover`.
+    scallop_height: Option<f64>,
     /// Spacing of the regular surface samples, in millimetres. `None` except on a surface.
     sample_step: Option<f64>,
     /// Tip floor for a surface, in millimetres. `None` means the mesh minimum Z, and other kinds store `None`.
@@ -454,10 +459,20 @@ impl Operation {
 
     /// Radial stepover in millimetres.
     ///
-    /// `None` when a pocket omits it. A face always has one: the file value, or three quarters
-    /// of the tool diameter when the file omits it.
+    /// `None` when a pocket omits it, and when a surface sets [`Self::scallop_height`] instead.
+    /// A face always has one: the file value, or three quarters of the tool diameter when the
+    /// file omits it. A surface that sets `stepover` stores that value.
     pub fn stepover(&self) -> Option<f64> {
         self.stepover
+    }
+
+    /// Flat-floor scallop height in millimetres.
+    ///
+    /// `Some` only on a surface that sets `scallop_height` instead of `stepover`. The run turns
+    /// this into an XY stepover. Raster spacing is measured in XY, so on a slope the real cusp
+    /// is larger than this flat-floor value for the same stepover.
+    pub fn scallop_height(&self) -> Option<f64> {
+        self.scallop_height
     }
 
     /// Facing direction in radians from +X. `0` or `π/2`. Other operations store `0`.
@@ -474,7 +489,9 @@ impl Operation {
 
     /// Maximum gap between regular surface samples, in millimetres.
     ///
-    /// `None` except on a surface, where an omitted file value is half of [`Self::stepover`].
+    /// `None` except on a surface. An omitted file value is half of the stepover. When the
+    /// surface sets [`Self::scallop_height`] and omits `sample_step`, this stays `None` and the
+    /// run uses half of the stepover resolved from that height, after the tool-diameter cap.
     pub fn sample_step(&self) -> Option<f64> {
         self.sample_step
     }
@@ -931,6 +948,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "depth",
             "step_down",
             "stepover",
+            "scallop_height",
             "sample_step",
             "angle_deg",
             "margin",
@@ -959,6 +977,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
     }
+    if optional(map, "scallop_height").is_some() {
+        return Err(JobFileError::invalid("scallop_height is only valid on a surface"));
+    }
     if optional(map, "floor_z").is_some() {
         return Err(JobFileError::invalid("floor_z is only valid on a surface"));
     }
@@ -984,6 +1005,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         depth,
         step_down,
         stepover,
+        scallop_height: None,
         sample_step: None,
         floor_z: None,
         face_angle,
@@ -1023,6 +1045,30 @@ fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileEr
     Ok(())
 }
 
+/// Exactly one of `stepover` and `scallop_height`. Lengths are millimetres after scaling.
+///
+/// An explicit stepover larger than the tool diameter is rejected. A scallop height is stored
+/// as given; the run derives the stepover and caps it at the diameter.
+fn surface_spacing(
+    stepover: Option<&Value>,
+    scallop_height: Option<&Value>,
+    diameter: f64,
+    scale: f64,
+) -> Result<(Option<f64>, Option<f64>), JobFileError> {
+    match (stepover, scallop_height) {
+        (None, None) => Err(JobFileError::invalid("surface needs a stepover or a scallop_height")),
+        (Some(_), Some(_)) => Err(JobFileError::invalid("surface takes stepover or scallop_height, not both")),
+        (Some(value), None) => {
+            let stepover = positive_length(value, scale, "stepover")?;
+            if stepover > diameter {
+                return Err(JobFileError::invalid("stepover is larger than the tool diameter"));
+            }
+            Ok((Some(stepover), None))
+        }
+        (None, Some(value)) => Ok((None, Some(positive_length(value, scale, "scallop_height")?))),
+    }
+}
+
 /// Parallel finish. Depth stays 0: the mesh and `floor_z` decide the tip height.
 fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
     reject_surface_foreign_keys(map)?;
@@ -1031,16 +1077,12 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
     let Some(diameter) = tool.diameter() else {
         return Err(JobFileError::invalid("surface is not valid with a kerf tool"));
     };
-    let Some(step_value) = optional(map, "stepover") else {
-        return Err(JobFileError::invalid("surface needs a stepover"));
-    };
-    let stepover = positive_length(step_value, scale, "stepover")?;
-    if stepover > diameter {
-        return Err(JobFileError::invalid("stepover is larger than the tool diameter"));
-    }
+    let (stepover, scallop_height) = surface_spacing(optional(map, "stepover"), optional(map, "scallop_height"), diameter, scale)?;
     let sample_step = match optional(map, "sample_step") {
-        Some(value) => positive_length(value, scale, "sample_step")?,
-        None => stepover * 0.5,
+        Some(value) => Some(positive_length(value, scale, "sample_step")?),
+        // Half of a known stepover. A scallop height is resolved when the job runs, and the
+        // sample gap is then half of that capped stepover.
+        None => stepover.map(|stepover| stepover * 0.5),
     };
     let face_angle = parse_face_angle(optional(map, "angle_deg"), OperationKind::Surface)?;
     let margin = parse_margin(optional(map, "margin"), OperationKind::Surface, scale)?;
@@ -1058,8 +1100,9 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         tool_id,
         depth: 0.0,
         step_down: 0.0,
-        stepover: Some(stepover),
-        sample_step: Some(sample_step),
+        stepover,
+        scallop_height,
+        sample_step,
         floor_z,
         face_angle,
         margin,
@@ -2919,7 +2962,7 @@ mod tests {
             (envelope("part.stl", r#"[{"id":1,"diameter":6,"shape":{"bull":3}}]"#, "[]"), "bull corner radius must be less than the tool radius"),
             (
                 envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, r#"[{"name":"a","type":"surface","tool_id":1,"feeds":{"cut":1}}]"#),
-                "surface needs a stepover",
+                "surface needs a stepover or a scallop_height",
             ),
             (
                 envelope(
@@ -2966,6 +3009,85 @@ mod tests {
             let path = write_job(&format!("surface-bad-{index}"), text);
             let err = load(&path).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
+    }
+
+    #[test]
+    fn parses_scallop_height_in_mm_and_inches_and_rejects_both_or_neither() {
+        let mm = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":6,"shape":"ball"}]"#,
+            r#"[{"name":"dome","type":"surface","tool_id":1,"scallop_height":0.01,"feeds":{"cut":1}}]"#,
+        );
+        let job = load(&write_job("scallop-mm", &mm)).expect("mm scallop");
+        let op = &job.operations()[0];
+        assert_eq!(op.stepover(), None);
+        assert_eq!(op.sample_step(), None);
+        near(op.scallop_height().expect("scallop"), 0.01);
+
+        let inch = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"dome.stl","hash":"{EMPTY_HASH}"}},"units":"inch","tools":[{{"id":1,"diameter":0.25,"shape":{{"bull":0.05}}}}],"operations":[{{"name":"cap","type":"surface","tool_id":1,"scallop_height":0.01,"sample_step":0.02,"feeds":{{"cut":10}}}}]}}"#
+        );
+        let inch = load(&write_job("scallop-inch", &inch)).expect("inch scallop");
+        let op = &inch.operations()[0];
+        assert_eq!(op.stepover(), None);
+        near(op.scallop_height().expect("scallop"), 0.01 * 25.4);
+        near(op.sample_step().expect("sample"), 0.02 * 25.4);
+
+        // A flat tool loads. The run is what rejects a scallop on a flat.
+        let flat = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":6,"shape":"flat"}]"#,
+            r#"[{"name":"dome","type":"surface","tool_id":1,"scallop_height":0.2,"feeds":{"cut":1}}]"#,
+        );
+        let flat = load(&write_job("scallop-flat", &flat)).expect("flat scallop loads");
+        assert!(flat.tool(1).expect("flat").shape().is_flat());
+        near(flat.operations()[0].scallop_height().expect("scallop"), 0.2);
+        assert_eq!(flat.operations()[0].stepover(), None);
+
+        let cases = [
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6,"shape":"ball"}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"stepover":1,"scallop_height":0.01,"feeds":{"cut":1}}]"#,
+                ),
+                "surface takes stepover or scallop_height, not both",
+            ),
+            (
+                envelope("part.stl", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, r#"[{"name":"a","type":"surface","tool_id":1,"feeds":{"cut":1}}]"#),
+                "surface needs a stepover or a scallop_height",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6,"shape":"ball"}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"scallop_height":0,"feeds":{"cut":1}}]"#,
+                ),
+                "scallop_height must be greater than 0",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6,"shape":"ball"}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"scallop_height":-0.01,"feeds":{"cut":1}}]"#,
+                ),
+                "scallop_height must be greater than 0",
+            ),
+            (
+                envelope(
+                    "plate.dxf",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"scallop_height":0.1}]"#,
+                ),
+                "scallop_height is only valid on a surface",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let path = write_job(&format!("scallop-bad-{index}"), text);
+            let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+            assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");
         }
     }
 }

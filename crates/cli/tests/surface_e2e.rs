@@ -118,3 +118,153 @@ fn dome_finish_stays_on_the_drop_cutter_surface() -> Result<(), String> {
     }
     if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
 }
+
+/// Flat-floor stepover for a 6 mm ball (radius 3 mm) and a 0.01 mm cusp.
+fn dome_scallop_stepover() -> f64 {
+    let height = 0.01_f64;
+    let radius = 3.0_f64;
+    2.0 * (2.0 * radius * height - height * height).sqrt()
+}
+
+/// Margin that makes the 40 mm dome plate an integer number of scallop stepovers wide.
+///
+/// Parallel finishing spaces passes evenly across the XY bounds, so a margin of 0 pitches the
+/// lines at `40 / ceil(40 / stepover)`, a hair under the flat-floor stepover. Growing the cross
+/// span to that multiple makes consecutive line starts equal the stepover.
+fn dome_scallop_margin(stepover: f64) -> Result<f64, String> {
+    let span = 40.0;
+    let mut intervals = (span / stepover).ceil();
+    if !intervals.is_finite() || intervals < 1.0 {
+        return Err(format!("scallop stepover {stepover} does not divide the dome"));
+    }
+    let mut guard = 0u32;
+    while span > stepover * intervals {
+        intervals += 1.0;
+        guard += 1;
+        if guard > 8 || !intervals.is_finite() {
+            return Err("scallop spacing is not usable".into());
+        }
+    }
+    Ok((intervals * stepover - span) / 2.0)
+}
+
+fn dome_scallop_job(root: &Path, margin: f64, shape: &str) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(root.join("examples/dome.job.json")).map_err(|err| format!("read dome job: {err}"))?;
+    let mut job: serde_json::Value = serde_json::from_str(&text).map_err(|err| format!("dome job json: {err}"))?;
+    let tool = job.get_mut("tools").and_then(|tools| tools.get_mut(0)).and_then(|tool| tool.as_object_mut()).ok_or("tool")?;
+    tool.insert("shape".to_string(), serde_json::Value::String(shape.to_string()));
+    let op = job.get_mut("operations").and_then(|ops| ops.get_mut(0)).and_then(|op| op.as_object_mut()).ok_or("operation")?;
+    op.remove("stepover");
+    op.insert("scallop_height".to_string(), serde_json::json!(0.01));
+    if margin > 0.0 {
+        op.insert("margin".to_string(), serde_json::json!(margin));
+    }
+    Ok(job)
+}
+
+/// Job file next to a copy of `examples/dome.stl`, so the relative source path still resolves.
+fn write_job_beside_dome(root: &Path, name: &str, job: &serde_json::Value) -> Result<PathBuf, String> {
+    let dir = temp_path(name);
+    std::fs::create_dir_all(&dir).map_err(|err| format!("temp dir: {err}"))?;
+    std::fs::copy(root.join("examples/dome.stl"), dir.join("dome.stl")).map_err(|err| format!("copy stl: {err}"))?;
+    let path = dir.join("job.json");
+    let text = serde_json::to_string_pretty(job).map_err(|err| format!("job json: {err}"))?;
+    std::fs::write(&path, text).map_err(|err| format!("write job: {err}"))?;
+    Ok(path)
+}
+
+#[test]
+fn flat_tool_scallop_fails_at_run_with_a_clear_message() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = dome_scallop_job(&root, 0.0, "flat")?;
+    let job_path = write_job_beside_dome(&root, "campanion-scallop-flat", &job)?;
+    let ngc_path = temp_path("campanion-scallop-flat.ngc");
+    let ir_path = temp_path("campanion-scallop-flat.json");
+    let output = campanion(&root, &["run", &path_arg(&job_path)?, "-o", &path_arg(&ngc_path)?, "--ir", &path_arg(&ir_path)?])?;
+    let stderr = output_text(&output.stderr)?;
+    let stdout = output_text(&output.stdout)?;
+    if output.status.code() == Some(0) {
+        return Err(format!("flat scallop succeeded\nstdout {stdout}\nstderr {stderr}"));
+    }
+    if stderr.contains("scallop height needs a ball or bull-nose tool") {
+        Ok(())
+    } else {
+        Err(format!("stderr missing the flat-tool message\nstdout {stdout}\nstderr {stderr}"))
+    }
+}
+
+#[test]
+fn dome_scallop_height_sets_the_raster_spacing() -> Result<(), String> {
+    let root = workspace_root()?;
+    let stepover = dome_scallop_stepover();
+    let margin = dome_scallop_margin(stepover)?;
+    let job = dome_scallop_job(&root, margin, "ball")?;
+    let job_path = write_job_beside_dome(&root, "campanion-scallop-dome", &job)?;
+    let ngc_path = temp_path("campanion-scallop-dome.ngc");
+    let ir_path = temp_path("campanion-scallop-dome.json");
+    run_job(&root, &path_arg(&job_path)?, &ngc_path, &ir_path)?;
+    assert_verify_clean(&root, "dome scallop", &ir_path)?;
+
+    let ir_text = std::fs::read_to_string(&ir_path).map_err(|err| format!("read ir: {err}"))?;
+    let ir: Value = serde_json::from_str(&ir_text).map_err(|err| format!("ir json: {err}"))?;
+    let blocks = ir["program"]["toolpaths"][0]["blocks"].as_array().ok_or("blocks is not an array")?;
+    let starts = raster_line_starts(blocks)?;
+    if starts.len() < 2 {
+        return Err(format!("scallop finish produced {} raster lines", starts.len()));
+    }
+    let mut failures = Vec::new();
+    let expected_first = -20.0 - margin;
+    let expected_last = 20.0 + margin;
+    if (starts[0] - expected_first).abs() > 1e-9 {
+        failures.push(format!("first line Y {} != {expected_first}", starts[0]));
+    }
+    if (starts[starts.len() - 1] - expected_last).abs() > 1e-9 {
+        failures.push(format!("last line Y {} != {expected_last}", starts[starts.len() - 1]));
+    }
+    for pair in starts.windows(2) {
+        let gap = pair[1] - pair[0];
+        if (gap - stepover).abs() > 1e-9 && failures.len() < 6 {
+            failures.push(format!("line start gap {gap} != flat-floor stepover {stepover}"));
+        }
+    }
+    if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+}
+
+/// Y of each raster line start. A line is a run of plunge or cut points at one Y.
+///
+/// Link samples between lines sit at their own Y, so a run of one point is not a line.
+fn raster_line_starts(blocks: &[Value]) -> Result<Vec<f64>, String> {
+    let mut ys = Vec::new();
+    for block in blocks {
+        if block["type"] != "linear" {
+            continue;
+        }
+        let role = block["role"].as_str().unwrap_or("");
+        if role != "cut" && role != "plunge" {
+            continue;
+        }
+        let y = block["to"]["tip"]["y"].as_f64().ok_or("linear tip y")?;
+        ys.push(y);
+    }
+    if ys.is_empty() {
+        return Err("surface produced no plunge or cut".into());
+    }
+    let mut starts = Vec::new();
+    let mut run_y = ys[0];
+    let mut run_len = 1usize;
+    for &y in ys.iter().skip(1) {
+        if y == run_y {
+            run_len += 1;
+            continue;
+        }
+        if run_len >= 2 {
+            starts.push(run_y);
+        }
+        run_y = y;
+        run_len = 1;
+    }
+    if run_len >= 2 {
+        starts.push(run_y);
+    }
+    Ok(starts)
+}

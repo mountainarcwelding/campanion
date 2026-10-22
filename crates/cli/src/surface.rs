@@ -4,7 +4,7 @@
 //! axial stock. Clearance and retract stay at the job heights. Links between raster lines are
 //! drop-cutter samples along the straight segment, so the feed stays on the surface.
 
-use campanion_mesh::{Cutter, DropCutter, Mesh, RasterAngle, RasterParams, Vec3 as MeshVec, parallel_finish};
+use campanion_mesh::{Cutter, DropCutter, Mesh, RasterAngle, RasterParams, Vec3 as MeshVec, parallel_finish, scallop_stepover};
 use campanion_path::{CutKind, Move, Point3, ProcessEvent, Toolpath};
 
 use crate::error::CliError;
@@ -20,12 +20,14 @@ const MAX_LINK_STEPS: usize = 100_000;
 /// One surface toolpath. `mesh` is the job's STL. Z of every cutter location includes axial stock.
 pub(crate) fn finish(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh) -> Result<Toolpath, CliError> {
     let bounds = mesh.bounds().map_err(|err| op_err(op, err))?;
-    let stepover = op.stepover().ok_or_else(|| op_err(op, "surface needs a stepover"))?;
-    let sample_step = op.sample_step().ok_or_else(|| op_err(op, "surface needs a sample_step"))?;
     let floor = op.floor_z().unwrap_or_else(|| bounds.min().z);
     let stock = op.stock_to_leave().floor();
     let margin = op.margin();
     let cutter = cutter(op, tool)?;
+    // A scallop height is the flat-floor cusp. The stepover it produces is capped at the tool
+    // diameter; an explicit stepover larger than the diameter was already rejected at load.
+    let stepover = resolve_stepover(op, tool, &cutter)?;
+    let sample_step = op.sample_step().unwrap_or(stepover * 0.5);
     let dc = DropCutter::new(mesh, cutter).map_err(|err| op_err(op, err))?;
     let angle = if (op.face_angle() - std::f64::consts::FRAC_PI_2).abs() < 1e-9 { RasterAngle::AlongY } else { RasterAngle::AlongX };
     let params = RasterParams { stepover, sample_step, tolerance: job.tolerance().chord(), angle, floor_z: floor, zigzag: true };
@@ -50,6 +52,21 @@ pub(crate) fn finish(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh)
     push_move(&mut moves, Move::Event(ProcessEvent::Off))?;
     push_move(&mut moves, Move::Rapid { to: point(op, last.x, last.y, job.clearance())? })?;
     Toolpath::new(moves).map_err(|err| op_err(op, err))
+}
+
+/// Explicit `stepover`, or the flat-floor stepover from `scallop_height`, capped at the diameter.
+fn resolve_stepover(op: &Operation, tool: &JobTool, cutter: &Cutter) -> Result<f64, CliError> {
+    if let Some(stepover) = op.stepover() {
+        return Ok(stepover);
+    }
+    let Some(height) = op.scallop_height() else {
+        return Err(op_err(op, "surface needs a stepover or a scallop_height"));
+    };
+    let stepover = scallop_stepover(cutter, height).map_err(|err| op_err(op, err))?;
+    let Some(diameter) = tool.diameter() else {
+        return Err(op_err(op, "surface is not valid with a kerf tool"));
+    };
+    Ok(stepover.min(diameter))
 }
 
 fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {

@@ -93,8 +93,9 @@ unique within that operation. The same layer may appear on two operations.
 | `tool_id` | yes | `id` of a tool in this file. |
 | `depth` | yes, except chamfer and surface | Positive distance downward from the stock surface, in `units`. Not an absolute Z. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface rejects `depth`. |
 | `step_down` | yes, except chamfer and surface | Positive maximum thickness of one pass, in `units`. The last pass stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface rejects `step_down`. |
-| `stepover` | pocket, face and surface | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires it. |
-| `sample_step` | surface only | Positive length in `units`. Default is half of `stepover`. Maximum gap between the regular drop-cutter samples on a raster line, and between the samples on the link from one line to the next. |
+| `stepover` | pocket, face and surface | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. |
+| `scallop_height` | surface only | Positive length in `units`. Flat-floor cusp height used instead of `stepover`. See below. Rejected on every other kind. |
+| `sample_step` | surface only | Positive length in `units`. Default is half of the stepover that is used (after a scallop height is resolved and capped). Maximum gap between the regular drop-cutter samples on a raster line, and between the samples on the link from one line to the next. |
 | `angle_deg` | face and surface | `0` (along +X) or `90` (along +Y). Default `0`. Stored as radians. Rejected on every other kind. |
 | `margin` | face and surface | Length in `units`, at least 0, at most 1e6 mm. Default 0. On a face, grows the faced rectangle past the geometry bounding box on every side. On a surface, grows the mesh XY bounds the same way. Rejected on every other kind. |
 | `floor_z` | surface only | Absolute tip Z in `units`. Default is the mesh minimum Z. Where the cutter misses the mesh, the tip stays at this height. |
@@ -152,10 +153,27 @@ the tips are at −0.5 mm and −0.3 mm.
 DXF, SVG or STEP source. There are no layers. A kerf tool is rejected.
 
 The raster covers the mesh XY bounds, grown by `margin` on every side. Passes run at `angle_deg`
-and alternate direction. `stepover` is the gap between passes. `sample_step` is the gap between
-regular drop-cutter samples; the links between passes use the same spacing. The chord tolerance
-of the job is the largest tip-Z error allowed when a raster chord replaces the true drop-cutter
-height. `floor_z` is the tip height where the cutter misses the mesh.
+and alternate direction. A surface requires exactly one of `stepover` and `scallop_height`.
+Setting both, or neither, is an error. `stepover` is the maximum gap between passes. The lines
+are spaced evenly from one side of the area to the other, so the pitch is at most that stepover.
+`sample_step` is the gap between regular drop-cutter samples; the links between passes use the
+same spacing. When `sample_step` is omitted it is half of the stepover that is used. The chord
+tolerance of the job is the largest tip-Z error allowed when a raster chord replaces the true
+drop-cutter height. `floor_z` is the tip height where the cutter misses the mesh.
+
+`scallop_height` is the cusp left between passes on a flat floor. It is a length in `units`,
+greater than 0. The job turns it into an XY stepover when it runs:
+
+- ball of radius `R`: `2 * sqrt(2*R*h - h*h)`
+- bull nose of radius `R` and corner radius `c`: `2*(R - c) + 2*sqrt(2*c*h - h*h)`
+
+`h` must be less than the corner radius (`R` on a ball, `c` on a bull nose). A flat tool has no
+corner, so the run fails with `scallop height needs a ball or bull-nose tool`. The computed
+stepover is capped at the tool diameter. A value past that limit is reduced to the diameter, and
+no warning is printed. An explicit `stepover` larger than the diameter is still an error.
+
+Raster spacing is measured in XY. On a slope the real cusp is larger than `scallop_height` for
+that same stepover. `scallop_height` is the flat-floor value.
 
 `stock_to_leave` raises every cutter-location Z by that many millimetres after the drop-cutter
 query. Clearance and retract stay at the job heights. Put those heights above the raised surface:
