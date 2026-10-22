@@ -142,9 +142,15 @@ property tests on random meshes show no gouge and stay within the scallop height
 - **Turning:** XZ profiles, facing, roughing/finishing, grooving, threading, parting; then live
   tooling (C/Y) and sub-spindle.
 - **Multi-channel up to 13 axes:** mill-turn and multi-head machines, sync between channels.
-- **Machine definitions and posts:** machine files (axes, limits, kinematics, process heads) and
-  posts as data plus small code where needed: LinuxCNC and GRBL first, then others,
-  written from public controller manuals.
+- **Machine and manufacturer posts (future milestone, after 3-axis):** controller-specific post
+  processors built only on the machine-neutral IR: LinuxCNC, GRBL, Mach3, Fanuc and Haas for
+  mills and routers, and plasma and laser controllers (process on/off, pierce, torch height and
+  kerf handling from the IR's generic process events). A post is a data file (dialect, codes,
+  number formats, header and footer templates, supported cycles, arc rules, limits) with a small,
+  documented hook interface for what data cannot express. A contributor adds a controller by
+  writing one post file plus golden tests, without touching operations. Machine files (axes,
+  limits, kinematics, process heads) pair with posts. Everything is written from public
+  controller manuals.
 - **Additive:** a slicer-style process on the same IR (later; only if it still makes sense then).
 
 ## SolidCraft integration path
