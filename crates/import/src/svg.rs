@@ -2,7 +2,7 @@
 //!
 //! The root `viewBox` and `width`/`height` become one affine, then Y is flipped into the same
 //! plane as DXF import. Element `transform` attributes compose inside that map. Curves are fitted
-//! with lines and arcs within tolerance. A circle, or a circular path arc under a similarity, stays one exact arc.
+//! with lines and arcs within the chord tolerance. A circle, or a circular path arc under a similarity, stays one exact arc.
 
 use std::collections::{BTreeMap, HashMap};
 
