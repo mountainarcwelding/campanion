@@ -4,7 +4,7 @@ use campanion_ir::{ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Eve
 
 use crate::def::{ArcMode, PostDef, ProcessWords};
 use crate::error::{Result, invalid, unsupported};
-use crate::fmt::format_fixed;
+use crate::fmt::{format_fixed, xy_text_eq};
 use crate::geom::{self, Xyz};
 
 /// Controls how a [`PostDef`] writes arcs.
@@ -46,6 +46,19 @@ struct Active {
     power: String,
 }
 
+/// Where torch-height control sits relative to the pierce dwell and process off.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThcPhase {
+    /// No process is waiting on a pierce.
+    Idle,
+    /// Process is on. The pierce dwell has not been written yet.
+    AwaitDwell,
+    /// Pierce dwell is written. The next feed move turns height control on.
+    AwaitCut,
+    /// Height control is on.
+    On,
+}
+
 struct Writer<'a> {
     post: &'a PostDef,
     options: &'a PostOptions,
@@ -61,6 +74,9 @@ struct Writer<'a> {
     feed: Option<String>,
     line_no: u32,
     on: Vec<Active>,
+    thc_phase: ThcPhase,
+    last_speed: String,
+    last_power: String,
 }
 
 impl<'a> Writer<'a> {
@@ -77,6 +93,9 @@ impl<'a> Writer<'a> {
             feed: None,
             line_no: post.line_numbers.start,
             on: Vec::new(),
+            thc_phase: ThcPhase::Idle,
+            last_speed: String::new(),
+            last_power: "0".to_string(),
         }
     }
 
@@ -105,14 +124,19 @@ impl<'a> Writer<'a> {
     fn motion(&mut self, motion: &ClMotion) -> Result<()> {
         match motion {
             ClMotion::Rapid { to, feed } => self.linear_move("G0", tip(*to), *feed),
-            ClMotion::Linear { to, feed, .. } => self.linear_move("G1", tip(*to), Some(*feed)),
+            ClMotion::Linear { to, feed, .. } => {
+                self.thc_before_cut()?;
+                self.linear_move("G1", tip(*to), Some(*feed))
+            }
             ClMotion::Arc { to, plane, center, sense, feed, .. } => {
+                self.thc_before_cut()?;
                 let end = tip(*to);
                 let center = xyz(*center);
                 let sweep = geom::arc_sweep(self.curve_start()?, end, center, *plane, *sense, 0.0)?;
                 self.circular(*sense, *plane, end, center, sweep, *feed, false)
             }
             ClMotion::Helix { to, plane, center, sense, sweep, feed, .. } => {
+                self.thc_before_cut()?;
                 let end = tip(*to);
                 let center = xyz(*center);
                 let start = self.curve_start()?;
@@ -219,6 +243,11 @@ impl<'a> Writer<'a> {
     }
 
     fn linear_move(&mut self, code: &str, end: Xyz, feed: Option<f64>) -> Result<()> {
+        if self.omit_z_only(code, end)? {
+            self.pos = Some(self.round_xyz(end)?);
+            self.exact = Some(end);
+            return Ok(());
+        }
         let mut words = Vec::new();
         if !(self.post.modal_motion && self.linear == Some(code)) {
             words.push(code.to_string());
@@ -231,15 +260,42 @@ impl<'a> Writer<'a> {
         self.emit_words(&words)
     }
 
-    fn push_axes(&mut self, words: &mut Vec<String>, end: Xyz) -> Result<Xyz> {
-        let letters = self.post.axis_letters.chars().collect::<Vec<_>>();
+    /// A Z-only rapid is omitted when `rapid_z` is false. With Z words omitted, a Z-only feed is
+    /// omitted too: the block would have no axis word.
+    fn omit_z_only(&self, code: &str, end: Xyz) -> Result<bool> {
+        let Some(pos) = self.pos else {
+            return Ok(false);
+        };
+        if !xy_text_eq(pos, end, self.post.decimals.linear, self.post.trailing_zeros)? {
+            return Ok(false);
+        }
+        let drop_rapid = code == "G0" && !self.post.process_feeds.rapid_z;
+        Ok(drop_rapid || self.post.drop_z())
+    }
+
+    fn round_xyz(&self, end: Xyz) -> Result<Xyz> {
         let mut rounded = [0.0; 3];
-        for (index, letter) in letters.iter().enumerate() {
+        for (index, slot) in rounded.iter_mut().enumerate() {
             let Some(value) = end.get(index).copied() else {
                 return Err(invalid("axis value is missing"));
             };
             let text = format_fixed(value, self.post.decimals.linear, self.post.trailing_zeros)?;
-            rounded[index] = text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+            *slot = text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        }
+        Ok(rounded)
+    }
+
+    fn push_axes(&self, words: &mut Vec<String>, end: Xyz) -> Result<Xyz> {
+        let letters = self.post.axis_letters.chars().collect::<Vec<_>>();
+        let rounded = self.round_xyz(end)?;
+        for (index, letter) in letters.iter().enumerate() {
+            if self.post.drop_z() && index == 2 {
+                continue;
+            }
+            let Some(value) = rounded.get(index).copied() else {
+                return Err(invalid("axis value is missing"));
+            };
+            let text = format_fixed(value, self.post.decimals.linear, self.post.trailing_zeros)?;
             words.push(format!("{letter}{text}"));
         }
         Ok(rounded)
@@ -266,8 +322,12 @@ impl<'a> Writer<'a> {
             Event::ProcessOn { process, params } => {
                 let lines = self.process_words(process)?.on.clone();
                 let speed = format_speed(params.speed_value())?;
-                let power = format_fixed(format_param(params.power_value())?, self.post.decimals.feed, self.post.trailing_zeros)?;
+                let (power, missing) = format_power(self.post, params.power_value())?;
                 self.note_on(process, &speed, &power);
+                self.arm_thc();
+                if missing {
+                    self.comment(&format!("power missing, using S{power}"))?;
+                }
                 self.templates(
                     "process.on",
                     &lines,
@@ -279,6 +339,7 @@ impl<'a> Writer<'a> {
                 let active = self.on.iter().find(|on| on.key == process_key(process)).cloned();
                 let speed = active.as_ref().map(|on| on.speed.clone()).unwrap_or_default();
                 let power = active.as_ref().map(|on| on.power.clone()).unwrap_or_else(|| "0".to_string());
+                self.thc_before_off()?;
                 self.note_off(process);
                 self.templates(
                     "process.off",
@@ -286,7 +347,10 @@ impl<'a> Writer<'a> {
                     &[("speed", speed.as_str()), ("power", power.as_str()), ("program_name", ""), ("date-free!", "")],
                 )
             }
-            Event::Dwell { seconds } => self.dwell(*seconds),
+            Event::Dwell { seconds } => {
+                self.note_pierce_dwell();
+                self.dwell(*seconds)
+            }
             Event::ToolChange { tool_id } => {
                 let lines = self.post.tool_change.clone();
                 let tool = tool_id.to_string();
@@ -314,6 +378,8 @@ impl<'a> Writer<'a> {
     }
 
     fn note_on(&mut self, process: &ProcessKind, speed: &str, power: &str) {
+        self.last_speed = speed.to_string();
+        self.last_power = power.to_string();
         let key = process_key(process).to_string();
         if let Some(active) = self.on.iter_mut().find(|on| on.key == key) {
             active.speed = speed.to_string();
@@ -328,7 +394,51 @@ impl<'a> Writer<'a> {
         self.on.retain(|on| on.key != key);
     }
 
+    fn arm_thc(&mut self) {
+        if self.post.thc.is_none() {
+            return;
+        }
+        if self.thc_phase == ThcPhase::Idle {
+            self.thc_phase = ThcPhase::AwaitDwell;
+        }
+    }
+
+    fn note_pierce_dwell(&mut self) {
+        if self.thc_phase == ThcPhase::AwaitDwell {
+            self.thc_phase = ThcPhase::AwaitCut;
+        }
+    }
+
+    fn thc_before_cut(&mut self) -> Result<()> {
+        if self.thc_phase != ThcPhase::AwaitCut {
+            return Ok(());
+        }
+        self.emit_thc(true)?;
+        self.thc_phase = ThcPhase::On;
+        Ok(())
+    }
+
+    fn thc_before_off(&mut self) -> Result<()> {
+        if self.thc_phase == ThcPhase::On {
+            self.emit_thc(false)?;
+        }
+        self.thc_phase = ThcPhase::Idle;
+        Ok(())
+    }
+
+    fn emit_thc(&mut self, on: bool) -> Result<()> {
+        let Some(thc) = self.post.thc.clone() else {
+            return Ok(());
+        };
+        let lines = if on { thc.on } else { thc.off };
+        let field_name = if on { "thc.on" } else { "thc.off" };
+        let speed = self.last_speed.clone();
+        let power = self.last_power.clone();
+        self.templates(field_name, &lines, &[("speed", speed.as_str()), ("power", power.as_str()), ("program_name", ""), ("date-free!", "")])
+    }
+
     fn stop_processes(&mut self) -> Result<()> {
+        self.thc_before_off()?;
         let on = std::mem::take(&mut self.on);
         for active in on {
             let Some(words) = self.post.process.get(&active.key).or_else(|| self.post.process.get("other")) else {
@@ -420,6 +530,27 @@ impl<'a> Writer<'a> {
 fn format_param(value: Option<f64>) -> Result<f64> {
     let value = value.unwrap_or(0.0);
     if value.is_finite() && value >= 0.0 { Ok(value) } else { Err(invalid("process speed or power must be >= 0")) }
+}
+
+/// `{power}` text, and whether a missing IR power was filled in at full scale.
+///
+/// With `power_scale`, the text is the integer `ir_power * power_scale`. A missing power is
+/// treated as `1`, so scale `1000` writes `1000`. Without a scale the raw power is written with
+/// the feed decimals, and a missing power is `0`.
+fn format_power(post: &PostDef, power: Option<f64>) -> Result<(String, bool)> {
+    let Some(scale) = post.power_scale else {
+        let text = format_fixed(format_param(power)?, post.decimals.feed, post.trailing_zeros)?;
+        return Ok((text, false));
+    };
+    let (value, missing) = match power {
+        Some(value) => (value, false),
+        None => (1.0, true),
+    };
+    if !(value.is_finite() && value >= 0.0) {
+        return Err(invalid("process speed or power must be >= 0"));
+    }
+    let text = format_fixed(value * scale, 0, false)?;
+    Ok((text, missing))
 }
 
 /// Spindle speed is a whole number of revolutions (`S12000`). An absent speed is an empty string

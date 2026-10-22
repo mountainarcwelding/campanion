@@ -94,7 +94,7 @@ proptest! {
             let text = post_program(&program, &post, &options).expect("post");
             let moves = read_back(&text, &post).expect("read");
             let tol = 10_f64.powi(-(post.linear_decimals() as i32));
-            compare(&program, &moves, tol).expect("compare");
+            compare(&program, &moves, tol, &post).expect("compare");
         }
     }
 }

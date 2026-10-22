@@ -29,10 +29,12 @@ const GRBL_JSON: &str = include_str!("../posts/grbl.json");
 const MACH3_JSON: &str = include_str!("../posts/mach3.json");
 const FANUC_JSON: &str = include_str!("../posts/fanuc.json");
 const HAAS_JSON: &str = include_str!("../posts/haas.json");
+const PLASMA_JSON: &str = include_str!("../posts/plasma.json");
+const GRBL_LASER_JSON: &str = include_str!("../posts/grbl_laser.json");
 
 /// Ids of the posts compiled into this crate, in a stable order.
 pub fn builtin_ids() -> &'static [&'static str] {
-    &["linuxcnc", "grbl", "mach3", "fanuc", "haas"]
+    &["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"]
 }
 
 /// A built-in post, or `None` when `id` is unknown or its JSON fails validation.
@@ -43,6 +45,8 @@ pub fn builtin(id: &str) -> Option<PostDef> {
         "mach3" => MACH3_JSON,
         "fanuc" => FANUC_JSON,
         "haas" => HAAS_JSON,
+        "plasma" => PLASMA_JSON,
+        "grbl_laser" => GRBL_LASER_JSON,
         _ => return None,
     };
     load_post(json).ok()
