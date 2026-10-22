@@ -22,7 +22,7 @@ lengths are millimetres and feeds are millimetres per minute.
 | `tolerance` | no | Linear, angular and chord tolerances. Omitted fields default to 1e-6 mm (linear), 1e-6 rad (angular) and 0.01 mm (chord). Defaults are not scaled when `units` is `inch`. |
 | `tools` | yes | Array of tools. May be empty when `operations` is empty. |
 | `operations` | yes | Array of operations, in cut order. May be empty. |
-| `rotary` | no | Fourth-axis table for indexed 3+1 and for wrapping. See below. |
+| `rotary` | no | Fourth-axis table for indexed 3+1, wrapping and rotary finishing. See below. |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
 
@@ -79,7 +79,7 @@ ball nose whose sphere radius is half the diameter. `{"bull": corner_radius}` is
 `corner_radius` is a length in `units`, greater than 0 and strictly less than the tool radius.
 A shape other than flat is rejected when a profile, pocket, drill, engrave, face, chamfer or wrap uses
 that tool. Those operations keep the flat diameter offset and do not read `shape`. A surface, a
-rough or a waterline reads `shape`.
+rough, a waterline or a rotary finish reads `shape`.
 
 ## Operations
 
@@ -89,15 +89,15 @@ unique within that operation. The same layer may appear on two operations.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | Short unique name. |
-| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer`, `surface`, `rough`, `waterline` or `wrap`. |
-| `layers` | yes, except surface, rough and waterline | One or more layer names. A surface, a rough or a waterline rejects `layers`. |
-| `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface, rough, waterline and wrap. |
+| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer`, `surface`, `rough`, `waterline`, `wrap` or `rotary_finish`. |
+| `layers` | yes, except surface, rough, waterline and rotary finish | One or more layer names. A surface, a rough, a waterline or a rotary finish rejects `layers`. |
+| `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface, rough, waterline, wrap and rotary finish. |
 | `tool_id` | yes | `id` of a tool in this file. |
-| `depth` | yes, except chamfer, surface, rough and waterline | Positive distance downward, in `units`. Not an absolute Z. On a profile, pocket, drill, engrave or face this is below the stock surface. On a wrap it is below the cylinder surface. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface, a rough or a waterline rejects `depth`. |
-| `step_down` | yes, except chamfer and surface | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. |
-| `stepover` | pocket, face, surface and rough | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. A rough that omits it uses 0.4 times the tool diameter. A waterline rejects `stepover`. |
+| `depth` | yes, except chamfer, surface, rough, waterline and rotary finish | Positive distance downward, in `units`. Not an absolute Z. On a profile, pocket, drill, engrave or face this is below the stock surface. On a wrap it is below the cylinder surface. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface, a rough, a waterline or a rotary finish rejects `depth`. |
+| `step_down` | yes, except chamfer, surface and rotary finish | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface or a rotary finish rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. |
+| `stepover` | pocket, face, surface, rough and rotary finish | Positive step between passes, in `units`. At most the tool diameter on a pocket, face, surface or rough. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. A rough that omits it uses 0.4 times the tool diameter. A waterline rejects `stepover`. On a rotary finish it is the arc length between angle passes at the largest radius, and it is not capped at the tool diameter. When `angle_step_deg` is also set, the run uses `stepover`. |
 | `scallop_height` | surface only | Positive length in `units`. Flat-floor cusp height used instead of `stepover`. See below. Rejected on every other kind. |
-| `sample_step` | surface only | Positive length in `units`. Default is half of the stepover that is used (after a scallop height is resolved and capped). Maximum gap between the regular drop-cutter samples on a raster line, and between the samples on the link from one line to the next. |
+| `sample_step` | surface and rotary finish | Positive length in `units`. On a surface, the default is half of the stepover that is used (after a scallop height is resolved and capped). It is the maximum gap between the regular drop-cutter samples on a raster line, and between the samples on the link from one line to the next. On a rotary finish it is the spacing along the axis. Omitted there, the run uses `min(0.25, chord * 10)` millimetres. |
 | `angle_deg` | face and surface | `0` (along +X) or `90` (along +Y). Default `0`. Stored as radians. Rejected on every other kind. |
 | `margin` | face, surface, rough and waterline | Length in `units`, at least 0, at most 1e6 mm. Default 0 on a face or a surface, and the tool radius on a rough or a waterline. On a face, grows the faced rectangle past the geometry bounding box on every side. On a surface, a rough or a waterline, grows the mesh XY bounds the same way. The rough stock rectangle is that grown box. Rejected on every other kind. |
 | `floor_z` | surface, rough and waterline | Absolute Z in `units`. Default is the mesh minimum Z. On a surface, the tip stays at this height where the cutter misses the mesh. On a rough or a waterline, this is the deepest level. |
@@ -110,15 +110,19 @@ unique within that operation. The same layer may appear on two operations.
 | `tip_clearance` | chamfer | Length in `units`, at least 0, default 0. How far the tip sits below the bottom of the bevel. Rejected on every other kind. |
 | `stock_to_leave` | profile, pocket, surface, rough and waterline | On a profile or pocket, an object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. On a surface, a rough or a waterline, a single length in `units`, at least 0. A surface or a waterline defaults to 0 and adds that length to every cutter-location Z. That is an axial offset approximation, not a true 3D rest-material offset along the surface normal. A rough defaults to 0.5 mm (a millimetre length, not scaled again when `units` is `inch`) and keeps the tool where the drop-cutter tip plus that stock is at or below the level. Rejected on a face. |
 | `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). Rejected on a face. |
-| `entry` | no | How a pass is entered. Omitted, a plunge. `{"type":"plunge"}`, `{"type":"ramp","angle_deg"}`, or `{"type":"helix","radius","angle_deg"}`. `angle_deg` is from the XY plane, greater than 0 and at most 90, and is not scaled by `units`. A helix `radius` is a length in `units`. One turn drops `2π r tan(angle_deg)`. A rough uses the same object. A surface or a wrap rejects `entry`. A wrap plunges. |
+| `entry` | no | How a pass is entered. Omitted, a plunge. `{"type":"plunge"}`, `{"type":"ramp","angle_deg"}`, or `{"type":"helix","radius","angle_deg"}`. `angle_deg` is from the XY plane, greater than 0 and at most 90, and is not scaled by `units`. A helix `radius` is a length in `units`. One turn drops `2π r tan(angle_deg)`. A rough uses the same object. A surface, a wrap or a rotary finish rejects `entry`. A wrap plunges. |
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
 | `cut_height` | no | Absolute Z to feed to after the pierce, before the cut. |
-| `timing` | no | Delays and the two process-on toggles. See below. Rejected on a wrap. |
-| `index_deg` | no | Machine A or B angle in degrees. Not scaled by `units`. Requires a job-level `rotary`. Omitted on a rotary job, the operation runs at 0° and its poses carry rotary 0. Rejected on a wrap: the angle follows the drawing. |
+| `timing` | no | Delays and the two process-on toggles. See below. Rejected on a wrap and on a rotary finish. |
+| `index_deg` | no | Machine A or B angle in degrees. Not scaled by `units`. Requires a job-level `rotary`. Omitted on a rotary job, the operation runs at 0° and its poses carry rotary 0. Rejected on a wrap and on a rotary finish: the angle follows the drawing or the rotary passes. |
 | `diameter` | wrap | Cylinder surface diameter, in `units`. Positive, at most 1e6 mm after conversion. This is not the tool diameter. Rejected on every other kind. |
 | `u_offset` | wrap | Length in `units`, default 0, added to drawing X to make flat-frame `u`. May be negative. At most 1e6 mm in absolute value. Rejected on every other kind. |
 | `v_offset` | wrap | Length in `units`, default 0, added to drawing Y to make flat-frame `v`. May be negative. At most 1e6 mm in absolute value. Rejected on every other kind. |
+| `u_min` | rotary finish | Length in `units`. Low end of the pass along the rotary axis. Omitted, the mesh minimum on that axis. May be negative. |
+| `u_max` | rotary finish | Length in `units`. High end of the pass along the rotary axis. Omitted, the mesh maximum on that axis. `u_min` greater than `u_max` is rejected. |
+| `angle_step_deg` | rotary finish | Degrees between passes, greater than 0 and at most 360. Not scaled by `units`. See below. |
+| `direction` | rotary finish | `zigzag` (the default) or `one_way`. |
 
 `depth` and `step_down` must be a legal `campanion-path` depth plan: positive, at most 1e6 mm,
 and at most 1024 passes. Five millimetres at a two millimetre step is three passes (2, 4, 5).
@@ -194,7 +198,7 @@ A wrap followed or preceded by an indexed operation uses the same index change a
 ### Surface
 
 `type` `surface` is a 3-axis parallel finish of an STL mesh. The source path must end in `.stl`
-(any case). An STL source allows `surface`, `rough` and `waterline` only, and `surface` is rejected on a
+(any case). An STL source allows `surface`, `rough`, `waterline` and `rotary_finish` only, and `surface` is rejected on a
 DXF, SVG or STEP source. There are no layers. A kerf tool is rejected.
 
 The raster covers the mesh XY bounds, grown by `margin` on every side. Passes run at `angle_deg`
@@ -237,7 +241,7 @@ at the centre, rising to Z = 10 mm.
 ### Roughing
 
 `type` `rough` is Z-level roughing of an STL mesh. The source path must end in `.stl` (any case).
-An STL source allows `surface`, `rough` and `waterline` only. `rough` is rejected on a DXF, SVG or STEP source.
+An STL source allows `surface`, `rough`, `waterline` and `rotary_finish` only. `rough` is rejected on a DXF, SVG or STEP source.
 There are no layers. A kerf tool is rejected. The tool `shape` is the flat, ball or bull nose a
 surface uses.
 
@@ -281,7 +285,7 @@ above the dome.
 ### Waterline
 
 `type` `waterline` finishes the steep walls of an STL mesh. The source path must end in `.stl`
-(any case). An STL source allows `surface`, `rough` and `waterline` only. `waterline` is rejected
+(any case). An STL source allows `surface`, `rough`, `waterline` and `rotary_finish` only. `waterline` is rejected
 on a DXF, SVG or STEP source. There are no layers. A kerf tool is rejected. The tool `shape` is
 the flat, ball or bull nose a surface uses.
 
@@ -312,6 +316,20 @@ and off after the last retract, then the tool rapids to clearance.
 
 `examples/dome_waterline.job.json` finishes the steep part of `examples/dome.stl` with a 6 mm ball
 nose, a 2.5 mm step-down, a 1 mm grid and a minimum slope of 30°. Clearance is 15 mm and retract is 12 mm.
+
+### Rotary finishing
+
+`type` `rotary_finish` is a continuous 4th-axis finish of an STL mesh. The source path must end in `.stl` (any case). It needs a job-level `rotary`. The tool stays on machine +Z and the part turns about that axis. There are no layers. A kerf tool is rejected. `index_deg` is rejected.
+
+Passes run along the axis. The angle then advances. Angles start at 0° and the last pass is at 360°. `u_min` and `u_max` limit that axial window, in `units`. Omitted, the window is the mesh extent on the rotary axis.
+
+`angle_step_deg` is the angle between passes, in degrees. It is not scaled by `units`. `stepover` is the same spacing as an arc length at the largest radius of the part. When both are set, the run uses `stepover`. When neither is set, the stepover is the flat-floor scallop for the job chord tolerance, capped at the tool diameter. That default needs a ball or bull nose.
+
+`sample_step` is the gap between drop-cutter samples along the axis. Omitted, the run uses `min(0.25, chord * 10)` millimetres. `direction` is `zigzag` or `one_way`. Zigzag is the default. It alternates the axial direction and, at the shared end of two passes, rotates in contact when the tip stays above the part at both angles and at the probed angles between them. Otherwise the tool retracts to the safe radius, rotates, and plunges. One-way always retracts, and every pass starts at the low end.
+
+The safe radius is at least the swept radius plus `heights.clearance`, and at least the highest cut plus that clearance. `campanion run` gouge-checks the path in the rotated frame: a constant-angle cut is sampled on the mesh turned by that angle, and a cut that changes angle is sampled between its ends.
+
+`examples/rotary.job.json` finishes `examples/rotary.stl` with a 3 mm ball, zigzag, a 30° angle step and a 0.25 mm sample step, about axis A through the origin. The mesh is a vase revolved about X, 60 mm long and about 30 mm in diameter, with closed ends. `crates/mesh/tests/rotary_vase.rs` builds that STL.
 
 Pocket strategy, leads, tabs and drill-cycle fields are not part of this version.
 

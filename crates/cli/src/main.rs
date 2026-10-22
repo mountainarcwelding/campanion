@@ -18,6 +18,7 @@ mod job;
 mod jobfile;
 mod post;
 mod report;
+mod rotary;
 mod rough;
 mod run;
 mod surface;

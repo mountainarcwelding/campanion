@@ -30,6 +30,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - `examples/sample_delays.job.json` shows pierce height and pierce/post delays.
 - `examples/indexed.job.json` finishes `examples/dome.stl` at two rotary indexes. See [Indexed 3+1](docs/job-file.md#indexed-31) in the job-file docs.
 - `examples/wrap.job.json` wraps `examples/wrap.svg` onto a 40 mm cylinder about A. Drawing X is the distance along the axis and drawing Y is the arc length around the surface. See [Wrapping](docs/job-file.md#wrapping).
+- `examples/rotary.job.json` finishes `examples/rotary.stl` with a 3 mm ball, zigzag. The mesh is a vase revolved about X. See [Rotary finishing](docs/job-file.md#rotary-finishing).
 
 ## Usage
 
@@ -49,7 +50,7 @@ the depth. `campanion run` on an STL job does the same check with each operation
 job's chord tolerance. XY arcs are sampled with Z interpolated from start to end. An arc in another
 plane is an error. Surface operations emit lines. An indexed mesh operation is checked in that
 indexed view: the mesh is turned by the same angle, and the path is mapped back to machine XY
-before it is sampled.
+before it is sampled. A rotary finish is checked on the mesh turned to each cutting angle.
 
 ## Posts
 
