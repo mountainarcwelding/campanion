@@ -42,9 +42,10 @@ pub struct RasterParams {
 /// `zigzag`, line 0 runs from the low along coordinate to the high one and each later line flips.
 /// Otherwise every line runs low to high. A zero-width cross span is a single line.
 ///
-/// Points on a line are `DropCutter::tip_z_or` samples. Midpoints whose true tip Z differs from
-/// the chord by more than `tolerance` are inserted, up to [`MAX_DEPTH`] bisections. Interior
-/// points are then dropped when every dropped point stays within `tolerance` of the remaining chord.
+/// Points on a line are `DropCutter::tip_z_or` samples. A span is bisected, up to [`MAX_DEPTH`]
+/// times, while its midpoint or any dyadic sample misses `tip_z_or` by more than `tolerance`.
+/// Interior points are then dropped when every dropped point stays within `tolerance` of the
+/// remaining chord.
 pub fn parallel_finish(dc: &DropCutter, area_min: (f64, f64), area_max: (f64, f64), params: &RasterParams) -> Result<Vec<Vec<Vec3>>> {
     validate(area_min, area_max, params)?;
     let (along, cross) = axis_spans(params.angle, area_min, area_max);
@@ -178,7 +179,10 @@ fn sample_line(dc: &DropCutter, params: &RasterParams, along: &[f64], cross: f64
     Ok(points)
 }
 
-/// Insert the true midpoint while its tip Z misses the chord by more than `tolerance`.
+/// Insert the true midpoint while the chord misses [`DropCutter::tip_z_or`] by more than `tolerance`.
+///
+/// The midpoint alone is not enough: on a curve the largest miss can sit off centre and still
+/// clear that one sample. [`chord_tracks_surface`] checks the rest of the span.
 fn refine_between(
     dc: &DropCutter,
     a: Vec3,
@@ -196,7 +200,7 @@ fn refine_between(
     let mid_y = (a.y + b.y) * 0.5;
     let interpolated = (a.z + b.z) * 0.5;
     let true_z = dc.tip_z_or(mid_x, mid_y, floor);
-    if (true_z - interpolated).abs() <= tolerance {
+    if (true_z - interpolated).abs() <= tolerance && chord_tracks_surface(dc, a, b, tolerance, floor) {
         return Ok(());
     }
     let mid = tip_point(dc, mid_x, mid_y, floor)?;
@@ -300,13 +304,20 @@ fn nearest_to_mid(points: &[Vec3], start: usize, end: usize) -> Result<usize> {
 /// Dyadic samples of chord `a`–`b` stay within `tolerance` of [`DropCutter::tip_z_or`].
 ///
 /// The limit sits a hair under `tolerance` so the unsampled bow between those checks cannot
-/// push a smooth tool surface past the caller's tolerance.
+/// push a smooth tool surface past the caller's tolerance. Sampling stops once a piece is
+/// shorter than [`TRACK_PIECE_MM`] or the depth cap is hit, whichever comes first.
 fn chord_tracks_surface(dc: &DropCutter, a: Vec3, b: Vec3, tolerance: f64, floor: f64) -> bool {
     let margin = 1e-4_f64.min(tolerance * 0.05);
     let limit = tolerance - margin;
     let span = (b.x - a.x).hypot(b.y - a.y);
     tracks_span(dc, a, b, limit, floor, span, 0.0, 1.0, 0)
 }
+
+/// Longest XY piece that is not split further while checking a chord.
+///
+/// On a smooth ball of a few millimetres this keeps the unchecked bow under the margin in
+/// [`chord_tracks_surface`]. The depth cap still bounds a very long chord.
+const TRACK_PIECE_MM: f64 = 0.05;
 
 fn tracks_span(dc: &DropCutter, a: Vec3, b: Vec3, limit: f64, floor: f64, full_span: f64, t0: f64, t1: f64, depth: u32) -> bool {
     let t = (t0 + t1) * 0.5;
@@ -317,7 +328,7 @@ fn tracks_span(dc: &DropCutter, a: Vec3, b: Vec3, limit: f64, floor: f64, full_s
         return false;
     }
     let piece = full_span * (t1 - t0);
-    if depth >= 8 || piece <= 1e-3 {
+    if depth >= 8 || piece <= TRACK_PIECE_MM {
         return true;
     }
     tracks_span(dc, a, b, limit, floor, full_span, t0, t, depth + 1) && tracks_span(dc, a, b, limit, floor, full_span, t, t1, depth + 1)
@@ -508,6 +519,29 @@ mod tests {
         }
         assert!(saw_crown, "raster missed the bump");
         assert_ne!(lines[0][0].x <= lines[0].last().expect("end").x, lines[1][0].x <= lines[1].last().expect("end").x);
+    }
+
+    /// A midpoint inside tolerance can still hide a deeper miss. Sampling the chord the way the
+    /// gouge check does must stay inside `tolerance`.
+    #[test]
+    fn tight_ball_chords_do_not_gouge() {
+        let tolerance = 0.01;
+        let floor = -1.0;
+        let mesh = dome(12.0, 8, 16);
+        let dc = DropCutter::new(&mesh, Cutter::new_ball(3.0).expect("ball")).expect("index");
+        let params = RasterParams { stepover: 1.0, sample_step: 0.5, tolerance, angle: RasterAngle::AlongX, floor_z: floor, zigzag: true };
+        let lines = parallel_finish(&dc, (-9.0, -9.0), (9.0, 9.0), &params).expect("finish");
+        let mut segments = Vec::new();
+        for line in &lines {
+            for pair in line.windows(2) {
+                let (Some(start), Some(end)) = (pair.first(), pair.get(1)) else {
+                    continue;
+                };
+                segments.push((*start, *end));
+            }
+        }
+        let (count, gouges) = crate::check_gouges(&dc, &segments, 0.1, tolerance, 4).expect("gouges");
+        assert_eq!(count, 0, "{gouges:?}");
     }
 
     fn mild_triangle(coords: (f64, f64, f64, f64, f64, f64, f64, f64, f64)) -> Option<Triangle> {

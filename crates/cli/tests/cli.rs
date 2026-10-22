@@ -56,14 +56,22 @@ fn version_flag_exits_zero_and_prints_name() {
 #[test]
 fn help_lists_commands() {
     let stdout = success_stdout(&["--help"]).expect("help");
-    for word in ["ir", "ngc", "verify", "schema", "--job", "--version"] {
+    for word in ["ir", "ngc", "verify", "schema", "--job", "--version", "--mesh", "bull:3,1"] {
         assert!(stdout.contains(word), "help missing {word}: {stdout}");
     }
 }
 
 #[test]
 fn usage_errors_exit_two() {
-    for args in [Vec::new(), vec!["nope"], vec!["verify"], vec!["ir", "--job"], vec!["schema", "extra"]] {
+    for args in [
+        Vec::new(),
+        vec!["nope"],
+        vec!["verify"],
+        vec!["ir", "--job"],
+        vec!["schema", "extra"],
+        vec!["verify", "file.json", "--mesh"],
+        vec!["verify", "file.json", "--tool", "ball:3"],
+    ] {
         let output = campanion(&args).expect("run");
         let stderr = text(&output.stderr).expect("utf-8");
         assert_eq!(output.status.code(), Some(2), "{args:?} {stderr}");

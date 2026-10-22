@@ -28,6 +28,24 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - The toolpath is verified before anything is written; errors stop the run.
 - `examples/sample_delays.job.json` shows pierce height and pierce/post delays.
 
+## Usage
+
+`campanion verify FILE` checks an IR file and prints a report. The status is 1 when the report
+has errors.
+
+Check cutting moves against an STL mesh. The tool is a radius in millimetres (`ball:3`, `flat:3`,
+or `bull:3,1`, where the number after the comma is the bull corner radius):
+
+```sh
+campanion verify out.json --mesh examples/dome.stl --tool ball:3
+```
+
+Tolerance is 0.01 mm, the job file's default chord tolerance. Samples are `min(0.25, tolerance*10)`
+mm apart. A gouge is printed like any other verify error and names the operation, the position and
+the depth. `campanion run` on an STL job does the same check with each operation's cutter and the
+job's chord tolerance. XY arcs are sampled with Z interpolated from start to end. An arc in another
+plane is an error. Surface operations emit lines.
+
 ## Preview
 
 `campanion-view` shows a toolpath IR file (the `--ir` output of `campanion run`):

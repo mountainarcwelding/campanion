@@ -2,17 +2,19 @@
 //!
 //! Units are millimetres. The frame is right-handed with Z up. STL is read and written from
 //! bytes ([`parse_stl`], [`write_stl_binary`]); this crate does not touch the filesystem, so it
-//! builds for `wasm32`.
+//! builds for `wasm32`. [`check_gouges`] samples a tool-tip path against a [`DropCutter`].
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod dropcutter;
+mod gouge;
 mod raster;
 mod scallop;
 mod stl;
 mod zlevel;
 
 pub use dropcutter::{Cutter, DropCutter, drop_cutter_triangle};
+pub use gouge::{Gouge, check_gouges};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};
 pub use scallop::scallop_stepover;
 pub use stl::{parse_stl, write_stl_binary};

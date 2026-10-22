@@ -69,7 +69,7 @@ fn resolve_stepover(op: &Operation, tool: &JobTool, cutter: &Cutter) -> Result<f
     Ok(stepover.min(diameter))
 }
 
-fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
+pub(crate) fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
     let Some(diameter) = tool.diameter() else {
         return Err(op_err(op, "surface is not valid with a kerf tool"));
     };

@@ -2,12 +2,14 @@
 //!
 //! `ir` and `ngc` turn a 2D profile job into IR JSON or test-sink RS274/NGC.
 //! `run` loads a `campanion-job/1` file, imports its DXF, and writes toolpaths.
-//! `verify` reports motion and process problems in an IR file. `view` opens the toolpath preview
+//! `verify` reports motion and process problems in an IR file, and can check an STL mesh for
+//! gouges. `view` opens the toolpath preview
 //! by launching the separate `campanion-view` program. `schema` prints the JSON Schema.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod error;
+mod gouge;
 mod job;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
@@ -33,7 +35,7 @@ Usage:
   campanion ir [--job FILE]
   campanion ngc [--job FILE]
   campanion run JOB -o OUT.ngc [--ir OUT.json]
-  campanion verify FILE
+  campanion verify FILE [--mesh PART.stl --tool ball:3|flat:3|bull:3,1]
   campanion view IR.json
   campanion schema
   campanion --help
@@ -45,7 +47,13 @@ run     Import the DXF, SVG, STEP or STL (by extension) named by a campanion-job
         JOB is the job file. -o is the RS274/NGC test sink. --ir also writes IR JSON.
         A changed source hash is a warning on stderr. The job file is not rewritten.
         Verify errors are printed and the status is 1. Warnings stay on stderr.
+        An STL job checks each cutting move against the mesh with that operation's cutter.
+        A gouge is a verify error and the status is 1.
 verify  Verify an IR JSON file and print a report. The status is 1 when the report has errors.
+        --mesh and --tool also check cutting moves against an STL mesh. Both are required together.
+        The tool is a radius in millimetres: ball:3, flat:3 or bull:3,1 (bull corner after the comma).
+        Tolerance is the job-file default chord tolerance, 0.01 mm. Samples are min(0.25, tolerance*10) mm apart.
+        A gouge names the operation, the position and the depth. XY arcs are sampled; other arcs are rejected.
 view    Open the toolpath preview (the campanion-view program) for an IR JSON file.
 schema  Print the JSON Schema for campanion-ir/1.
 
@@ -118,19 +126,77 @@ fn emit(args: &[OsString], ngc: bool) -> Result<ExitCode, CliError> {
     write_stdout(&text)
 }
 
+struct VerifyArgs {
+    file: PathBuf,
+    mesh: Option<(PathBuf, String)>,
+}
+
 fn verify(args: &[OsString]) -> Result<ExitCode, CliError> {
-    let [path] = args else {
+    let args = parse_verify(args)?;
+    let text = job::read_text(&args.file)?;
+    let doc = campanion_ir::Document::from_json(&text)?;
+    let gouges = if let Some((mesh_path, tool)) = &args.mesh {
+        let cutter = gouge::parse_tool(tool)?;
+        let bytes = run::read_bytes(mesh_path)?;
+        let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
+        gouge::check_program(doc.program(), &mesh, cutter, jobfile::DEFAULT_JOB_CHORD_MM)?
+    } else {
+        Vec::new()
+    };
+    let report = campanion_ir::verify(doc.program());
+    let failed = !report.issues().is_empty() || !gouges.is_empty();
+    let text = if gouges.is_empty() { report::format_report(&report) } else { report::format_report_and_gouges(&report, &gouges) };
+    write_stdout(&text)?;
+    if failed { Ok(ExitCode::from(1)) } else { Ok(ExitCode::SUCCESS) }
+}
+
+fn parse_verify(args: &[OsString]) -> Result<VerifyArgs, CliError> {
+    let mut file: Option<&OsStr> = None;
+    let mut mesh: Option<&OsStr> = None;
+    let mut tool: Option<&OsStr> = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        let Some(arg) = args.get(index) else {
+            break;
+        };
+        index += 1;
+        if arg.as_os_str() == "--mesh" || arg.as_os_str() == "--tool" {
+            let flag = if arg.as_os_str() == "--mesh" { "--mesh" } else { "--tool" };
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage(format!("{flag} needs a value")));
+            };
+            index += 1;
+            if value.is_empty() {
+                return Err(CliError::usage(format!("{flag} needs a value")));
+            }
+            let slot = if flag == "--mesh" { &mut mesh } else { &mut tool };
+            if slot.is_some() {
+                return Err(CliError::usage(format!("{flag} is already set")));
+            }
+            *slot = Some(value.as_os_str());
+        } else if arg.to_string_lossy().starts_with('-') {
+            return Err(CliError::usage("unknown argument"));
+        } else if file.is_some() || arg.is_empty() {
+            return Err(CliError::usage("verify needs one IR JSON file"));
+        } else {
+            file = Some(arg.as_os_str());
+        }
+    }
+    let Some(file) = file else {
         return Err(CliError::usage("verify needs one IR JSON file"));
     };
-    if path.is_empty() {
-        return Err(CliError::usage("verify needs one IR JSON file"));
-    }
-    let text = job::read_text(Path::new(path))?;
-    let doc = campanion_ir::Document::from_json(&text)?;
-    let report = campanion_ir::verify(doc.program());
-    let failed = !report.issues().is_empty();
-    write_stdout(&report::format_report(&report))?;
-    if failed { Ok(ExitCode::from(1)) } else { Ok(ExitCode::SUCCESS) }
+    let mesh = match (mesh, tool) {
+        (None, None) => None,
+        (Some(mesh), Some(tool)) => {
+            let Some(tool) = tool.to_str() else {
+                return Err(CliError::usage("tool must be ball:R, flat:R or bull:R,C"));
+            };
+            Some((PathBuf::from(mesh), tool.to_string()))
+        }
+        (Some(_), None) => return Err(CliError::usage("verify --mesh needs --tool")),
+        (None, Some(_)) => return Err(CliError::usage("verify --tool needs --mesh")),
+    };
+    Ok(VerifyArgs { file: PathBuf::from(file), mesh })
 }
 
 fn view(args: &[OsString]) -> Result<ExitCode, CliError> {

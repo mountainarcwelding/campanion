@@ -2,12 +2,33 @@
 
 use campanion_ir::{Issue, ProcessKind, RefKind, VerifyReport};
 
+/// A mesh gouge to print with the verifier issues.
+#[derive(Debug)]
+pub struct GougeNote {
+    /// Operation or toolpath name.
+    pub operation: String,
+    /// Tool tip, millimetres.
+    pub x: f64,
+    /// Tool tip, millimetres.
+    pub y: f64,
+    /// Tool tip, millimetres.
+    pub z: f64,
+    /// Millimetres below the drop-cutter contact.
+    pub depth: f64,
+}
+
 /// Summary, then one line per issue. The string ends with a newline.
 pub fn format_report(report: &VerifyReport) -> String {
+    format_report_and_gouges(report, &[])
+}
+
+/// [`format_report`], then one line per gouge. Gouges count as verify errors.
+pub fn format_report_and_gouges(report: &VerifyReport, gouges: &[GougeNote]) -> String {
     let mut out = String::new();
-    let status = if report.issues().is_empty() { "ok" } else { "errors" };
+    let issue_count = report.issues().len().saturating_add(gouges.len());
+    let status = if issue_count == 0 { "ok" } else { "errors" };
     line(&mut out, &format!("status {status}"));
-    line(&mut out, &format!("issues {}", report.issues().len()));
+    line(&mut out, &format!("issues {issue_count}"));
     line(&mut out, &format!("length_mm {}", num(report.total_length())));
     line(&mut out, &format!("rapid_mm {}", num(report.rapid_length())));
     line(&mut out, &format!("time_s {}", num(report.time_s())));
@@ -23,7 +44,16 @@ pub fn format_report(report: &VerifyReport) -> String {
     for issue in report.issues() {
         line(&mut out, &format_issue(issue));
     }
+    for gouge in gouges {
+        line(&mut out, &format_gouge(gouge));
+    }
     out
+}
+
+fn format_gouge(gouge: &GougeNote) -> String {
+    let mut name = String::new();
+    push_clean(&mut name, &gouge.operation);
+    format!("gouge operation {name} x {} y {} z {} depth {}", num(gouge.x), num(gouge.y), num(gouge.z), num(gouge.depth))
 }
 
 fn line(out: &mut String, text: &str) {
@@ -84,5 +114,24 @@ fn format_issue(issue: &Issue) -> String {
         }
         Issue::UnknownRef(RefKind::Axis(id)) => format!("unknown_ref axis {id}"),
         Issue::UnknownRef(RefKind::Channel(id)) => format!("unknown_ref channel {id}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use campanion_ir::{Document, Program, verify};
+
+    #[test]
+    fn gouge_lines_count_as_verify_errors() {
+        let program = Program::try_new(None, Vec::new(), None, Vec::new(), Vec::new(), Vec::new()).expect("program");
+        let doc = Document::new(program).expect("document");
+        let report = verify(doc.program());
+        assert_eq!(format_report(&report), format_report_and_gouges(&report, &[]));
+        let notes = [GougeNote { operation: "dome".into(), x: 1.0, y: 2.0, z: 3.5, depth: 0.5 }];
+        let text = format_report_and_gouges(&report, &notes);
+        assert!(text.contains("status errors\n"), "{text}");
+        assert!(text.contains("issues 1\n"), "{text}");
+        assert!(text.contains("gouge operation dome x 1.000000 y 2.000000 z 3.500000 depth 0.500000\n"), "{text}");
     }
 }

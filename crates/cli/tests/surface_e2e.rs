@@ -268,3 +268,52 @@ fn raster_line_starts(blocks: &[Value]) -> Result<Vec<f64>, String> {
     }
     Ok(starts)
 }
+
+#[test]
+fn lowered_dome_cut_is_reported_as_a_gouge() -> Result<(), String> {
+    let root = workspace_root()?;
+    let ngc_path = temp_path("campanion-gouge-e2e.ngc");
+    let ir_path = temp_path("campanion-gouge-e2e.json");
+    run_job(&root, "examples/dome.job.json", &ngc_path, &ir_path)?;
+
+    let ir_arg = path_arg(&ir_path)?;
+    let clean = campanion(&root, &["verify", &ir_arg, "--mesh", "examples/dome.stl", "--tool", "ball:3"])?;
+    let clean_out = output_text(&clean.stdout)?;
+    let clean_err = output_text(&clean.stderr)?;
+    if clean.status.code() != Some(0) {
+        return Err(format!("clean dome verify --mesh exit {:?} stdout {clean_out} stderr {clean_err}", clean.status.code()));
+    }
+
+    let ir_text = std::fs::read_to_string(&ir_path).map_err(|err| format!("read ir: {err}"))?;
+    let mut ir: Value = serde_json::from_str(&ir_text).map_err(|err| format!("ir json: {err}"))?;
+    let blocks = ir["program"]["toolpaths"]
+        .get_mut(0)
+        .and_then(|path| path.get_mut("blocks"))
+        .and_then(|blocks| blocks.as_array_mut())
+        .ok_or("blocks is not an array")?;
+    let mut lowered = false;
+    for block in blocks.iter_mut() {
+        if block.get("type").and_then(Value::as_str) == Some("linear") && block.get("role").and_then(Value::as_str) == Some("cut") {
+            let z = block.get("to").and_then(|to| to.get("tip")).and_then(|tip| tip.get("z")).and_then(Value::as_f64).ok_or("cut z")?;
+            let tip = block.get_mut("to").and_then(|to| to.get_mut("tip")).ok_or("cut tip")?;
+            tip["z"] = Value::from(z - 0.5);
+            lowered = true;
+            break;
+        }
+    }
+    if !lowered {
+        return Err("dome finish produced no cutting move".into());
+    }
+    let edited = temp_path("campanion-gouge-e2e-lowered.json");
+    let text = serde_json::to_string_pretty(&ir).map_err(|err| format!("write json: {err}"))?;
+    std::fs::write(&edited, text).map_err(|err| format!("write ir: {err}"))?;
+    let edited_arg = path_arg(&edited)?;
+    let output = campanion(&root, &["verify", &edited_arg, "--mesh", "examples/dome.stl", "--tool", "ball:3"])?;
+    let stdout = output_text(&output.stdout)?;
+    let stderr = output_text(&output.stderr)?;
+    if output.status.code() != Some(1) {
+        return Err(format!("lowered dome exit {:?} stdout {stdout} stderr {stderr}", output.status.code()));
+    }
+    let combined = format!("{stdout}\n{stderr}");
+    if combined.contains("gouge") { Ok(()) } else { Err(format!("expected a gouge report:\n{combined}")) }
+}

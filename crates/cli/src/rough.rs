@@ -41,7 +41,7 @@ pub(crate) fn rough(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh) 
     link_levels(op, job.clearance(), job.retract(), &levels)
 }
 
-fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
+pub(crate) fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
     let Some(diameter) = tool.diameter() else {
         return Err(op_err(op, "rough is not valid with a kerf tool"));
     };
