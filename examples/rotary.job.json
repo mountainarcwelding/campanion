@@ -1,0 +1,43 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "rotary.stl",
+    "hash": "27b466c561a230e9"
+  },
+  "units": "mm",
+  "heights": {
+    "clearance": 10.0,
+    "retract": 8.0
+  },
+  "rotary": {
+    "axis": "a",
+    "center": [0.0, 0.0, 0.0],
+    "direction": "positive"
+  },
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 3.0,
+      "shape": "ball"
+    }
+  ],
+  "operations": [
+    {
+      "name": "vase",
+      "type": "rotary_finish",
+      "tool_id": 1,
+      "angle_step_deg": 30,
+      "sample_step": 0.25,
+      "direction": "zigzag",
+      "feeds": {
+        "cut": 800.0,
+        "plunge": 200.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  }
+}

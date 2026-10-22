@@ -7,6 +7,10 @@
 //! A program with a rotary setup is checked in the indexed view. The mesh is turned by the same
 //! angle the operation was planned at, and each pose is mapped back to that view before sampling.
 //! An arc stored on a cardinal plane is turned back into machine XY. A 3-axis program is unchanged.
+//!
+//! A rotary finish changes angle along the path. Each cutting segment at one angle is sampled on
+//! the mesh turned by that angle, in the machine view. A segment that changes angle is sampled at
+//! intermediate angles, each on the mesh turned by that angle.
 
 use std::borrow::Cow;
 
@@ -67,6 +71,9 @@ pub(crate) fn parse_tool(text: &str) -> Result<Cutter, CliError> {
 /// The reference is the drop-cutter tip on the part. `stock_to_leave` is not added. A surface
 /// or waterline path already includes its axial stock in Z. A rough path sits above the surface
 /// plus its stock, so a gouge is a tip below the part, not below the stock allowance.
+///
+/// A rotary finish is reported per operation, like a surface. Constant-angle cuts use the mesh
+/// turned by that angle. Angle changes are sampled between the endpoints.
 pub(crate) fn check_job(job: &JobFile, mesh: &Mesh, program: &Program) -> Result<Vec<GougeNote>, CliError> {
     let tolerance = job.tolerance().chord();
     let sample_step = sample_step_for(tolerance)?;
@@ -130,10 +137,177 @@ fn check_one(
     angle: f64,
 ) -> Result<Vec<GougeNote>, CliError> {
     let cutter = cutter_for(op, tool)?;
+    if matches!(op.kind(), OperationKind::RotaryFinish) {
+        let Some(setup) = setup else {
+            return Err(CliError::run(format!("operation {name}: rotary finish needs a rotary setup")));
+        };
+        return check_rotary(name, path, mesh, cutter, sample_step, tolerance, setup);
+    }
     let view = indexed_mesh(mesh, setup, angle)?;
     let dc = DropCutter::new(view.as_ref(), cutter).map_err(|err| CliError::run(format!("operation {name}: {err}")))?;
     let segments = cutting_segments(path, sample_step, setup)?;
     notes_for(name, &dc, &segments, sample_step, tolerance)
+}
+
+/// One angle's cutting segments, already in the machine view.
+struct AngleCuts {
+    angle: f64,
+    segments: Vec<(MeshVec, MeshVec)>,
+}
+
+/// Constant-angle cuts share one turned mesh. A cut that changes angle is sampled between the ends.
+fn check_rotary(
+    name: &str,
+    path: &ClPath,
+    mesh: &Mesh,
+    cutter: Cutter,
+    sample_step: f64,
+    tolerance: f64,
+    setup: &RotarySetup,
+) -> Result<Vec<GougeNote>, CliError> {
+    let mut groups: Vec<AngleCuts> = Vec::new();
+    let mut rotating: Vec<(Pose, Pose)> = Vec::new();
+    let mut cursor: Option<Pose> = None;
+    for block in path.blocks() {
+        let ClBlock::Motion(motion) = block else {
+            continue;
+        };
+        match motion {
+            ClMotion::Rapid { to, .. } => cursor = Some(*to),
+            ClMotion::Linear { to, role, .. } => {
+                if cutting(*role) {
+                    let start = cursor.unwrap_or(*to);
+                    push_rotary_cut(name, &mut groups, &mut rotating, setup, start, *to)?;
+                }
+                cursor = Some(*to);
+            }
+            ClMotion::Arc { role, .. } | ClMotion::Helix { role, .. } => {
+                if cutting(*role) {
+                    return Err(CliError::run(format!("operation {name}: gouge check cannot sample a rotary arc; rotary finish emits lines")));
+                }
+                cursor = Some(motion_pose(motion));
+            }
+        }
+    }
+    let mut notes = Vec::new();
+    for group in &groups {
+        notes.extend(check_at_angle(name, mesh, setup, cutter, group.angle, &group.segments, sample_step, tolerance)?);
+    }
+    for (start, end) in rotating {
+        notes.extend(check_rotating(name, mesh, setup, cutter, start, end, sample_step, tolerance)?);
+    }
+    notes.sort_by(|left, right| right.depth.total_cmp(&left.depth));
+    notes.truncate(MAX_REPORTS);
+    Ok(notes)
+}
+
+fn push_rotary_cut(
+    name: &str,
+    groups: &mut Vec<AngleCuts>,
+    rotating: &mut Vec<(Pose, Pose)>,
+    setup: &RotarySetup,
+    start: Pose,
+    end: Pose,
+) -> Result<(), CliError> {
+    let start_angle = rotary_angle(name, start)?;
+    let end_angle = rotary_angle(name, end)?;
+    if index::angles_differ(start_angle, end_angle) {
+        rotating.push((start, end));
+        return Ok(());
+    }
+    let from = mesh_vec(part_to_machine(setup, start, end_angle).tip());
+    let to = mesh_vec(part_to_machine(setup, end, end_angle).tip());
+    if let Some(group) = groups.last_mut()
+        && !index::angles_differ(group.angle, end_angle)
+    {
+        return push_segment(&mut group.segments, from, to);
+    }
+    let mut segments = Vec::new();
+    push_segment(&mut segments, from, to)?;
+    groups.push(AngleCuts { angle: end_angle, segments });
+    Ok(())
+}
+
+fn check_rotating(
+    name: &str,
+    mesh: &Mesh,
+    setup: &RotarySetup,
+    cutter: Cutter,
+    start: Pose,
+    end: Pose,
+    sample_step: f64,
+    tolerance: f64,
+) -> Result<Vec<GougeNote>, CliError> {
+    let start_angle = rotary_angle(name, start)?;
+    let end_angle = rotary_angle(name, end)?;
+    let start_tip = part_to_machine(setup, start, start_angle).tip();
+    let end_tip = part_to_machine(setup, end, end_angle).tip();
+    let tip_radius = index::distance_to_axis(setup, start_tip).max(index::distance_to_axis(setup, end_tip));
+    // A tool parked on the axis still sweeps stock out at the cutter radius.
+    let radius = tip_radius.max(cutter.radius().unwrap_or(0.0));
+    let span = (end_angle - start_angle).abs();
+    let linear = tip_distance(start_tip, end_tip);
+    let count = spin_count(name, span, radius, linear, sample_step)?;
+    let mut notes = Vec::new();
+    let steps = (count - 1) as f64;
+    for index in 0..count {
+        let t = if count == 1 { 0.0 } else { index as f64 / steps };
+        let angle = start_angle + (end_angle - start_angle) * t;
+        let tip = lerp_tip(start_tip, end_tip, t).map_err(|err| CliError::run(format!("operation {name}: {err}")))?;
+        let point = mesh_vec(tip);
+        notes.extend(check_at_angle(name, mesh, setup, cutter, angle, &[(point, point)], sample_step, tolerance)?);
+    }
+    Ok(notes)
+}
+
+fn check_at_angle(
+    name: &str,
+    mesh: &Mesh,
+    setup: &RotarySetup,
+    cutter: Cutter,
+    angle: f64,
+    segments: &[(MeshVec, MeshVec)],
+    sample_step: f64,
+    tolerance: f64,
+) -> Result<Vec<GougeNote>, CliError> {
+    if segments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let turned = index::rotate_mesh(mesh, setup, angle)?;
+    let dc = DropCutter::new(&turned, cutter).map_err(|err| CliError::run(format!("operation {name}: {err}")))?;
+    notes_for(name, &dc, segments, sample_step, tolerance)
+}
+
+fn rotary_angle(name: &str, pose: Pose) -> Result<f64, CliError> {
+    match pose.rotary() {
+        Some(angle) if angle.is_finite() => Ok(angle),
+        _ => Err(CliError::run(format!("operation {name}: rotary finish move has no angle"))),
+    }
+}
+
+/// Samples along a rotating cut, including both ends. Spacing follows the gouge sample step.
+fn spin_count(name: &str, span_deg: f64, radius: f64, linear: f64, sample_step: f64) -> Result<usize, CliError> {
+    let arc = radius.max(0.0) * span_deg.to_radians();
+    if !arc.is_finite() {
+        return Err(CliError::run(format!("operation {name}: rotary arc length is not finite")));
+    }
+    let length = arc.hypot(linear);
+    if !length.is_finite() {
+        return Err(CliError::run(format!("operation {name}: rotary sample length is not finite")));
+    }
+    let count = spaced_points(length, sample_step)?;
+    if span_deg > 1e-9 { Ok(count.max(2)) } else { Ok(count.max(1)) }
+}
+
+fn tip_distance(start: IrVec, end: IrVec) -> f64 {
+    let dx = end.x() - start.x();
+    let dy = end.y() - start.y();
+    let dz = end.z() - start.z();
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn lerp_tip(start: IrVec, end: IrVec, t: f64) -> Result<IrVec, impl std::fmt::Display> {
+    IrVec::new(start.x() + (end.x() - start.x()) * t, start.y() + (end.y() - start.y()) * t, start.z() + (end.z() - start.z()) * t)
 }
 
 /// Part mesh, or that mesh turned into the indexed view when `angle` is not zero.
@@ -153,7 +327,8 @@ fn cutter_for(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
         OperationKind::Surface => surface::cutter(op, tool),
         OperationKind::Rough => rough::cutter(op, tool),
         OperationKind::Waterline => waterline::cutter(op, tool),
-        _ => Err(CliError::run(format!("operation {}: gouge check needs a surface, rough or waterline operation", op.name()))),
+        OperationKind::RotaryFinish => crate::rotary::cutter(op, tool),
+        _ => Err(CliError::run(format!("operation {}: gouge check needs a surface, rough, waterline or rotary finish operation", op.name()))),
     }
 }
 
@@ -412,7 +587,7 @@ fn spaced_points(length: f64, step: f64) -> Result<usize, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use campanion_ir::{CompensationMode, Feeds, Pose, Tool, Vec3};
+    use campanion_ir::{CompensationMode, Feeds, Pose, RotaryAxisKind, RotaryDirection, RotarySetup, Tool, Vec3, machine_to_part};
     use campanion_mesh::{Mesh, Triangle};
 
     fn plane() -> Mesh {
@@ -562,5 +737,82 @@ mod tests {
             Ok(job) => job,
             Err(err) => panic!("rough job {name}: {err}"),
         }
+    }
+
+    fn square_bar() -> Mesh {
+        let (x0, x1) = (-12.0, 12.0);
+        let (y0, y1, z0, z1) = (-8.0, 8.0, -8.0, 8.0);
+        let p = |x, y, z| MeshVec::new(x, y, z);
+        let (a, b, c, d) = (p(x0, y0, z0), p(x1, y0, z0), p(x1, y1, z0), p(x0, y1, z0));
+        let (e, f, g, h) = (p(x0, y0, z1), p(x1, y0, z1), p(x1, y1, z1), p(x0, y1, z1));
+        let mut triangles = Vec::new();
+        let mut face = |a, b, c, d| {
+            triangles.push(Triangle { a, b, c });
+            triangles.push(Triangle { a, b: c, c: d });
+        };
+        face(e, f, g, h);
+        face(a, d, c, b);
+        face(d, h, g, c);
+        face(a, b, f, e);
+        face(b, c, g, f);
+        face(a, e, h, d);
+        Mesh::new(triangles).expect("bar")
+    }
+
+    fn at_machine(setup: &RotarySetup, x: f64, z: f64, angle: f64) -> Pose {
+        let machine = Pose::new(Vec3::new(x, 0.0, z).expect("tip"), Vec3::Z).expect("pose");
+        machine_to_part(setup, machine, angle).with_rotary(angle).expect("angle")
+    }
+
+    fn cut_block(to: Pose) -> ClBlock {
+        ClBlock::Motion(ClMotion::Linear { to, feed: 100.0, role: MoveRole::Cut })
+    }
+
+    /// A square bar's corner swings above the flat faces. A rotate at the face height gouges only
+    /// between the endpoint angles. A cut below the face at one angle is reported on that operation.
+    #[test]
+    fn rotary_finish_checks_each_angle_and_samples_angle_changes() {
+        let mesh = square_bar();
+        let setup = RotarySetup::new(RotaryAxisKind::A, Vec3::new(0.0, 0.0, 0.0).expect("center"), RotaryDirection::Positive, None).expect("setup");
+        let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
+        let spin = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: at_machine(&setup, -1.0, 10.0, 0.0), feed: None }),
+            cut_block(at_machine(&setup, 1.0, 10.0, 0.0)),
+            cut_block(at_machine(&setup, 1.0, 10.0, 90.0)),
+            cut_block(at_machine(&setup, -1.0, 10.0, 90.0)),
+        ];
+        let low = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: at_machine(&setup, -1.0, 4.0, 0.0), feed: None }),
+            cut_block(at_machine(&setup, 1.0, 4.0, 0.0)),
+        ];
+        let path = |name: &str, blocks: Vec<ClBlock>| {
+            ClPath::try_new(Some(name.into()), Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks).expect(name)
+        };
+        let tool = Tool::try_new(1, None, Some(6.0), None).expect("tool");
+        let program = Program::try_new(None, vec![tool], None, vec![path("spin", spin), path("low", low)], Vec::new(), Vec::new(), Some(setup))
+            .expect("program");
+        let text = concat!(
+            r#"{"format":"campanion-job/1","source":{"path":"bar.stl","hash":"cbf29ce484222325"},"units":"mm","#,
+            r#""rotary":{"axis":"a","center":[0,0,0],"direction":"positive"},"#,
+            r#""tools":[{"id":1,"diameter":6,"shape":"flat"}],"operations":["#,
+            r#"{"name":"spin","type":"rotary_finish","tool_id":1,"angle_step_deg":90,"feeds":{"cut":100}},"#,
+            r#"{"name":"low","type":"rotary_finish","tool_id":1,"angle_step_deg":90,"feeds":{"cut":100}}"#,
+            r#"],"tolerance":{"chord":0.05}}"#
+        );
+        let dir = std::env::temp_dir().join("campanion-gouge-rotary");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("job.json");
+        std::fs::write(&file, text).expect("job");
+        let job = crate::jobfile::load(&file).expect("load");
+        let notes = ok(check_job(&job, &mesh, &program));
+        let spin_notes: Vec<_> = notes.iter().filter(|note| note.operation == "spin").collect();
+        assert!(!spin_notes.is_empty(), "rotate across the corner was not a gouge: {notes:?}");
+        assert!(spin_notes.iter().any(|note| note.depth > 0.5), "{spin_notes:?}");
+        assert!(spin_notes.iter().all(|note| (note.x - 1.0).abs() < 1e-4 && note.y.abs() < 1e-6 && (note.z - 10.0).abs() < 1e-6), "{spin_notes:?}");
+        let low_notes: Vec<_> = notes.iter().filter(|note| note.operation == "low").collect();
+        assert!(!low_notes.is_empty(), "lowered constant-angle cut was not a gouge");
+        assert!(low_notes.iter().all(|note| (note.depth - 4.0).abs() < 1e-4 && (note.z - 4.0).abs() < 1e-6), "{low_notes:?}");
+        assert!(low_notes.iter().all(|note| (-1.0..=1.0).contains(&note.x) && note.y.abs() < 1e-6), "{low_notes:?}");
+        assert!(notes.iter().all(|note| note.operation == "spin" || note.operation == "low"), "{notes:?}");
     }
 }

@@ -49,9 +49,11 @@
 //! to the retract height. The process turns on once and off after the last retract.
 //! After the document is built, each cutting move is checked against the mesh with that
 //! operation's cutter. The sample step is `min(0.25, chord * 10)` millimetres and the allowance
-//! is the job chord tolerance. A gouge is a verify error. Roughing, surfacing and waterline are
-//! compared with the drop-cutter surface of the part. `stock_to_leave` is not added to that
-//! surface: the cuts sit above the surface plus the stock.
+//! is the job chord tolerance. A gouge is a verify error. Roughing, surfacing, waterline and
+//! rotary finish are compared with the drop-cutter surface of the part. `stock_to_leave` is not
+//! added to that surface: the cuts sit above the surface plus the stock. A rotary finish checks
+//! each constant angle on the mesh turned by that angle, and samples angle-changing links in
+//! between.
 //!
 //! A job with a rotary setup plans each indexed operation in the indexed view at `index_deg`
 //! (0° when that field is omitted). Two-dimensional geometry is used as drawn. Mesh operations
@@ -88,6 +90,7 @@ use crate::index::{self, IndexedOp};
 use crate::job::read_text;
 use crate::jobfile::{self, Finish, JobFile, JobTool, Operation, OperationKind};
 use crate::report;
+use crate::rotary;
 use crate::rough;
 use crate::step;
 use crate::surface;
@@ -197,12 +200,21 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
         };
         let import = import_for(op, tool)?;
+        if matches!(op.kind(), OperationKind::RotaryFinish) {
+            let Some(setup) = job.rotary() else {
+                return Err(op_err(op, "rotary finish needs a rotary setup"));
+            };
+            let path = rotary::cut(job, op, tool, mesh, &setup)?;
+            groups.push(index::part_frame_op(op.tool_id(), op.feeds(), vec![path])?);
+            continue;
+        }
         let view = planning_mesh(job, mesh, op)?;
         let path = match op.kind() {
             OperationKind::Surface => surface::finish(job, op, tool, view.as_ref())?,
             OperationKind::Rough => rough::rough(job, op, tool, view.as_ref())?,
             OperationKind::Waterline => waterline::finish(job, op, tool, view.as_ref())?,
-            _ => return Err(op_err(op, "an STL source only allows surface, rough or waterline operations")),
+            OperationKind::RotaryFinish => return Err(op_err(op, "rotary finish needs a rotary setup")),
+            _ => return Err(op_err(op, "an STL source only allows surface, rough, waterline or rotary_finish operations")),
         };
         let mut paths = Vec::new();
         push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
@@ -332,6 +344,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Surface => return Err(op_err(op, "surface finishing needs an STL source")),
             OperationKind::Rough => return Err(op_err(op, "roughing needs an STL source")),
             OperationKind::Waterline => return Err(op_err(op, "waterline finishing needs an STL source")),
+            OperationKind::RotaryFinish => return Err(op_err(op, "rotary finish needs an STL source")),
             OperationKind::Wrap => {
                 let Some(setup) = job.rotary() else {
                     return Err(op_err(op, "wrap needs a rotary setup"));

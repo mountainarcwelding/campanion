@@ -22,8 +22,8 @@
 //! not a cryptographic hash. See `docs/job-file.md`.
 //!
 //! An STL source, a path ending in `.stl` in any case, is a triangle mesh. Its hash is those
-//! raw bytes. A mesh job may only contain `surface`, `rough` and `waterline` operations, and
-//! all three are rejected on every other source. A surface rasters the mesh. It requires exactly one of
+//! raw bytes. A mesh job may only contain `surface`, `rough`, `waterline` and `rotary_finish`
+//! operations, and those kinds are rejected on every other source. A surface rasters the mesh. It requires exactly one of
 //! `stepover` and `scallop_height`. `scallop_height` is a flat-floor cusp height; the run turns
 //! it into an XY stepover and caps that stepover at the tool diameter. On a slope the real
 //! cusp is larger for the same XY stepover, because raster spacing is measured in XY.
@@ -49,8 +49,8 @@
 //! cutter-location Z. Entry is a plunge.
 //!
 //! A tool may set `shape`: `"flat"` (the default), `"ball"`, or `{"bull": corner_radius}`.
-//! A shape other than flat is only used by a surface, rough or waterline operation. Two-dimensional
-//! operations keep the flat diameter offset.
+//! A shape other than flat is only used by a surface, rough, waterline or rotary finish operation.
+//! Two-dimensional operations keep the flat diameter offset.
 //!
 //! A face clears the bounding box of its layers. `angle_deg` is 0 or 90 and is stored as
 //! radians. `margin` grows that box on every side. `stepover` defaults to three quarters of
@@ -73,6 +73,16 @@
 //! optional `v_offset`. Both offsets default to 0 and may be negative. `index_deg` is
 //! rejected: the angle follows `v`. A wrap without `rotary` is an error that names the
 //! operation. See `docs/job-file.md`.
+//!
+//! `rotary_finish` is a continuous 4-axis finish around the job rotary axis. It needs that
+//! setup and an STL source. `u_min` and `u_max` limit the pass along the axis and default to
+//! the mesh extent. `angle_step_deg` is the rotary step in degrees, not scaled by `units`.
+//! `stepover` is the same step measured in millimetres at the largest radius; when both are
+//! set, `stepover` is used. When neither is set, the stepover is the flat-floor scallop for
+//! the job chord tolerance, capped at the tool diameter, which needs a ball or bull nose.
+//! `sample_step` is the spacing along the axis. Omitted, the run uses `min(0.25, chord * 10)`.
+//! `direction` is `zigzag` (the default) or `one_way`. `index_deg` is rejected. A kerf tool
+//! is rejected. See `docs/job-file.md`.
 //!
 //! An optional top-level `rotary` object is a 4th-axis table: `axis` `"a"` or `"b"`, `center`
 //! `[x, y, z]` (scaled by `units`), `direction` `"positive"` or `"negative"`, and optional
@@ -370,6 +380,30 @@ pub enum OperationKind {
     Waterline,
     /// Wrap the layer contours onto a cylinder about the job rotary axis. No side.
     Wrap,
+    /// Continuous rotary finish around the job rotary axis. No layers and no side.
+    RotaryFinish,
+}
+
+/// How consecutive rotary-finish passes are joined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RotaryTravel {
+    /// Alternate direction. The angle changes at the shared end of the two passes.
+    Zigzag,
+    /// Every pass runs from low `u` to high `u`. The angle changes on the safe retract.
+    OneWay,
+}
+
+/// Axis window and angular step for a [`OperationKind::RotaryFinish`].
+///
+/// Lengths are millimetres. `angle_step_deg` is degrees and is not scaled by the file units.
+/// `None` on either field means the run fills it in: the mesh extent for `u`, and the stepover
+/// or the scallop rule for the angle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RotaryFinishGeom {
+    u_min: Option<f64>,
+    u_max: Option<f64>,
+    angle_step_deg: Option<f64>,
+    travel: RotaryTravel,
 }
 
 /// Cylinder and flat-frame offsets for a [`OperationKind::Wrap`]. Lengths are millimetres.
@@ -477,6 +511,8 @@ pub struct Operation {
     index_deg: Option<f64>,
     /// Cylinder diameter and flat-frame offsets. `None` except on a wrap.
     wrap_geom: Option<WrapGeom>,
+    /// Axis window, angle step and travel. `None` except on a rotary finish.
+    rotary_geom: Option<RotaryFinishGeom>,
 }
 
 impl Operation {
@@ -644,6 +680,28 @@ impl Operation {
             Some(geom) => geom.v_offset,
             None => 0.0,
         }
+    }
+
+    /// Low end of a rotary finish along the axis, in millimetres. `None` except when the file sets `u_min`.
+    pub fn u_min(&self) -> Option<f64> {
+        self.rotary_geom.and_then(|geom| geom.u_min)
+    }
+
+    /// High end of a rotary finish along the axis, in millimetres. `None` except when the file sets `u_max`.
+    pub fn u_max(&self) -> Option<f64> {
+        self.rotary_geom.and_then(|geom| geom.u_max)
+    }
+
+    /// Rotary step in degrees. `None` except when a rotary finish sets `angle_step_deg`.
+    ///
+    /// Not scaled by `units`. When this and [`Self::stepover`] are both set, the run uses the stepover.
+    pub fn angle_step_deg(&self) -> Option<f64> {
+        self.rotary_geom.and_then(|geom| geom.angle_step_deg)
+    }
+
+    /// How a rotary finish joins passes. `None` on every other kind.
+    pub fn rotary_travel(&self) -> Option<RotaryTravel> {
+        self.rotary_geom.map(|geom| geom.travel)
     }
 }
 
@@ -827,18 +885,23 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
     {
         return Err(JobFileError::invalid(format!("operation `{}`: wrap needs a rotary setup", operation.name())));
     }
+    if rotary.is_none()
+        && let Some(operation) = operations.iter().find(|operation| matches!(operation.kind(), OperationKind::RotaryFinish))
+    {
+        return Err(JobFileError::invalid(format!("operation `{}`: rotary finish needs a rotary setup", operation.name())));
+    }
     check_mesh_source(&source, &operations, &tools)?;
     Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary })
 }
 
-/// An STL part only accepts `surface`, `rough` and `waterline`. Each only accepts an STL part.
+/// An STL part only accepts `surface`, `rough`, `waterline` and `rotary_finish`. Each only accepts an STL part.
 /// A non-flat tool shape is rejected when a 2D operation uses that tool.
 fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool]) -> Result<(), JobFileError> {
     let stl = source.is_stl();
     for operation in operations {
         let mesh_op = is_mesh_op(operation.kind());
         if stl && !mesh_op {
-            return Err(JobFileError::invalid("an STL source only allows surface, rough or waterline operations"));
+            return Err(JobFileError::invalid("an STL source only allows surface, rough, waterline or rotary_finish operations"));
         }
         if matches!(operation.kind(), OperationKind::Surface) && !stl {
             return Err(JobFileError::invalid("surface is only valid on an STL source"));
@@ -849,6 +912,9 @@ fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool
         if matches!(operation.kind(), OperationKind::Waterline) && !stl {
             return Err(JobFileError::invalid("waterline is only valid on an STL source"));
         }
+        if matches!(operation.kind(), OperationKind::RotaryFinish) && !stl {
+            return Err(JobFileError::invalid("rotary finish is only valid on an STL source"));
+        }
     }
     for tool in tools {
         if tool.shape().is_flat() {
@@ -856,14 +922,17 @@ fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool
         }
         let used_on_flat_work = operations.iter().any(|operation| operation.tool_id() == tool.id() && !is_mesh_op(operation.kind()));
         if used_on_flat_work {
-            return Err(JobFileError::invalid(format!("tool {} shape is only valid on a surface, rough or waterline operation", tool.id())));
+            return Err(JobFileError::invalid(format!(
+                "tool {} shape is only valid on a surface, rough or waterline operation, or a rotary finish",
+                tool.id()
+            )));
         }
     }
     Ok(())
 }
 
 fn is_mesh_op(kind: OperationKind) -> bool {
-    matches!(kind, OperationKind::Surface | OperationKind::Rough | OperationKind::Waterline)
+    matches!(kind, OperationKind::Surface | OperationKind::Rough | OperationKind::Waterline | OperationKind::RotaryFinish)
 }
 
 fn check_format(tag: &str) -> Result<(), JobFileError> {
@@ -1120,6 +1189,10 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "diameter",
             "u_offset",
             "v_offset",
+            "u_min",
+            "u_max",
+            "angle_step_deg",
+            "direction",
         ],
         "operation",
     )
@@ -1139,6 +1212,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     }
     if matches!(kind, OperationKind::Wrap) {
         return finish_wrap(name, map, scale, tools);
+    }
+    if matches!(kind, OperationKind::RotaryFinish) {
+        return finish_rotary(name, map, scale, tools);
     }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
@@ -1166,6 +1242,11 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     }
     if optional(map, "v_offset").is_some() {
         return Err(JobFileError::invalid("v_offset is only valid on a wrap"));
+    }
+    for key in ["u_min", "u_max", "angle_step_deg", "direction"] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is only valid on a rotary finish")));
+        }
     }
     reject_chamfer_cut_keys(map, kind)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
@@ -1208,6 +1289,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         params,
         index_deg,
         wrap_geom: None,
+        rotary_geom: None,
     })
 }
 
@@ -1232,6 +1314,10 @@ fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileEr
         "diameter",
         "u_offset",
         "v_offset",
+        "u_min",
+        "u_max",
+        "angle_step_deg",
+        "direction",
     ] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is not valid on a surface")));
@@ -1315,6 +1401,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         params,
         index_deg: None,
         wrap_geom: None,
+        rotary_geom: None,
     })
 }
 
@@ -1338,6 +1425,10 @@ fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErro
         "diameter",
         "u_offset",
         "v_offset",
+        "u_min",
+        "u_max",
+        "angle_step_deg",
+        "direction",
     ] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is not valid on a rough")));
@@ -1429,6 +1520,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         params,
         index_deg: None,
         wrap_geom: None,
+        rotary_geom: None,
     })
 }
 
@@ -1453,6 +1545,10 @@ fn reject_waterline_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFile
         "diameter",
         "u_offset",
         "v_offset",
+        "u_min",
+        "u_max",
+        "angle_step_deg",
+        "direction",
     ] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is not valid on a waterline")));
@@ -1542,6 +1638,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         params,
         index_deg: None,
         wrap_geom: None,
+        rotary_geom: None,
     })
 }
 
@@ -1568,6 +1665,10 @@ fn reject_wrap_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError
         "pierce_height",
         "timing",
         "index_deg",
+        "u_min",
+        "u_max",
+        "angle_step_deg",
+        "direction",
     ] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is not valid on a wrap")));
@@ -1626,6 +1727,122 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         params,
         index_deg: None,
         wrap_geom: Some(WrapGeom { diameter, u_offset, v_offset }),
+        rotary_geom: None,
+    })
+}
+
+/// Keys a rotary finish does not accept. `side` is already rejected by [`parse_kind`].
+fn reject_rotary_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError> {
+    for key in [
+        "layers",
+        "depth",
+        "step_down",
+        "scallop_height",
+        "angle_deg",
+        "margin",
+        "floor_z",
+        "top_z",
+        "grid",
+        "min_slope_deg",
+        "width",
+        "v_angle_deg",
+        "tip_diameter",
+        "tip_clearance",
+        "stock_to_leave",
+        "finish",
+        "entry",
+        "cut_height",
+        "pierce_height",
+        "timing",
+        "index_deg",
+        "diameter",
+        "u_offset",
+        "v_offset",
+    ] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is not valid on a rotary finish")));
+        }
+    }
+    Ok(())
+}
+
+/// Continuous rotary finish. `u_step` stays `None` when the file omits `sample_step`.
+fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
+    reject_rotary_foreign_keys(map)?;
+    let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
+    let tool = tools.iter().find(|tool| tool.id() == tool_id).ok_or_else(|| JobFileError::invalid(format!("unknown tool {tool_id}")))?;
+    if tool.diameter().is_none() {
+        return Err(JobFileError::invalid("rotary finish is not valid with a kerf tool"));
+    }
+    let stepover = match optional(map, "stepover") {
+        Some(value) => Some(positive_length(value, scale, "stepover")?),
+        None => None,
+    };
+    let sample_step = match optional(map, "sample_step") {
+        Some(value) => Some(positive_length(value, scale, "sample_step")?),
+        None => None,
+    };
+    let u_min = match optional(map, "u_min") {
+        Some(value) => Some(finite_height(scale_f64(value, scale, "u_min")?, "u_min")?),
+        None => None,
+    };
+    let u_max = match optional(map, "u_max") {
+        Some(value) => Some(finite_height(scale_f64(value, scale, "u_max")?, "u_max")?),
+        None => None,
+    };
+    if let (Some(low), Some(high)) = (u_min, u_max)
+        && low > high
+    {
+        return Err(JobFileError::invalid("u_min is greater than u_max"));
+    }
+    let angle_step_deg = match optional(map, "angle_step_deg") {
+        Some(value) => {
+            let degrees = as_f64(value, "angle_step_deg").map_err(from_cli)?;
+            if !(degrees.is_finite() && degrees > 0.0 && degrees <= 360.0) {
+                return Err(JobFileError::invalid("angle_step_deg must be greater than 0 and at most 360"));
+            }
+            Some(degrees)
+        }
+        None => None,
+    };
+    let travel = match optional(map, "direction") {
+        None => RotaryTravel::Zigzag,
+        Some(value) => match as_str(value, "direction").map_err(from_cli)? {
+            "zigzag" => RotaryTravel::Zigzag,
+            "one_way" => RotaryTravel::OneWay,
+            _ => return Err(JobFileError::invalid("direction must be \"zigzag\" or \"one_way\"")),
+        },
+    };
+    let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
+    let params = parse_params(None).map_err(from_cli)?;
+    Ok(Operation {
+        name,
+        kind: OperationKind::RotaryFinish,
+        layers: Vec::new(),
+        tool_id,
+        depth: 0.0,
+        step_down: 0.0,
+        stepover,
+        scallop_height: None,
+        sample_step,
+        floor_z: None,
+        top_z: None,
+        grid: None,
+        min_slope_deg: 0.0,
+        face_angle: 0.0,
+        margin: 0.0,
+        width: 0.0,
+        v_angle: 0.0,
+        tip_diameter: 0.0,
+        tip_clearance: 0.0,
+        stock_to_leave: StockToLeave::default(),
+        finish: None,
+        entry: DepthEntry::Plunge,
+        feeds,
+        params,
+        index_deg: None,
+        wrap_geom: None,
+        rotary_geom: Some(RotaryFinishGeom { u_min, u_max, angle_step_deg, travel }),
     })
 }
 
@@ -2034,6 +2251,10 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
         "wrap" => {
             reject_side(side)?;
             Ok(OperationKind::Wrap)
+        }
+        "rotary_finish" => {
+            reject_side(side)?;
+            Ok(OperationKind::RotaryFinish)
         }
         "chamfer" => {
             let Some(side) = side else {
@@ -3537,7 +3758,7 @@ mod tests {
             (envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{surface}]")), "surface is only valid on an STL source"),
             (
                 envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, &format!("[{profile}]")),
-                "an STL source only allows surface, rough or waterline operations",
+                "an STL source only allows surface, rough, waterline or rotary_finish operations",
             ),
             (
                 envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{profile}]")),
@@ -4255,7 +4476,7 @@ mod tests {
                 format!(
                     r#"{{"format":"campanion-job/1","source":{{"path":"part.stl","hash":"{EMPTY_HASH}"}},"units":"mm","rotary":{{"axis":"a","center":[0,0,0],"direction":"positive"}},"tools":[{{"id":1,"diameter":6}}],"operations":[{{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":40,"feeds":{{"cut":1}}}}]}}"#
                 ),
-                "an STL source only allows surface, rough or waterline",
+                "an STL source only allows surface, rough, waterline or rotary_finish",
             ),
         ];
         for (index, (text, needle)) in cases.iter().enumerate() {

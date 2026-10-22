@@ -149,7 +149,7 @@ Done when: every example job posts to each controller, read-back of each program
 IR within tolerance, and golden files cover each post.
 4th axis and beyond start only after this milestone.
 
-### M9: 4th axis: indexing, wrapping and rotary finishing (in progress)
+### M9: 4th axis: indexing, wrapping and rotary finishing (done)
 One rotary axis (A about X, or B about Y). Simultaneous 5-axis, tool tilt and a machine
 kinematics model are out of scope.
 1. **Machine and setup data:** an optional rotary axis in the setup (axis, centre, direction,
@@ -169,7 +169,7 @@ kinematics model are out of scope.
 6. **Viewer:** shows the rotary axis and index angles.
 Done when: property tests show indexing round-trips and unwrapping a wrap gives back the flat
 path, rotary finishing passes the gouge check, and every 4-axis post has golden files.
-Releases: v0.5.0 after indexing, wrapping and posts; continuous rotary and the viewer follow.
+Releases: v0.5.0, including continuous rotary finishing and the viewer.
 
 ### Later (each its own milestone when we get there)
 - **2.5D extras:** thread milling, adaptive clearing.
@@ -222,3 +222,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   and beyond.
 - 2026-10-22: M8 done (v0.4.0). M9 is the 4th axis: indexing, wrapping, rotary posts, then
   continuous rotary finishing and viewer support.
+- 2026-10-22: M9 done. Indexing, wrapping, rotary posts, continuous rotary finishing and the
+  viewer are in. `examples/rotary.job.json` is the rotary finish.

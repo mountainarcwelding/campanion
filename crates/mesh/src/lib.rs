@@ -1,14 +1,16 @@
-//! Triangle meshes for 3-axis work.
+//! Triangle meshes for 3-axis and rotary (4-axis) work.
 //!
 //! Units are millimetres. The frame is right-handed with Z up. STL is read and written from
 //! bytes ([`parse_stl`], [`write_stl_binary`]); this crate does not touch the filesystem, so it
 //! builds for `wasm32`. [`check_gouges`] samples a tool-tip path against a [`DropCutter`].
+//! [`rotary_lines`] turns the mesh about an A or B axis and samples tip radii above that axis.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod dropcutter;
 mod gouge;
 mod raster;
+mod rotary;
 mod scallop;
 mod stl;
 mod waterline;
@@ -17,6 +19,7 @@ mod zlevel;
 pub use dropcutter::{Cutter, DropCutter, drop_cutter_triangle};
 pub use gouge::{Gouge, check_gouges};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};
+pub use rotary::{RotaryLine, RotaryLineAxis, rotary_lines};
 pub use scallop::scallop_stepover;
 pub use stl::{parse_stl, write_stl_binary};
 pub use waterline::{WaterlineLevel, WaterlineParams, waterline};
