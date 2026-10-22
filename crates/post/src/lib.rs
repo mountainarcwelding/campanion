@@ -6,6 +6,9 @@
 //!
 //! [`crate::read_back`] reads the dialect back into moves. [`crate::compare`] checks those moves
 //! against the program that was posted.
+//!
+//! A post may declare a rotary axis. Poses that carry an angle are written in the machine frame.
+//! The feed rule for a move that changes the angle is in the crate README.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -15,6 +18,7 @@ mod error;
 mod fmt;
 mod geom;
 mod read;
+mod rotary;
 mod write;
 
 pub use compare::compare;

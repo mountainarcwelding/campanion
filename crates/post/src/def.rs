@@ -11,9 +11,15 @@
 //! writer adds a comment. `process_feeds.rapid_z` drops rapids that only change Z. `z_mode`
 //! `drop` omits Z words. `thc.on` is written on the first feed move after process on and a dwell,
 //! and `thc.off` is written before process off.
+//!
+//! `rotary` is optional. Without it, a program that carries a rotary angle is rejected. `axes`
+//! lists `a`, `b`, or both. The A/B word uses [`crate::fmt::format_fixed`] with `decimals`
+//! (degrees). `feed_mode` is `inverse_time`, `degrees_per_minute`, or `surface`. Inverse time
+//! requires `inverse_time_on` and `inverse_time_off` (LinuxCNC uses `G93` and `G94`).
 
 use std::collections::BTreeMap;
 
+use campanion_ir::RotaryAxisKind;
 use serde::Deserialize;
 
 use crate::error::{PostError, Result, field};
@@ -80,6 +86,9 @@ pub struct PostDef {
     pub(crate) max_line_length: Option<u32>,
     #[serde(default = "default_axis_letters")]
     pub(crate) axis_letters: String,
+    /// Fourth-axis words. Absent on a post that rejects rotary programs.
+    #[serde(default)]
+    pub(crate) rotary: Option<RotaryOutput>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -163,6 +172,68 @@ fn default_axis_letters() -> String {
     "XYZ".to_string()
 }
 
+/// How a feed that changes the rotary angle is written.
+///
+/// `inverse_time` switches to [`RotaryOutput::inverse_time_on`] and sets `F` to `1 / minutes`.
+/// `degrees_per_minute` and `surface` write the IR feed number unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RotaryFeedMode {
+    /// `F` is `1 / T` with `T` in minutes. The move length is the part-frame tip distance.
+    InverseTime,
+    /// `F` is the IR feed. Controllers that mix millimetres and degrees read that number as-is.
+    DegreesPerMinute,
+    /// `F` is the IR surface feed, millimetres per minute.
+    Surface,
+}
+
+/// A/B word and the feed mode used when the angle changes.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RotaryOutput {
+    /// `"a"`, `"b"`, or both, in the order the post lists them.
+    pub(crate) axes: Vec<String>,
+    /// Digits after the decimal point on the A/B word. The angle is degrees.
+    pub(crate) decimals: u8,
+    /// `inverse_time`, `degrees_per_minute`, or `surface`.
+    pub(crate) feed_mode: String,
+    /// Modal code that selects inverse time, such as `G93`. Required for `inverse_time`.
+    #[serde(default)]
+    pub(crate) inverse_time_on: Option<String>,
+    /// Modal code that returns to units per minute, such as `G94`. Required for `inverse_time`.
+    #[serde(default)]
+    pub(crate) inverse_time_off: Option<String>,
+}
+
+impl RotaryOutput {
+    pub(crate) fn mode(&self) -> RotaryFeedMode {
+        match self.feed_mode.as_str() {
+            "degrees_per_minute" => RotaryFeedMode::DegreesPerMinute,
+            "surface" => RotaryFeedMode::Surface,
+            _ => RotaryFeedMode::InverseTime,
+        }
+    }
+
+    pub(crate) fn supports(&self, kind: RotaryAxisKind) -> bool {
+        let name = match kind {
+            RotaryAxisKind::A => "a",
+            RotaryAxisKind::B => "b",
+        };
+        self.axes.iter().any(|axis| axis == name)
+    }
+
+    pub(crate) fn on_code(&self) -> Option<u16> {
+        self.inverse_time_on.as_deref().and_then(g_code_number)
+    }
+
+    pub(crate) fn off_code(&self) -> Option<u16> {
+        self.inverse_time_off.as_deref().and_then(g_code_number)
+    }
+}
+
+pub(crate) fn g_code_number(text: &str) -> Option<u16> {
+    text.strip_prefix('G')?.parse().ok()
+}
+
 fn default_z_mode() -> String {
     "keep".to_string()
 }
@@ -210,7 +281,27 @@ impl PostDef {
         }
         self.axis_letters = check_axes(&self.axis_letters)?;
         check_dwell_word(&self.dwell.word, &self.axis_letters, &self.line_numbers.prefix)?;
+        check_rotary(&mut self)?;
         Ok(self)
+    }
+
+    /// Rotary axes this post writes, in the order the JSON lists them.
+    ///
+    /// Empty when the post has no `rotary` block. A program whose setup axis is missing from
+    /// this list is rejected by name.
+    pub fn rotary_axes(&self) -> Vec<RotaryAxisKind> {
+        let Some(rotary) = &self.rotary else {
+            return Vec::new();
+        };
+        rotary
+            .axes
+            .iter()
+            .filter_map(|axis| match axis.as_str() {
+                "a" => Some(RotaryAxisKind::A),
+                "b" => Some(RotaryAxisKind::B),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Short id, such as `linuxcnc`.
@@ -335,6 +426,69 @@ fn check_axes(text: &str) -> Result<String> {
         return Err(field("axis_letters", "letters collide with G-code words"));
     }
     Ok(upper)
+}
+
+fn check_rotary(post: &mut PostDef) -> Result<()> {
+    let Some(rotary) = post.rotary.as_mut() else {
+        return Ok(());
+    };
+    if rotary.axes.is_empty() || rotary.axes.len() > 2 {
+        return Err(field("rotary.axes", "must list a, b, or both"));
+    }
+    let mut seen_a = false;
+    let mut seen_b = false;
+    for axis in &mut rotary.axes {
+        *axis = axis.to_ascii_lowercase();
+        match axis.as_str() {
+            "a" if !seen_a => seen_a = true,
+            "b" if !seen_b => seen_b = true,
+            "a" | "b" => return Err(field("rotary.axes", "lists the same axis twice")),
+            _ => return Err(field("rotary.axes", "must be a and/or b")),
+        }
+    }
+    if rotary.decimals > 8 {
+        return Err(field("rotary.decimals", "must be 0..=8"));
+    }
+    match rotary.feed_mode.as_str() {
+        "inverse_time" | "degrees_per_minute" | "surface" => {}
+        _ => return Err(field("rotary.feed_mode", "must be inverse_time, degrees_per_minute or surface")),
+    }
+    if rotary.feed_mode == "inverse_time" {
+        let on = rotary.inverse_time_on.as_deref().ok_or_else(|| field("rotary.inverse_time_on", "required for inverse_time"))?;
+        let off = rotary.inverse_time_off.as_deref().ok_or_else(|| field("rotary.inverse_time_off", "required for inverse_time"))?;
+        let on = canonical_g(on, "rotary.inverse_time_on")?;
+        let off = canonical_g(off, "rotary.inverse_time_off")?;
+        if on == off {
+            return Err(field("rotary.inverse_time_off", "must differ from inverse_time_on"));
+        }
+        rotary.inverse_time_on = Some(on);
+        rotary.inverse_time_off = Some(off);
+    } else if rotary.inverse_time_on.is_some() || rotary.inverse_time_off.is_some() {
+        return Err(field("rotary.inverse_time_on", "only valid when feed_mode is inverse_time"));
+    }
+    for axis in &rotary.axes {
+        let letter = if axis == "a" { 'A' } else { 'B' };
+        if post.axis_letters.contains(letter) {
+            return Err(field("rotary.axes", format!("letter {letter} collides with axis_letters")));
+        }
+        if post.dwell.word.contains(letter) || post.line_numbers.prefix.contains(letter) {
+            return Err(field("rotary.axes", format!("letter {letter} collides with a G-code word")));
+        }
+    }
+    Ok(())
+}
+
+/// `G93` and `g94` both become `G93` / `G94`. The number is an integer from 0 to 999.
+fn canonical_g(text: &str, field_name: &str) -> Result<String> {
+    let upper = text.trim().to_ascii_uppercase();
+    let Some(rest) = upper.strip_prefix('G') else {
+        return Err(field(field_name, "must be a G code such as G93"));
+    };
+    if rest.is_empty() || rest.len() > 3 || !rest.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(field(field_name, "must be a G code such as G93"));
+    }
+    let number: u16 = rest.parse().map_err(|_| field(field_name, "must be a G code such as G93"))?;
+    Ok(format!("G{number}"))
 }
 
 fn check_dwell_word(word: &str, axes: &str, prefix: &str) -> Result<()> {
