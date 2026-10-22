@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-geom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cavalier_contours",
  "proptest",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-import"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "campanion-geom",
  "kurbo",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-ir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "campanion-geom",
  "campanion-path",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-path"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "campanion-geom",
  "thiserror 2.0.21",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-view"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "campanion-ir",
  "eframe",

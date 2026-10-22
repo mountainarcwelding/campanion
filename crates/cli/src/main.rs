@@ -2,7 +2,8 @@
 //!
 //! `ir` and `ngc` turn a 2D profile job into IR JSON or test-sink RS274/NGC.
 //! `run` loads a `campanion-job/1` file, imports its DXF, and writes toolpaths.
-//! `verify` reports motion and process problems in an IR file. `schema` prints the JSON Schema.
+//! `verify` reports motion and process problems in an IR file. `view` opens the toolpath preview
+//! by launching the separate `campanion-view` program. `schema` prints the JSON Schema.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -20,8 +21,8 @@ mod step;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
-use std::path::Path;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
 
 use error::CliError;
 
@@ -31,6 +32,7 @@ Usage:
   campanion ngc [--job FILE]
   campanion run JOB -o OUT.ngc [--ir OUT.json]
   campanion verify FILE
+  campanion view IR.json
   campanion schema
   campanion --help
   campanion --version
@@ -42,6 +44,7 @@ run     Import the DXF or SVG (by extension) named by a campanion-job/1 file and
         A changed source hash is a warning on stderr. The job file is not rewritten.
         Verify errors are printed and the status is 1. Warnings stay on stderr.
 verify  Verify an IR JSON file and print a report. The status is 1 when the report has errors.
+view    Open the toolpath preview (the campanion-view program) for an IR JSON file.
 schema  Print the JSON Schema for campanion-ir/1.
 
 --job FILE
@@ -94,6 +97,7 @@ fn try_main() -> Result<ExitCode, CliError> {
         name if name == "ngc" => emit(rest, true),
         name if name == "run" => run::run(rest),
         name if name == "verify" => verify(rest),
+        name if name == "view" => view(rest),
         name if name == "schema" => schema(rest),
         _ => Err(CliError::usage("unknown command")),
     }
@@ -125,6 +129,52 @@ fn verify(args: &[OsString]) -> Result<ExitCode, CliError> {
     let failed = !report.issues().is_empty();
     write_stdout(&report::format_report(&report))?;
     if failed { Ok(ExitCode::from(1)) } else { Ok(ExitCode::SUCCESS) }
+}
+
+fn view(args: &[OsString]) -> Result<ExitCode, CliError> {
+    if args.first().is_none_or(|path| path.is_empty()) {
+        return Err(CliError::usage("view needs an IR JSON file"));
+    }
+    let program = find_viewer()?;
+    let status = Command::new(&program)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|err| CliError::run(format!("could not start {}: {err}", program.display())))?;
+    Ok(exit_code_of(status))
+}
+
+/// Same directory as this executable, then `PATH`. No GUI crates are linked into this binary.
+fn find_viewer() -> Result<PathBuf, CliError> {
+    let file_name = format!("campanion-view{}", env::consts::EXE_SUFFIX);
+    if let Ok(exe) = env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(&file_name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            let candidate = dir.join(&file_name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(CliError::run("campanion view needs the campanion-view program next to campanion or on PATH (cargo build -p campanion-view)"))
+}
+
+fn exit_code_of(status: ExitStatus) -> ExitCode {
+    match status.code() {
+        Some(0) => ExitCode::SUCCESS,
+        // Non-zero statuses stay the same code, clamped into the range `ExitCode::from` can carry.
+        Some(code) => ExitCode::from(code.clamp(1, 255) as u8),
+        None => ExitCode::from(1),
+    }
 }
 
 fn schema(args: &[OsString]) -> Result<ExitCode, CliError> {

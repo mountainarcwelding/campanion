@@ -28,6 +28,20 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - The toolpath is verified before anything is written; errors stop the run.
 - `examples/sample_delays.job.json` shows pierce height and pierce/post delays.
 
+## Preview
+
+`campanion-view` shows a toolpath IR file (the `--ir` output of `campanion run`):
+
+```sh
+cargo run -p campanion-cli -- run examples/curves.job.json -o out.ngc --ir out.json
+cargo run -p campanion-view -- out.json      # or: campanion view out.json
+```
+
+Cutting moves are solid, rapids dashed (toggle), pierces are dots, and numbers give the cut order.
+Wheel zooms at the cursor, drag pans, F or double-click fits. Space plays or pauses; the sliders set
+the playback speed and position. Labels need a system font (DejaVu, Liberation or Noto are found
+automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
+
 ## Roadmap and contributing
 
 See [docs/plan.md](docs/plan.md) for the roadmap and [CONTRIBUTING.md](CONTRIBUTING.md) for how to help.
