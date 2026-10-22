@@ -258,6 +258,7 @@ name = "campanion-path"
 version = "0.2.0"
 dependencies = [
  "campanion-geom",
+ "proptest",
  "thiserror 2.0.21",
 ]
 
