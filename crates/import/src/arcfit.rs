@@ -12,7 +12,14 @@ const EPS_T: f64 = 1e-10;
 const EPS_ZERO: f64 = 1e-12;
 const EPS_UNIT: f64 = 1e-15;
 const CONNECT_TOL: f64 = 1e-9;
-const SAMPLE_STEPS: usize = 64;
+/// Internal fits must clear this fraction of the caller tolerance. The gap covers
+/// deviation peaks that still sit between forward samples.
+const TARGET_SCALE: f64 = 0.9;
+const MIN_FORWARD_SAMPLES: usize = 64;
+/// Confirmation grid. Finer than the public proptest sampler so a fit that passes
+/// here cannot fail that sampler on the same piece.
+const FORWARD_CONFIRM_SAMPLES: usize = 2048;
+const MIN_REVERSE_SAMPLES: usize = 16;
 
 /// Options for Bézier-to-arc fitting.
 #[derive(Clone, Copy, Debug)]
@@ -274,17 +281,12 @@ fn split_at_params(c: Cubic, ts: &[f64]) -> Vec<Cubic> {
 }
 
 fn try_biarc(c: &Cubic, opts: &FitOptions) -> Result<Option<Vec<Segment>>> {
+    let target = acceptance_target(opts.tolerance);
     let Some(u0) = c.start_tangent().unit() else {
-        return Ok(match make_line(c.p0, c.p3)? {
-            Some(seg) => Some(vec![seg]),
-            None => Some(Vec::new()),
-        });
+        return chord_if_within(c, target);
     };
     let Some(u1) = c.end_tangent().unit() else {
-        return Ok(match make_line(c.p0, c.p3)? {
-            Some(seg) => Some(vec![seg]),
-            None => Some(Vec::new()),
-        });
+        return chord_if_within(c, target);
     };
     let join = biarc_join(c.p0, u0, c.p3, u1);
     if !join.is_finite() {
@@ -306,11 +308,21 @@ fn try_biarc(c: &Cubic, opts: &FitOptions) -> Result<Option<Vec<Segment>>> {
     if segs.is_empty() {
         return Ok(Some(Vec::new()));
     }
-    let dev = sample_dev(&segs, c, SAMPLE_STEPS)?;
-    if dev > opts.tolerance {
-        return Ok(None);
+    if fits_within(&segs, c, target)? { Ok(Some(segs)) } else { Ok(None) }
+}
+
+fn chord_if_within(c: &Cubic, target: f64) -> Result<Option<Vec<Segment>>> {
+    match make_line(c.p0, c.p3)? {
+        Some(seg) => {
+            let segs = vec![seg];
+            if fits_within(&segs, c, target)? { Ok(Some(segs)) } else { Ok(None) }
+        }
+        None => Ok(Some(Vec::new())),
     }
-    Ok(Some(segs))
+}
+
+fn acceptance_target(tolerance: f64) -> f64 {
+    tolerance * TARGET_SCALE
 }
 
 fn arc_radius_too_small(seg: &Segment, min_radius: f64) -> bool {
@@ -488,7 +500,312 @@ fn point_dev(segments: &[Segment], p: V2, origin: V2) -> Result<f64> {
     if min_d.is_finite() { Ok(min_d) } else { Ok(p.sub(origin).len()) }
 }
 
+/// Two-sided acceptance against `target` (already scaled to `0.9 * tolerance`).
+///
+/// Forward: at least 64 samples on the piece, extra samples around maximum curvature
+/// and around split points, then a dense uniform grid.
+/// Reverse: each produced segment is sampled and compared to a dense polyline of the
+/// Bézier, which rejects arcs that bulge away from the curve.
+fn fits_within(segments: &[Segment], curve: &Cubic, target: f64) -> Result<bool> {
+    if !(target.is_finite() && target > 0.0) {
+        return Ok(false);
+    }
+    if forward_exceeds(segments, curve, target)? {
+        return Ok(false);
+    }
+    Ok(!reverse_exceeds(segments, curve, target)?)
+}
+
+fn forward_exceeds(segments: &[Segment], curve: &Cubic, target: f64) -> Result<bool> {
+    if grid_exceeds(segments, curve, target, MIN_FORWARD_SAMPLES)? {
+        return Ok(true);
+    }
+    if hot_exceeds(segments, curve, target)? {
+        return Ok(true);
+    }
+    grid_exceeds(segments, curve, target, FORWARD_CONFIRM_SAMPLES)
+}
+
+fn grid_exceeds(segments: &[Segment], curve: &Cubic, target: f64, steps: usize) -> Result<bool> {
+    let steps = steps.max(MIN_FORWARD_SAMPLES);
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        if point_dev(segments, curve.eval(t), curve.p0)? > target {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn hot_exceeds(segments: &[Segment], curve: &Cubic, target: f64) -> Result<bool> {
+    for t in hot_params(curve, segments) {
+        if point_dev(segments, curve.eval(t), curve.p0)? > target {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn hot_params(curve: &Cubic, segments: &[Segment]) -> Vec<f64> {
+    let mut ts = Vec::new();
+    let k = max_curvature_param(curve);
+    push_cluster(&mut ts, k, 1.0 / 32.0, 48);
+    push_cluster(&mut ts, k, 1.0 / 512.0, 32);
+    for site in split_sites(curve, segments) {
+        push_cluster(&mut ts, site, 1.0 / 32.0, 24);
+        push_cluster(&mut ts, site, 1.0 / 512.0, 16);
+    }
+    dedup_sorted_ts(ts)
+}
+
+fn push_cluster(ts: &mut Vec<f64>, center: f64, half_width: f64, steps: usize) {
+    let steps = steps.max(1);
+    let center = center.clamp(0.0, 1.0);
+    ts.push(center);
+    let a = (center - half_width).clamp(0.0, 1.0);
+    let b = (center + half_width).clamp(0.0, 1.0);
+    if b - a < 1e-15 {
+        return;
+    }
+    for i in 0..=steps {
+        ts.push(a + (b - a) * (i as f64 / steps as f64));
+    }
+}
+
+fn split_sites(curve: &Cubic, segments: &[Segment]) -> Vec<f64> {
+    let mut sites = split_params(curve);
+    // Biarc joins are the split between produced arcs. A long polyline's vertices are
+    // not geometric split points; clustering on every vertex would drown the check.
+    if (2..=4).contains(&segments.len()) {
+        let mut iter = segments.iter().peekable();
+        while let Some(seg) = iter.next() {
+            if iter.peek().is_some() {
+                let p = seg.end();
+                sites.push(nearest_param(curve, V2::new(p.x(), p.y())));
+            }
+        }
+    }
+    sites
+}
+
+fn nearest_param(curve: &Cubic, p: V2) -> f64 {
+    let n = 48usize;
+    let mut best_t = 0.0;
+    let mut best = f64::INFINITY;
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        let d = curve.eval(t).sub(p).len2();
+        if d < best {
+            best = d;
+            best_t = t;
+        }
+    }
+    let mut half = 0.5 / n as f64;
+    let mut t = best_t;
+    for _ in 0..12 {
+        let mut local_t = t;
+        let mut local_d = curve.eval(t).sub(p).len2();
+        for i in 0..=12 {
+            let u = (t - half + 2.0 * half * (i as f64 / 12.0)).clamp(0.0, 1.0);
+            let d = curve.eval(u).sub(p).len2();
+            if d < local_d {
+                local_d = d;
+                local_t = u;
+            }
+        }
+        t = local_t;
+        half *= 0.5;
+    }
+    t
+}
+
+fn dedup_sorted_ts(mut ts: Vec<f64>) -> Vec<f64> {
+    ts.retain(|t| t.is_finite() && *t >= 0.0 && *t <= 1.0);
+    ts.sort_by(|a, b| a.total_cmp(b));
+    let mut out = Vec::with_capacity(ts.len());
+    for t in ts {
+        let fresh = match out.last() {
+            Some(prev) => t - *prev > 1e-12,
+            None => true,
+        };
+        if fresh {
+            out.push(t);
+        }
+    }
+    out
+}
+
+fn max_curvature_param(curve: &Cubic) -> f64 {
+    let n = 128usize;
+    let mut best_t = 0.5;
+    let mut best_k = -1.0;
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        let k = curvature_abs(curve, t);
+        if k > best_k {
+            best_k = k;
+            best_t = t;
+        }
+    }
+    refine_curvature(curve, best_t, 0.5 / n as f64)
+}
+
+fn refine_curvature(curve: &Cubic, mut t: f64, mut half: f64) -> f64 {
+    for _ in 0..16 {
+        let mut local_t = t;
+        let mut local_k = curvature_abs(curve, t);
+        for i in 0..=16 {
+            let u = (t - half + 2.0 * half * (i as f64 / 16.0)).clamp(0.0, 1.0);
+            let k = curvature_abs(curve, u);
+            if k > local_k {
+                local_k = k;
+                local_t = u;
+            }
+        }
+        t = local_t;
+        half *= 0.5;
+    }
+    t
+}
+
+fn curvature_abs(curve: &Cubic, t: f64) -> f64 {
+    let d1 = curve.deriv(t);
+    let d2 = curve.deriv2(t);
+    let speed2 = d1.len2();
+    if !speed2.is_finite() || speed2 <= 1e-24 {
+        return f64::MAX;
+    }
+    let num = d1.cross(d2).abs();
+    if !num.is_finite() {
+        return 0.0;
+    }
+    let k = num / speed2.powf(1.5);
+    if k.is_finite() { k } else { f64::MAX }
+}
+
+fn reverse_exceeds(segments: &[Segment], curve: &Cubic, target: f64) -> Result<bool> {
+    if segments.is_empty() {
+        return Ok(false);
+    }
+    let eps = (target * 0.01).max(1e-9);
+    let poly = bezier_polyline(curve, eps);
+    for seg in segments {
+        let n = reverse_sample_count(seg);
+        for p in sample_segment_points(seg, n) {
+            if dist_to_polyline(p, &poly) > target {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn reverse_sample_count(seg: &Segment) -> usize {
+    let sweep = match seg {
+        Segment::Arc(arc) => arc.sweep().abs(),
+        Segment::Line(_) => 0.0,
+    };
+    let from_sweep = (sweep / (std::f64::consts::PI / 32.0)).ceil();
+    let n = if from_sweep.is_finite() { from_sweep as usize } else { MIN_REVERSE_SAMPLES };
+    n.clamp(MIN_REVERSE_SAMPLES, 128)
+}
+
+fn sample_segment_points(seg: &Segment, n: usize) -> Vec<V2> {
+    let n = n.max(MIN_REVERSE_SAMPLES);
+    if let Segment::Arc(arc) = seg {
+        let center = arc.center();
+        let radius = arc.radius();
+        let a0 = arc.start_angle();
+        let sweep = arc.sweep();
+        if radius.is_finite() && radius > 0.0 && a0.is_finite() && sweep.is_finite() && center.x().is_finite() && center.y().is_finite() {
+            let mut pts = Vec::with_capacity(n + 1);
+            for i in 0..=n {
+                let a = a0 + sweep * (i as f64 / n as f64);
+                pts.push(V2::new(center.x() + radius * a.cos(), center.y() + radius * a.sin()));
+            }
+            return pts;
+        }
+    }
+    let s = seg.start();
+    let e = seg.end();
+    let mut pts = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        pts.push(V2::new(s.x() + (e.x() - s.x()) * t, s.y() + (e.y() - s.y()) * t));
+    }
+    pts
+}
+
+fn bezier_polyline(curve: &Cubic, eps: f64) -> Vec<V2> {
+    let mut out = Vec::new();
+    let mut stack = vec![(*curve, 0u32)];
+    while let Some((cur, depth)) = stack.pop() {
+        let flatness = dist_to_segment(cur.p1, cur.p0, cur.p3).max(dist_to_segment(cur.p2, cur.p0, cur.p3));
+        if flatness <= eps || depth >= 14 {
+            push_poly_point(&mut out, cur.p0);
+            push_poly_point(&mut out, cur.p3);
+        } else {
+            let (left, right) = cur.split(0.5);
+            stack.push((right, depth + 1));
+            stack.push((left, depth + 1));
+        }
+    }
+    if out.len() < 2 {
+        out.clear();
+        out.push(curve.p0);
+        out.push(curve.p3);
+    }
+    out
+}
+
+fn push_poly_point(out: &mut Vec<V2>, p: V2) {
+    if let Some(prev) = out.last()
+        && prev.almost_eq(p, EPS_ZERO)
+    {
+        return;
+    }
+    out.push(p);
+}
+
+fn dist_to_polyline(p: V2, poly: &[V2]) -> f64 {
+    let Some(first) = poly.first() else {
+        return f64::INFINITY;
+    };
+    if poly.len() == 1 {
+        return p.sub(*first).len();
+    }
+    let mut min_d = f64::INFINITY;
+    for w in poly.windows(2) {
+        let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
+            continue;
+        };
+        let dx = if p.x < a.x.min(b.x) {
+            a.x.min(b.x) - p.x
+        } else if p.x > a.x.max(b.x) {
+            p.x - a.x.max(b.x)
+        } else {
+            0.0
+        };
+        let dy = if p.y < a.y.min(b.y) {
+            a.y.min(b.y) - p.y
+        } else if p.y > a.y.max(b.y) {
+            p.y - a.y.max(b.y)
+        } else {
+            0.0
+        };
+        if dx * dx + dy * dy >= min_d * min_d {
+            continue;
+        }
+        let d = dist_to_segment(p, *a, *b);
+        if d < min_d {
+            min_d = d;
+        }
+    }
+    min_d
+}
+
 fn fallback_lines(c: &Cubic, opts: &FitOptions, out: &mut Vec<Segment>) -> Result<()> {
+    let target = acceptance_target(opts.tolerance);
     let remaining = opts.max_segments.saturating_sub(out.len());
     if remaining == 0 {
         return Err(invalid("curve needs too many segments"));
@@ -497,9 +814,7 @@ fn fallback_lines(c: &Cubic, opts: &FitOptions, out: &mut Vec<Segment>) -> Resul
     loop {
         let n_use = n.min(remaining);
         let segs = lines_through_samples(c, n_use)?;
-        let check_steps = SAMPLE_STEPS.max(n_use.saturating_mul(4)).min(512);
-        let dev = sample_dev(&segs, c, check_steps)?;
-        if dev <= opts.tolerance {
+        if fits_within(&segs, c, target)? {
             for seg in segs {
                 push_seg(out, seg, opts.max_segments)?;
             }
@@ -607,6 +922,12 @@ impl Cubic {
         let b = self.p2.sub(self.p1);
         let c = self.p3.sub(self.p2);
         a.mul(3.0 * u * u).add(b.mul(6.0 * u * t)).add(c.mul(3.0 * t * t))
+    }
+
+    fn deriv2(self, t: f64) -> V2 {
+        let a = self.p0.sub(self.p1.mul(2.0)).add(self.p2);
+        let b = self.p1.sub(self.p2.mul(2.0)).add(self.p3);
+        a.mul(6.0 * (1.0 - t)).add(b.mul(6.0 * t))
     }
 
     fn split(self, t: f64) -> (Self, Self) {
@@ -793,8 +1114,37 @@ mod tests {
         assert!(connected(&segs, p0, p2));
     }
 
+    fn check_quad_regression(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), tol: f64, label: &str) {
+        let opts = FitOptions::new(tol);
+        let segs = fit_quad(p0, p1, p2, &opts).expect(label);
+        let q1 = ((p0.0 + 2.0 * p1.0) / 3.0, (p0.1 + 2.0 * p1.1) / 3.0);
+        let q2 = ((2.0 * p1.0 + p2.0) / 3.0, (2.0 * p1.1 + p2.1) / 3.0);
+        let dev = max_dev(&segs, [p0, q1, q2, p2], 512);
+        eprintln!("regression {label}: max_dev={dev} segments={}", segs.len());
+        assert!(dev <= tol, "{label} max_dev={dev} tol={tol}");
+        assert!(connected(&segs, p0, p2), "{label} not connected");
+    }
+
+    #[test]
+    fn regression_quad_sharp_turns() {
+        check_quad_regression(
+            (84.85272948020699, -49.95309528348296),
+            (-55.68321606372267, -90.66688133460589),
+            (82.50336145651696, -60.711313006139214),
+            0.2047473614540869,
+            "sharp",
+        );
+        check_quad_regression(
+            (25.336616948201755, 14.53374822695395),
+            (-32.54115446485634, -41.963240184782336),
+            (-17.34619108446449, 51.64321104027232),
+            0.46498884863067874,
+            "cubic-sourced",
+        );
+    }
+
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
+        #![proptest_config(ProptestConfig::with_cases(1024))]
 
         #[test]
         fn random_cubics(
@@ -816,7 +1166,7 @@ mod tests {
             match fit_cubic(p0, p1, p2, p3, &opts) {
                 Ok(segs) => {
                     prop_assert!(connected(&segs, p0, p3), "not connected");
-                    let dev = max_dev(&segs, [p0, p1, p2, p3], 512);
+                    let dev = max_dev(&segs, [p0, p1, p2, p3], 2048);
                     prop_assert!(dev <= tol * 1.0001, "max_dev={dev} tol={tol}");
                 }
                 Err(e) => {
@@ -845,7 +1195,7 @@ mod tests {
                     prop_assert!(connected(&segs, p0, p2), "not connected");
                     let q1 = ((p0.0 + 2.0 * p1.0) / 3.0, (p0.1 + 2.0 * p1.1) / 3.0);
                     let q2 = ((2.0 * p1.0 + p2.0) / 3.0, (2.0 * p1.1 + p2.1) / 3.0);
-                    let dev = max_dev(&segs, [p0, q1, q2, p2], 512);
+                    let dev = max_dev(&segs, [p0, q1, q2, p2], 2048);
                     prop_assert!(dev <= tol * 1.0001, "max_dev={dev} tol={tol}");
                 }
                 Err(e) => {
