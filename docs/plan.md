@@ -108,10 +108,36 @@ Done when: the test plate imports from DXF, SVG and a SolidCraft STEP export wit
 An egui viewer (same toolkit as SolidCraft) for 2D/3D toolpath preview: cutting moves, rapids,
 lead-ins, pierces, order numbers and a simple playback. It only reads the IR.
 
+### M6: 2.5D (done)
+Multi-depth pockets and profiles with stock to leave (wall and floor) and a finishing pass,
+pocket stepover, facing (zigzag with overrun), and chamfer/deburr with V-bits along closed
+contours. Thread milling and adaptive clearing are still to come.
+
+### M7: 3-axis surfacing (in progress)
+Started after the 2.5D milestone (multi-depth pockets and profiles with stock to leave and a
+finishing pass, facing, chamfer and deburr).
+- **Input:** triangle meshes (binary and ASCII STL, and tessellated STEP through
+  `solidcraft-cli`), with a stated chord tolerance. The mesh is checked for watertightness and
+  degenerate triangles, and the result names the problem.
+- **Tools:** flat, ball and bull-nose end mills described by a radial profile (radius, corner
+  radius, flute length), so contact and gouge maths are shared by every operation.
+- **Drop-cutter core:** for a tool at (x, y), the lowest Z where it touches the mesh, exact for
+  vertices, edges and facets per tool shape. Clean-room from the published geometry. No
+  OpenCAMLib code.
+- **Roughing:** Z-level (waterline-based) roughing with step-down and stock to leave, reusing the
+  2D offset and pocket code on each slice of the part.
+- **Finishing:** parallel (raster) finishing along drop-cutter lines and waterline finishing for
+  steep walls, with a slope split between them. Scallop height drives stepover for ball tools.
+- **Safety:** every 3D path is checked against the mesh. No point is below the drop-cutter Z
+  within tolerance (gouge-free), and rapids stay above the stock.
+- **Output:** the same CL-level IR (tool tip plus axis), so posts and the viewer need no changes.
+  The viewer gains a mesh and stock preview.
+Done when: analytic tests pass (a ball on a plane, a sphere and a cylinder at known Z), and
+property tests on random meshes show no gouge and stay within the scallop height.
+
 ### Later (each its own milestone when we get there)
-- **2.5D:** multi-depth pockets, facing, chamfer and deburr, thread milling, adaptive clearing.
-- **3-axis surfacing:** mesh-based drop-cutter, waterline, parallel and scallop finishing, rest
-  machining, stock simulation. All clean-room, with no OpenCAMLib.
+- **2.5D extras:** thread milling, adaptive clearing.
+- **3-axis extras:** scallop finishing, rest machining, stock simulation.
 - **4/5-axis:** indexed (3+2) first, then continuous with tool-axis control and collision checks.
 - **Turning:** XZ profiles, facing, roughing/finishing, grooving, threading, parting; then live
   tooling (C/Y) and sub-spindle.
@@ -152,3 +178,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   crate called `solidcraft-cam`.
 - 2026-10-21: Machine-neutral first; 2D path processing first; IR designed for up to 13 axes
   (hard cap 16).
+- 2026-10-22: 2.5D milestone done; 3-axis surfacing (M7) started on triangle meshes in a new
+  `campanion-mesh` crate.
