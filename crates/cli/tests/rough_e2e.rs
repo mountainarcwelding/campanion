@@ -39,7 +39,7 @@ fn campanion(cwd: &Path, args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_campanion")).args(args).current_dir(cwd).output().map_err(|err| err.to_string())
 }
 
-fn run_job(cwd: &Path, job: &str, ngc_path: &Path, ir_path: &Path) -> Result<(), String> {
+fn run_job(cwd: &Path, job: &str, ngc_path: &Path, ir_path: &Path) -> Result<String, String> {
     let ngc_arg = path_arg(ngc_path)?;
     let ir_arg = path_arg(ir_path)?;
     let output = campanion(cwd, &["run", job, "-o", &ngc_arg, "--ir", &ir_arg])?;
@@ -51,7 +51,7 @@ fn run_job(cwd: &Path, job: &str, ngc_path: &Path, ir_path: &Path) -> Result<(),
     if stderr.contains("changed") {
         return Err(format!("{job}: source hash did not match: {stderr}"));
     }
-    Ok(())
+    Ok(stderr)
 }
 
 fn assert_verify_clean(root: &Path, job: &str, ir_path: &Path) -> Result<(), String> {
@@ -244,4 +244,141 @@ fn dome_rough_stays_above_stock_to_leave() -> Result<(), String> {
         failures.push(format!("deepest cut Z {min_z} is below the floor {floor}"));
     }
     if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+}
+
+/// `examples/dome_rough.job.json` with one `entry` object, next to a copy of the mesh.
+fn write_entry_job(root: &Path, dir: &Path, entry_json: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|err| format!("mkdir: {err}"))?;
+    std::fs::copy(root.join("examples/dome.stl"), dir.join("dome.stl")).map_err(|err| format!("copy stl: {err}"))?;
+    let text = std::fs::read_to_string(root.join("examples/dome_rough.job.json")).map_err(|err| format!("read job: {err}"))?;
+    let mut value: Value = serde_json::from_str(&text).map_err(|err| format!("job json: {err}"))?;
+    let entry: Value = serde_json::from_str(entry_json).map_err(|err| format!("entry json: {err}"))?;
+    let op = value
+        .get_mut("operations")
+        .and_then(Value::as_array_mut)
+        .and_then(|ops| ops.get_mut(0))
+        .and_then(Value::as_object_mut)
+        .ok_or("dome rough job has no operation")?;
+    op.insert("entry".to_string(), entry);
+    let path = dir.join("dome_rough.job.json");
+    let body = serde_json::to_string_pretty(&value).map_err(|err| format!("write job json: {err}"))?;
+    std::fs::write(&path, body).map_err(|err| format!("write job: {err}"))?;
+    Ok(path)
+}
+
+fn mesh_top_z(root: &Path) -> Result<f64, String> {
+    let stl = std::fs::read(root.join("examples/dome.stl")).map_err(|err| format!("read stl: {err}"))?;
+    let mesh = parse_stl(&stl).map_err(|err| format!("parse stl: {err}"))?;
+    let bounds = mesh.bounds().map_err(|err| format!("stl bounds: {err}"))?;
+    Ok(bounds.max().z)
+}
+
+/// A feed that drops more than `1e-6` mm with no XY motion, and ends below `top_z`.
+fn vertical_descents_below(ir_path: &Path, top_z: f64) -> Result<Vec<String>, String> {
+    let ir_text = std::fs::read_to_string(ir_path).map_err(|err| format!("read ir: {err}"))?;
+    let ir: Value = serde_json::from_str(&ir_text).map_err(|err| format!("ir json: {err}"))?;
+    let blocks = ir["program"]["toolpaths"][0]["blocks"].as_array().ok_or("blocks is not an array")?;
+    let mut cursor = None;
+    let mut failures = Vec::new();
+    for block in blocks {
+        let kind = block["type"].as_str().unwrap_or("");
+        if kind != "linear" && kind != "arc" && kind != "helix" && kind != "rapid" {
+            continue;
+        }
+        let to = tip_of(block)?;
+        let Some(from) = cursor else {
+            cursor = Some(to);
+            continue;
+        };
+        cursor = Some(to);
+        if kind == "rapid" {
+            continue;
+        }
+        let drop = from.2 - to.2;
+        if drop <= 1.0e-6 || to.2 >= top_z - 1.0e-6 {
+            continue;
+        }
+        if feed_has_xy(block, from, to)? {
+            continue;
+        }
+        if failures.len() < 8 {
+            failures.push(format!("{kind} descent from {from:?} to {to:?} is vertical below top Z {top_z}"));
+        }
+    }
+    Ok(failures)
+}
+
+fn feed_has_xy(block: &Value, from: (f64, f64, f64), to: (f64, f64, f64)) -> Result<bool, String> {
+    let chord = (to.0 - from.0).hypot(to.1 - from.1);
+    if block["type"] == "linear" {
+        return Ok(chord > 1.0e-6);
+    }
+    let center = &block["center"];
+    let cx = center["x"].as_f64().ok_or("arc center x")?;
+    let cy = center["y"].as_f64().ok_or("arc center y")?;
+    let radius = (from.0 - cx).hypot(from.1 - cy);
+    Ok(radius > 1.0e-6 || chord > 1.0e-6)
+}
+
+fn assert_same_bytes(actual: &[u8], expected: &[u8]) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
+    }
+    let shared = actual.len().min(expected.len());
+    let at = (0..shared).find(|index| actual[*index] != expected[*index]).unwrap_or(shared);
+    Err(format!("IR differs at byte {at}: actual {} bytes, golden {} bytes", actual.len(), expected.len()))
+}
+
+#[test]
+fn plunge_entry_ir_matches_golden() -> Result<(), String> {
+    let root = workspace_root()?;
+    let ngc_path = temp_path("campanion-rough-plunge.ngc");
+    let ir_path = temp_path("campanion-rough-plunge.json");
+    run_job(&root, "examples/dome_rough.job.json", &ngc_path, &ir_path)?;
+    let actual = std::fs::read(&ir_path).map_err(|err| format!("read ir: {err}"))?;
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/dome_rough.ir.json");
+    let expected = std::fs::read(&golden).map_err(|err| format!("read golden: {err}"))?;
+    assert_same_bytes(&actual, &expected)
+}
+
+#[test]
+fn ramp_and_helix_entries_stay_clear_of_the_mesh() -> Result<(), String> {
+    let root = workspace_root()?;
+    let top_z = mesh_top_z(&root)?;
+    let ramp_dir = temp_path("campanion-rough-ramp");
+    let _ramp_job = write_entry_job(&root, &ramp_dir, r#"{"type":"ramp","angle_deg":3}"#)?;
+    let ramp_ngc = temp_path("campanion-rough-ramp.ngc");
+    let ramp_ir = temp_path("campanion-rough-ramp.json");
+    let ramp_stderr = run_job(&ramp_dir, "dome_rough.job.json", &ramp_ngc, &ramp_ir)?;
+    assert_verify_clean(&root, "ramp", &ramp_ir)?;
+    if ramp_stderr.lines().any(|line| line == "helix does not fit; ramping") {
+        return Err(format!("ramp printed a helix warning: {ramp_stderr}"));
+    }
+    let descents = vertical_descents_below(&ramp_ir, top_z)?;
+    if !descents.is_empty() {
+        return Err(descents.join("\n"));
+    }
+
+    let helix_dir = temp_path("campanion-rough-helix");
+    let _helix_job = write_entry_job(&root, &helix_dir, r#"{"type":"helix","radius":2,"angle_deg":3}"#)?;
+    let helix_ngc = temp_path("campanion-rough-helix.ngc");
+    let helix_ir = temp_path("campanion-rough-helix.json");
+    run_job(&helix_dir, "dome_rough.job.json", &helix_ngc, &helix_ir)?;
+    assert_verify_clean(&root, "helix", &helix_ir)?;
+    let helix_descents = vertical_descents_below(&helix_ir, top_z)?;
+    if !helix_descents.is_empty() {
+        return Err(helix_descents.join("\n"));
+    }
+
+    let fallback_dir = temp_path("campanion-rough-helix-fallback");
+    let _fallback_job = write_entry_job(&root, &fallback_dir, r#"{"type":"helix","radius":50,"angle_deg":3}"#)?;
+    let fallback_ngc = temp_path("campanion-rough-helix-fallback.ngc");
+    let fallback_ir = temp_path("campanion-rough-helix-fallback.json");
+    let fallback_stderr = run_job(&fallback_dir, "dome_rough.job.json", &fallback_ngc, &fallback_ir)?;
+    assert_verify_clean(&root, "helix fallback", &fallback_ir)?;
+    let warnings = fallback_stderr.lines().filter(|line| *line == "helix does not fit; ramping").count();
+    if warnings != 1 {
+        return Err(format!("helix fallback warnings {warnings}: {fallback_stderr}"));
+    }
+    Ok(())
 }

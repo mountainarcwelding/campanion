@@ -34,10 +34,11 @@
 //! to the job retract height, then a rapid back to clearance. Rapids stay at clearance, which is
 //! at or above the retract height.
 //! Each `rough` operation is Z-level roughing. Levels run top to bottom and rings stay in order.
-//! For each ring the tool rapids at clearance to the start, rapids down to the retract height,
-//! plunges to the level, cuts the ring, and feeds back to the retract height. Entry is a plunge;
-//! ramp entry is future work. The process turns on once before the first plunge and off after the
-//! last retract, then the tool rapids to clearance.
+//! For each ring the tool rapids at clearance to the entry, rapids down to the retract height,
+//! feeds the entry from the previous level (or the stock top on the first level), cuts the ring,
+//! and feeds back to the retract height. An omitted entry is a plunge. A helix that leaves the
+//! ring or the stock allowance ramps instead, and the operation warns once. The process turns on
+//! once before the first cut and off after the last retract, then the tool rapids to clearance.
 //! After the document is built, each cutting move is checked against the mesh with that
 //! operation's cutter. The sample step is `min(0.25, chord * 10)` millimetres and the allowance
 //! is the job chord tolerance. A gouge is a verify error. Roughing is compared with the

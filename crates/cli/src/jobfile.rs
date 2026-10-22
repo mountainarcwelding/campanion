@@ -36,9 +36,9 @@
 //! tool diameter. `margin` defaults to the tool radius and grows the mesh XY bounds into the
 //! stock rectangle. `top_z` defaults to the mesh maximum Z and `floor_z` to the minimum.
 //! `grid` defaults to the minimum of `stepover / 4` and 0.5 mm. `stock_to_leave` is one length;
-//! omitted, it is 0.5 mm, which is not scaled again when the file is in inches. Entry is a
-//! plunge. Ramp entry is future work, so `entry` is rejected, as are keys that belong to other
-//! kinds.
+//! omitted, it is 0.5 mm, which is not scaled again when the file is in inches. `entry` is the
+//! same object a 2D operation uses. Omitted, it is a plunge. Keys that belong to other kinds
+//! are rejected.
 //!
 //! A tool may set `shape`: `"flat"` (the default), `"ball"`, or `{"bull": corner_radius}`.
 //! A shape other than flat is only used by a surface or rough operation. Two-dimensional
@@ -339,7 +339,7 @@ pub enum OperationKind {
     },
     /// Parallel finish over an STL mesh. No layers and no side.
     Surface,
-    /// Z-level roughing over an STL mesh. No layers and no side. Entry is a plunge.
+    /// Z-level roughing over an STL mesh. No layers and no side. `entry` defaults to a plunge.
     Rough,
 }
 
@@ -1190,7 +1190,6 @@ fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErro
         "tip_diameter",
         "tip_clearance",
         "finish",
-        "entry",
         "cut_height",
         "pierce_height",
         "timing",
@@ -1203,7 +1202,7 @@ fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErro
 }
 
 /// Z-level rough. `depth` stays 0: `top_z` and `floor_z` are absolute and default to the mesh.
-/// Entry is a plunge. Ramp entry is future work.
+/// `entry` uses the same parser as a 2D operation. Omitted, it is a plunge.
 fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
     reject_rough_foreign_keys(map)?;
     let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
@@ -1255,6 +1254,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         }
         None => DEFAULT_ROUGH_STOCK_MM,
     };
+    let entry = parse_entry(optional(map, "entry"), scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_params(None).map_err(from_cli)?;
     Ok(Operation {
@@ -1278,7 +1278,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         tip_clearance: 0.0,
         stock_to_leave: StockToLeave { wall: 0.0, floor: stock },
         finish: None,
-        entry: DepthEntry::Plunge,
+        entry,
         feeds,
         params,
     })
@@ -3287,6 +3287,30 @@ mod tests {
         assert!(matches!(op.entry(), DepthEntry::Plunge));
         assert!(job.tool(1).expect("flat").shape().is_flat());
 
+        let ramp = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"rough","type":"rough","tool_id":1,"step_down":1,"entry":{"type":"ramp","angle_deg":10},"feeds":{"cut":1}}]"#,
+        );
+        let ramp = load(&write_job("rough-ramp", &ramp)).expect("rough ramp");
+        match ramp.operations()[0].entry() {
+            DepthEntry::Ramp { max_angle } => near(max_angle, 10.0_f64.to_radians()),
+            other => panic!("rough ramp: {other:?}"),
+        }
+        let helix = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"rough","type":"rough","tool_id":1,"step_down":1,"entry":{"type":"helix","radius":2,"angle_deg":3},"feeds":{"cut":1}}]"#,
+        );
+        let helix = load(&write_job("rough-helix", &helix)).expect("rough helix");
+        match helix.operations()[0].entry() {
+            DepthEntry::Helix { radius, pitch } => {
+                near(radius, 2.0);
+                near(pitch, 2.0 * std::f64::consts::TAU * 3.0_f64.to_radians().tan());
+            }
+            other => panic!("rough helix: {other:?}"),
+        }
+
         let defaults =
             envelope("dome.stl", r#"[{"id":1,"diameter":10}]"#, r#"[{"name":"rough","type":"rough","tool_id":1,"step_down":1,"feeds":{"cut":1}}]"#);
         let defaults = load(&write_job("rough-defaults", &defaults)).expect("defaults");
@@ -3379,9 +3403,9 @@ mod tests {
                 envelope(
                     "part.stl",
                     r#"[{"id":1,"diameter":6}]"#,
-                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"entry":{"type":"ramp","angle_deg":10},"feeds":{"cut":1}}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"entry":{"type":"spiral","angle_deg":10},"feeds":{"cut":1}}]"#,
                 ),
-                "entry is not valid on a rough",
+                "unknown entry type",
             ),
             (
                 envelope(
