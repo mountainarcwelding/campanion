@@ -218,6 +218,7 @@ dependencies = [
  "campanion-ir",
  "campanion-mesh",
  "campanion-path",
+ "campanion-post",
  "serde_json",
 ]
 
@@ -274,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-post"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "campanion-ir",
  "proptest",

@@ -25,6 +25,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - `examples/sample.job.json` describes the source drawing (`examples/sample.dxf`), tools,
   heights and operations (inside/outside profiles by layer).
 - `-o out.ngc` writes reference G-code; `--ir out.json` writes the machine-neutral toolpath.
+  Pass `--post` to write a controller dialect instead of the test sink. See [Posts](#posts).
 - The toolpath is verified before anything is written; errors stop the run.
 - `examples/sample_delays.job.json` shows pierce height and pierce/post delays.
 
@@ -45,6 +46,56 @@ mm apart. A gouge is printed like any other verify error and names the operation
 the depth. `campanion run` on an STL job does the same check with each operation's cutter and the
 job's chord tolerance. XY arcs are sampled with Z interpolated from start to end. An arc in another
 plane is an error. Surface operations emit lines.
+
+## Posts
+
+Without `--post`, `campanion run -o` writes the test-sink NGC. With `--post`, `-o` is G-code from
+that post. The G-code is read back and compared to the toolpath at the job chord tolerance
+(0.01 mm when the job omits `tolerance.chord`). A mismatch exits 1 and writes nothing.
+
+`campanion posts` lists the built-in posts:
+
+| id | name | description |
+| --- | --- | --- |
+| `linuxcnc` | LinuxCNC | Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices. |
+| `grbl` | Grbl | Millimetre dialect for Grbl. Absolute moves, IJK arcs and helices, no line numbers, tool changes as comments. |
+
+```sh
+campanion run examples/sample.job.json -o out.ngc --post linuxcnc
+campanion run examples/sample.job.json -o out.ngc --ir out.json --post path/to/my-post.json
+campanion post out.json --post grbl -o out.nc
+campanion post out.json --post grbl
+campanion posts
+```
+
+`--post FILE.json` loads that file (the value has to end in `.json`). Any other value is a built-in
+id. An unknown id exits 1 and lists the ids above. `campanion post` prints the G-code when `-o` is
+omitted, and compares the read-back at the default job chord tolerance, 0.01 mm.
+
+A custom post is one JSON object. Unknown fields are rejected, and so are date or time
+placeholders, so the same program and post always produce the same bytes. Start from
+`crates/post/posts/linuxcnc.json` or `crates/post/posts/grbl.json`.
+
+- `id`, `name`, `description` — short id, display name, and what the dialect is for.
+- `units` — `mm`.
+- `line_numbers` — `enabled`, `start`, `step`, and a one-letter `prefix`.
+- `decimals` — digits for `linear`, `feed`, and `dwell` moves (0 through 8).
+- `trailing_zeros` — keep trailing zeros when true.
+- `header`, `footer` — lines around the toolpaths. Placeholders: `{program_name}` and `{date-free!}` (expands to nothing).
+- `modal_motion` — when true, a repeated `G0` or `G1` is left off the next line.
+- `arcs` — `mode` is `ijk` (centre offsets `I` `J` `K`), `r` (signed radius), or `lines` (chords within the chord tolerance). `max_sweep_deg` splits a longer arc (greater than 0, at most 360). `helix` writes a helix as arcs when true, and as chords when false.
+- `planes` — when true, the post can change plane. When false, an arc has to stay in the header plane.
+- `dwell` — `word` (one letter) and `unit` (`s` or `ms`).
+- `process` — map from a process name (`spindle`, `torch`, `laser`, `extruder`, `knife`, `other`) to `{ "on": [lines], "off": [lines] }`. Placeholders: `{speed}`, `{power}`, `{program_name}`, `{date-free!}`.
+- `tool_change` — lines for a tool change. Placeholder: `{tool}`.
+- `coolant` — `flood`, `mist`, and `off`, each a list of lines.
+- `comments` — `style` is `paren`, `semicolon`, or `none`.
+- `program_end` — at least one line, such as `M2` or `M30`.
+- `max_line_length` — optional limit from 1 to 4096 characters.
+- `axis_letters` — optional three distinct letters. The default is `XYZ`.
+
+Check the posted program on the machine before cutting: dry run, then a single block. Read-back
+only checks that the motion matches the toolpath.
 
 ## Preview
 

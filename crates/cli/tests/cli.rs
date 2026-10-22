@@ -56,9 +56,12 @@ fn version_flag_exits_zero_and_prints_name() {
 #[test]
 fn help_lists_commands() {
     let stdout = success_stdout(&["--help"]).expect("help");
-    for word in ["ir", "ngc", "verify", "schema", "--job", "--version", "--mesh", "bull:3,1"] {
+    for word in ["ir", "ngc", "verify", "schema", "--job", "--version", "--mesh", "bull:3,1", "posts", "--post"] {
         assert!(stdout.contains(word), "help missing {word}: {stdout}");
     }
+    assert!(stdout.contains("campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]"), "{stdout}");
+    assert!(stdout.contains("campanion post IR.json --post ID|FILE.json [-o OUT]"), "{stdout}");
+    assert!(stdout.contains("campanion posts"), "{stdout}");
 }
 
 #[test]
@@ -71,6 +74,9 @@ fn usage_errors_exit_two() {
         vec!["schema", "extra"],
         vec!["verify", "file.json", "--mesh"],
         vec!["verify", "file.json", "--tool", "ball:3"],
+        vec!["post"],
+        vec!["posts", "extra"],
+        vec!["run", "job.json", "-o", "out.ngc", "--post"],
     ] {
         let output = campanion(&args).expect("run");
         let stderr = text(&output.stderr).expect("utf-8");

@@ -1,7 +1,8 @@
 //! Command-line interface for CAMpanion.
 //!
 //! `ir` and `ngc` turn a 2D profile job into IR JSON or test-sink RS274/NGC.
-//! `run` loads a `campanion-job/1` file, imports its DXF, and writes toolpaths.
+//! `run` loads a `campanion-job/1` file, imports its source, and writes toolpaths.
+//! `post` writes a dialect for an IR file. `posts` lists the built-in posts.
 //! `verify` reports motion and process problems in an IR file, and can check an STL mesh for
 //! gouges. `view` opens the toolpath preview
 //! by launching the separate `campanion-view` program. `schema` prints the JSON Schema.
@@ -14,6 +15,7 @@ mod job;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
 mod jobfile;
+mod post;
 mod report;
 mod rough;
 mod run;
@@ -35,7 +37,9 @@ const HELP: &str = "\
 Usage:
   campanion ir [--job FILE]
   campanion ngc [--job FILE]
-  campanion run JOB -o OUT.ngc [--ir OUT.json]
+  campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]
+  campanion post IR.json --post ID|FILE.json [-o OUT]
+  campanion posts
   campanion verify FILE [--mesh PART.stl --tool ball:3|flat:3|bull:3,1]
   campanion view IR.json
   campanion schema
@@ -45,11 +49,18 @@ Usage:
 ir      Print IR JSON for the built-in sample 2D profile, or for a JSON job file.
 ngc     Print test-sink RS274/NGC for that job. This is not a post for a real machine.
 run     Import the DXF, SVG, STEP or STL (by extension) named by a campanion-job/1 file and write one toolpath program.
-        JOB is the job file. -o is the RS274/NGC test sink. --ir also writes IR JSON.
+        JOB is the job file. Without --post, -o is the RS274/NGC test sink. --ir also writes IR JSON.
+        --post ID writes a built-in post. A value ending in .json is a custom post file.
+        An unknown id lists the built-in ids. Posted text is read back and compared at the job
+        chord tolerance. A mismatch exits 1 and nothing is written.
         A changed source hash is a warning on stderr. The job file is not rewritten.
         Verify errors are printed and the status is 1. Warnings stay on stderr.
         An STL job checks each cutting move against the mesh with that operation's cutter.
         A gouge is a verify error and the status is 1.
+post    Post an IR JSON file. --post is an id or a file ending in .json, same as run.
+        -o writes a file. Omit -o to print the G-code.
+        Read-back uses the default job chord tolerance, 0.01 mm. A mismatch exits 1.
+posts   List built-in post ids with their names and descriptions.
 verify  Verify an IR JSON file and print a report. The status is 1 when the report has errors.
         --mesh and --tool also check cutting moves against an STL mesh. Both are required together.
         The tool is a radius in millimetres: ball:3, flat:3 or bull:3,1 (bull corner after the comma).
@@ -107,6 +118,8 @@ fn try_main() -> Result<ExitCode, CliError> {
         name if name == "ir" => emit(rest, false),
         name if name == "ngc" => emit(rest, true),
         name if name == "run" => run::run(rest),
+        name if name == "post" => post::post_command(rest),
+        name if name == "posts" => post::posts_command(rest),
         name if name == "verify" => verify(rest),
         name if name == "view" => view(rest),
         name if name == "schema" => schema(rest),
@@ -270,7 +283,7 @@ fn take_job(args: &[OsString]) -> Result<Option<&OsStr>, CliError> {
     }
 }
 
-fn write_stdout(text: &str) -> Result<ExitCode, CliError> {
+pub(crate) fn write_stdout(text: &str) -> Result<ExitCode, CliError> {
     let mut out = io::stdout().lock();
     out.write_all(text.as_bytes())?;
     if !text.ends_with('\n') {

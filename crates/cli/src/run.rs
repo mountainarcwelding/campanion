@@ -28,6 +28,10 @@
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
 //! and retract height is the job retract. Issues are printed and the process exits 1.
 //!
+//! `--post` writes that dialect instead of the test-sink NGC. The text is read back and compared
+//! at the job chord tolerance. A mismatch exits 1 and nothing is written. Without `--post` the
+//! test sink is unchanged.
+//!
 //! An STL source is read as bytes, not as text, and is not sent through the DXF or SVG importer.
 //! Each `surface` operation is a parallel finish: a rapid to clearance, a plunge to the first
 //! cutter location, cuts along the raster and along the drop-cutter link between lines, a retract
@@ -63,6 +67,7 @@ use campanion_path::{
     ChamferOp, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
     Tool as PathTool, Toolpath, apply_timing,
 };
+use campanion_post::PostDef;
 
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::job::read_text;
@@ -82,6 +87,7 @@ struct RunArgs {
     job: PathBuf,
     output: PathBuf,
     ir: Option<PathBuf>,
+    post: Option<PathBuf>,
 }
 
 struct Cut<'a> {
@@ -95,6 +101,10 @@ struct Cut<'a> {
 
 pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
     let args = parse_run(args)?;
+    let post = match &args.post {
+        Some(spec) => Some(crate::post::load_spec(spec)?),
+        None => None,
+    };
     let job = jobfile::load(&args.job).map_err(show)?;
     let source = jobfile::source_path(&job);
     if job.source().is_stl() {
@@ -103,7 +113,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
         let doc = build_surface(&job, &mesh)?;
         let gouges = crate::gouge::check_job(&job, &mesh, doc.program())?;
-        return emit_program(&args, &job, doc, &gouges);
+        return emit_program(&args, &job, doc, &gouges, post.as_ref());
     }
     let text = read_text(&source)?;
     warn_if_changed(&job, text.as_bytes())?;
@@ -136,7 +146,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         warn(&format!("skipped {format} entities: {kinds}"))?;
     }
     let doc = build(&job, &drawing)?;
-    emit_program(&args, &job, doc, &[])
+    emit_program(&args, &job, doc, &[], post.as_ref())
 }
 
 fn warn_if_changed(job: &JobFile, bytes: &[u8]) -> Result<(), CliError> {
@@ -184,7 +194,7 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
     Ok(Document::new(program)?)
 }
 
-fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::GougeNote]) -> Result<ExitCode, CliError> {
+fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::GougeNote], post: Option<&PostDef>) -> Result<ExitCode, CliError> {
     let options = campanion_ir::VerifyOptions { safe_z: Some(job.clearance()), retract_z: Some(job.retract()) };
     let report = campanion_ir::verify_with(doc.program(), &options);
     if !report.issues().is_empty() || !gouges.is_empty() {
@@ -192,7 +202,11 @@ fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::
         write_all(&mut err_out, &report::format_report_and_gouges(&report, gouges))?;
         return Ok(ExitCode::from(1));
     }
-    write_output(&args.output, &campanion_ir::write_ngc(doc.program())?)?;
+    let text = match post {
+        Some(post) => crate::post::render(doc.program(), post, job.tolerance().chord())?,
+        None => campanion_ir::write_ngc(doc.program())?,
+    };
+    write_output(&args.output, &text)?;
     if let Some(ir_path) = &args.ir {
         write_output(ir_path, &doc.to_json_pretty()?)?;
     }
@@ -203,26 +217,39 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     let mut job: Option<&OsStr> = None;
     let mut output: Option<&OsStr> = None;
     let mut ir: Option<&OsStr> = None;
+    let mut post: Option<&OsStr> = None;
     let mut index = 0;
     while index < args.len() {
         let Some(arg) = args.get(index) else {
             break;
         };
         index += 1;
-        if arg.as_os_str() == "-o" || arg.as_os_str() == "--ir" {
-            let flag = if arg.as_os_str() == "-o" { "-o" } else { "--ir" };
-            let Some(path) = args.get(index) else {
-                return Err(CliError::usage(format!("{flag} needs a file")));
+        if arg.as_os_str() == "-o" || arg.as_os_str() == "--ir" || arg.as_os_str() == "--post" {
+            let flag = if arg.as_os_str() == "-o" {
+                "-o"
+            } else if arg.as_os_str() == "--ir" {
+                "--ir"
+            } else {
+                "--post"
+            };
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage(format!("{flag} needs a {}", if flag == "--post" { "value" } else { "file" })));
             };
             index += 1;
-            if path.is_empty() {
-                return Err(CliError::usage(format!("{flag} needs a file")));
+            if value.is_empty() {
+                return Err(CliError::usage(format!("{flag} needs a {}", if flag == "--post" { "value" } else { "file" })));
             }
-            let slot = if flag == "-o" { &mut output } else { &mut ir };
+            let slot = if flag == "-o" {
+                &mut output
+            } else if flag == "--ir" {
+                &mut ir
+            } else {
+                &mut post
+            };
             if slot.is_some() {
                 return Err(CliError::usage(format!("{flag} is already set")));
             }
-            *slot = Some(path.as_os_str());
+            *slot = Some(value.as_os_str());
         } else if starts_with_dash(arg) {
             return Err(CliError::usage("unknown argument"));
         } else if job.is_some() || arg.is_empty() {
@@ -240,7 +267,7 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     if ir.is_some_and(|path| path == output) {
         return Err(CliError::usage("-o and --ir must be different files"));
     }
-    Ok(RunArgs { job: PathBuf::from(job), output: PathBuf::from(output), ir: ir.map(PathBuf::from) })
+    Ok(RunArgs { job: PathBuf::from(job), output: PathBuf::from(output), ir: ir.map(PathBuf::from), post: post.map(PathBuf::from) })
 }
 
 fn starts_with_dash(arg: &OsStr) -> bool {
@@ -924,7 +951,7 @@ fn warn(message: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn write_output(path: &Path, text: &str) -> Result<(), CliError> {
+pub(crate) fn write_output(path: &Path, text: &str) -> Result<(), CliError> {
     let mut file = File::create(path).map_err(|err| CliError::run(format!("{}: {err}", path.display())))?;
     write_all(&mut file, text).map_err(|err| CliError::run(format!("{}: {err}", path.display())))?;
     if !text.ends_with('\n') {
