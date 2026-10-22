@@ -19,11 +19,13 @@ lengths are millimetres and feeds are millimetres per minute.
 | `format` | yes | Exactly `campanion-job/1`. `campanion-job/2` is an unsupported major. Anything else is an unknown tag. |
 | `source` | yes | Part file. See below. |
 | `units` | yes | `mm` or `inch`. One inch is 25.4 mm. |
-| `tolerance` | no | Linear, angular and chord tolerances. Omitted fields use the engine defaults (1e-6 mm, 1e-6 rad, 1e-6 mm). Those defaults are not scaled when `units` is `inch`. |
+| `tolerance` | no | Linear, angular and chord tolerances. Omitted fields default to 1e-6 mm (linear), 1e-6 rad (angular) and 0.01 mm (chord). Defaults are not scaled when `units` is `inch`. |
 | `tools` | yes | Array of tools. May be empty when `operations` is empty. |
 | `operations` | yes | Array of operations, in cut order. May be empty. |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
+
+`chord` is the largest allowed deviation when curves (SVG Beziers, and later splines and ellipses) are fitted with lines and arcs. Smaller values give more, shorter arcs; 0.01 mm suits most cutting.
 
 ## Source
 
