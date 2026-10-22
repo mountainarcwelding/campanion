@@ -13,6 +13,7 @@ mod job;
 #[allow(dead_code)]
 mod jobfile;
 mod report;
+mod rough;
 mod run;
 mod surface;
 // STEP faces are exported by shelling out to SolidCraft. `run` does not call this yet.
