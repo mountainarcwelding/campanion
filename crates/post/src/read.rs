@@ -2,9 +2,10 @@
 //!
 //! The parser is modal and absolute. `I` `J` `K` are centre offsets from the start of the block.
 //! A signed `R` is the radius. Comments, line numbers, `%` tape edges and `O` program numbers are
-//! skipped. `G4` is a dwell.
+//! skipped. `G4` is a dwell. A post with a rotary block also accepts its A/B word and the
+//! inverse-time codes (`G93` / `G94` on LinuxCNC). Those stay modal the way `X` `Y` `Z` do.
 
-use campanion_ir::{ArcSense, Plane};
+use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 
 use crate::def::PostDef;
 use crate::error::{Result, invalid};
@@ -15,23 +16,31 @@ use crate::geom::{self, Xyz};
 pub enum ReadMove {
     /// `G0`.
     Rapid {
-        /// Absolute end position.
+        /// Absolute end position, in the frame the post wrote (machine frame when `rotary` is set).
         end: Xyz,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
+        /// Modal A/B angle in degrees after this block. `None` when the post has no rotary word yet.
+        rotary: Option<f64>,
+        /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
+        inverse_time: bool,
     },
     /// `G1`.
     Linear {
-        /// Absolute end position.
+        /// Absolute end position, in the frame the post wrote (machine frame when `rotary` is set).
         end: Xyz,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
+        /// Modal A/B angle in degrees after this block. `None` when the post has no rotary word yet.
+        rotary: Option<f64>,
+        /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
+        inverse_time: bool,
     },
     /// `G2` or `G3`.
     Arc {
         /// Clockwise or counter-clockwise.
         sense: ArcSense,
-        /// Absolute end position.
+        /// Absolute end position, in the frame the post wrote (machine frame when `rotary` is set).
         end: Xyz,
         /// Absolute centre. With an `R` word the perpendicular axis is the start position.
         center: Xyz,
@@ -39,6 +48,10 @@ pub enum ReadMove {
         radius: Option<f64>,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
+        /// Modal A/B angle in degrees after this block. `None` when the post has no rotary word yet.
+        rotary: Option<f64>,
+        /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
+        inverse_time: bool,
     },
     /// `G4`, in seconds.
     Dwell {
@@ -66,11 +79,15 @@ struct Parser<'a> {
     motion: Option<Motion>,
     plane: Plane,
     feed: Option<f64>,
+    /// Modal rotary angle. Updated when the block carries the post's A or B word.
+    angle: Option<f64>,
+    /// Modal inverse time. `G94` (or the post's off code) clears it.
+    inverse_time: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(post: &'a PostDef) -> Self {
-        Self { post, pos: [0.0, 0.0, 0.0], motion: None, plane: Plane::Xy, feed: None }
+        Self { post, pos: [0.0, 0.0, 0.0], motion: None, plane: Plane::Xy, feed: None, angle: None, inverse_time: false }
     }
 
     fn line(&mut self, raw: &str) -> Result<Option<ReadMove>> {
@@ -132,17 +149,29 @@ impl<'a> Parser<'a> {
                 'M' => saw_m = true,
                 'T' => saw_t = true,
                 'I' | 'J' | 'K' | 'R' | 'F' | 'S' | 'H' | 'D' | 'P' => {}
-                letter if axes.contains(&letter) || letter == dwell_letter => {}
+                letter if axes.contains(&letter) || letter == dwell_letter || self.is_rotary_letter(letter) => {}
                 letter => return Err(invalid(format!("unexpected word {letter}"))),
             }
         }
         let f = unique(&words, 'F')?;
+        if let Some(angle) = self.rotary_word(&words)? {
+            self.angle = Some(angle);
+        }
         let mut plane = self.plane;
         let mut motion = self.motion;
         let mut dwell = false;
         let mut planes = 0u8;
         let mut motions = 0u8;
+        let mut inverse_time = self.inverse_time;
         for code in g_codes {
+            if self.post.rotary.as_ref().is_some_and(|rotary| rotary.on_code() == Some(code)) {
+                inverse_time = true;
+                continue;
+            }
+            if self.post.rotary.as_ref().is_some_and(|rotary| rotary.off_code() == Some(code)) {
+                inverse_time = false;
+                continue;
+            }
             match code {
                 0 => {
                     motion = Some(Motion::Rapid);
@@ -182,6 +211,7 @@ impl<'a> Parser<'a> {
         if motions > 1 || planes > 1 {
             return Err(invalid("line has conflicting G codes"));
         }
+        self.inverse_time = inverse_time;
         let axis_values = [unique(&words, axes[0])?, unique(&words, axes[1])?, unique(&words, axes[2])?];
         let has_axis = axis_values.iter().any(Option::is_some);
         if dwell {
@@ -232,9 +262,11 @@ impl<'a> Parser<'a> {
             self.feed = Some(feed);
         }
         let feed = self.feed;
+        let rotary = self.angle;
+        let inverse_time = self.inverse_time;
         let move_ = match motion {
-            Motion::Rapid => ReadMove::Rapid { end, feed },
-            Motion::Linear => ReadMove::Linear { end, feed },
+            Motion::Rapid => ReadMove::Rapid { end, feed, rotary, inverse_time },
+            Motion::Linear => ReadMove::Linear { end, feed, rotary, inverse_time },
             Motion::Cw | Motion::Ccw => {
                 let sense = if matches!(motion, Motion::Cw) { ArcSense::Cw } else { ArcSense::Ccw };
                 let radius = unique(words, 'R')?;
@@ -250,13 +282,33 @@ impl<'a> Parser<'a> {
                 } else {
                     return Err(invalid("arc needs IJK or R"));
                 };
-                ReadMove::Arc { sense, end, center, radius, feed }
+                ReadMove::Arc { sense, end, center, radius, feed, rotary, inverse_time }
             }
         };
         self.pos = end;
         self.motion = Some(motion);
         self.plane = plane;
         Ok(Some(move_))
+    }
+
+    fn is_rotary_letter(&self, letter: char) -> bool {
+        let Some(rotary) = &self.post.rotary else {
+            return false;
+        };
+        (letter == 'A' && rotary.supports(RotaryAxisKind::A)) || (letter == 'B' && rotary.supports(RotaryAxisKind::B))
+    }
+
+    fn rotary_word(&self, words: &[(char, f64)]) -> Result<Option<f64>> {
+        let Some(rotary) = &self.post.rotary else {
+            return Ok(None);
+        };
+        let a = if rotary.supports(RotaryAxisKind::A) { unique(words, 'A')? } else { None };
+        let b = if rotary.supports(RotaryAxisKind::B) { unique(words, 'B')? } else { None };
+        match (a, b) {
+            (Some(_), Some(_)) => Err(invalid("block has both an A word and a B word")),
+            (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
+            (None, None) => Ok(None),
+        }
     }
 }
 

@@ -10,7 +10,11 @@ Regenerate them from the repository root:
 cargo run -p campanion-cli -- run examples/sample.job.json -o /tmp/sample.ngc --ir crates/post/tests/data/sample.ir.json
 cargo run -p campanion-cli -- run examples/curves.job.json -o /tmp/curves.ngc --ir crates/post/tests/data/curves.ir.json
 cargo run -p campanion-cli -- run examples/dome.job.json -o /tmp/dome.ngc --ir crates/post/tests/data/dome.ir.json
+cargo run -p campanion-cli -- run examples/indexed.job.json -o /tmp/indexed.ngc --ir crates/post/tests/data/indexed.ir.json
+cargo run -p campanion-cli -- run examples/wrap.job.json -o /tmp/wrap.ngc --ir crates/post/tests/data/wrap.ir.json
 ```
+
+`indexed.ir.json` and `wrap.ir.json` carry an A axis. The golden test posts them only with dialects that list that axis. The other three programs are posted with every built-in.
 
 Then rewrite the goldens. The test posts each program with `arc_tolerance` of `0.01` mm:
 

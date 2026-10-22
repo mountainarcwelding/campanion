@@ -1,6 +1,6 @@
 use campanion_ir::{
     ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind,
-    RotaryDirection, RotarySetup, Tool, Vec3,
+    RotaryDirection, RotarySetup, Tool, Vec3, machine_to_part, part_to_machine,
 };
 
 use crate::{PostOptions, builtin, builtin_ids, compare, load_post, post_program, read_back};
@@ -38,37 +38,76 @@ fn linux() -> crate::PostDef {
     builtin("linuxcnc").expect("linuxcnc")
 }
 
+fn a_setup() -> RotarySetup {
+    RotarySetup::new(RotaryAxisKind::A, Vec3::ZERO, RotaryDirection::Positive, None).expect("setup")
+}
+
+/// Part-frame pose whose tool axis is machine +Z turned back by `angle`.
+fn turned(setup: RotarySetup, x: f64, y: f64, z: f64, angle: f64) -> Pose {
+    let tip = at(x, y, z);
+    let spindle = Pose::new(Vec3::ZERO, Vec3::Z).expect("spindle");
+    let axis = machine_to_part(&setup, spindle, angle).axis();
+    Pose::new(tip, axis).expect("pose").with_rotary(angle).expect("angle")
+}
+
+fn with_rotary(setup: RotarySetup, blocks: Vec<ClBlock>) -> Program {
+    Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new(), Some(setup)).expect("program")
+}
+
+fn linux_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("../posts/linuxcnc.json")).expect("json")
+}
+
+/// LinuxCNC JSON with a different rotary feed mode. Inverse-time codes stay only for that mode.
+fn post_with_mode(mode: &str) -> crate::PostDef {
+    let mut raw = linux_json();
+    raw["rotary"]["feed_mode"] = serde_json::json!(mode);
+    if mode != "inverse_time" {
+        let rotary = raw["rotary"].as_object_mut().expect("rotary");
+        rotary.remove("inverse_time_on");
+        rotary.remove("inverse_time_off");
+    }
+    load_post(&raw.to_string()).expect(mode)
+}
+
 #[test]
-fn rotary_angles_are_rejected_by_every_post() {
+fn rotary_angles_need_a_post_that_names_the_axis() {
     let blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 5.0), feed: None })];
     let plain = program(blocks.clone());
     let posted = post_program(&plain, &linux(), &options()).expect("plain");
 
-    let setup = RotarySetup::new(RotaryAxisKind::A, Vec3::ZERO, RotaryDirection::Positive, None).expect("setup");
-    let with_setup =
-        Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new(), Some(setup)).expect("setup");
+    let setup = a_setup();
+    let with_setup = with_rotary(setup, blocks);
     assert_eq!(post_program(&with_setup, &linux(), &options()).expect("no angles"), posted);
 
-    let angled = pose(0.0, 0.0, 5.0).with_rotary(90.0).expect("angle");
-    // A-positive 90° turns machine +Z into part +Y.
-    let axis = Vec3::Y;
-    let turned = Pose::new(angled.tip(), axis).expect("pose").with_rotary(90.0).expect("tag");
-    let rotary_blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: turned, feed: None })];
-    let rotary =
-        Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(rotary_blocks)], Vec::new(), Vec::new(), Some(setup)).expect("rotary");
+    // A-positive 90° maps (0, 0, 5) to machine (0, -5, 0).
+    let rotary = with_rotary(setup, vec![ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 0.0, 0.0, 5.0, 90.0), feed: None })]);
     for id in builtin_ids() {
         let post = builtin(id).expect(id);
-        let err = post_program(&rotary, &post, &options()).expect_err(id);
-        let text = err.to_string();
-        assert!(text.contains(&format!("post `{id}` does not support a rotary axis")), "{id}: {text}");
+        if post.rotary_axes().contains(&RotaryAxisKind::A) {
+            let text = post_program(&rotary, &post, &options()).expect(id);
+            assert!(text.contains("A90.000"), "{id}: {text}");
+            assert!(text.contains("X0.0000 Y-5.0000 Z0.0000"), "{id}: {text}");
+            compare(&rotary, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+        } else {
+            let err = post_program(&rotary, &post, &options()).expect_err(id);
+            let text = err.to_string();
+            assert!(text.contains(&format!("post `{id}` does not support a rotary axis")), "{id}: {text}");
+        }
     }
 
     let zero = pose(1.0, 2.0, 5.0).with_rotary(0.0).expect("zero");
-    let zero_blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: zero, feed: None })];
-    let zero_program =
-        Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(zero_blocks)], Vec::new(), Vec::new(), Some(setup)).expect("zero program");
-    let err = post_program(&zero_program, &linux(), &options()).expect_err("zero angle");
-    assert!(err.to_string().contains("post `linuxcnc` does not support a rotary axis"), "{err}");
+    let zero_program = with_rotary(setup, vec![ClBlock::Motion(ClMotion::Rapid { to: zero, feed: None })]);
+    let err = post_program(&zero_program, &builtin("grbl").expect("grbl"), &options()).expect_err("zero angle");
+    assert!(err.to_string().contains("post `grbl` does not support a rotary axis"), "{err}");
+    let zero_text = post_program(&zero_program, &linux(), &options()).expect("zero on linuxcnc");
+    assert!(zero_text.contains("A0.000"), "{zero_text}");
+    compare(&zero_program, &read_back(&zero_text, &linux()).expect("read"), 1e-3, &linux()).expect("compare");
+
+    let b_setup = RotarySetup::new(RotaryAxisKind::B, Vec3::ZERO, RotaryDirection::Positive, None).expect("b");
+    let b_program = with_rotary(b_setup, vec![ClBlock::Motion(ClMotion::Rapid { to: turned(b_setup, 0.0, 0.0, 5.0, 0.0), feed: None })]);
+    let err = post_program(&b_program, &linux(), &options()).expect_err("b axis");
+    assert!(err.to_string().contains("post `linuxcnc` does not support rotary axis `b`"), "{err}");
 }
 
 #[test]
@@ -81,6 +120,8 @@ fn builtins_load_and_match_ids() {
     }
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").linear_decimals(), 4);
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").max_line_length(), Some(256));
+    assert_eq!(builtin("linuxcnc").expect("linuxcnc").rotary_axes(), vec![RotaryAxisKind::A]);
+    assert!(builtin("grbl").expect("grbl").rotary_axes().is_empty());
     assert_eq!(builtin("grbl").expect("grbl").linear_decimals(), 4);
     assert_eq!(builtin("mach3").expect("mach3").linear_decimals(), 4);
     assert_eq!(builtin("mach3").expect("mach3").max_line_length(), Some(256));
@@ -797,6 +838,215 @@ fn rapid_z_false_drops_only_z_rapids() {
     let z_only = text.lines().filter(|line| without_comments(line).contains("X0.0000 Y0.0000 Z1.0000")).count();
     assert_eq!(z_only, 0, "{text}");
     compare(&posted, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+/// Rapid at 0°, then a 50 mm feed to 90° (F = 100/50 = 2), then a feed that keeps 90°.
+fn angled_travel() -> Program {
+    let setup = a_setup();
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 0.0, 0.0, 5.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: turned(setup, 50.0, 0.0, 5.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: turned(setup, 60.0, 0.0, 5.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+    ];
+    with_rotary(setup, blocks)
+}
+
+#[test]
+fn rotary_feed_modes_write_the_documented_f_word() {
+    let program = angled_travel();
+    for mode in ["inverse_time", "degrees_per_minute", "surface"] {
+        let post = post_with_mode(mode);
+        let text = post_program(&program, &post, &options()).unwrap_or_else(|err| panic!("{mode}: {err}"));
+        if mode == "inverse_time" {
+            let on = line_with_word(&text, "G93");
+            let rotating = line_with_words(&text, &["A90.000", "F2.0000"]);
+            let off = line_with_word(&text, "G94");
+            let held = line_with_words(&text, &["A90.000", "F100.0000"]);
+            assert!(on < rotating && rotating < off && off < held, "{mode}: {text}");
+            assert!(text.contains("X50.0000 Y-5.0000 Z0.0000"), "{text}");
+        } else {
+            assert!(!text.contains("G93") && !text.contains("G94"), "{mode}: {text}");
+            assert!(text.contains("F100.0000"), "{mode}: {text}");
+            assert!(!text.contains("F2.0000"), "{mode}: {text}");
+        }
+        compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).unwrap_or_else(|err| panic!("{mode}: {err}"));
+    }
+}
+
+#[test]
+fn inverse_time_needs_part_frame_travel() {
+    let setup = a_setup();
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 1.0, 2.0, 3.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: turned(setup, 1.0, 2.0, 3.0, 15.0), feed: 100.0, role: MoveRole::Cut }),
+    ];
+    let err = post_program(&with_rotary(setup, blocks), &linux(), &options()).expect_err("zero length");
+    assert!(err.to_string().contains("positive distance"), "{err}");
+}
+
+#[test]
+fn rapids_keep_inverse_time_until_the_next_plain_feed() {
+    let setup = a_setup();
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 0.0, 0.0, 5.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: turned(setup, 10.0, 0.0, 5.0, 10.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 10.0, 0.0, 5.0, 20.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: turned(setup, 20.0, 0.0, 5.0, 20.0), feed: 100.0, role: MoveRole::Cut }),
+    ];
+    let program = with_rotary(setup, blocks);
+    let text = post_program(&program, &linux(), &options()).expect("post");
+    let on = line_with_word(&text, "G93");
+    let rotating = line_with_words(&text, &["A10.000", "F10.0000"]);
+    let rapid = line_with_words(&text, &["G0", "A20.000"]);
+    let off = line_with_word(&text, "G94");
+    let held = line_with_words(&text, &["A20.000", "F100.0000"]);
+    assert!(on < rotating && rotating < rapid && rapid < off && off < held, "{text}");
+    assert_eq!(text.lines().filter(|line| without_comments(line).split_whitespace().any(|word| word == "G94")).count(), 1, "{text}");
+    compare(&program, &read_back(&text, &linux()).expect("read"), 1e-3, &linux()).expect("compare");
+}
+
+#[test]
+fn equal_angles_stay_arcs_and_a_changing_angle_is_linearised() {
+    let setup = a_setup();
+    let held = with_rotary(
+        setup,
+        vec![
+            ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 10.0, 0.0, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: turned(setup, 0.0, 10.0, 0.0, 0.0),
+                plane: Plane::Xy,
+                center: Vec3::ZERO,
+                sense: ArcSense::Ccw,
+                feed: 80.0,
+                role: MoveRole::Cut,
+            }),
+        ],
+    );
+    let held_text = post_program(&held, &linux(), &options()).expect("held");
+    let held_arc = arc_lines(&held_text);
+    assert_eq!(held_arc.len(), 1, "{held_text}");
+    assert!(held_arc[0].contains("G3") && held_arc[0].contains("A0.000"), "{held_text}");
+    assert!(!held_arc[0].contains("G18") && !held_text.contains("G93"), "{held_text}");
+    compare(&held, &read_back(&held_text, &linux()).expect("read"), 1e-3, &linux()).expect("compare");
+
+    // A+90° sends part +Z to machine -Y, so this XY CCW quarter becomes G18 G2.
+    let turned_arc = with_rotary(
+        setup,
+        vec![
+            ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 10.0, 0.0, 0.0, 90.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: turned(setup, 0.0, 10.0, 0.0, 90.0),
+                plane: Plane::Xy,
+                center: Vec3::ZERO,
+                sense: ArcSense::Ccw,
+                feed: 80.0,
+                role: MoveRole::Cut,
+            }),
+        ],
+    );
+    let turned_text = post_program(&turned_arc, &linux(), &options()).expect("turned");
+    let line = arc_lines(&turned_text).into_iter().next().expect("arc");
+    assert!(line.contains("G18") && line.contains("G2"), "{line}");
+    assert!(line.contains("X0.0000 Y0.0000 Z10.0000 A90.000"), "{line}");
+    assert!(line.contains("I-10.0000") && line.contains("K0.0000"), "{line}");
+    assert!(!word_letters(line).contains(&'J'), "{line}");
+    assert!(!turned_text.contains("G93"), "{turned_text}");
+    let end = part_to_machine(&setup, turned(setup, 0.0, 10.0, 0.0, 90.0), 90.0).tip();
+    assert!((end.x()).abs() < 1e-9 && (end.y()).abs() < 1e-9 && (end.z() - 10.0).abs() < 1e-9, "{end:?}");
+    compare(&turned_arc, &read_back(&turned_text, &linux()).expect("read"), 1e-3, &linux()).expect("compare");
+
+    let changing = with_rotary(
+        setup,
+        vec![
+            ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 10.0, 0.0, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: turned(setup, 0.0, 10.0, 0.0, 30.0),
+                plane: Plane::Xy,
+                center: Vec3::ZERO,
+                sense: ArcSense::Ccw,
+                feed: 40.0,
+                role: MoveRole::Cut,
+            }),
+        ],
+    );
+    let tight = crate::PostOptions { arc_tolerance: 0.0005 };
+    let changing_text = post_program(&changing, &linux(), &tight).expect("changing");
+    assert!(arc_lines(&changing_text).is_empty(), "{changing_text}");
+    assert!(changing_text.contains("G93") && changing_text.contains("G1 "), "{changing_text}");
+    compare(&changing, &read_back(&changing_text, &linux()).expect("read"), 1e-3, &linux()).expect("compare");
+}
+
+#[test]
+fn b_axis_uses_the_b_word_and_reads_back() {
+    let mut raw = linux_json();
+    raw["rotary"]["axes"] = serde_json::json!(["b"]);
+    let post = load_post(&raw.to_string()).expect("b post");
+    let setup = RotarySetup::new(RotaryAxisKind::B, Vec3::ZERO, RotaryDirection::Positive, None).expect("b");
+    let end_pose = turned(setup, 10.0, 0.0, 0.0, 90.0);
+    let program = with_rotary(
+        setup,
+        vec![
+            ClBlock::Motion(ClMotion::Rapid { to: turned(setup, 0.0, 0.0, 5.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Linear { to: end_pose, feed: 100.0, role: MoveRole::Cut }),
+        ],
+    );
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(text.contains("B0.000") && text.contains("B90.000"), "{text}");
+    assert!(!text.lines().any(|line| without_comments(line).split_whitespace().any(|word| word.starts_with('A'))), "{text}");
+    let machine = part_to_machine(&setup, end_pose, 90.0).tip();
+    let coords = format!("X{:.4} Y{:.4} Z{:.4}", machine.x(), machine.y(), machine.z());
+    assert!(text.contains(&coords), "{coords} missing in {text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn rotary_schema_is_validated() {
+    let mut raw = linux_json();
+    raw["rotary"]["axes"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty");
+    assert!(err.to_string().contains("rotary.axes"), "{err}");
+
+    raw["rotary"]["axes"] = serde_json::json!(["c"]);
+    let err = load_post(&raw.to_string()).expect_err("c");
+    assert!(err.to_string().contains("rotary.axes"), "{err}");
+
+    raw["rotary"]["axes"] = serde_json::json!(["a", "a"]);
+    let err = load_post(&raw.to_string()).expect_err("duplicate");
+    assert!(err.to_string().contains("rotary.axes"), "{err}");
+
+    raw["rotary"]["axes"] = serde_json::json!(["A", "b"]);
+    let post = load_post(&raw.to_string()).expect("both");
+    assert_eq!(post.rotary_axes(), vec![RotaryAxisKind::A, RotaryAxisKind::B]);
+
+    raw["rotary"]["decimals"] = serde_json::json!(9);
+    let err = load_post(&raw.to_string()).expect_err("decimals");
+    assert!(err.to_string().contains("rotary.decimals"), "{err}");
+
+    raw = linux_json();
+    raw["rotary"]["feed_mode"] = serde_json::json!("degrees_per_minute");
+    let err = load_post(&raw.to_string()).expect_err("codes with dpm");
+    assert!(err.to_string().contains("inverse_time_on"), "{err}");
+
+    raw["rotary"].as_object_mut().expect("rotary").remove("inverse_time_on");
+    raw["rotary"].as_object_mut().expect("rotary").remove("inverse_time_off");
+    raw["rotary"]["feed_mode"] = serde_json::json!("surface");
+    load_post(&raw.to_string()).expect("surface");
+
+    raw["rotary"]["feed_mode"] = serde_json::json!("inverse_time");
+    let err = load_post(&raw.to_string()).expect_err("missing on");
+    assert!(err.to_string().contains("rotary.inverse_time_on"), "{err}");
+
+    raw["rotary"]["inverse_time_on"] = serde_json::json!("G93");
+    let err = load_post(&raw.to_string()).expect_err("missing off");
+    assert!(err.to_string().contains("rotary.inverse_time_off"), "{err}");
+
+    raw["rotary"]["inverse_time_off"] = serde_json::json!("G93");
+    let err = load_post(&raw.to_string()).expect_err("same code");
+    assert!(err.to_string().contains("inverse_time_off"), "{err}");
+
+    raw["rotary"]["nope"] = serde_json::json!(1);
+    let err = load_post(&raw.to_string()).expect_err("unknown");
+    assert!(err.to_string().contains("nope") || err.to_string().contains("unknown field"), "{err}");
 }
 
 #[test]

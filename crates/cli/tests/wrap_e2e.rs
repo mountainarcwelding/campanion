@@ -2,7 +2,8 @@
 //!
 //! The IR validates. Every cutting pose carries a rotary angle, the tool axis is perpendicular
 //! to the rotary axis, and unwrapping the pose lands on the flat drawing at the pass depth.
-//! Rotary steps stay inside the chord-tolerance subdivision. linuxcnc rejects the rotary axis.
+//! Rotary steps stay inside the chord-tolerance subdivision. LinuxCNC posts the A axis with
+//! inverse time. Grbl, which has no rotary axis, rejects the program.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -62,7 +63,7 @@ fn dot(left: Vec3, right: Vec3) -> f64 {
 }
 
 #[test]
-fn wrap_example_stays_on_the_drawing_and_posts_reject_rotary() -> Result<(), String> {
+fn wrap_example_stays_on_the_drawing_and_linuxcnc_posts_inverse_time() -> Result<(), String> {
     let root = workspace_root()?;
     let ngc_path = temp_path("campanion-wrap-e2e.ngc");
     let ir_path = temp_path("campanion-wrap-e2e.json");
@@ -206,14 +207,29 @@ fn wrap_example_stays_on_the_drawing_and_posts_reject_rotary() -> Result<(), Str
     let posted_arg = path_arg(&posted_ngc)?;
     let posted = campanion(&root, &["run", "examples/wrap.job.json", "-o", &posted_arg, "--post", "linuxcnc"])?;
     let posted_err = output_text(&posted.stderr)?;
-    if posted.status.code() == Some(0) {
-        return Err(format!("linuxcnc posted a rotary program: {posted_err}"));
+    if posted.status.code() != Some(0) {
+        return Err(format!("linuxcnc did not post the wrap program: {posted_err}"));
     }
-    if !posted_err.contains("post `linuxcnc` does not support a rotary axis") {
-        return Err(format!("missing rotary post error: {posted_err}"));
+    let ngc = std::fs::read_to_string(&posted_ngc).map_err(|err| format!("read posted ngc: {err}"))?;
+    if !ngc.contains("G93") {
+        return Err(format!("linuxcnc wrap output has no inverse-time block:\n{ngc}"));
     }
-    if posted_err.contains("changed") {
-        return Err(format!("source hash did not match: {posted_err}"));
+    if !ngc.lines().any(|line| line.split_whitespace().any(|word| word.starts_with('A') && word.len() > 1)) {
+        return Err(format!("linuxcnc output has no A word:\n{ngc}"));
+    }
+
+    let grbl_ngc = temp_path("campanion-wrap-e2e-grbl.ngc");
+    let grbl_arg = path_arg(&grbl_ngc)?;
+    let grbl = campanion(&root, &["run", "examples/wrap.job.json", "-o", &grbl_arg, "--post", "grbl"])?;
+    let grbl_err = output_text(&grbl.stderr)?;
+    if grbl.status.code() == Some(0) {
+        return Err(format!("grbl posted a rotary program: {grbl_err}"));
+    }
+    if !grbl_err.contains("post `grbl` does not support a rotary axis") {
+        return Err(format!("missing rotary post error: {grbl_err}"));
+    }
+    if grbl_err.contains("changed") {
+        return Err(format!("source hash did not match: {grbl_err}"));
     }
     Ok(())
 }

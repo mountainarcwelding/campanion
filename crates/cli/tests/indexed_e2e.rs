@@ -2,7 +2,7 @@
 //!
 //! Two surface operations on `examples/dome.stl`, at index 0° and 90° about A. The IR validates,
 //! every pose carries its operation's index, the index-change tip sits outside the swept radius,
-//! the gouge check passes, and linuxcnc rejects the rotary axis.
+//! the gouge check passes. LinuxCNC posts the A axis. Grbl, which has no rotary axis, rejects it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -53,7 +53,7 @@ fn distance_to_a(point: Vec3) -> f64 {
 }
 
 #[test]
-fn indexed_dome_keeps_part_frame_poses_and_posts_reject_rotary() -> Result<(), String> {
+fn indexed_dome_keeps_part_frame_poses_and_linuxcnc_posts_the_a_axis() -> Result<(), String> {
     let root = workspace_root()?;
     let ngc_path = temp_path("campanion-indexed-e2e.ngc");
     let ir_path = temp_path("campanion-indexed-e2e.json");
@@ -128,14 +128,26 @@ fn indexed_dome_keeps_part_frame_poses_and_posts_reject_rotary() -> Result<(), S
     let posted_arg = path_arg(&posted_ngc)?;
     let posted = campanion(&root, &["run", "examples/indexed.job.json", "-o", &posted_arg, "--post", "linuxcnc"])?;
     let posted_err = output_text(&posted.stderr)?;
-    if posted.status.code() == Some(0) {
-        return Err(format!("linuxcnc posted a rotary program: {posted_err}"));
+    if posted.status.code() != Some(0) {
+        return Err(format!("linuxcnc did not post the indexed program: {posted_err}"));
     }
-    if !posted_err.contains("post `linuxcnc` does not support a rotary axis") {
-        return Err(format!("missing rotary post error: {posted_err}"));
+    let ngc = std::fs::read_to_string(&posted_ngc).map_err(|err| format!("read posted ngc: {err}"))?;
+    if !ngc.lines().any(|line| line.split_whitespace().any(|word| word.starts_with('A') && word.len() > 1)) {
+        return Err(format!("linuxcnc output has no A word:\n{ngc}"));
     }
-    if posted_err.contains("changed") {
-        return Err(format!("source hash did not match: {posted_err}"));
+
+    let grbl_ngc = temp_path("campanion-indexed-e2e-grbl.ngc");
+    let grbl_arg = path_arg(&grbl_ngc)?;
+    let grbl = campanion(&root, &["run", "examples/indexed.job.json", "-o", &grbl_arg, "--post", "grbl"])?;
+    let grbl_err = output_text(&grbl.stderr)?;
+    if grbl.status.code() == Some(0) {
+        return Err(format!("grbl posted a rotary program: {grbl_err}"));
+    }
+    if !grbl_err.contains("post `grbl` does not support a rotary axis") {
+        return Err(format!("missing rotary post error: {grbl_err}"));
+    }
+    if grbl_err.contains("changed") {
+        return Err(format!("source hash did not match: {grbl_err}"));
     }
     Ok(())
 }

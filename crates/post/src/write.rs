@@ -1,11 +1,20 @@
 //! Write cutter-location programs as RS274/NGC text.
+//!
+//! A pose with a rotary angle is written in the machine frame. `X` `Y` `Z` are
+//! [`campanion_ir::part_to_machine`] of the pose, and the A or B word is the continuous angle
+//! stored on the IR. Feeds for those moves are described in the post crate README: inverse time
+//! uses the straight-line distance between the part-frame tips.
 
-use campanion_ir::{ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, Plane, Pose, ProcessKind, Program, Vec3};
+use campanion_ir::{
+    ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, Plane, Pose, ProcessKind, Program, RotaryAxisKind, RotarySetup, Vec3,
+    part_to_machine,
+};
 
-use crate::def::{ArcMode, PostDef, ProcessWords};
+use crate::def::{ArcMode, PostDef, ProcessWords, RotaryFeedMode};
 use crate::error::{Result, invalid, unsupported};
 use crate::fmt::{format_fixed, xy_text_eq};
 use crate::geom::{self, Xyz};
+use crate::rotary::{self, angles_equal};
 
 /// Controls how a [`PostDef`] writes arcs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,10 +34,8 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     if !program.channel_programs().is_empty() {
         return Err(unsupported("channel programs are not supported; only cutter-location toolpaths are posted"));
     }
-    if poses_use_rotary(program) {
-        return Err(unsupported(format!("post `{}` does not support a rotary axis", post.id())));
-    }
-    let mut writer = Writer::new(post, options);
+    check_rotary_program(program, post)?;
+    let mut writer = Writer::new(post, options, program.rotary().copied());
     let name = sanitize(program.name().unwrap_or(""));
     let number = post.program_number.clone().unwrap_or_default();
     let header_vars = [("program_name", name.as_str()), ("program_number", number.as_str()), ("date-free!", "")];
@@ -62,6 +69,20 @@ enum ThcPhase {
     On,
 }
 
+/// One motion end as the writer emits it.
+struct Posted {
+    /// `X` `Y` `Z` on the block. Machine frame when the pose carries an angle.
+    xyz: Xyz,
+    /// Part-frame tip. Inverse-time length is the distance between these.
+    part: Xyz,
+    /// Continuous A/B angle from the IR, when this pose has one.
+    angle: Option<f64>,
+}
+
+fn plain(end: Xyz) -> Posted {
+    Posted { xyz: end, part: end, angle: None }
+}
+
 struct Writer<'a> {
     post: &'a PostDef,
     options: &'a PostOptions,
@@ -71,6 +92,13 @@ struct Writer<'a> {
     /// Last programmed point before rounding. Split arcs are sampled from this so they stay on the
     /// original curve; `pos` is only where the machine was told to be.
     exact: Option<Xyz>,
+    /// Last part-frame tip. Equals [`Self::exact`] when the pose has no rotary angle.
+    part_tip: Option<Xyz>,
+    /// Last IR angle, degrees. `None` until a pose carries one.
+    angle: Option<f64>,
+    /// Modal inverse-time feed (`G93` on LinuxCNC). Units per minute is the default.
+    inverse_time: bool,
+    setup: Option<RotarySetup>,
     plane: Option<Plane>,
     /// Last `G0` or `G1`, cleared by an arc so the next line is not modal.
     linear: Option<&'static str>,
@@ -83,7 +111,7 @@ struct Writer<'a> {
 }
 
 impl<'a> Writer<'a> {
-    fn new(post: &'a PostDef, options: &'a PostOptions) -> Self {
+    fn new(post: &'a PostDef, options: &'a PostOptions, setup: Option<RotarySetup>) -> Self {
         let plane = if post.planes { header_plane(&post.header) } else { header_plane(&post.header).or(Some(Plane::Xy)) };
         Self {
             post,
@@ -91,6 +119,10 @@ impl<'a> Writer<'a> {
             out: String::new(),
             pos: None,
             exact: None,
+            part_tip: None,
+            angle: None,
+            inverse_time: header_inverse(post),
+            setup,
             plane,
             linear: None,
             feed: None,
@@ -126,36 +158,137 @@ impl<'a> Writer<'a> {
 
     fn motion(&mut self, motion: &ClMotion) -> Result<()> {
         match motion {
-            ClMotion::Rapid { to, feed } => self.linear_move("G0", tip(*to), *feed),
+            ClMotion::Rapid { to, feed } => self.linear_move("G0", self.posted_end(*to)?, *feed),
             ClMotion::Linear { to, feed, .. } => {
                 self.thc_before_cut()?;
-                self.linear_move("G1", tip(*to), Some(*feed))
+                self.linear_move("G1", self.posted_end(*to)?, Some(*feed))
             }
             ClMotion::Arc { to, plane, center, sense, feed, .. } => {
                 self.thc_before_cut()?;
-                let end = tip(*to);
-                let center = xyz(*center);
-                let sweep = geom::arc_sweep(self.curve_start()?, end, center, *plane, *sense, 0.0)?;
-                self.circular(*sense, *plane, end, center, sweep, *feed, false)
+                self.arc(*to, *plane, xyz(*center), *sense, None, *feed)
             }
             ClMotion::Helix { to, plane, center, sense, sweep, feed, .. } => {
                 self.thc_before_cut()?;
-                let end = tip(*to);
-                let center = xyz(*center);
-                let start = self.curve_start()?;
-                geom::same_radius(start, end, center, *plane, 0.0)?;
-                if !(sweep.is_finite() && *sweep > 0.0) {
-                    return Err(invalid("helix sweep must be positive"));
-                }
-                if *sweep > std::f64::consts::TAU * 10_000.0 {
-                    return Err(invalid("helix has more than 10000 turns"));
-                }
-                self.circular(*sense, *plane, end, center, *sweep, *feed, true)
+                self.arc(*to, *plane, xyz(*center), *sense, Some(*sweep), *feed)
             }
         }
     }
 
-    fn circular(&mut self, sense: campanion_ir::ArcSense, plane: Plane, end: Xyz, center: Xyz, sweep: f64, feed: f64, helix: bool) -> Result<()> {
+    fn posted_end(&self, to: Pose) -> Result<Posted> {
+        let part = tip(to);
+        let Some(angle) = to.rotary() else {
+            return Ok(Posted { xyz: part, part, angle: None });
+        };
+        let setup = self.setup.ok_or_else(|| invalid("rotary angle needs a rotary setup"))?;
+        Ok(Posted { xyz: tip(part_to_machine(&setup, to, angle)), part, angle: Some(angle) })
+    }
+
+    /// Part-frame arc, or the same arc rotated into a principal machine plane.
+    ///
+    /// Equal start and end angles stay arcs when the rotated plane is XY, ZX, or YZ and the post
+    /// can emit that arc. Any other rotary arc is chorded at [`PostOptions::arc_tolerance`]
+    /// before the points are mapped with [`part_to_machine`].
+    fn arc(&mut self, to: Pose, plane: Plane, center: Xyz, sense: campanion_ir::ArcSense, sweep: Option<f64>, feed: f64) -> Result<()> {
+        if self.angle.is_none() && to.rotary().is_none() {
+            let end = tip(to);
+            if let Some(sweep) = sweep {
+                let start = self.curve_start()?;
+                geom::same_radius(start, end, center, plane, 0.0)?;
+                if !(sweep.is_finite() && sweep > 0.0) {
+                    return Err(invalid("helix sweep must be positive"));
+                }
+                if sweep > std::f64::consts::TAU * 10_000.0 {
+                    return Err(invalid("helix has more than 10000 turns"));
+                }
+                return self.circular(sense, plane, end, center, sweep, feed, true, None);
+            }
+            let sweep = geom::arc_sweep(self.curve_start()?, end, center, plane, sense, 0.0)?;
+            return self.circular(sense, plane, end, center, sweep, feed, false, None);
+        }
+        let part_start = self.part_tip.ok_or_else(|| invalid("arc needs a prior position"))?;
+        let part_end = tip(to);
+        let helical = sweep.is_some();
+        let sweep = if let Some(sweep) = sweep {
+            geom::same_radius(part_start, part_end, center, plane, 0.0)?;
+            if !(sweep.is_finite() && sweep > 0.0) {
+                return Err(invalid("helix sweep must be positive"));
+            }
+            if sweep > std::f64::consts::TAU * 10_000.0 {
+                return Err(invalid("helix has more than 10000 turns"));
+            }
+            sweep
+        } else {
+            geom::arc_sweep(part_start, part_end, center, plane, sense, 0.0)?
+        };
+        let (start_angle, end_angle) = match (self.angle, to.rotary()) {
+            (Some(start), Some(end)) => (start, end),
+            _ => return Err(invalid("rotary arc needs an angle on both endpoints")),
+        };
+        if angles_equal(start_angle, end_angle)
+            && let Some(mapped) =
+                rotary::map_arc(&self.setup.ok_or_else(|| invalid("rotary angle needs a rotary setup"))?, end_angle, plane, sense, part_end, center)?
+        {
+            let start_m = self.exact.ok_or_else(|| invalid("arc needs a prior position"))?;
+            let (_, _, start_axial) = geom::plane_uv(mapped.plane, start_m);
+            let (_, _, end_axial) = geom::plane_uv(mapped.plane, mapped.end);
+            let moves_axial = helical || (end_axial - start_axial).abs() > 1e-9;
+            if self.can_emit_arc(mapped.plane, moves_axial) {
+                self.leave_inverse()?;
+                self.circular(mapped.sense, mapped.plane, mapped.end, mapped.center, sweep, feed, helical, Some(end_angle))?;
+                self.part_tip = Some(part_end);
+                self.angle = Some(end_angle);
+                return Ok(());
+            }
+        }
+        self.linearise_rotary(part_start, part_end, center, plane, sense, sweep, start_angle, end_angle, feed)
+    }
+
+    fn can_emit_arc(&self, plane: Plane, helical: bool) -> bool {
+        if self.post.arc_mode() == ArcMode::Lines || (helical && !self.post.arcs.helix) {
+            return false;
+        }
+        if !self.post.planes {
+            let fixed = self.plane.unwrap_or(Plane::Xy);
+            if plane != fixed {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn linearise_rotary(
+        &mut self,
+        start: Xyz,
+        end: Xyz,
+        center: Xyz,
+        plane: Plane,
+        sense: campanion_ir::ArcSense,
+        sweep: f64,
+        start_angle: f64,
+        end_angle: f64,
+        feed: f64,
+    ) -> Result<()> {
+        let setup = self.setup.ok_or_else(|| invalid("rotary angle needs a rotary setup"))?;
+        let samples = rotary::sample_curve(start, end, center, plane, sense, sweep, start_angle, end_angle, self.options.arc_tolerance)?;
+        for sample in samples {
+            let pose = rotary::pose_at(sample.part)?.with_rotary(sample.angle).map_err(|err| invalid(err.to_string()))?;
+            let machine = tip(part_to_machine(&setup, pose, sample.angle));
+            self.linear_move("G1", Posted { xyz: machine, part: sample.part, angle: Some(sample.angle) }, Some(feed))?;
+        }
+        Ok(())
+    }
+
+    fn circular(
+        &mut self,
+        sense: campanion_ir::ArcSense,
+        plane: Plane,
+        end: Xyz,
+        center: Xyz,
+        sweep: f64,
+        feed: f64,
+        helix: bool,
+        angle: Option<f64>,
+    ) -> Result<()> {
         let start = self.curve_start()?;
         if !self.post.planes {
             let fixed = self.plane.unwrap_or(Plane::Xy);
@@ -182,7 +315,10 @@ impl<'a> Writer<'a> {
             let tip = geom::point_at(start, end, center, plane, sense, sweep, t1, true);
             let from = self.pos.ok_or_else(|| invalid("arc needs a prior position"))?;
             let piece = if last { sweep - max_sweep * f64::from(index) } else { max_sweep };
-            self.one_arc(sense, plane, from, tip, center, piece, feed)?;
+            self.one_arc(sense, plane, from, tip, center, piece, feed, angle)?;
+        }
+        if angle.is_none() {
+            self.part_tip = self.exact;
         }
         Ok(())
     }
@@ -202,18 +338,29 @@ impl<'a> Writer<'a> {
         for index in 1..=segments {
             let t = if index == segments { 1.0 } else { f64::from(index) / f64::from(segments) };
             let tip = geom::point_at(start, end, center, plane, sense, sweep, t, true);
-            self.linear_move("G1", tip, Some(feed))?;
+            self.linear_move("G1", plain(tip), Some(feed))?;
         }
         Ok(())
     }
 
-    fn one_arc(&mut self, sense: campanion_ir::ArcSense, plane: Plane, start: Xyz, end: Xyz, center: Xyz, sweep: f64, feed: f64) -> Result<()> {
+    fn one_arc(
+        &mut self,
+        sense: campanion_ir::ArcSense,
+        plane: Plane,
+        start: Xyz,
+        end: Xyz,
+        center: Xyz,
+        sweep: f64,
+        feed: f64,
+        angle: Option<f64>,
+    ) -> Result<()> {
         let mut words = Vec::new();
         if self.post.planes && self.plane != Some(plane) {
             words.push(plane_word(plane).to_string());
         }
         words.push(sense_word(sense).to_string());
         let rounded = self.push_axes(&mut words, end)?;
+        self.push_rotary(&mut words, angle)?;
         match self.post.arc_mode() {
             ArcMode::R => {
                 let radius = geom::in_plane_len(plane, start, center);
@@ -235,7 +382,7 @@ impl<'a> Writer<'a> {
             }
             ArcMode::Lines => return Err(invalid("line mode reached an arc block")),
         }
-        self.push_feed(&mut words, Some(feed))?;
+        self.push_feed(&mut words, Some(feed), false)?;
         if self.post.planes {
             self.plane = Some(plane);
         }
@@ -245,22 +392,103 @@ impl<'a> Writer<'a> {
         self.emit_words(&words)
     }
 
-    fn linear_move(&mut self, code: &str, end: Xyz, feed: Option<f64>) -> Result<()> {
-        if self.omit_z_only(code, end)? {
-            self.pos = Some(self.round_xyz(end)?);
-            self.exact = Some(end);
+    fn linear_move(&mut self, code: &str, posted: Posted, feed: Option<f64>) -> Result<()> {
+        let rotating = rotary::angle_changes(self.angle, posted.angle);
+        if self.omit_z_only(code, posted.xyz)? && !rotating {
+            self.pos = Some(self.round_xyz(posted.xyz)?);
+            self.exact = Some(posted.xyz);
+            self.part_tip = Some(posted.part);
+            self.angle = posted.angle;
             return Ok(());
         }
+        let (feed, force) = self.resolve_feed(code, feed, &posted, rotating)?;
         let mut words = Vec::new();
         if !(self.post.modal_motion && self.linear == Some(code)) {
             words.push(code.to_string());
         }
-        let rounded = self.push_axes(&mut words, end)?;
-        self.push_feed(&mut words, feed)?;
+        let rounded = self.push_axes(&mut words, posted.xyz)?;
+        self.push_rotary(&mut words, posted.angle)?;
+        self.push_feed(&mut words, feed, force)?;
         self.linear = Some(if code == "G0" { "G0" } else { "G1" });
         self.pos = Some(rounded);
-        self.exact = Some(end);
+        self.exact = Some(posted.xyz);
+        self.part_tip = Some(posted.part);
+        self.angle = posted.angle;
         self.emit_words(&words)
+    }
+
+    /// Feed word for this block, and whether inverse time requires `F` on every block.
+    ///
+    /// A feed that changes the angle uses the post's rotary feed mode. Inverse time sets
+    /// `F = feed / length`, where `length` is the straight-line distance between the part-frame
+    /// tips (millimetres) and `feed` is the IR feed (millimetres per minute). That is `1 / T`
+    /// with `T` in minutes. `degrees_per_minute` and `surface` write the IR feed unchanged.
+    /// A feed that keeps the angle stays in millimetres per minute, which means leaving inverse
+    /// time before the block. Rapids do not change the feed mode.
+    fn resolve_feed(&mut self, code: &str, feed: Option<f64>, posted: &Posted, rotating: bool) -> Result<(Option<f64>, bool)> {
+        if code == "G0" {
+            return Ok((feed, false));
+        }
+        let Some(feed) = feed else {
+            return Ok((None, false));
+        };
+        let inverse = self.post.rotary.as_ref().is_some_and(|rotary| rotary.mode() == RotaryFeedMode::InverseTime);
+        if rotating && inverse {
+            let start = self.part_tip.ok_or_else(|| invalid("inverse time feed needs a prior position"))?;
+            let value = rotary::inverse_minutes_feed(feed, geom::dist3(start, posted.part))?;
+            self.enter_inverse()?;
+            Ok((Some(value), true))
+        } else {
+            self.leave_inverse()?;
+            Ok((Some(feed), false))
+        }
+    }
+
+    fn enter_inverse(&mut self) -> Result<()> {
+        if self.inverse_time {
+            return Ok(());
+        }
+        let code = self
+            .post
+            .rotary
+            .as_ref()
+            .and_then(|rotary| rotary.inverse_time_on.clone())
+            .ok_or_else(|| invalid("inverse time mode needs inverse_time_on"))?;
+        self.emit_line(&code)?;
+        self.inverse_time = true;
+        self.feed = None;
+        Ok(())
+    }
+
+    fn leave_inverse(&mut self) -> Result<()> {
+        if !self.inverse_time {
+            return Ok(());
+        }
+        let code = self
+            .post
+            .rotary
+            .as_ref()
+            .and_then(|rotary| rotary.inverse_time_off.clone())
+            .ok_or_else(|| invalid("inverse time mode needs inverse_time_off"))?;
+        self.emit_line(&code)?;
+        self.inverse_time = false;
+        self.feed = None;
+        Ok(())
+    }
+
+    fn push_rotary(&self, words: &mut Vec<String>, angle: Option<f64>) -> Result<()> {
+        let Some(angle) = angle else {
+            return Ok(());
+        };
+        let rotary = self.post.rotary.as_ref().ok_or_else(|| unsupported(format!("post `{}` does not support a rotary axis", self.post.id())))?;
+        let letter = match self.setup.map(|setup| setup.axis()) {
+            Some(RotaryAxisKind::A) => 'A',
+            Some(RotaryAxisKind::B) => 'B',
+            None => return Err(invalid("rotary angle needs a rotary setup")),
+        };
+        let text = format_fixed(angle, rotary.decimals, self.post.trailing_zeros)?;
+        words.push(format!("{letter}{text}"));
+        Ok(())
     }
 
     /// A Z-only rapid is omitted when `rapid_z` is false. With Z words omitted, a Z-only feed is
@@ -304,7 +532,7 @@ impl<'a> Writer<'a> {
         Ok(rounded)
     }
 
-    fn push_feed(&mut self, words: &mut Vec<String>, feed: Option<f64>) -> Result<()> {
+    fn push_feed(&mut self, words: &mut Vec<String>, feed: Option<f64>, force: bool) -> Result<()> {
         let Some(feed) = feed else {
             return Ok(());
         };
@@ -312,7 +540,7 @@ impl<'a> Writer<'a> {
             return Err(invalid("feed must be positive"));
         }
         let text = format_fixed(feed, self.post.decimals.feed, self.post.trailing_zeros)?;
-        if self.feed.as_deref() == Some(text.as_str()) {
+        if !force && self.feed.as_deref() == Some(text.as_str()) {
             return Ok(());
         }
         words.push(format!("F{text}"));
@@ -682,6 +910,48 @@ fn substitute(field_name: &str, line: &str, vars: &[(&str, &str)]) -> Result<Str
 fn meaningless(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.is_empty() || trimmed == "()" || trimmed == ";"
+}
+
+fn check_rotary_program(program: &Program, post: &PostDef) -> Result<()> {
+    if !poses_use_rotary(program) {
+        return Ok(());
+    }
+    let Some(rotary) = &post.rotary else {
+        return Err(unsupported(format!("post `{}` does not support a rotary axis", post.id())));
+    };
+    let Some(setup) = program.rotary() else {
+        return Err(invalid("rotary angle needs a rotary setup"));
+    };
+    if rotary.supports(setup.axis()) {
+        return Ok(());
+    }
+    let name = match setup.axis() {
+        RotaryAxisKind::A => "a",
+        RotaryAxisKind::B => "b",
+    };
+    Err(unsupported(format!("post `{}` does not support rotary axis `{name}`", post.id())))
+}
+
+/// True when the header selects inverse time and does not later cancel it.
+fn header_inverse(post: &PostDef) -> bool {
+    let Some(rotary) = &post.rotary else {
+        return false;
+    };
+    let on = rotary.inverse_time_on.as_deref();
+    let off = rotary.inverse_time_off.as_deref();
+    let mut enabled = false;
+    for line in &post.header {
+        for word in line.split_whitespace() {
+            let word = word.to_ascii_uppercase();
+            if Some(word.as_str()) == on {
+                enabled = true;
+            }
+            if Some(word.as_str()) == off {
+                enabled = false;
+            }
+        }
+    }
+    enabled
 }
 
 /// True when any cutter-location pose, including a probe target, carries a rotary angle.

@@ -380,7 +380,7 @@ Zs is the greater of the job safe height and the swept radius plus the rapid cle
 
 `examples/indexed.job.json` finishes `examples/dome.stl` with a 6 mm ball at index 0° and 90° about A through the origin.
 
-Posts do not write a rotary axis yet. A program that contains any rotary angle is rejected before output, with `post `<id>` does not support a rotary axis`. A setup whose poses carry no angle still posts.
+A post with no `rotary` field rejects a program that contains any rotary angle, with `post `<id>` does not support a rotary axis`. A setup whose poses carry no angle still posts. LinuxCNC writes axis A: machine `X` `Y` `Z` from `part_to_machine`, and inverse-time feed (`G93`, back to `G94` when the angle holds) when a feed changes the angle. The length used for that feed is the straight-line distance between the part-frame tips; see the post crate README.
 
 ## Limits
 
