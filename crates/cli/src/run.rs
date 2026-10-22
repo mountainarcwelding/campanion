@@ -6,15 +6,19 @@
 //! profile job. Compensation is computed here, and travel is climb. Pocket and drill use the
 //! matching `campanion-path` operations. Profile and engrave are depth passes linked per operation.
 //! Each pocket region, at each depth, is linked the same way, and every region at one depth is
-//! linked before the next depth.
+//! linked before the next depth. A finish pass, when the job asks for one, is linked after the
+//! roughing passes.
 //!
 //! Stock Z is 0. A depth pass cuts at `z = -pass` (Z is up). For a linked profile, pocket, or
 //! engrave the tool rapids at clearance, rapids down to the job retract height, and then feeds
 //! the plunge or ramp. Those link rapids stay at or above the retract height. After linking, the
 //! operation's process timing is applied: process on and the pierce dwell at the pierce height
 //! before the plunge, and process off and the post delay before the rapid retract to clearance.
-//! The job file has no pocket stepover, so rings are spaced by the tool radius. Drill cycles are
-//! not in this job version: each hole is a rapid to the final depth, not an expanded peck.
+//! A pocket uses `stepover` when the job sets it, and otherwise the tool radius. Roughing leaves
+//! `stock_to_leave` on the walls and above the floor. When `finish` is set, that stock is cut
+//! afterwards: a profile at the tool radius, then a pocket floor pass and wall contours.
+//! Drill cycles are not in this job version: each hole is a rapid to the final depth, not an
+//! expanded peck.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
 //! and retract height is the job retract. Issues are printed and the process exits 1.
 
@@ -34,7 +38,7 @@ use campanion_path::{
 
 use crate::error::CliError;
 use crate::job::read_text;
-use crate::jobfile::{self, JobFile, JobTool, Operation, OperationKind};
+use crate::jobfile::{self, Finish, JobFile, JobTool, Operation, OperationKind};
 use crate::report;
 use crate::step;
 
@@ -255,37 +259,106 @@ fn import_with_params(op: &Operation, tool: &JobTool, params: ProcessParams) -> 
 }
 
 fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide) -> Result<(), CliError> {
+    let radius = tool_radius(cut)?;
+    let stock = cut.op.stock_to_leave();
+    // Roughing stands off the wall by `wall` and stops `floor` short of the final depth.
+    link_profile(paths, cut, side, radius + stock.wall(), cut.op.depth() - stock.floor(), cut.op.step_down())?;
+    if let Some(finish) = cut.op.finish() {
+        link_profile(paths, cut, side, radius, cut.op.depth(), finish.step_down())?;
+    }
+    Ok(())
+}
+
+/// One linked profile. `distance` is how far the cutter centre sits from the part.
+fn link_profile(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide, distance: f64, total: f64, step_down: f64) -> Result<(), CliError> {
+    if !distance.is_finite() {
+        return Err(op_err(cut.op, "profile offset is not finite"));
+    }
     let mut features = Vec::with_capacity(cut.contours.len());
     for contour in cut.contours {
-        let shaped = compensate_profile(cut, side, contour)?;
-        let toolpath = depth_at_retract(cut, &shaped)?;
+        let shaped = compensate_profile(cut, side, contour, distance)?;
+        let toolpath = depth_with(cut, &shaped, total, step_down)?;
         features.push(Feature::new(contour.clone(), toolpath));
     }
     link_operation(paths, cut, &features)
 }
 
 fn pocket_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
-    let stepover = cut.tool.path_tool().compensation_distance().map_err(|err| op_err(cut.op, err))?;
+    let stepover = pocket_stepover(cut)?;
     let regions = pocket_regions(cut.op, cut.contours, &cut.tolerance)?;
-    let retract = retract_z(cut.job);
+    let stock = cut.op.stock_to_leave();
     // All regions at one depth, then the next depth. Linking each depth on its own keeps that
     // order; `order_and_link` only chooses the travel order inside the depth.
-    for z in cut_levels(cut.op)? {
-        let mut features = Vec::with_capacity(regions.len());
-        for region in &regions {
-            let pocket = PocketOp::new(cut.tool.path_tool(), PocketStrategy::OffsetRings, stepover)
-                .z(z)
-                .retract_z(retract)
-                .tolerance(cut.tolerance)
-                .generate(region)
-                .map_err(|err| op_err(cut.op, err))?;
-            // The generator feeds back to retract after process-off. Drop that move so the same
-            // clearance rapid profiles use can follow process-off.
-            let toolpath = clearance_retracts(cut, &moves_through_process_off(pocket.toolpath()))?;
-            features.push(Feature::new(region.outer().clone(), toolpath));
-        }
-        link_operation(paths, cut, &features)?;
+    for z in depth_levels(cut.op, cut.op.depth() - stock.floor(), cut.op.step_down())? {
+        link_pocket_level(paths, cut, &regions, z, stepover, stock.wall())?;
     }
+    let Some(finish) = cut.op.finish() else {
+        return Ok(());
+    };
+    // The floor pass still holds the wall allowance. Wall contours come after it.
+    if finish.floor() && stock.floor() > 0.0 {
+        link_pocket_level(paths, cut, &regions, -cut.op.depth(), stepover, stock.wall())?;
+    }
+    let walls = pocket_wall_features(cut, &regions, finish)?;
+    link_operation(paths, cut, &walls)
+}
+
+fn pocket_stepover(cut: &Cut<'_>) -> Result<f64, CliError> {
+    match cut.op.stepover() {
+        Some(step) => Ok(step),
+        None => tool_radius(cut),
+    }
+}
+
+fn link_pocket_level(paths: &mut Vec<ClPath>, cut: &Cut<'_>, regions: &[Region], z: f64, stepover: f64, allowance: f64) -> Result<(), CliError> {
+    let mut features = Vec::with_capacity(regions.len());
+    for region in regions {
+        let toolpath = pocket_toolpath(cut, region, z, stepover, allowance)?;
+        features.push(Feature::new(region.outer().clone(), toolpath));
+    }
+    link_operation(paths, cut, &features)
+}
+
+fn pocket_toolpath(cut: &Cut<'_>, region: &Region, z: f64, stepover: f64, allowance: f64) -> Result<Toolpath, CliError> {
+    let pocket = PocketOp::new(cut.tool.path_tool(), PocketStrategy::OffsetRings, stepover)
+        .allowance(allowance)
+        .z(z)
+        .retract_z(retract_z(cut.job))
+        .tolerance(cut.tolerance)
+        .generate(region)
+        .map_err(|err| op_err(cut.op, err))?;
+    // The generator feeds back to retract after process-off. Drop that move so the same
+    // clearance rapid profiles use can follow process-off.
+    clearance_retracts(cut, &moves_through_process_off(pocket.toolpath()))
+}
+
+/// Wall finish follows the tool-radius offset of each region. The outer is an inside profile
+/// and each hole is an outside profile, so both climb.
+fn pocket_wall_features(cut: &Cut<'_>, regions: &[Region], finish: Finish) -> Result<Vec<Feature>, CliError> {
+    let radius = tool_radius(cut)?;
+    let mut features = Vec::new();
+    for region in regions {
+        let pieces = campanion_geom::offset_region(region, radius, &cut.tolerance).map_err(|err| op_err(cut.op, err))?;
+        if pieces.is_empty() {
+            return Err(op_err(cut.op, "tool does not fit in the pocket"));
+        }
+        for piece in pieces {
+            push_wall_contour(cut, piece.outer(), ProfileSide::Inside, finish, &mut features)?;
+            for hole in piece.holes() {
+                push_wall_contour(cut, hole, ProfileSide::Outside, finish, &mut features)?;
+            }
+        }
+    }
+    if features.is_empty() {
+        return Err(op_err(cut.op, "pocket finish produced no contour"));
+    }
+    Ok(features)
+}
+
+fn push_wall_contour(cut: &Cut<'_>, contour: &Contour, side: ProfileSide, finish: Finish, features: &mut Vec<Feature>) -> Result<(), CliError> {
+    let shaped = orient_climb(cut.op, side, contour, &cut.tolerance)?;
+    let toolpath = depth_with(cut, &shaped, cut.op.depth(), finish.step_down())?;
+    features.push(Feature::new(shaped, toolpath));
     Ok(())
 }
 
@@ -314,7 +387,11 @@ fn engrave_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError>
 /// Depth passes from stock Z 0, with the same clearance and retract links as a pocket section.
 /// Plunge moves use the operation plunge feed.
 fn depth_at_retract(cut: &Cut<'_>, contour: &Contour) -> Result<Toolpath, CliError> {
-    let plan = DepthPlan::new(0.0, cut.op.depth(), cut.op.step_down(), cut.op.entry());
+    depth_with(cut, contour, cut.op.depth(), cut.op.step_down())
+}
+
+fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> Result<Toolpath, CliError> {
+    let plan = DepthPlan::new(0.0, total, step_down, cut.op.entry());
     let path = campanion_path::depth_toolpath(contour, &plan, &cut.tolerance).map_err(|err| op_err(cut.op, err))?;
     clearance_retracts(cut, path.moves())
 }
@@ -460,8 +537,11 @@ fn reject_low_rapids(op: &Operation, path: &Toolpath, retract: f64) -> Result<()
     Ok(())
 }
 
-fn compensate_profile(cut: &Cut<'_>, side: ProfileSide, contour: &Contour) -> Result<Contour, CliError> {
-    let distance = cut.tool.path_tool().compensation_distance().map_err(|err| op_err(cut.op, err))?;
+fn tool_radius(cut: &Cut<'_>) -> Result<f64, CliError> {
+    cut.tool.path_tool().compensation_distance().map_err(|err| op_err(cut.op, err))
+}
+
+fn compensate_profile(cut: &Cut<'_>, side: ProfileSide, contour: &Contour, distance: f64) -> Result<Contour, CliError> {
     let path = if matches!(side, ProfileSide::On) || distance <= cut.tolerance.linear() {
         contour.clone()
     } else {
@@ -533,7 +613,11 @@ fn orient_climb(op: &Operation, side: ProfileSide, path: &Contour, tolerance: &T
 
 /// Depths from [`campanion_path::pass_depths`], as absolute Z below the stock surface.
 fn cut_levels(op: &Operation) -> Result<Vec<f64>, CliError> {
-    let depths = campanion_path::pass_depths(op.depth(), op.step_down()).map_err(|err| op_err(op, err))?;
+    depth_levels(op, op.depth(), op.step_down())
+}
+
+fn depth_levels(op: &Operation, total: f64, step_down: f64) -> Result<Vec<f64>, CliError> {
+    let depths = campanion_path::pass_depths(total, step_down).map_err(|err| op_err(op, err))?;
     let mut levels = Vec::with_capacity(depths.len());
     for depth in depths {
         let z = -depth;

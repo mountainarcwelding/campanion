@@ -227,6 +227,11 @@ impl JobTool {
     pub fn ir(&self) -> &IrTool {
         &self.ir
     }
+
+    /// Rotating-cutter diameter in millimetres. `None` for a kerf tool.
+    pub fn diameter(&self) -> Option<f64> {
+        self.ir.diameter()
+    }
 }
 
 /// What an operation asks the path engine to do. Geometry comes from the source layers.
@@ -245,12 +250,51 @@ pub enum OperationKind {
     Engrave,
 }
 
+/// Stock left by a roughing pass, in millimetres. Zero means cut to the contour and to `depth`.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct StockToLeave {
+    wall: f64,
+    floor: f64,
+}
+
+impl StockToLeave {
+    /// Radial stock left on walls, in millimetres.
+    pub fn wall(self) -> f64 {
+        self.wall
+    }
+
+    /// Axial stock left above the floor, in millimetres.
+    pub fn floor(self) -> f64 {
+        self.floor
+    }
+}
+
+/// Finishing pass after roughing. `step_down` is millimetres; `floor` is a pocket-only floor pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Finish {
+    step_down: f64,
+    floor: bool,
+}
+
+impl Finish {
+    /// Maximum thickness of one finishing pass, in millimetres.
+    pub fn step_down(self) -> f64 {
+        self.step_down
+    }
+
+    /// When true, a pocket also finishes the floor.
+    pub fn floor(self) -> bool {
+        self.floor
+    }
+}
+
 /// One layer operation. Depths, heights and feeds are millimetres after loading.
 ///
 /// `depth` and `step_down` are a positive distance downward. They must form a legal
 /// `campanion-path` depth plan (at most 1024 passes, each within 1e6 mm). Heights on
 /// [`Self::params`] are absolute Z. [`Self::entry`] is how each pass is entered.
-/// An omitted entry is a plunge.
+/// An omitted entry is a plunge. [`Self::stock_to_leave`] is millimetres of material
+/// left by roughing; an omitted [`Self::finish`] means no finishing pass.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -259,6 +303,9 @@ pub struct Operation {
     tool_id: u32,
     depth: f64,
     step_down: f64,
+    stepover: Option<f64>,
+    stock_to_leave: StockToLeave,
+    finish: Option<Finish>,
     entry: DepthEntry,
     feeds: Feeds,
     params: ProcessParams,
@@ -290,6 +337,21 @@ impl Operation {
     /// Maximum thickness of one depth pass, in millimetres.
     pub fn step_down(&self) -> f64 {
         self.step_down
+    }
+
+    /// Pocket radial stepover in millimetres. `None` when the file omits it.
+    pub fn stepover(&self) -> Option<f64> {
+        self.stepover
+    }
+
+    /// Stock left by roughing, in millimetres. Omitted fields are zero.
+    pub fn stock_to_leave(&self) -> StockToLeave {
+        self.stock_to_leave
+    }
+
+    /// Finishing pass. `None` when the file omits `finish`.
+    pub fn finish(&self) -> Option<Finish> {
+        self.finish
     }
 
     /// How the tool enters each depth pass. An omitted `entry` object is [`DepthEntry::Plunge`].
@@ -660,7 +722,23 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let map = object(value, "operation").map_err(from_cli)?;
     check_keys(
         map,
-        &["name", "type", "layers", "side", "tool_id", "depth", "step_down", "entry", "feeds", "cut_height", "pierce_height", "timing"],
+        &[
+            "name",
+            "type",
+            "layers",
+            "side",
+            "tool_id",
+            "depth",
+            "step_down",
+            "stepover",
+            "stock_to_leave",
+            "finish",
+            "entry",
+            "feeds",
+            "cut_height",
+            "pierce_height",
+            "timing",
+        ],
         "operation",
     )
     .map_err(from_cli)?;
@@ -669,16 +747,98 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let kind = parse_kind(map)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
     let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
-    if !tools.iter().any(|tool| tool.id() == tool_id) {
-        return Err(JobFileError::invalid(format!("unknown tool {tool_id}")));
-    }
+    let tool = tools.iter().find(|tool| tool.id() == tool_id).ok_or_else(|| JobFileError::invalid(format!("unknown tool {tool_id}")))?;
     let depth = scale_f64(require(map, "depth").map_err(from_cli)?, scale, "depth")?;
     let step_down = scale_f64(require(map, "step_down").map_err(from_cli)?, scale, "step_down")?;
     check_depth(depth, step_down)?;
+    let stepover = parse_stepover(optional(map, "stepover"), kind, tool, scale)?;
+    let stock_to_leave = parse_stock_to_leave(optional(map, "stock_to_leave"), kind, depth, scale)?;
+    let finish = parse_finish(optional(map, "finish"), kind, depth, scale)?;
     let entry = parse_entry(optional(map, "entry"), scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale)?;
-    Ok(Operation { name, kind, layers, tool_id, depth, step_down, entry, feeds, params })
+    Ok(Operation { name, kind, layers, tool_id, depth, step_down, stepover, stock_to_leave, finish, entry, feeds, params })
+}
+
+fn parse_stepover(value: Option<&Value>, kind: OperationKind, tool: &JobTool, scale: f64) -> Result<Option<f64>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if kind != OperationKind::Pocket {
+        return Err(JobFileError::invalid("stepover is only valid on a pocket"));
+    }
+    let Some(diameter) = tool.diameter() else {
+        return Err(JobFileError::invalid("stepover is not valid with a kerf tool"));
+    };
+    let stepover = scale_f64(value, scale, "stepover")?;
+    if !(stepover > 0.0) {
+        return Err(JobFileError::invalid("stepover must be greater than 0"));
+    }
+    if stepover > diameter {
+        return Err(JobFileError::invalid("stepover is larger than the tool diameter"));
+    }
+    Ok(Some(stepover))
+}
+
+fn parse_stock_to_leave(value: Option<&Value>, kind: OperationKind, depth: f64, scale: f64) -> Result<StockToLeave, JobFileError> {
+    let Some(value) = value else {
+        return Ok(StockToLeave::default());
+    };
+    if !matches!(kind, OperationKind::Profile { .. } | OperationKind::Pocket) {
+        return Err(JobFileError::invalid("stock_to_leave is only valid on a profile or pocket"));
+    }
+    let map = object(value, "stock_to_leave").map_err(from_cli)?;
+    check_keys(map, &["wall", "floor"], "stock_to_leave").map_err(from_cli)?;
+    let wall = match optional(map, "wall") {
+        Some(value) => non_negative_length(value, scale, "stock_to_leave wall")?,
+        None => 0.0,
+    };
+    let floor = match optional(map, "floor") {
+        Some(value) => non_negative_length(value, scale, "stock_to_leave floor")?,
+        None => 0.0,
+    };
+    if floor >= depth {
+        return Err(JobFileError::invalid("stock_to_leave floor must be less than depth"));
+    }
+    Ok(StockToLeave { wall, floor })
+}
+
+fn non_negative_length(value: &Value, scale: f64, what: &str) -> Result<f64, JobFileError> {
+    let length = scale_f64(value, scale, what)?;
+    if length < 0.0 {
+        return Err(JobFileError::invalid(format!("{what} must be at least 0")));
+    }
+    Ok(length)
+}
+
+fn parse_finish(value: Option<&Value>, kind: OperationKind, depth: f64, scale: f64) -> Result<Option<Finish>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !matches!(kind, OperationKind::Profile { .. } | OperationKind::Pocket) {
+        return Err(JobFileError::invalid("finish is only valid on a profile or pocket"));
+    }
+    let map = object(value, "finish").map_err(from_cli)?;
+    check_keys(map, &["step_down", "floor"], "finish").map_err(from_cli)?;
+    if matches!(kind, OperationKind::Profile { .. }) && optional(map, "floor").is_some() {
+        return Err(JobFileError::invalid("finish floor is only valid on a pocket"));
+    }
+    let step_down = match optional(map, "step_down") {
+        Some(value) => {
+            let step_down = scale_f64(value, scale, "finish step_down")?;
+            if !(step_down > 0.0) {
+                return Err(JobFileError::invalid("finish step_down must be positive"));
+            }
+            check_depth(depth, step_down)?;
+            step_down
+        }
+        None => depth,
+    };
+    let floor = match optional(map, "floor") {
+        Some(value) => as_bool(value, "floor").map_err(from_cli)?,
+        None => true,
+    };
+    Ok(Some(Finish { step_down, floor }))
 }
 
 /// `entry` is optional. Lengths scale with the file units. Angles stay in degrees until they
@@ -1520,6 +1680,204 @@ mod tests {
         ];
         for (index, (text, needle)) in cases.iter().enumerate() {
             let path = write_job(&format!("bad-{index}"), text);
+            let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+            assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");
+        }
+    }
+
+    fn op_job(units: &str, tools: &str, op: &str) -> String {
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"{units}","tools":{tools},"operations":[{op}]}}"#
+        )
+    }
+
+    #[test]
+    fn parses_stepover_stock_to_leave_and_finish_in_mm_and_inches() {
+        let mm = load(&write_job(
+            "stl-mm",
+            &op_job(
+                "mm",
+                r#"[{"id":1,"diameter":6}]"#,
+                r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stepover":3,"stock_to_leave":{"wall":0.4,"floor":0.2},"finish":{"step_down":1.5,"floor":false}}"#,
+            ),
+        ))
+        .expect("mm");
+        let op = &mm.operations()[0];
+        near(op.stepover().expect("stepover"), 3.0);
+        near(op.stock_to_leave().wall(), 0.4);
+        near(op.stock_to_leave().floor(), 0.2);
+        let finish = op.finish().expect("finish");
+        near(finish.step_down(), 1.5);
+        assert!(!finish.floor());
+
+        let inch = load(&write_job(
+            "stl-inch",
+            &op_job(
+                "inch",
+                r#"[{"id":1,"diameter":0.25}]"#,
+                r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":0.5,"step_down":0.25,"feeds":{"cut":1},"stepover":0.1,"stock_to_leave":{"wall":0.01,"floor":0.02},"finish":{"step_down":0.1,"floor":true}}"#,
+            ),
+        ))
+        .expect("inch");
+        let op = &inch.operations()[0];
+        near(op.stepover().expect("stepover"), 0.1 * 25.4);
+        near(op.stock_to_leave().wall(), 0.01 * 25.4);
+        near(op.stock_to_leave().floor(), 0.02 * 25.4);
+        let finish = op.finish().expect("finish");
+        near(finish.step_down(), 0.1 * 25.4);
+        assert!(finish.floor());
+
+        let profile = load(&write_job(
+            "stl-profile",
+            &op_job(
+                "mm",
+                r#"[{"id":1,"diameter":6}]"#,
+                r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stock_to_leave":{"wall":0.5},"finish":{"step_down":2}}"#,
+            ),
+        ))
+        .expect("profile");
+        let op = &profile.operations()[0];
+        assert_eq!(op.stepover(), None);
+        near(op.stock_to_leave().wall(), 0.5);
+        near(op.stock_to_leave().floor(), 0.0);
+        let finish = op.finish().expect("finish");
+        near(finish.step_down(), 2.0);
+        assert!(finish.floor());
+    }
+
+    #[test]
+    fn omitted_stepover_stock_to_leave_and_finish_use_defaults() {
+        let omitted = load(&write_job(
+            "stl-omitted",
+            &op_job(
+                "mm",
+                r#"[{"id":1,"diameter":6}]"#,
+                r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("omitted");
+        let op = &omitted.operations()[0];
+        assert_eq!(op.stepover(), None);
+        assert_eq!(op.stock_to_leave(), StockToLeave::default());
+        assert_eq!(op.stock_to_leave().wall(), 0.0);
+        assert_eq!(op.stock_to_leave().floor(), 0.0);
+        assert_eq!(op.finish(), None);
+
+        let empty = load(&write_job(
+            "stl-empty",
+            &op_job(
+                "mm",
+                r#"[{"id":1,"diameter":6}]"#,
+                r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stock_to_leave":{},"finish":{}}"#,
+            ),
+        ))
+        .expect("empty objects");
+        let op = &empty.operations()[0];
+        assert_eq!(op.stepover(), None);
+        assert_eq!(op.stock_to_leave().wall(), 0.0);
+        assert_eq!(op.stock_to_leave().floor(), 0.0);
+        let finish = op.finish().expect("finish");
+        near(finish.step_down(), 6.0);
+        assert!(finish.floor());
+    }
+
+    #[test]
+    fn rejects_invalid_stepover_stock_to_leave_and_finish() {
+        let diameter = r#"[{"id":1,"diameter":6}]"#;
+        let kerf = r#"[{"id":1,"kerf":1.2}]"#;
+        let cases = [
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stepover":0}"#,
+                ),
+                "stepover must be greater than 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stepover":6.1}"#,
+                ),
+                "stepover is larger than the tool diameter",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stepover":1}"#,
+                ),
+                "stepover is only valid on a pocket",
+            ),
+            (
+                op_job(
+                    "mm",
+                    kerf,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stepover":0.5}"#,
+                ),
+                "stepover is not valid with a kerf tool",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stock_to_leave":{"wall":-0.1}}"#,
+                ),
+                "stock_to_leave wall must be at least 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stock_to_leave":{"floor":6}}"#,
+                ),
+                "stock_to_leave floor must be less than depth",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"drill","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"finish":{}}"#,
+                ),
+                "finish is only valid on a profile or pocket",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"finish":{"floor":true}}"#,
+                ),
+                "finish floor is only valid on a pocket",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"stock_to_leave":{"bar":1}}"#,
+                ),
+                "unknown stock_to_leave field",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1},"finish":{"step_down":0}}"#,
+                ),
+                "finish step_down must be positive",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":10,"step_down":10,"feeds":{"cut":1},"finish":{"step_down":0.001}}"#,
+                ),
+                "too many depth passes",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let path = write_job(&format!("stl-bad-{index}"), text);
             let err = load(&path).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
             assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");

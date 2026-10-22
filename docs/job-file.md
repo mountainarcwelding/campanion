@@ -87,6 +87,9 @@ unique within that operation. The same layer may appear on two operations.
 | `tool_id` | yes | `id` of a tool in this file. |
 | `depth` | yes | Positive distance downward from the stock surface, in `units`. Not an absolute Z. |
 | `step_down` | yes | Positive maximum thickness of one pass, in `units`. The last pass stops at `depth` and is not deeper. |
+| `stepover` | pocket only | Positive step between pocket passes, in `units`. At most the tool diameter. Rejected on a kerf tool. |
+| `stock_to_leave` | profile and pocket | Object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. |
+| `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). |
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
 | `cut_height` | no | Absolute Z to feed to after the pierce, before the cut. |
@@ -94,8 +97,12 @@ unique within that operation. The same layer may appear on two operations.
 
 `depth` and `step_down` must be a legal `campanion-path` depth plan: positive, at most 1e6 mm,
 and at most 1024 passes. Five millimetres at a two millimetre step is three passes (2, 4, 5).
+When `finish.step_down` is set, it must satisfy the same rule against `depth`.
 
-Pocket strategy, stepover, leads, tabs and drill-cycle fields are not part of this version.
+Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
+removes that remaining stock.
+
+Pocket strategy, leads, tabs and drill-cycle fields are not part of this version.
 
 ### Timing
 
