@@ -47,7 +47,7 @@ fn examples_match_goldens_and_read_back() -> Result<(), String> {
                 assert_eq!(text, golden, "{example} {id}");
             }
             let moves = read_back(&text, &post).map_err(|err| format!("{example} {id} read: {err}"))?;
-            compare(program, &moves, 1e-3).map_err(|err| format!("{example} {id} compare: {err}"))?;
+            compare(program, &moves, 1e-3, &post).map_err(|err| format!("{example} {id} compare: {err}"))?;
         }
     }
     Ok(())

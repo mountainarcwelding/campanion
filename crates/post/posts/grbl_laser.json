@@ -1,0 +1,38 @@
+{
+  "id": "grbl_laser",
+  "name": "Grbl laser",
+  "description": "Grbl laser mode in millimetres. Absolute moves in XY. The header is G21 G90 G17 and M4 S0, which arms dynamic laser power with the beam off. Process on is M4 S{power} and process off is M5. z_mode drop omits Z words. process_feeds.rapid_z is false, so a rapid that only changes Z is left out. power_scale 1000 maps an IR power of 0..1 onto S0..S1000. A missing IR power is written as S1000 and noted in a comment. The program ends with M30.",
+  "units": "mm",
+  "line_numbers": { "enabled": false, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 4, "feed": 3, "dwell": 3 },
+  "trailing_zeros": false,
+  "header": [
+    "({program_name})",
+    "G21",
+    "G90",
+    "G17",
+    "M4 S0"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "s" },
+  "process_feeds": { "rapid_z": false },
+  "power_scale": 1000,
+  "z_mode": "drop",
+  "process": {
+    "spindle": { "on": ["M4 S{power}"], "off": ["M5"] },
+    "torch": { "on": ["M4 S{power}"], "off": ["M5"] },
+    "laser": { "on": ["M4 S{power}"], "off": ["M5"] },
+    "extruder": { "on": ["M4 S{power}"], "off": ["M5"] },
+    "knife": { "on": ["M4 S{power}"], "off": ["M5"] },
+    "other": { "on": ["M4 S{power}"], "off": ["M5"] }
+  },
+  "tool_change": ["(tool {tool})"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M30"],
+  "max_line_length": 256,
+  "axis_letters": "XYZ"
+}

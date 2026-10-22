@@ -1,0 +1,172 @@
+{
+  "format": "campanion-ir/1",
+  "program": {
+    "name": "plasma",
+    "tools": [
+      {
+        "id": 1,
+        "name": "torch",
+        "diameter": null,
+        "kerf": 1.2
+      }
+    ],
+    "machine": null,
+    "toolpaths": [
+      {
+        "name": "plate",
+        "tool_id": 1,
+        "compensation": "off",
+        "feeds": {
+          "cut": 1200.0,
+          "lead_in": null,
+          "lead_out": null,
+          "plunge": 300.0,
+          "retract": null
+        },
+        "pierce": {
+          "x": 10.0,
+          "y": 10.0,
+          "z": 3.0
+        },
+        "tabs": [],
+        "blocks": [
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 10.0,
+                "y": 10.0,
+                "z": 8.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 10.0,
+                "y": 10.0,
+                "z": 3.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "process_on",
+            "process": "torch",
+            "params": {
+              "speed": null,
+              "power": 0.8,
+              "pierce_delay_s": 0.5,
+              "pierce_process_on_during_delay": true,
+              "post_delay_s": 0.25,
+              "post_process_on_during_delay": false,
+              "pierce_height": 3.0,
+              "cut_height": 1.2,
+              "extra": {}
+            }
+          },
+          {
+            "type": "dwell",
+            "seconds": 0.5
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 10.0,
+                "y": 10.0,
+                "z": 1.2
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 300.0,
+            "role": "plunge"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 40.0,
+                "y": 10.0,
+                "z": 1.2
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 1200.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": 50.0,
+                "y": 20.0,
+                "z": 1.2
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "plane": "xy",
+            "center": {
+              "x": 40.0,
+              "y": 20.0,
+              "z": 1.2
+            },
+            "sense": "ccw",
+            "feed": 1200.0,
+            "role": "cut"
+          },
+          {
+            "type": "process_off",
+            "process": "torch"
+          },
+          {
+            "type": "dwell",
+            "seconds": 0.25
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 50.0,
+                "y": 20.0,
+                "z": 8.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          }
+        ]
+      }
+    ],
+    "channel_programs": [],
+    "syncs": []
+  }
+}

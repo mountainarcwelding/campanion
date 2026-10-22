@@ -31,6 +31,14 @@ pub(crate) fn format_fixed(value: f64, decimals: u8, trailing_zeros: bool) -> Re
     Ok(text)
 }
 
+/// True when `a` and `b` write the same `X` and `Y` at this post's linear precision.
+pub(crate) fn xy_text_eq(a: [f64; 3], b: [f64; 3], decimals: u8, trailing_zeros: bool) -> Result<bool> {
+    let same = |left: f64, right: f64| -> Result<bool> {
+        Ok(format_fixed(left, decimals, trailing_zeros)? == format_fixed(right, decimals, trailing_zeros)?)
+    };
+    Ok(same(a[0], b[0])? && same(a[1], b[1])?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::format_fixed;

@@ -5,6 +5,12 @@
 //! `{program_number}` is the post's `program_number` digits (`O{program_number}` becomes `O0001`).
 //! `{tool}` is the tool id on a tool-change template. `{date-free!}` expands to nothing. Date and
 //! time placeholders are rejected so output stays stable.
+//!
+//! `{power}` on a process line is the IR power. With `power_scale` it is written as an integer,
+//! `ir_power * power_scale`. A missing IR power then uses full scale (`1 * power_scale`) and the
+//! writer adds a comment. `process_feeds.rapid_z` drops rapids that only change Z. `z_mode`
+//! `drop` omits Z words. `thc.on` is written on the first feed move after process on and a dwell,
+//! and `thc.off` is written before process off.
 
 use std::collections::BTreeMap;
 
@@ -53,7 +59,19 @@ pub struct PostDef {
     pub(crate) arcs: Arcs,
     pub(crate) planes: bool,
     pub(crate) dwell: Dwell,
+    /// When `rapid_z` is false, a rapid that does not change X or Y is left out.
+    #[serde(default)]
+    pub(crate) process_feeds: ProcessFeeds,
+    /// `{power}` becomes the integer `ir_power * power_scale`. Omit to keep the raw power text.
+    #[serde(default)]
+    pub(crate) power_scale: Option<f64>,
+    /// `keep` writes Z. `drop` omits the Z word on every motion block.
+    #[serde(default = "default_z_mode")]
+    pub(crate) z_mode: String,
     pub(crate) process: BTreeMap<String, ProcessWords>,
+    /// Torch-height control. `on` follows the pierce dwell. `off` precedes process off.
+    #[serde(default)]
+    pub(crate) thc: Option<ThcWords>,
     pub(crate) tool_change: Vec<String>,
     pub(crate) coolant: CoolantWords,
     pub(crate) comments: Comments,
@@ -103,6 +121,30 @@ pub(crate) struct ProcessWords {
     pub(crate) off: Vec<String>,
 }
 
+/// Whether positioning rapids along Z are written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProcessFeeds {
+    /// False drops a rapid whose rounded X and Y match the previous point.
+    pub(crate) rapid_z: bool,
+}
+
+impl Default for ProcessFeeds {
+    fn default() -> Self {
+        Self { rapid_z: true }
+    }
+}
+
+/// Lines for torch-height control.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ThcWords {
+    /// Written on the first feed move after process on and a pierce dwell.
+    pub(crate) on: Vec<String>,
+    /// Written immediately before process off.
+    pub(crate) off: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CoolantWords {
@@ -119,6 +161,10 @@ pub(crate) struct Comments {
 
 fn default_axis_letters() -> String {
     "XYZ".to_string()
+}
+
+fn default_z_mode() -> String {
+    "keep".to_string()
 }
 
 impl PostDef {
@@ -139,7 +185,15 @@ impl PostDef {
         if !matches!(self.dwell.unit.as_str(), "s" | "ms") {
             return Err(field("dwell.unit", "must be s or ms"));
         }
+        check_power_scale(self.power_scale)?;
+        if !matches!(self.z_mode.as_str(), "keep" | "drop") {
+            return Err(field("z_mode", "must be keep or drop"));
+        }
         check_process(&self.process)?;
+        if let Some(thc) = &self.thc {
+            check_templates("thc.on", &thc.on, PROCESS_KEYS)?;
+            check_templates("thc.off", &thc.off, PROCESS_KEYS)?;
+        }
         check_templates("tool_change", &self.tool_change, TOOL_KEYS)?;
         check_coolant(&self.coolant)?;
         if !matches!(self.comments.style.as_str(), "paren" | "semicolon" | "none") {
@@ -191,6 +245,17 @@ impl PostDef {
             _ => ArcMode::Ijk,
         }
     }
+
+    pub(crate) fn drop_z(&self) -> bool {
+        self.z_mode == "drop"
+    }
+}
+
+fn check_power_scale(scale: Option<f64>) -> Result<()> {
+    let Some(scale) = scale else {
+        return Ok(());
+    };
+    if scale.is_finite() && (0.0..=1.0e9).contains(&scale) { Ok(()) } else { Err(field("power_scale", "must be finite and in 0..=1e9")) }
 }
 
 fn check_token(field_name: &str, text: &str, max: usize) -> Result<()> {

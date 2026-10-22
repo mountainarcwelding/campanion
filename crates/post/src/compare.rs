@@ -6,7 +6,9 @@
 
 use campanion_ir::{ArcSense, ClBlock, ClMotion, Plane, Pose, Program, Vec3};
 
+use crate::def::PostDef;
 use crate::error::{Result, invalid, unsupported};
+use crate::fmt::xy_text_eq;
 use crate::geom::{self, Xyz};
 use crate::read::ReadMove;
 
@@ -14,13 +16,18 @@ use crate::read::ReadMove;
 ///
 /// `tol` is millimetres. Non-motion blocks in `moves` are ignored. A channel program is
 /// [`crate::PostError::NotSupported`].
-pub fn compare(program: &Program, moves: &[ReadMove], tol: f64) -> Result<()> {
+///
+/// `post` selects moves the writer left out. `z_mode` `drop` compares X and Y only. A rapid that
+/// only changes Z is skipped when `process_feeds.rapid_z` is false. A feed that only changes Z
+/// is skipped in that Z mode too, because the block would have no axis word.
+pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) -> Result<()> {
     if !(tol.is_finite() && tol >= 0.0) {
         return Err(invalid("tolerance must be finite and >= 0"));
     }
     if !program.channel_programs().is_empty() {
         return Err(unsupported("channel programs are not supported"));
     }
+    let drop_z = post.drop_z();
     let motions: Vec<&ReadMove> = moves.iter().filter(|move_| is_motion(move_)).collect();
     let mut cursor = 0usize;
     let mut pos: Option<Xyz> = None;
@@ -31,12 +38,16 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64) -> Result<()> {
             match motion {
                 ClMotion::Rapid { to, .. } => {
                     let end = tip(*to);
-                    take_line(&motions, &mut cursor, true, end, tol, index)?;
+                    if !skip_z_only(post, pos, end, true)? {
+                        take_line(&motions, &mut cursor, true, end, tol, index, drop_z)?;
+                    }
                     pos = Some(end);
                 }
                 ClMotion::Linear { to, .. } => {
                     let end = tip(*to);
-                    take_line(&motions, &mut cursor, false, end, tol, index)?;
+                    if !skip_z_only(post, pos, end, false)? {
+                        take_line(&motions, &mut cursor, false, end, tol, index, drop_z)?;
+                    }
                     pos = Some(end);
                 }
                 ClMotion::Arc { to, plane, center, sense, .. } => {
@@ -44,14 +55,14 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64) -> Result<()> {
                     let end = tip(*to);
                     let center = xyz(*center);
                     let sweep = geom::arc_sweep(start, end, center, *plane, *sense, 0.0)?;
-                    consume_curve(&motions, &mut cursor, start, end, center, *plane, *sense, sweep, tol, index)?;
+                    consume_curve(&motions, &mut cursor, start, end, center, *plane, *sense, sweep, tol, index, drop_z)?;
                     pos = Some(end);
                 }
                 ClMotion::Helix { to, plane, center, sense, sweep, .. } => {
                     let start = pos.ok_or_else(|| invalid(format!("motion {index}: helix needs a prior position")))?;
                     let end = tip(*to);
                     let center = xyz(*center);
-                    consume_curve(&motions, &mut cursor, start, end, center, *plane, *sense, *sweep, tol, index)?;
+                    consume_curve(&motions, &mut cursor, start, end, center, *plane, *sense, *sweep, tol, index, drop_z)?;
                     pos = Some(end);
                 }
             }
@@ -64,7 +75,24 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64) -> Result<()> {
     Ok(())
 }
 
-fn take_line(moves: &[&ReadMove], cursor: &mut usize, rapid: bool, end: Xyz, tol: f64, index: usize) -> Result<()> {
+/// True when the writer emits no block: X and Y are unchanged, and either this is a dropped
+/// Z rapid or Z words are omitted so a feed would also be empty.
+fn skip_z_only(post: &PostDef, pos: Option<Xyz>, end: Xyz, rapid: bool) -> Result<bool> {
+    let Some(pos) = pos else {
+        return Ok(false);
+    };
+    if !xy_text_eq(pos, end, post.decimals.linear, post.trailing_zeros)? {
+        return Ok(false);
+    }
+    let drop_rapid = rapid && !post.process_feeds.rapid_z;
+    Ok(drop_rapid || post.drop_z())
+}
+
+fn project(point: Xyz, drop_z: bool) -> Xyz {
+    if drop_z { [point[0], point[1], 0.0] } else { point }
+}
+
+fn take_line(moves: &[&ReadMove], cursor: &mut usize, rapid: bool, end: Xyz, tol: f64, index: usize, drop_z: bool) -> Result<()> {
     let Some(mv) = moves.get(*cursor).copied() else {
         return Err(invalid(format!("motion {index}: missing g-code")));
     };
@@ -78,6 +106,8 @@ fn take_line(moves: &[&ReadMove], cursor: &mut usize, rapid: bool, end: Xyz, tol
     if got_rapid != rapid {
         return Err(invalid(format!("motion {index}: feed and rapid were swapped")));
     }
+    let got = project(got, drop_z);
+    let end = project(end, drop_z);
     if geom::dist3(got, end) > tol {
         return Err(invalid(format!("motion {index}: end differs by {:.6} mm", geom::dist3(got, end))));
     }
@@ -95,7 +125,11 @@ fn consume_curve(
     sweep: f64,
     tol: f64,
     index: usize,
+    drop_z: bool,
 ) -> Result<()> {
+    let start = project(start, drop_z);
+    let end = project(end, drop_z);
+    let center = project(center, drop_z);
     if !(sweep.is_finite() && sweep > 0.0) {
         return Err(invalid(format!("motion {index}: sweep must be positive")));
     }
@@ -111,15 +145,16 @@ fn consume_curve(
         if guard > 100_001 {
             return Err(invalid(format!("motion {index}: too many blocks")));
         }
-        let point = end_of(mv);
+        let point = project(end_of(mv), drop_z);
         match mv {
             ReadMove::Rapid { .. } => return Err(invalid(format!("motion {index}: arc was posted as a rapid"))),
             ReadMove::Arc { sense: got, center: got_center, radius, .. } => {
                 if *got != sense {
                     return Err(invalid(format!("motion {index}: arc sense differs")));
                 }
+                let got_center = project(*got_center, drop_z);
                 let centre_tol = if radius.is_some() { radius_centre_limit(prev, point, center, plane, tol) } else { tol };
-                if !centre_ok(*got_center, center, plane, radius.is_some(), centre_tol) {
+                if !centre_ok(got_center, center, plane, radius.is_some(), centre_tol) {
                     return Err(invalid(format!("motion {index}: arc centre differs")));
                 }
             }

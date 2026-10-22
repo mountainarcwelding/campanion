@@ -39,7 +39,7 @@ fn linux() -> crate::PostDef {
 
 #[test]
 fn builtins_load_and_match_ids() {
-    assert_eq!(builtin_ids(), &["linuxcnc", "grbl", "mach3", "fanuc", "haas"]);
+    assert_eq!(builtin_ids(), &["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"]);
     for id in builtin_ids() {
         let post = builtin(id).expect(id);
         assert_eq!(post.id(), *id);
@@ -119,7 +119,7 @@ fn linuxcnc_preamble_and_modal_lines() {
     assert!(!text.contains("M3 S"), "{text}");
     assert!(text.contains("M5"), "{text}");
     let moves = read_back(&text, &linux()).expect("read");
-    compare(&program, &moves, 1e-3).expect("compare");
+    compare(&program, &moves, 1e-3, &linux()).expect("compare");
     for line in text.lines() {
         assert!(line.chars().count() <= 256, "{line}");
     }
@@ -153,7 +153,7 @@ fn grbl_comments_tool_change_and_has_no_line_numbers() {
     assert!(text.trim_end().ends_with("M30"), "{text}");
     assert!(text.contains("X1 Y2 Z3") || text.contains("X1.0 Y2.0 Z3.0") || text.contains("X1.0000"), "{text}");
     let moves = read_back(&text, &post).expect("read");
-    compare(&program, &moves, 1e-3).expect("compare");
+    compare(&program, &moves, 1e-3, &post).expect("compare");
 }
 
 fn word_letters(line: &str) -> Vec<char> {
@@ -211,7 +211,7 @@ fn arc_centre_words_stay_in_plane() {
     assert!(letters.contains(&'I') && letters.contains(&'K'), "{zx_line}");
     assert!(!letters.contains(&'J'), "{zx_line}");
     let moves = read_back(&zx, &linux()).expect("read");
-    compare(&zx_program, &moves, 1e-3).expect("compare");
+    compare(&zx_program, &moves, 1e-3, &linux()).expect("compare");
 
     let yz_blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 1.0, 0.0), feed: None }),
@@ -230,7 +230,7 @@ fn arc_centre_words_stay_in_plane() {
     let letters = word_letters(yz_line);
     assert!(letters.contains(&'J') && letters.contains(&'K'), "{yz_line}");
     assert!(!letters.contains(&'I'), "{yz_line}");
-    compare(&yz_program, &read_back(&yz, &linux()).expect("read"), 1e-3).expect("compare");
+    compare(&yz_program, &read_back(&yz, &linux()).expect("read"), 1e-3, &linux()).expect("compare");
 }
 
 fn sequence_numbers(text: &str) -> Vec<u32> {
@@ -277,7 +277,7 @@ fn mach3_header_is_unnumbered_and_ends_with_m30() {
     assert!(!text.lines().any(|line| line.starts_with('N') || line.starts_with('O')), "{text}");
     assert!(text.trim_end().ends_with("M30"), "{text}");
     let moves = read_back(&text, &post).expect("read");
-    compare(&program(vec![ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 3.0), feed: None })]), &moves, 1e-3).expect("compare");
+    compare(&program(vec![ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 3.0), feed: None })]), &moves, 1e-3, &post).expect("compare");
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn fanuc_splits_full_circles_and_linearises_helices() {
     assert!(text.contains("G1 "), "{text}");
     assert!(text.contains("Z-1\n"), "{text}");
     let moves = read_back(&text, &post).expect("read");
-    compare(&posted, &moves, 1e-3).expect("compare");
+    compare(&posted, &moves, 1e-3, &post).expect("compare");
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn haas_keeps_ijk_helices_and_five_digit_program_number() {
     }
     assert!(arcs[1].contains("Z-1"), "{text}");
     let moves = read_back(&text, &post).expect("read");
-    compare(&posted, &moves, 1e-3).expect("compare");
+    compare(&posted, &moves, 1e-3, &post).expect("compare");
 }
 
 fn round_trip(post_json: &str, blocks: Vec<ClBlock>, tol: f64) {
@@ -390,7 +390,7 @@ fn round_trip(post_json: &str, blocks: Vec<ClBlock>, tol: f64) {
     let program = program(blocks);
     let text = post_program(&program, &post, &options()).expect("post");
     let moves = read_back(&text, &post).expect("read");
-    compare(&program, &moves, tol).expect("compare");
+    compare(&program, &moves, tol, &post).expect("compare");
 }
 
 #[test]
@@ -502,6 +502,265 @@ fn channel_programs_and_controller_compensation_are_rejected() {
     let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new()).expect("program");
     let err = post_program(&program, &linux(), &options()).expect_err("comp");
     assert!(err.to_string().contains("not supported"), "{err}");
+}
+
+fn without_comments(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '(' {
+            for inner in chars.by_ref() {
+                if inner == ')' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == ';' {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn assert_no_z_word(text: &str) {
+    for line in text.lines() {
+        for word in without_comments(line).split_whitespace() {
+            assert!(!word.starts_with('Z'), "unexpected Z word in {line}");
+        }
+    }
+}
+
+fn torch_params(power: Option<f64>) -> ProcessParams {
+    ProcessParams::new().power(power).expect("power").pierce_delay(0.5, true).expect("pierce").post_delay(0.25, false).expect("post")
+}
+
+fn torch_cut(power: Option<f64>) -> Program {
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 10.0, 8.0), feed: None }),
+        ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 10.0, 3.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params: torch_params(power) }),
+        ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 10.0, 1.2), feed: 300.0, role: MoveRole::Plunge }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(40.0, 10.0, 1.2), feed: 1200.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(50.0, 20.0, 1.2),
+            plane: Plane::Xy,
+            center: at(40.0, 20.0, 1.2),
+            sense: ArcSense::Ccw,
+            feed: 1200.0,
+            role: MoveRole::Cut,
+        }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }),
+        ClBlock::Event(Event::Dwell { seconds: 0.25 }),
+        ClBlock::Motion(ClMotion::Rapid { to: pose(50.0, 20.0, 8.0), feed: None }),
+    ];
+    program(blocks)
+}
+
+fn line_with_word(text: &str, word: &str) -> usize {
+    text.lines()
+        .position(|line| without_comments(line).split_whitespace().any(|token| token == word))
+        .unwrap_or_else(|| panic!("missing {word} in {text}"))
+}
+
+fn line_with_words(text: &str, words: &[&str]) -> usize {
+    text.lines()
+        .position(|line| {
+            let stripped = without_comments(line);
+            words.iter().all(|word| stripped.split_whitespace().any(|token| token == *word))
+        })
+        .unwrap_or_else(|| panic!("missing {words:?} in {text}"))
+}
+
+#[test]
+fn cutting_fields_are_validated() {
+    let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/grbl.json")).expect("json");
+    raw["z_mode"] = serde_json::json!("float");
+    let err = load_post(&raw.to_string()).expect_err("z");
+    assert!(err.to_string().contains("z_mode"), "{err}");
+    raw["z_mode"] = serde_json::json!("drop");
+    raw["power_scale"] = serde_json::json!(-1.0);
+    let err = load_post(&raw.to_string()).expect_err("scale");
+    assert!(err.to_string().contains("power_scale"), "{err}");
+    raw["power_scale"] = serde_json::json!(1.0e12);
+    let err = load_post(&raw.to_string()).expect_err("scale range");
+    assert!(err.to_string().contains("power_scale"), "{err}");
+    raw["power_scale"] = serde_json::json!(1000);
+    raw["process_feeds"] = serde_json::json!({"rapid_z": false, "plunge": 1});
+    let err = load_post(&raw.to_string()).expect_err("feeds");
+    assert!(err.to_string().contains("plunge") || err.to_string().contains("unknown"), "{err}");
+    raw["process_feeds"] = serde_json::json!({});
+    let err = load_post(&raw.to_string()).expect_err("rapid_z");
+    assert!(err.to_string().contains("rapid_z"), "{err}");
+    raw["process_feeds"] = serde_json::json!({"rapid_z": false});
+    raw["thc"] = serde_json::json!({"on": ["T{tool}"], "off": []});
+    let err = load_post(&raw.to_string()).expect_err("thc");
+    assert!(err.to_string().contains("thc.on"), "{err}");
+    raw["thc"] = serde_json::json!({"on": [], "off": []});
+    let post = load_post(&raw.to_string()).expect("cutting fields");
+    assert!(post.drop_z());
+    assert!(!post.process_feeds.rapid_z);
+    assert_eq!(post.power_scale, Some(1000.0));
+}
+
+#[test]
+fn plasma_fires_the_torch_and_linearises_helices() {
+    let post = builtin("plasma").expect("plasma");
+    let text = post_program(&torch_cut(Some(0.8)), &post, &options()).expect("post");
+    for code in ["G21", "G90", "G17", "G40", "G49", "G64 P0.05"] {
+        assert!(text.contains(code), "{code} missing in {text}");
+    }
+    assert!(text.contains("M3 S1"), "{text}");
+    assert!(!text.contains("S0.8") && !text.contains("S800"), "{text}");
+    assert!(text.contains("G4 P0.500"), "{text}");
+    assert!(text.contains("G4 P0.250"), "{text}");
+    assert!(text.trim_end().ends_with("M2"), "{text}");
+    let pierce = line_with_words(&text, &["G4", "P0.500"]);
+    let cut = line_with_word(&text, "G1");
+    let off = line_with_word(&text, "M5");
+    let posted = line_with_words(&text, &["G4", "P0.250"]);
+    assert!(line_with_word(&text, "S1") < pierce && pierce < cut && cut < off && off < posted, "{text}");
+    let moves = read_back(&text, &post).expect("read");
+    compare(&torch_cut(Some(0.8)), &moves, 1e-3, &post).expect("compare");
+
+    let helix = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 0.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Helix {
+            to: pose(10.0, 0.0, -1.0),
+            plane: Plane::Xy,
+            center: Vec3::ZERO,
+            sense: ArcSense::Ccw,
+            sweep: std::f64::consts::TAU,
+            feed: 80.0,
+            role: MoveRole::Cut,
+        }),
+    ]);
+    let helix_text = post_program(&helix, &post, &options()).expect("helix");
+    assert!(arc_lines(&helix_text).is_empty(), "{helix_text}");
+    assert!(helix_text.contains("G1 "), "{helix_text}");
+    assert!(helix_text.contains("Z-1.0000"), "{helix_text}");
+    compare(&helix, &read_back(&helix_text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let arc = text.lines().find(|line| line.split_whitespace().any(|word| word == "G3")).expect("arc");
+    let letters = word_letters(arc);
+    assert!(letters.contains(&'I') && letters.contains(&'J'), "{arc}");
+    assert!(!letters.contains(&'K'), "{arc}");
+}
+
+#[test]
+fn grbl_laser_drops_z_and_scales_power() {
+    let post = builtin("grbl_laser").expect("grbl_laser");
+    assert_eq!(post.power_scale, Some(1000.0));
+    assert!(post.drop_z());
+    assert!(!post.process_feeds.rapid_z);
+    let text = post_program(&torch_cut(Some(0.8)), &post, &options()).expect("post");
+    assert!(text.lines().take(5).any(|line| line == "G21"), "{text}");
+    assert!(text.lines().any(|line| line == "G90"), "{text}");
+    assert!(text.lines().any(|line| line == "G17"), "{text}");
+    assert!(text.lines().any(|line| line == "M4 S0"), "{text}");
+    assert!(text.contains("M4 S800"), "{text}");
+    assert!(!text.contains("power missing"), "{text}");
+    assert!(text.trim_end().ends_with("M30"), "{text}");
+    assert_no_z_word(&text);
+    let rapids = text.lines().filter(|line| without_comments(line).split_whitespace().any(|word| word == "G0")).count();
+    assert_eq!(rapids, 1, "Z-only rapids stay in the file:\n{text}");
+    compare(&torch_cut(Some(0.8)), &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let missing = post_program(&torch_cut(None), &post, &options()).expect("missing");
+    assert!(missing.contains("power missing, using S1000"), "{missing}");
+    assert!(missing.contains("M4 S1000"), "{missing}");
+    assert_no_z_word(&missing);
+
+    let zero = ProcessParams::new().power(Some(0.0)).expect("zero");
+    let off = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 3.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Laser, params: zero }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(4.0, 2.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Laser }),
+    ]);
+    let zero_text = post_program(&off, &post, &options()).expect("zero");
+    assert!(zero_text.contains("M4 S0\n"), "{zero_text}");
+    assert!(!zero_text.contains("power missing"), "{zero_text}");
+    assert_no_z_word(&zero_text);
+    let half = ProcessParams::new().power(Some(0.5)).expect("half");
+    let half_program = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Laser, params: half }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Laser }),
+    ]);
+    let half_text = post_program(&half_program, &post, &options()).expect("half");
+    assert!(half_text.contains("M4 S500"), "{half_text}");
+    assert!(!half_text.contains("power missing"), "{half_text}");
+}
+
+#[test]
+fn thc_lines_follow_the_pierce_dwell() {
+    let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/plasma.json")).expect("json");
+    raw["thc"] = serde_json::json!({"on": ["(THC ON)"], "off": ["(THC OFF)"]});
+    let post = load_post(&raw.to_string()).expect("post");
+    let text = post_program(&torch_cut(Some(0.8)), &post, &options()).expect("post");
+    let pierce = line_with_words(&text, &["G4", "P0.500"]);
+    let on = text.lines().position(|line| line.contains("THC ON")).expect("thc on");
+    let cut = line_with_word(&text, "G1");
+    let off = text.lines().position(|line| line.contains("THC OFF")).expect("thc off");
+    let torch_off = line_with_word(&text, "M5");
+    assert!(pierce + 1 == on && on < cut && cut < off && off + 1 == torch_off, "{text}");
+    compare(&torch_cut(Some(0.8)), &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let bare = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params: ProcessParams::new() }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(5.0, 0.0, 1.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }),
+    ]);
+    let bare_text = post_program(&bare, &post, &options()).expect("bare");
+    assert!(!bare_text.contains("THC"), "{bare_text}");
+
+    let dwell_first = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Event(Event::Dwell { seconds: 0.2 }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params: ProcessParams::new() }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(5.0, 0.0, 1.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }),
+    ]);
+    let dwell_first_text = post_program(&dwell_first, &post, &options()).expect("dwell first");
+    assert!(!dwell_first_text.contains("THC"), "{dwell_first_text}");
+
+    let open = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 2.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params: torch_params(Some(1.0)) }),
+        ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(3.0, 0.0, 2.0), feed: 100.0, role: MoveRole::Cut }),
+    ]);
+    let open_text = post_program(&open, &post, &options()).expect("open");
+    let on = open_text.lines().position(|line| line.contains("THC ON")).expect("thc on");
+    let off = open_text.lines().position(|line| line.contains("THC OFF")).expect("thc off");
+    let end_off = line_with_word(&open_text, "M5");
+    assert!(line_with_word(&open_text, "G4") < on && on < line_with_word(&open_text, "G1") && off + 1 == end_off, "{open_text}");
+    assert!(open_text.trim_end().ends_with("M2"), "{open_text}");
+}
+
+#[test]
+fn rapid_z_false_drops_only_z_rapids() {
+    let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/linuxcnc.json")).expect("json");
+    raw["process_feeds"] = serde_json::json!({"rapid_z": false});
+    let post = load_post(&raw.to_string()).expect("post");
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 5.0), feed: None }),
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 1.0), feed: 200.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 0.0), feed: 50.0, role: MoveRole::Plunge }),
+    ];
+    let posted = program(blocks);
+    let text = post_program(&posted, &post, &options()).expect("post");
+    assert!(text.contains("Z5.0000"), "{text}");
+    assert!(text.contains("Z1.0000"), "{text}");
+    assert!(text.contains("Z0.0000"), "{text}");
+    let z_only = text.lines().filter(|line| without_comments(line).contains("X0.0000 Y0.0000 Z1.0000")).count();
+    assert_eq!(z_only, 0, "{text}");
+    compare(&posted, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
 }
 
 #[test]

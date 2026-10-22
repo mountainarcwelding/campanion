@@ -2,6 +2,8 @@
 
 `sample.ir.json`, `curves.ir.json`, and `dome.ir.json` are cutter-location programs for `examples/sample.job.json`, `examples/curves.job.json`, and `examples/dome.job.json`. The golden G-code under `crates/post/tests/golden/` is posted from these files, so they contain no dates or timestamps.
 
+`plasma.ir.json` is a torch program built in `tests/cutting.rs` (pierce dwell, post dwell, and power). It is not produced from a job file. Regenerate it with `UPDATE_PLASMA_IR=1 cargo test -p campanion-post --test cutting`.
+
 Regenerate them from the repository root:
 
 ```

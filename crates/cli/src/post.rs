@@ -44,7 +44,7 @@ pub(crate) fn render(program: &Program, post: &PostDef, tolerance_mm: f64) -> Re
     let text = campanion_post::post_program(program, post, &options).map_err(|err| CliError::run(format!("post `{}`: {err}", post.id())))?;
     let moves =
         campanion_post::read_back(&text, post).map_err(|err| CliError::run(format!("post `{}` output could not be read back: {err}", post.id())))?;
-    campanion_post::compare(program, &moves, tolerance_mm)
+    campanion_post::compare(program, &moves, tolerance_mm, post)
         .map_err(|err| CliError::run(format!("post `{}` does not match the program within {tolerance_mm} mm: {err}", post.id())))?;
     Ok(text)
 }
