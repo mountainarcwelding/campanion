@@ -102,8 +102,13 @@ fn check_positive(value: f64, what: &str) -> Result<()> {
 
 /// Z of each level, from `top_z - step_down` down to exactly `bottom_z`.
 fn level_heights(params: &ZLevelParams) -> Result<Vec<f64>> {
-    let total = params.top_z - params.bottom_z;
-    let steps = (total / params.step_down).ceil();
+    plan_levels(params.top_z, params.bottom_z, params.step_down)
+}
+
+/// Depth plan shared with waterline finishing. The first level is `top_z - step_down` and the last is exactly `bottom_z`.
+pub(crate) fn plan_levels(top_z: f64, bottom_z: f64, step_down: f64) -> Result<Vec<f64>> {
+    let total = top_z - bottom_z;
+    let steps = (total / step_down).ceil();
     if !steps.is_finite() || steps > MAX_LEVELS as f64 {
         return Err(invalid(format!("too many z levels: limit is {MAX_LEVELS}")));
     }
@@ -113,16 +118,16 @@ fn level_heights(params: &ZLevelParams) -> Result<Vec<f64>> {
         if heights.len() >= MAX_LEVELS {
             return Err(invalid(format!("too many z levels: limit is {MAX_LEVELS}")));
         }
-        let next = done + params.step_down;
+        let next = done + step_down;
         if !next.is_finite() {
             return Err(invalid("z level is not finite"));
         }
         if next >= total - 1e-9 {
-            heights.push(params.bottom_z);
+            heights.push(bottom_z);
             break;
         }
         done = next;
-        let z = params.top_z - done;
+        let z = top_z - done;
         if !z.is_finite() {
             return Err(invalid("z level is not finite"));
         }
@@ -131,32 +136,54 @@ fn level_heights(params: &ZLevelParams) -> Result<Vec<f64>> {
     Ok(heights)
 }
 
-struct SampleGrid {
+pub(crate) struct SampleGrid {
     xs: Vec<f64>,
     ys: Vec<f64>,
     /// Required tip Z. `None` is a border sample, forbidden at every level.
     required: Vec<Option<f64>>,
 }
 
+pub(crate) fn grid_size(grid: &SampleGrid) -> (usize, usize) {
+    (grid.xs.len(), grid.ys.len())
+}
+
 fn sample_grid(dc: &DropCutter, area_min: (f64, f64), area_max: (f64, f64), params: &ZLevelParams) -> Result<SampleGrid> {
-    let xs = axis_coords(area_min.0, area_max.0, params.grid)?;
-    let ys = axis_coords(area_min.1, area_max.1, params.grid)?;
+    let floor = params.bottom_z - 1.0;
+    sample_heights(dc, area_min, area_max, params.grid, floor, params.stock_to_leave, true)
+}
+
+/// Drop-cutter samples on the stock rectangle.
+///
+/// `floor` is the miss height passed to [`DropCutter::tip_z_or`]. `stock_to_leave` is added to each hit.
+/// When `seal_border` is set, the outer samples are `None` (forbidden) so every traced loop closes
+/// inside the rectangle. Waterline leaves the border real: the contact curve already closes, and a
+/// sealed border would trace the rectangle as well.
+pub(crate) fn sample_heights(
+    dc: &DropCutter,
+    area_min: (f64, f64),
+    area_max: (f64, f64),
+    grid: f64,
+    floor: f64,
+    stock_to_leave: f64,
+    seal_border: bool,
+) -> Result<SampleGrid> {
+    let xs = axis_coords(area_min.0, area_max.0, grid)?;
+    let ys = axis_coords(area_min.1, area_max.1, grid)?;
     let count = xs.len().checked_mul(ys.len()).ok_or_else(|| invalid(format!("too many samples: limit is {MAX_SAMPLES}")))?;
     if count > MAX_SAMPLES {
         return Err(invalid(format!("too many samples: {count} > {MAX_SAMPLES}")));
     }
-    let floor = params.bottom_z - 1.0;
     if !floor.is_finite() {
         return Err(invalid("drop-cutter floor is not finite"));
     }
     let mut required = Vec::with_capacity(count);
     for (j, y) in ys.iter().copied().enumerate() {
         for (i, x) in xs.iter().copied().enumerate() {
-            if i == 0 || j == 0 || i + 1 == xs.len() || j + 1 == ys.len() {
+            if seal_border && (i == 0 || j == 0 || i + 1 == xs.len() || j + 1 == ys.len()) {
                 required.push(None);
                 continue;
             }
-            let tip = dc.tip_z_or(x, y, floor) + params.stock_to_leave;
+            let tip = dc.tip_z_or(x, y, floor) + stock_to_leave;
             if !tip.is_finite() {
                 return Err(invalid("required tip z is not finite"));
             }
@@ -214,7 +241,7 @@ fn field_z(required: Option<f64>, level: f64) -> f64 {
     }
 }
 
-fn sample_required(grid: &SampleGrid, i: usize, j: usize) -> Result<Option<f64>> {
+pub(crate) fn sample_required(grid: &SampleGrid, i: usize, j: usize) -> Result<Option<f64>> {
     let nx = grid.xs.len();
     let index = j.checked_mul(nx).and_then(|row| row.checked_add(i)).ok_or_else(|| invalid("sample index overflow"))?;
     grid.required.get(index).copied().ok_or_else(|| invalid("sample index is out of range"))
@@ -225,13 +252,13 @@ fn coord_at(coords: &[f64], index: usize) -> Result<f64> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct EdgeKey {
+pub(crate) struct EdgeKey {
     i: u32,
     j: u32,
     vertical: bool,
 }
 
-struct Frag {
+pub(crate) struct Frag {
     from: EdgeKey,
     to: EdgeKey,
 }
@@ -250,7 +277,7 @@ fn trace_allowed(grid: &SampleGrid, level: f64, tol: &Tolerance) -> Result<Vec<C
     loops_to_contours(&loops, tol)
 }
 
-fn march(grid: &SampleGrid, level: f64) -> Result<Vec<Frag>> {
+pub(crate) fn march(grid: &SampleGrid, level: f64) -> Result<Vec<Frag>> {
     let nx = grid.xs.len();
     let ny = grid.ys.len();
     let mut frags = Vec::new();
@@ -315,6 +342,11 @@ fn side_key(side: Side, i: usize, j: usize) -> Result<EdgeKey> {
 }
 
 fn stitch(frags: &[Frag], grid: &SampleGrid, level: f64) -> Result<Vec<Vec<(f64, f64)>>> {
+    stitch_points(frags, |key| edge_point(grid, key, level))
+}
+
+/// Join marching-squares fragments into loops. `point_at` places the vertex on each edge.
+pub(crate) fn stitch_points(frags: &[Frag], mut point_at: impl FnMut(EdgeKey) -> Result<(f64, f64)>) -> Result<Vec<Vec<(f64, f64)>>> {
     let mut start_at: HashMap<EdgeKey, usize> = HashMap::new();
     for (idx, frag) in frags.iter().enumerate() {
         if start_at.insert(frag.from, idx).is_some() {
@@ -336,7 +368,7 @@ fn stitch(frags: &[Frag], grid: &SampleGrid, level: f64) -> Result<Vec<Vec<(f64,
             }
             *flag = true;
             let frag = frags.get(idx).ok_or_else(|| invalid("marching squares index is out of range"))?;
-            points.push(edge_point(grid, frag.from, level)?);
+            points.push(point_at(frag.from)?);
             let next = start_at.get(&frag.to).copied().ok_or_else(|| invalid("open marching squares loop"))?;
             if next == start {
                 break;
@@ -351,8 +383,25 @@ fn stitch(frags: &[Frag], grid: &SampleGrid, level: f64) -> Result<Vec<Vec<(f64,
     Ok(loops)
 }
 
+/// Grid nodes at the two ends of a marching-squares edge. The first is `(i, j)`.
+pub(crate) fn edge_corners(key: EdgeKey) -> ((usize, usize), (usize, usize)) {
+    let i = key.i as usize;
+    let j = key.j as usize;
+    if key.vertical { ((i, j), (i, j + 1)) } else { ((i, j), (i + 1, j)) }
+}
+
+/// XY of the two ends of a marching-squares edge.
+pub(crate) fn edge_endpoints(grid: &SampleGrid, key: EdgeKey) -> Result<((f64, f64), (f64, f64))> {
+    let ((i0, j0), (i1, j1)) = edge_corners(key);
+    let x0 = coord_at(&grid.xs, i0)?;
+    let y0 = coord_at(&grid.ys, j0)?;
+    let x1 = coord_at(&grid.xs, i1)?;
+    let y1 = coord_at(&grid.ys, j1)?;
+    Ok(((x0, y0), (x1, y1)))
+}
+
 /// Linear crossing of `level` along the edge, kept off the corners so loops do not collapse.
-fn edge_point(grid: &SampleGrid, key: EdgeKey, level: f64) -> Result<(f64, f64)> {
+pub(crate) fn edge_point(grid: &SampleGrid, key: EdgeKey, level: f64) -> Result<(f64, f64)> {
     let i = key.i as usize;
     let j = key.j as usize;
     let (i1, j1) = if key.vertical { (i, j + 1) } else { (i + 1, j) };
@@ -371,7 +420,7 @@ fn edge_point(grid: &SampleGrid, key: EdgeKey, level: f64) -> Result<(f64, f64)>
     Ok((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t))
 }
 
-fn loops_to_contours(loops: &[Vec<(f64, f64)>], tol: &Tolerance) -> Result<Vec<Contour>> {
+pub(crate) fn loops_to_contours(loops: &[Vec<(f64, f64)>], tol: &Tolerance) -> Result<Vec<Contour>> {
     let mut out = Vec::new();
     for points in loops {
         let Some(contour) = contour_from_points(points, tol)? else {

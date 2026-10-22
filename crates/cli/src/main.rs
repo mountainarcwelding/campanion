@@ -18,6 +18,7 @@ mod report;
 mod rough;
 mod run;
 mod surface;
+mod waterline;
 // STEP faces are exported by shelling out to SolidCraft. `run` does not call this yet.
 #[allow(dead_code)]
 mod step;

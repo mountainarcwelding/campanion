@@ -39,11 +39,15 @@
 //! and feeds back to the retract height. An omitted entry is a plunge. A helix that leaves the
 //! ring or the stock allowance ramps instead, and the operation warns once. The process turns on
 //! once before the first cut and off after the last retract, then the tool rapids to clearance.
+//! Each `waterline` operation finishes steep walls. Levels use the same depth plan as roughing.
+//! For each polyline the tool rapids at clearance to the first point, rapids down to the retract
+//! height, plunges to that point's Z plus axial stock, cuts along the polyline, and feeds back
+//! to the retract height. The process turns on once and off after the last retract.
 //! After the document is built, each cutting move is checked against the mesh with that
 //! operation's cutter. The sample step is `min(0.25, chord * 10)` millimetres and the allowance
-//! is the job chord tolerance. A gouge is a verify error. Roughing is compared with the
-//! drop-cutter surface of the part. `stock_to_leave` is not added to that surface: the cuts sit
-//! above the surface plus the stock.
+//! is the job chord tolerance. A gouge is a verify error. Roughing, surfacing and waterline are
+//! compared with the drop-cutter surface of the part. `stock_to_leave` is not added to that
+//! surface: the cuts sit above the surface plus the stock.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -67,6 +71,7 @@ use crate::report;
 use crate::rough;
 use crate::step;
 use crate::surface;
+use crate::waterline;
 
 /// Matches the IR cap. A hostile drawing fails here instead of building an unbounded program.
 const MAX_TOOLPATHS: usize = 1_024;
@@ -169,7 +174,8 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
         let path = match op.kind() {
             OperationKind::Surface => surface::finish(job, op, tool, mesh)?,
             OperationKind::Rough => rough::rough(job, op, tool, mesh)?,
-            _ => return Err(op_err(op, "an STL source only allows surface or rough operations")),
+            OperationKind::Waterline => waterline::finish(job, op, tool, mesh)?,
+            _ => return Err(op_err(op, "an STL source only allows surface, rough or waterline operations")),
         };
         push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
     }
@@ -267,6 +273,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Chamfer { side } => chamfer_paths(&mut paths, &cut, side)?,
             OperationKind::Surface => return Err(op_err(op, "surface finishing needs an STL source")),
             OperationKind::Rough => return Err(op_err(op, "roughing needs an STL source")),
+            OperationKind::Waterline => return Err(op_err(op, "waterline finishing needs an STL source")),
         }
     }
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();

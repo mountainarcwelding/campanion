@@ -12,6 +12,7 @@ use crate::jobfile::{JobFile, JobTool, Operation, OperationKind};
 use crate::report::GougeNote;
 use crate::rough;
 use crate::surface;
+use crate::waterline;
 
 /// Deepest gouges printed for one toolpath. The check still fails when there are more.
 const MAX_REPORTS: usize = 32;
@@ -57,8 +58,8 @@ pub(crate) fn parse_tool(text: &str) -> Result<Cutter, CliError> {
 /// Check every cutting move of an STL job. Each operation uses its own flat, ball or bull cutter.
 ///
 /// The reference is the drop-cutter tip on the part. `stock_to_leave` is not added. A surface
-/// path already includes its axial stock in Z. A rough path sits above the surface plus its
-/// stock, so a gouge is a tip below the part, not below the stock allowance.
+/// or waterline path already includes its axial stock in Z. A rough path sits above the surface
+/// plus its stock, so a gouge is a tip below the part, not below the stock allowance.
 pub(crate) fn check_job(job: &JobFile, mesh: &Mesh, program: &Program) -> Result<Vec<GougeNote>, CliError> {
     let tolerance = job.tolerance().chord();
     let sample_step = sample_step_for(tolerance)?;
@@ -110,12 +111,13 @@ fn check_one(
     notes_for(name, &dc, &segments, sample_step, tolerance)
 }
 
-/// Flat, ball or bull nose taken from the job tool. Roughing uses the same shapes.
+/// Flat, ball or bull nose taken from the job tool. Roughing and waterline use the same shapes.
 fn cutter_for(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
     match op.kind() {
         OperationKind::Surface => surface::cutter(op, tool),
         OperationKind::Rough => rough::cutter(op, tool),
-        _ => Err(CliError::run(format!("operation {}: gouge check needs a surface or rough operation", op.name()))),
+        OperationKind::Waterline => waterline::cutter(op, tool),
+        _ => Err(CliError::run(format!("operation {}: gouge check needs a surface, rough or waterline operation", op.name()))),
     }
 }
 
