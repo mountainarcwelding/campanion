@@ -503,6 +503,11 @@ impl<'a> DropCutter<'a> {
         best
     }
 
+    /// Cutter this index was built with.
+    pub fn cutter(&self) -> Cutter {
+        self.cutter
+    }
+
     /// [`Self::tip_z`], or `floor` when the tool misses. A hit is the maximum of the tip and `floor`.
     pub fn tip_z_or(&self, x: f64, y: f64, floor: f64) -> f64 {
         match self.tip_z(x, y) {

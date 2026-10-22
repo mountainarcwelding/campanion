@@ -1,0 +1,38 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "dome.stl",
+    "hash": "63fcad5e5dca92dc"
+  },
+  "units": "mm",
+  "heights": {
+    "clearance": 15.0,
+    "retract": 12.0
+  },
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0,
+      "shape": "ball"
+    }
+  ],
+  "operations": [
+    {
+      "name": "waterline",
+      "type": "waterline",
+      "tool_id": 1,
+      "step_down": 2.5,
+      "grid": 1.0,
+      "min_slope_deg": 30,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  }
+}

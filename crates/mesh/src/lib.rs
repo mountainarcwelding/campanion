@@ -11,6 +11,7 @@ mod gouge;
 mod raster;
 mod scallop;
 mod stl;
+mod waterline;
 mod zlevel;
 
 pub use dropcutter::{Cutter, DropCutter, drop_cutter_triangle};
@@ -18,6 +19,7 @@ pub use gouge::{Gouge, check_gouges};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};
 pub use scallop::scallop_stepover;
 pub use stl::{parse_stl, write_stl_binary};
+pub use waterline::{WaterlineLevel, WaterlineParams, waterline};
 pub use zlevel::{ZLevel, ZLevelParams, zlevel_rough};
 
 /// Crate version from the package manifest.

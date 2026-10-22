@@ -22,8 +22,8 @@
 //! not a cryptographic hash. See `docs/job-file.md`.
 //!
 //! An STL source, a path ending in `.stl` in any case, is a triangle mesh. Its hash is those
-//! raw bytes. A mesh job may only contain `surface` and `rough` operations, and both are
-//! rejected on every other source. A surface rasters the mesh. It requires exactly one of
+//! raw bytes. A mesh job may only contain `surface`, `rough` and `waterline` operations, and
+//! all three are rejected on every other source. A surface rasters the mesh. It requires exactly one of
 //! `stepover` and `scallop_height`. `scallop_height` is a flat-floor cusp height; the run turns
 //! it into an XY stepover and caps that stepover at the tool diameter. On a slope the real
 //! cusp is larger for the same XY stepover, because raster spacing is measured in XY.
@@ -40,8 +40,16 @@
 //! same object a 2D operation uses. Omitted, it is a plunge. Keys that belong to other kinds
 //! are rejected.
 //!
+//! `waterline` finishes steep walls. `step_down` is required. `margin` defaults to the tool
+//! radius. `top_z` and `floor_z` default as they do for a rough, and the depth plan is the same.
+//! `grid` defaults to the minimum of `step_down` and 0.25 mm. That 0.25 mm cap is not scaled
+//! again when the file is in inches. `min_slope_deg` defaults to 0 and is not scaled. Zero keeps
+//! every closed loop. A positive value keeps only the portions at least that steep, and a cut
+//! portion is an open polyline. `stock_to_leave` is one axial length, default 0, added to every
+//! cutter-location Z. Entry is a plunge.
+//!
 //! A tool may set `shape`: `"flat"` (the default), `"ball"`, or `{"bull": corner_radius}`.
-//! A shape other than flat is only used by a surface or rough operation. Two-dimensional
+//! A shape other than flat is only used by a surface, rough or waterline operation. Two-dimensional
 //! operations keep the flat diameter offset.
 //!
 //! A face clears the bounding box of its layers. `angle_deg` is 0 or 90 and is stored as
@@ -102,6 +110,8 @@ const ROUGH_STEPOVER_OF_DIAMETER: f64 = 0.4;
 const DEFAULT_ROUGH_STOCK_MM: f64 = 0.5;
 /// Upper bound of the default roughing sample grid, in millimetres.
 const DEFAULT_ROUGH_GRID_MM: f64 = 0.5;
+/// Upper bound of the default waterline sample grid, in millimetres. Not scaled for inches.
+const DEFAULT_WATERLINE_GRID_MM: f64 = 0.25;
 const MAX_FEED_MM_PER_MIN: f64 = 1.0e9;
 const MAX_DELAY_S: f64 = 1.0e6;
 const MAX_TOOLS: usize = 256;
@@ -341,6 +351,8 @@ pub enum OperationKind {
     Surface,
     /// Z-level roughing over an STL mesh. No layers and no side. `entry` defaults to a plunge.
     Rough,
+    /// Waterline finish of steep walls on an STL mesh. No layers and no side. Entry is a plunge.
+    Waterline,
 }
 
 /// Stock left by a roughing pass, in millimetres. Zero means cut to the contour and to `depth`.
@@ -391,10 +403,11 @@ impl Finish {
 /// An omitted entry is a plunge. [`Self::stock_to_leave`] is millimetres of material
 /// left by roughing; an omitted [`Self::finish`] means no finishing pass.
 /// [`Self::face_angle`] and [`Self::margin`] describe a face or a mesh operation.
-/// A rough stores its margin (the file value, or the tool radius when omitted). Other kinds
-/// store 0. [`Self::width`], [`Self::v_angle`], [`Self::tip_diameter`] and
+/// A rough or a waterline stores its margin (the file value, or the tool radius when omitted).
+/// Other kinds store 0. [`Self::width`], [`Self::v_angle`], [`Self::tip_diameter`] and
 /// [`Self::tip_clearance`] describe a chamfer. Other kinds store 0.
-/// [`Self::top_z`] and [`Self::grid`] describe a rough. Other kinds store `None`.
+/// [`Self::top_z`] and [`Self::grid`] describe a rough or a waterline. Other kinds store `None`.
+/// [`Self::min_slope_deg`] describes a waterline. Other kinds store 0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -414,9 +427,12 @@ pub struct Operation {
     /// Top of the roughing stock, in millimetres. `None` means the mesh maximum Z.
     /// Other kinds store `None`.
     top_z: Option<f64>,
-    /// Roughing sample grid, in millimetres. `None` except on a rough, where an omitted file
-    /// value is `min(stepover / 4, 0.5 mm)`.
+    /// Roughing or waterline sample grid, in millimetres. `None` except on those kinds.
+    /// An omitted rough grid is `min(stepover / 4, 0.5 mm)`. An omitted waterline grid is
+    /// `min(step_down, 0.25 mm)`.
     grid: Option<f64>,
+    /// Minimum slope kept by a waterline, in degrees from horizontal. Other kinds store `0`.
+    min_slope_deg: f64,
     face_angle: f64,
     margin: f64,
     width: f64,
@@ -508,8 +524,8 @@ impl Operation {
 
     /// Extra material around the geometry bounding box, in millimetres, on every side.
     ///
-    /// A face, a surface, or a rough sets this. A rough that omits it stores the tool radius.
-    /// Other operations store `0`.
+    /// A face, a surface, a rough, or a waterline sets this. A rough or a waterline that omits
+    /// it stores the tool radius. Other operations store `0`.
     pub fn margin(&self) -> f64 {
         self.margin
     }
@@ -523,20 +539,25 @@ impl Operation {
         self.sample_step
     }
 
-    /// Surface tip floor, or the deepest roughing level, in millimetres.
+    /// Surface tip floor, or the deepest roughing or waterline level, in millimetres.
     /// `None` means the mesh minimum Z when the job runs.
     pub fn floor_z(&self) -> Option<f64> {
         self.floor_z
     }
 
-    /// Top of the roughing stock, in millimetres. `None` means the mesh maximum Z when the job runs.
+    /// Top of the roughing or waterline stock, in millimetres. `None` means the mesh maximum Z when the job runs.
     pub fn top_z(&self) -> Option<f64> {
         self.top_z
     }
 
-    /// Roughing sample grid, in millimetres. `None` except on a rough.
+    /// Roughing or waterline sample grid, in millimetres. `None` except on those kinds.
     pub fn grid(&self) -> Option<f64> {
         self.grid
+    }
+
+    /// Minimum slope kept by a waterline, in degrees from horizontal. Other kinds return `0`.
+    pub fn min_slope_deg(&self) -> f64 {
+        self.min_slope_deg
     }
 
     /// Stock left by roughing, in millimetres. Omitted fields are zero.
@@ -729,14 +750,14 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
     Ok(Body { source, units, tolerance, tools, operations, clearance, retract })
 }
 
-/// An STL part only accepts `surface` and `rough`. Both only accept an STL part.
+/// An STL part only accepts `surface`, `rough` and `waterline`. Each only accepts an STL part.
 /// A non-flat tool shape is rejected when a 2D operation uses that tool.
 fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool]) -> Result<(), JobFileError> {
     let stl = source.is_stl();
     for operation in operations {
-        let mesh_op = matches!(operation.kind(), OperationKind::Surface | OperationKind::Rough);
+        let mesh_op = is_mesh_op(operation.kind());
         if stl && !mesh_op {
-            return Err(JobFileError::invalid("an STL source only allows surface or rough operations"));
+            return Err(JobFileError::invalid("an STL source only allows surface, rough or waterline operations"));
         }
         if matches!(operation.kind(), OperationKind::Surface) && !stl {
             return Err(JobFileError::invalid("surface is only valid on an STL source"));
@@ -744,19 +765,24 @@ fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool
         if matches!(operation.kind(), OperationKind::Rough) && !stl {
             return Err(JobFileError::invalid("rough is only valid on an STL source"));
         }
+        if matches!(operation.kind(), OperationKind::Waterline) && !stl {
+            return Err(JobFileError::invalid("waterline is only valid on an STL source"));
+        }
     }
     for tool in tools {
         if tool.shape().is_flat() {
             continue;
         }
-        let used_on_flat_work = operations
-            .iter()
-            .any(|operation| operation.tool_id() == tool.id() && !matches!(operation.kind(), OperationKind::Surface | OperationKind::Rough));
+        let used_on_flat_work = operations.iter().any(|operation| operation.tool_id() == tool.id() && !is_mesh_op(operation.kind()));
         if used_on_flat_work {
-            return Err(JobFileError::invalid(format!("tool {} shape is only valid on a surface or rough operation", tool.id())));
+            return Err(JobFileError::invalid(format!("tool {} shape is only valid on a surface, rough or waterline operation", tool.id())));
         }
     }
     Ok(())
+}
+
+fn is_mesh_op(kind: OperationKind) -> bool {
+    matches!(kind, OperationKind::Surface | OperationKind::Rough | OperationKind::Waterline)
 }
 
 fn check_format(tag: &str) -> Result<(), JobFileError> {
@@ -997,6 +1023,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "floor_z",
             "top_z",
             "grid",
+            "min_slope_deg",
             "width",
             "v_angle_deg",
             "tip_diameter",
@@ -1021,6 +1048,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     if matches!(kind, OperationKind::Rough) {
         return finish_rough(name, map, scale, tools);
     }
+    if matches!(kind, OperationKind::Waterline) {
+        return finish_waterline(name, map, scale, tools);
+    }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
     }
@@ -1028,13 +1058,16 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         return Err(JobFileError::invalid("scallop_height is only valid on a surface"));
     }
     if optional(map, "floor_z").is_some() {
-        return Err(JobFileError::invalid("floor_z is only valid on a surface or a rough"));
+        return Err(JobFileError::invalid("floor_z is only valid on a surface, a rough or a waterline"));
     }
     if optional(map, "top_z").is_some() {
-        return Err(JobFileError::invalid("top_z is only valid on a rough"));
+        return Err(JobFileError::invalid("top_z is only valid on a rough or a waterline"));
     }
     if optional(map, "grid").is_some() {
-        return Err(JobFileError::invalid("grid is only valid on a rough"));
+        return Err(JobFileError::invalid("grid is only valid on a rough or a waterline"));
+    }
+    if optional(map, "min_slope_deg").is_some() {
+        return Err(JobFileError::invalid("min_slope_deg is only valid on a waterline"));
     }
     reject_chamfer_cut_keys(map, kind)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
@@ -1063,6 +1096,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         floor_z: None,
         top_z: None,
         grid: None,
+        min_slope_deg: 0.0,
         face_angle,
         margin,
         width: chamfer.width,
@@ -1085,6 +1119,7 @@ fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileEr
         "step_down",
         "top_z",
         "grid",
+        "min_slope_deg",
         "width",
         "v_angle_deg",
         "tip_diameter",
@@ -1163,6 +1198,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         floor_z,
         top_z: None,
         grid: None,
+        min_slope_deg: 0.0,
         face_angle,
         margin,
         width: 0.0,
@@ -1185,6 +1221,7 @@ fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErro
         "scallop_height",
         "sample_step",
         "angle_deg",
+        "min_slope_deg",
         "width",
         "v_angle_deg",
         "tip_diameter",
@@ -1270,6 +1307,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         floor_z,
         top_z,
         grid: Some(grid),
+        min_slope_deg: 0.0,
         face_angle: 0.0,
         margin,
         width: 0.0,
@@ -1279,6 +1317,114 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         stock_to_leave: StockToLeave { wall: 0.0, floor: stock },
         finish: None,
         entry,
+        feeds,
+        params,
+    })
+}
+
+/// Keys a waterline does not accept. `side` is already rejected by [`parse_kind`].
+fn reject_waterline_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError> {
+    for key in [
+        "layers",
+        "depth",
+        "stepover",
+        "scallop_height",
+        "sample_step",
+        "angle_deg",
+        "width",
+        "v_angle_deg",
+        "tip_diameter",
+        "tip_clearance",
+        "finish",
+        "entry",
+        "cut_height",
+        "pierce_height",
+        "timing",
+    ] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is not valid on a waterline")));
+        }
+    }
+    Ok(())
+}
+
+/// Steep-wall waterline. `depth` stays 0. Axial stock defaults to 0 and is added to cut Z at run time.
+fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
+    reject_waterline_foreign_keys(map)?;
+    let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
+    let tool = tools.iter().find(|tool| tool.id() == tool_id).ok_or_else(|| JobFileError::invalid(format!("unknown tool {tool_id}")))?;
+    let Some(diameter) = tool.diameter() else {
+        return Err(JobFileError::invalid("waterline is not valid with a kerf tool"));
+    };
+    let Some(step_value) = optional(map, "step_down") else {
+        return Err(JobFileError::invalid("waterline needs a step_down"));
+    };
+    let step_down = positive_length(step_value, scale, "step_down")?;
+    let margin = match optional(map, "margin") {
+        Some(value) => cap_under(non_negative_length(value, scale, "margin")?, MAX_MM, "margin")?,
+        None => diameter * 0.5,
+    };
+    let floor_z = match optional(map, "floor_z") {
+        Some(value) => Some(finite_height(scale_f64(value, scale, "floor_z")?, "floor_z")?),
+        None => None,
+    };
+    let top_z = match optional(map, "top_z") {
+        Some(value) => Some(finite_height(scale_f64(value, scale, "top_z")?, "top_z")?),
+        None => None,
+    };
+    if let (Some(top), Some(floor)) = (top_z, floor_z)
+        && top <= floor
+    {
+        return Err(JobFileError::invalid("top_z must be above floor_z"));
+    }
+    let grid = match optional(map, "grid") {
+        Some(value) => positive_length(value, scale, "grid")?,
+        None => step_down.min(DEFAULT_WATERLINE_GRID_MM),
+    };
+    let min_slope_deg = match optional(map, "min_slope_deg") {
+        Some(value) => {
+            let degrees = as_f64(value, "min_slope_deg").map_err(from_cli)?;
+            if !(0.0..=90.0).contains(&degrees) {
+                return Err(JobFileError::invalid("min_slope_deg must lie in [0, 90]"));
+            }
+            degrees
+        }
+        None => 0.0,
+    };
+    let stock = match optional(map, "stock_to_leave") {
+        Some(value) => {
+            if !value.is_number() {
+                return Err(JobFileError::invalid("waterline stock_to_leave must be a number"));
+            }
+            cap_under(non_negative_length(value, scale, "stock_to_leave")?, MAX_MM, "stock_to_leave")?
+        }
+        None => 0.0,
+    };
+    let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
+    let params = parse_params(None).map_err(from_cli)?;
+    Ok(Operation {
+        name,
+        kind: OperationKind::Waterline,
+        layers: Vec::new(),
+        tool_id,
+        depth: 0.0,
+        step_down,
+        stepover: None,
+        scallop_height: None,
+        sample_step: None,
+        floor_z,
+        top_z,
+        grid: Some(grid),
+        min_slope_deg,
+        face_angle: 0.0,
+        margin,
+        width: 0.0,
+        v_angle: 0.0,
+        tip_diameter: 0.0,
+        tip_clearance: 0.0,
+        stock_to_leave: StockToLeave { wall: 0.0, floor: stock },
+        finish: None,
+        entry: DepthEntry::Plunge,
         feeds,
         params,
     })
@@ -1621,6 +1767,10 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
         "rough" => {
             reject_side(side)?;
             Ok(OperationKind::Rough)
+        }
+        "waterline" => {
+            reject_side(side)?;
+            Ok(OperationKind::Waterline)
         }
         "chamfer" => {
             let Some(side) = side else {
@@ -3122,10 +3272,13 @@ mod tests {
         let profile = r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}"#;
         let cases = [
             (envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{surface}]")), "surface is only valid on an STL source"),
-            (envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, &format!("[{profile}]")), "an STL source only allows surface or rough operations"),
+            (
+                envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, &format!("[{profile}]")),
+                "an STL source only allows surface, rough or waterline operations",
+            ),
             (
                 envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{profile}]")),
-                "shape is only valid on a surface or rough operation",
+                "shape is only valid on a surface, rough or waterline operation",
             ),
             (envelope("part.stl", r#"[{"id":1,"kerf":1.2}]"#, &format!("[{surface}]")), "surface is not valid with a kerf tool"),
             (envelope("part.stl", r#"[{"id":1,"kerf":1.2,"shape":"ball"}]"#, "[]"), "shape is only valid on a diameter tool"),
@@ -3470,5 +3623,150 @@ mod tests {
         let ball = load(&write_job("rough-ball", &ball)).expect("ball on rough");
         assert!(matches!(ball.tool(2).expect("ball").shape(), ToolShape::Ball));
         assert_eq!(ball.operations()[0].kind(), OperationKind::Rough);
+    }
+
+    #[test]
+    fn parses_waterline_defaults_and_rejects_foreign_keys() {
+        let text = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":6,"shape":"ball"}]"#,
+            r#"[{"name":"walls","type":"waterline","tool_id":1,"step_down":0.5,"min_slope_deg":30,"margin":1,"top_z":12,"floor_z":0,"grid":0.4,"stock_to_leave":0.2,"feeds":{"cut":1000,"plunge":300}}]"#,
+        );
+        let job = load(&write_job("waterline-mm", &text)).expect("waterline");
+        let op = &job.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Waterline);
+        assert!(op.layers().is_empty());
+        near(op.step_down(), 0.5);
+        near(op.min_slope_deg(), 30.0);
+        near(op.margin(), 1.0);
+        near(op.top_z().expect("top"), 12.0);
+        near(op.floor_z().expect("floor"), 0.0);
+        near(op.grid().expect("grid"), 0.4);
+        near(op.stock_to_leave().floor(), 0.2);
+        near(op.stock_to_leave().wall(), 0.0);
+        assert_eq!(op.stepover(), None);
+        assert!(matches!(op.entry(), DepthEntry::Plunge));
+
+        let defaults = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":10}]"#,
+            r#"[{"name":"walls","type":"waterline","tool_id":1,"step_down":1,"feeds":{"cut":1}}]"#,
+        );
+        let defaults = load(&write_job("waterline-defaults", &defaults)).expect("defaults");
+        let op = &defaults.operations()[0];
+        near(op.margin(), 5.0);
+        near(op.grid().expect("grid"), 0.25);
+        near(op.stock_to_leave().floor(), 0.0);
+        near(op.min_slope_deg(), 0.0);
+        assert_eq!(op.top_z(), None);
+        assert_eq!(op.floor_z(), None);
+
+        let fine = envelope(
+            "part.stl",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"walls","type":"waterline","tool_id":1,"step_down":0.1,"feeds":{"cut":1}}]"#,
+        );
+        let fine = load(&write_job("waterline-grid", &fine)).expect("fine grid");
+        near(fine.operations()[0].grid().expect("grid"), 0.1);
+
+        let inch = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"dome.STL","hash":"{EMPTY_HASH}"}},"units":"inch","tools":[{{"id":1,"diameter":0.25,"shape":"ball"}}],"operations":[{{"name":"walls","type":"waterline","tool_id":1,"step_down":0.1,"min_slope_deg":45,"margin":0.05,"top_z":0.4,"floor_z":0,"grid":0.02,"stock_to_leave":0.01,"feeds":{{"cut":10}}}}]}}"#
+        );
+        let inch = load(&write_job("waterline-inch", &inch)).expect("inch waterline");
+        let op = &inch.operations()[0];
+        near(op.step_down(), 0.1 * 25.4);
+        near(op.min_slope_deg(), 45.0);
+        near(op.margin(), 0.05 * 25.4);
+        near(op.top_z().expect("top"), 0.4 * 25.4);
+        near(op.floor_z().expect("floor"), 0.0);
+        near(op.grid().expect("grid"), 0.02 * 25.4);
+        near(op.stock_to_leave().floor(), 0.01 * 25.4);
+
+        let inch_default = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"dome.stl","hash":"{EMPTY_HASH}"}},"units":"inch","tools":[{{"id":1,"diameter":0.25}}],"operations":[{{"name":"walls","type":"waterline","tool_id":1,"step_down":0.02,"feeds":{{"cut":1}}}}]}}"#
+        );
+        let inch_default = load(&write_job("waterline-inch-grid", &inch_default)).expect("inch default grid");
+        // step_down is 0.508 mm, so the unscaled 0.25 mm cap is the default grid.
+        near(inch_default.operations()[0].grid().expect("grid"), 0.25);
+        near(inch_default.operations()[0].margin(), 0.125 * 25.4);
+
+        let line = r#"{"name":"a","type":"waterline","tool_id":1,"step_down":1,"feeds":{"cut":1}}"#;
+        let cases = [
+            (envelope("plate.dxf", r#"[{"id":1,"diameter":6}]"#, &format!("[{line}]")), "waterline is only valid on an STL source"),
+            (envelope("part.stl", r#"[{"id":1,"kerf":1.2}]"#, &format!("[{line}]")), "waterline is not valid with a kerf tool"),
+            (
+                envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, r#"[{"name":"a","type":"waterline","tool_id":1,"feeds":{"cut":1}}]"#),
+                "waterline needs a step_down",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"waterline","tool_id":1,"step_down":1,"layers":["L"],"feeds":{"cut":1}}]"#,
+                ),
+                "layers is not valid on a waterline",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"waterline","tool_id":1,"step_down":1,"stepover":1,"feeds":{"cut":1}}]"#,
+                ),
+                "stepover is not valid on a waterline",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"waterline","tool_id":1,"step_down":1,"min_slope_deg":91,"feeds":{"cut":1}}]"#,
+                ),
+                "min_slope_deg must lie in [0, 90]",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"waterline","tool_id":1,"step_down":1,"min_slope_deg":-1,"feeds":{"cut":1}}]"#,
+                ),
+                "min_slope_deg must lie in [0, 90]",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"waterline","tool_id":1,"step_down":1,"stock_to_leave":{"wall":0.1},"feeds":{"cut":1}}]"#,
+                ),
+                "waterline stock_to_leave must be a number",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"waterline","tool_id":1,"step_down":1,"top_z":0,"floor_z":1,"feeds":{"cut":1}}]"#,
+                ),
+                "top_z must be above floor_z",
+            ),
+            (
+                envelope(
+                    "plate.dxf",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"min_slope_deg":30,"feeds":{"cut":1}}]"#,
+                ),
+                "min_slope_deg is only valid on a waterline",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"stepover":1,"min_slope_deg":30,"feeds":{"cut":1}}]"#,
+                ),
+                "min_slope_deg is not valid on a surface",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let path = write_job(&format!("waterline-bad-{index}"), text);
+            let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
     }
 }
