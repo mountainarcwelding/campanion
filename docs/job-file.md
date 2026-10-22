@@ -108,6 +108,7 @@ unique within that operation. The same layer may appear on two operations.
 | `tip_clearance` | chamfer | Length in `units`, at least 0, default 0. How far the tip sits below the bottom of the bevel. Rejected on every other kind. |
 | `stock_to_leave` | profile, pocket, surface and rough | On a profile or pocket, an object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. On a surface or a rough, a single length in `units`, at least 0. A surface defaults to 0 and adds that length to every cutter-location Z. That is an axial offset approximation, not a true 3D rest-material offset along the surface normal. A rough defaults to 0.5 mm (a millimetre length, not scaled again when `units` is `inch`) and keeps the tool where the drop-cutter tip plus that stock is at or below the level. Rejected on a face. |
 | `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). Rejected on a face. |
+| `entry` | no | How a pass is entered. Omitted, a plunge. `{"type":"plunge"}`, `{"type":"ramp","angle_deg"}`, or `{"type":"helix","radius","angle_deg"}`. `angle_deg` is from the XY plane, greater than 0 and at most 90, and is not scaled by `units`. A helix `radius` is a length in `units`. One turn drops `2π r tan(angle_deg)`. A rough uses the same object. A surface rejects `entry`. |
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
 | `cut_height` | no | Absolute Z to feed to after the pierce, before the cut. |
@@ -210,12 +211,25 @@ below the level. It is not a separate wall and floor pair. A level where that al
 no place for the tool has no ring and adds no moves. On the dome, 0.3 mm of stock keeps the flat
 tool off the plate, so the floor level is empty and the deepest cut is the 2.5 mm level.
 
-Entry is a plunge. Ramp entry is future work, and `entry` is rejected. Levels are cut from the top
-down, and the rings of a level are cut in order. For each ring the tool rapids at clearance to the
-ring start, rapids down to the retract height, plunges to the level, cuts the ring back to the
-start, and feeds back to the retract height. The process turns on once before the first plunge and
-off after the last retract, then the tool rapids to clearance. Clearance and retract stay at the
-job heights. Put those heights above the stock.
+`entry` is optional. Omitted, or `"type": "plunge"`, the tool feeds straight down at the ring
+start. `"type": "ramp"` follows the ring while it descends. `angle_deg` is the angle from the XY
+plane. `"type": "helix"` is a counter-clockwise circle about the ring's bounding-box centre.
+`radius` is the circle radius.
+
+For each ring at level `z` the entry descends from the previous level's Z, or from `top_z` on the
+first level, down to `z`. The tool rapids at clearance to the entry start and rapids down to the
+retract height. A plunge then feeds to the level. A ramp or a helix rapids straight down to the
+start height on that same point, then feeds the entry. The ring is cut, and the tool feeds back
+to the retract height. XY rapids stay at clearance. The process turns on once before the first
+entry and off after the last retract, then the tool rapids to clearance. Clearance and retract
+stay at the job heights. Put those heights above the stock.
+
+A ramp follows the ring, which is where the tool is allowed at that level. A helix is used only
+when samples of its circle, every 0.25 mm, lie inside the ring and the drop-cutter tip plus
+`stock_to_leave` is at or below the level. If a sample fails, the operation ramps at the helix
+angle and writes one stderr line, `helix does not fit; ramping`.
+
+Levels are cut from the top down, and the rings of a level are cut in order.
 
 `examples/dome_rough.job.json` roughs `examples/dome.stl` with a 6 mm flat end mill, a 2.5 mm
 step-down, a 2.4 mm stepover and 0.3 mm of stock to leave. Clearance is 15 mm and retract is 12 mm,
