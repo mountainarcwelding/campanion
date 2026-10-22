@@ -16,8 +16,10 @@
 //! point on that axis, a direction sign, and optional travel limits in degrees. A [`Pose`] may
 //! then carry a machine A/B angle in degrees (the value may exceed 360 for multi-turn motion).
 //! Poses without an angle stay 3-axis. Helpers rotate part-frame geometry into the machine frame
-//! and recover an index angle that turns a tool axis onto machine +Z. The IR does not encode a
-//! particular controller.
+//! and recover an index angle that turns a tool axis onto machine +Z. [`wrap_point`] maps a flat
+//! `(u, v, w)` coordinate on a [`Cylinder`] into that frame; [`wrap_polyline`] splits the flat
+//! path so each chord stays within tolerance. Surface feed is the flat-frame length. The IR does
+//! not encode a particular controller.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -32,6 +34,7 @@ mod program;
 mod rotary;
 mod schema;
 mod verify;
+mod wrap;
 
 pub use convert::Import;
 pub use geom::{ArcSense, Plane, Pose, Vec3};
@@ -46,6 +49,7 @@ pub use rotary::{
 };
 pub use schema::json_schema;
 pub use verify::{Bounds, Issue, RefKind, VerifyOptions, VerifyReport, verify, verify_with};
+pub use wrap::{Cylinder, unwrap_pose, wrap_point, wrap_polyline};
 
 /// Crate version from the package manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
