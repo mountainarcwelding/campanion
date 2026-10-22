@@ -59,6 +59,9 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 | --- | --- | --- |
 | `linuxcnc` | LinuxCNC | Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices. |
 | `grbl` | Grbl | Millimetre dialect for Grbl. Absolute moves, IJK arcs and helices, no line numbers, tool changes as comments. |
+| `mach3` | Mach3 | Millimetre dialect for Mach3. Incremental IJK arcs and helices, dwell P in seconds, no line numbers. |
+| `fanuc` | Fanuc | Millimetre Fanuc mill dialect. Program O0001, sequence numbers, R arcs, helices as lines, dwell P in milliseconds. |
+| `haas` | Haas | Millimetre Haas mill dialect. Program O00001, sequence numbers, IJK arcs and helices, dwell P in milliseconds. |
 
 ```sh
 campanion run examples/sample.job.json -o out.ngc --post linuxcnc
