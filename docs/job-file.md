@@ -33,7 +33,7 @@ lengths are millimetres and feeds are millimetres per minute.
 "source": { "path": "parts/plate.dxf", "hash": "cbf29ce484222325" }
 ```
 
-The source format is chosen by extension: `.svg` is read as SVG, anything else as DXF.
+The source format is chosen by extension: `.svg` is read as SVG, `.step`/`.stp` as STEP (see below), anything else as DXF.
 `path` is relative to the directory that contains the job file. Absolute paths, a path with no
 file name (`.` or `..` alone), and control characters are rejected. `..` components are allowed.
 `source_path` joins the job directory and folds `.` and `..` lexically. It does not look at the
@@ -181,3 +181,22 @@ The hash below is FNV-1a 64 of zero bytes. Replace it with the hash of `parts/pl
   ]
 }
 ```
+
+## STEP sources
+
+```json
+"source": { "path": "plate.step", "hash": "...", "face": [50, 5, 5] }
+```
+
+A STEP part is cut from one planar face. `face` is a point on that face, in millimetres in the
+part's model coordinates (never scaled by `units`). `campanion run` hands the part to SolidCraft's
+command-line tool, which exports the face's outline and holes as DXF, and imports that DXF.
+
+- The tool is found through the `CAMPANION_SOLIDCRAFT_CLI` environment variable (path to the
+  `solidcraft-cli` executable) or, failing that, `solidcraft-cli` on `PATH`. Without it, a STEP job
+  stops with an error that says so; DXF and SVG jobs don't need it.
+- The face DXF has a single layer, so operations select contours by nesting instead: `OUTER` is
+  the face outline (and any islands inside holes), `INNER` is the holes.
+- The DXF is written to a private temporary directory that is removed afterwards.
+
+`examples/step.job.json` cuts `examples/plate.step` (generated with `solidcraft-cli`).
