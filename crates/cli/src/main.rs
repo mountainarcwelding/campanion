@@ -13,6 +13,9 @@ mod job;
 mod jobfile;
 mod report;
 mod run;
+// STEP faces are exported by shelling out to SolidCraft. `run` does not call this yet.
+#[allow(dead_code)]
+mod step;
 
 use std::env;
 use std::ffi::{OsStr, OsString};
