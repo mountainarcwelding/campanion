@@ -1,16 +1,19 @@
 //! Plan-view preview model for CAMpanion toolpaths.
 //!
-//! The crate is pure data and geometry: no UI toolkit. Distances are millimetres and angles are
-//! radians. World coordinates are Y-up and right-handed. Screen coordinates are Y-down pixels.
+//! The crate is pure data and geometry: no UI toolkit. Distances are millimetres. Arc sweeps are
+//! radians; rotary angles are degrees, matching the IR. World coordinates are Y-up and
+//! right-handed. Screen coordinates are Y-down pixels.
 //!
 //! A [`Scene`] is built by walking every toolpath with one cursor. The first motion of the
 //! program only places that cursor; every later motion becomes a [`Stroke`]. XY arcs and helices
 //! are tessellated so the chord error stays within the requested tolerance. Playback then reveals
-//! the scene by arc length, and [`View`] maps world millimetres onto a viewport.
+//! the scene by arc length, and [`View`] maps world millimetres onto a viewport. A rotary setup
+//! adds the axis segment through the centre, across the toolpath extent, and either the distinct
+//! index angles or the continuous angle range.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane};
+use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAxisKind, RotarySetup};
 
 /// Motions whose XY travel is at or below this (millimetres) are vertical feeds.
 ///
@@ -31,6 +34,12 @@ const LEN_EPS_MM: f64 = 1e-9;
 
 /// Plan labels closer than this (millimetres) share one callout.
 const LABEL_MERGE_MM: f64 = 0.5;
+
+/// Angles closer than this, in degrees, are one index.
+///
+/// A feed whose ends differ by more than this is continuous rotary motion. Index-change rapids
+/// are allowed to jump without making the program continuous.
+const INDEX_ANGLE_EPS_DEG: f64 = 1e-6;
 
 /// Flat cut colour, the same blue the preview uses for an unshaded cut stroke: `(90, 200, 250)`.
 const FLAT_CUT_RGB: [u8; 3] = [90, 200, 250];
@@ -67,8 +76,85 @@ pub struct Stroke {
     pub z_start: f64,
     /// Z of the last point, in millimetres.
     pub z_end: f64,
+    /// Rotary angle of each point, in degrees. Empty when the motion has no rotary angle.
+    ///
+    /// The same length as [`Stroke::points`] when present. A line stores the endpoint angles.
+    /// An arc or helix interpolates by XY arc length, the same way as [`Stroke::zs`].
+    pub angles: Vec<f64>,
     /// 3D length of the polyline, in millimetres.
     pub length: f64,
+}
+
+/// Distinct index angles, or the range of a continuous rotary move.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RotarySpan {
+    /// Constant angles, degrees, ascending and de-duplicated.
+    Indexed(Vec<f64>),
+    /// Inclusive range of angles that change along a feed, in degrees.
+    Continuous { min_deg: f64, max_deg: f64 },
+}
+
+/// Rotary angles at the two ends of one motion.
+///
+/// `rapid` is an index change or a positioning move. A jump on a rapid does not make the program
+/// continuous; a feed whose ends differ does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RotarySample {
+    /// Angle at the start of the motion, degrees.
+    pub start_deg: f64,
+    /// Angle at the end of the motion, degrees.
+    pub end_deg: f64,
+    /// `true` when the motion is a rapid.
+    pub rapid: bool,
+}
+
+/// Colour stops for the rotary-angle legend. Low is blue and high is red, same ramp as height.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AngleLegend {
+    /// Label for the low end of the range, such as `"0°"`.
+    pub low_label: String,
+    /// Label for the high end of the range, such as `"90°"`.
+    pub high_label: String,
+    /// One colour per step from low to high, inclusive.
+    pub colours: Vec<[u8; 3]>,
+}
+
+/// Axis line and angle summary for a program that has a rotary setup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotaryPreview {
+    /// `"A"` (part +X) or `"B"` (part +Y), drawn beside the axis line.
+    pub label: &'static str,
+    /// A point on the axis, millimetres, part frame.
+    pub center: [f64; 3],
+    /// Segment through [`RotaryPreview::center`] spanning the toolpath on that axis.
+    ///
+    /// `None` when the program drew nothing. The pair is `(start, end)`.
+    pub line: Option<([f64; 3], [f64; 3])>,
+    /// Index list or continuous range. `None` when no pose carries an angle.
+    pub span: Option<RotarySpan>,
+}
+
+impl RotaryPreview {
+    /// Low and high angles used to colour moves, in degrees.
+    ///
+    /// Indexed programs use the first and last distinct angle. A single index has a zero-width
+    /// range, which [`angle_color`] draws as the flat cut colour.
+    pub fn angle_range(&self) -> Option<(f64, f64)> {
+        match &self.span {
+            Some(RotarySpan::Indexed(angles)) => {
+                let min_deg = angles.iter().copied().fold(f64::INFINITY, f64::min);
+                let max_deg = angles.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                if min_deg.is_finite() && max_deg.is_finite() { Some((min_deg, max_deg)) } else { None }
+            }
+            Some(RotarySpan::Continuous { min_deg, max_deg }) => Some((*min_deg, *max_deg)),
+            None => None,
+        }
+    }
+
+    /// Overlay sentence for this setup, such as `"Index: 0°, 90°"`.
+    pub fn overlay(&self) -> Option<String> {
+        self.span.as_ref().map(rotary_overlay)
+    }
 }
 
 /// A pierce: the plan position where a process turns on.
@@ -110,6 +196,8 @@ pub struct Scene {
     pub total_length: f64,
     /// Toolpath names in program order. Missing names are empty strings.
     pub names: Vec<String>,
+    /// Rotary axis and angles when the program has a setup. `None` for a 3-axis program.
+    pub rotary: Option<RotaryPreview>,
 }
 
 /// Parse a program and build its preview scene.
@@ -140,12 +228,17 @@ pub fn load_scene(json: &str, arc_tol: f64) -> Result<Scene, String> {
 ///
 /// Labels whose points lie within 0.5 mm of an earlier label are then merged into that label.
 /// Texts join with `", "` (for example `"2, 3"`) and the earlier label keeps its position.
+///
+/// When the program has a rotary setup, each stroke also stores the rotary angle along the move
+/// (empty for a 3-axis pose). The scene's [`RotaryPreview`] is the axis segment through the
+/// setup centre, across the toolpath extent, plus the index list or the continuous range.
 pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     let tol = sanitize_tol(arc_tol);
     let mut scene = empty_scene();
     let mut bounds = BoundsAcc::new();
     let mut z_range = ZRangeAcc::new();
-    let mut cursor: Option<[f64; 3]> = None;
+    let mut cursor: Option<Placed> = None;
+    let mut samples = Vec::new();
 
     for (toolpath, path) in doc.program().toolpaths().iter().enumerate() {
         scene.names.push(path.name().unwrap_or("").to_string());
@@ -156,14 +249,23 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
                     let Some(end) = motion_tip(motion) else {
                         continue;
                     };
+                    let end_angle = motion_angle(motion);
                     let Some(start) = cursor else {
-                        cursor = Some(end);
+                        if let Some(angle) = end_angle {
+                            samples.push(RotarySample { start_deg: angle, end_deg: angle, rapid: true });
+                        }
+                        cursor = Some(Placed { at: end, angle: end_angle });
                         continue;
                     };
-                    push_stroke(&mut scene, &mut bounds, &mut z_range, &mut labeled, toolpath, motion, start, end, tol);
-                    cursor = Some(end);
+                    if let Some(angle) = end_angle {
+                        let start_deg = start.angle.filter(|value| value.is_finite()).unwrap_or(angle);
+                        let rapid = matches!(motion, ClMotion::Rapid { .. });
+                        samples.push(RotarySample { start_deg, end_deg: angle, rapid });
+                    }
+                    push_stroke(&mut scene, &mut bounds, &mut z_range, &mut labeled, toolpath, motion, start.at, end, start.angle, end_angle, tol);
+                    cursor = Some(Placed { at: end, angle: end_angle });
                 }
-                ClBlock::Event(event) => record_event(&mut scene, toolpath, event, cursor),
+                ClBlock::Event(event) => record_event(&mut scene, toolpath, event, cursor.as_ref().map(|placed| placed.at)),
             }
         }
     }
@@ -171,6 +273,9 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     scene.bounds = bounds.finish();
     scene.z_range = z_range.finish();
     scene.labels = merge_labels(std::mem::take(&mut scene.labels), LABEL_MERGE_MM);
+    if let Some(setup) = doc.program().rotary().copied() {
+        scene.rotary = Some(rotary_preview(&setup, scene.bounds, &samples));
+    }
     scene
 }
 
@@ -359,6 +464,10 @@ pub fn projected_bounds(scene: &Scene, projection: Projection) -> Option<([f64; 
             bounds.include(project(*point, z, projection));
         }
     }
+    if let Some((start, end)) = scene.rotary.as_ref().and_then(|rotary| rotary.line) {
+        bounds.include(project([start[0], start[1]], start[2], projection));
+        bounds.include(project([end[0], end[1]], end[2], projection));
+    }
     bounds.finish()
 }
 
@@ -403,6 +512,131 @@ fn colour_byte(value: f64) -> u8 {
     } else {
         value.round() as u8
     }
+}
+
+/// Blue (low angle) through green and yellow to red (high angle), clamped to `range`.
+///
+/// `range` is `(low_deg, high_deg)`. A zero-width or non-finite range returns the flat cut colour
+/// `(90, 200, 250)`, the same rule as [`height_color`].
+pub fn angle_color(angle_deg: f64, range: (f64, f64)) -> [u8; 3] {
+    height_color(angle_deg, range)
+}
+
+/// Legend colours and end labels for [`angle_color`].
+///
+/// `steps` is the number of swatches from the low angle to the high angle, inclusive. A zero-width
+/// range, a non-finite range, or `steps == 0` returns `None` (there is nothing to show). `steps`
+/// is capped at 32.
+pub fn angle_legend(range: (f64, f64), steps: usize) -> Option<AngleLegend> {
+    let (low, high) = if range.0 <= range.1 { (range.0, range.1) } else { (range.1, range.0) };
+    if !low.is_finite() || !high.is_finite() || !(high > low) || steps == 0 {
+        return None;
+    }
+    let steps = steps.min(32);
+    let mut colours = Vec::with_capacity(steps);
+    let last = (steps - 1) as f64;
+    for index in 0..steps {
+        let t = if steps == 1 { 0.0 } else { index as f64 / last };
+        colours.push(angle_color(low + (high - low) * t, (low, high)));
+    }
+    Some(AngleLegend { low_label: format_angle_deg(low), high_label: format_angle_deg(high), colours })
+}
+
+/// Format one angle for the overlay and the legend. Whole degrees drop the fraction (`"90°"`).
+pub fn format_angle_deg(deg: f64) -> String {
+    if !deg.is_finite() {
+        return "—".to_string();
+    }
+    let rounded = deg.round();
+    if (deg - rounded).abs() <= 1e-6 && rounded.abs() <= 1.0e9 {
+        let whole = if rounded == 0.0 { 0.0 } else { rounded };
+        return format!("{whole:.0}°");
+    }
+    let mut text = format!("{deg:.4}");
+    while text.contains('.') && (text.ends_with('0') || text.ends_with('.')) {
+        text.pop();
+    }
+    format!("{text}°")
+}
+
+/// Overlay text for index angles or a continuous range.
+///
+/// Indexed: `"Index: 0°, 90°"`. Continuous: `"Angle: 0°..180°"`.
+pub fn rotary_overlay(span: &RotarySpan) -> String {
+    match span {
+        RotarySpan::Indexed(angles) => {
+            let body = angles.iter().copied().map(format_angle_deg).collect::<Vec<_>>().join(", ");
+            format!("Index: {body}")
+        }
+        RotarySpan::Continuous { min_deg, max_deg } => format!("Angle: {}..{}", format_angle_deg(*min_deg), format_angle_deg(*max_deg)),
+    }
+}
+
+/// Classify rotary samples as an index list or a continuous range.
+///
+/// A feed whose ends differ by more than [`INDEX_ANGLE_EPS_DEG`] is continuous, and the range is
+/// the minimum and maximum of every finite sample. Otherwise the distinct angles, sorted
+/// ascending, are the index list. Rapids may jump between indexes. Non-finite samples are left
+/// out. `None` when nothing finite remains.
+pub fn rotary_span(samples: &[RotarySample]) -> Option<RotarySpan> {
+    let mut values = Vec::new();
+    let mut continuous = false;
+    for sample in samples {
+        if !sample.start_deg.is_finite() || !sample.end_deg.is_finite() {
+            continue;
+        }
+        if !sample.rapid && (sample.end_deg - sample.start_deg).abs() > INDEX_ANGLE_EPS_DEG {
+            continuous = true;
+        }
+        values.push(sample.start_deg);
+        values.push(sample.end_deg);
+    }
+    if values.is_empty() {
+        return None;
+    }
+    if continuous {
+        let min_deg = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_deg = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        return Some(RotarySpan::Continuous { min_deg, max_deg });
+    }
+    values.sort_by(f64::total_cmp);
+    let mut distinct = Vec::new();
+    for value in values {
+        let value = if value == 0.0 { 0.0 } else { value };
+        if distinct.last().is_none_or(|prev: &f64| (value - *prev).abs() > INDEX_ANGLE_EPS_DEG) {
+            distinct.push(value);
+        }
+    }
+    Some(RotarySpan::Indexed(distinct))
+}
+
+/// Endpoints of the rotary axis through `center`, across the toolpath extent.
+///
+/// [`RotaryAxisKind::A`] runs along part +X at the centre's Y and Z. [`RotaryAxisKind::B`] runs
+/// along part +Y at the centre's X and Z. The segment includes the centre, so a centre outside
+/// the toolpath still lies on the line, and it covers the toolpath's extent on that axis.
+/// `bounds` is `(min_xy, max_xy)` in millimetres. `None` when `center` or `bounds` is not finite.
+pub fn rotary_axis_endpoints(kind: RotaryAxisKind, center: [f64; 3], bounds: ([f64; 2], [f64; 2])) -> Option<([f64; 3], [f64; 3])> {
+    if !center.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let (min_xy, max_xy) = bounds;
+    if ![min_xy[0], min_xy[1], max_xy[0], max_xy[1]].into_iter().all(f64::is_finite) {
+        return None;
+    }
+    let (start, end) = match kind {
+        RotaryAxisKind::A => {
+            let lo = min_xy[0].min(center[0]);
+            let hi = max_xy[0].max(center[0]);
+            ([lo, center[1], center[2]], [hi, center[1], center[2]])
+        }
+        RotaryAxisKind::B => {
+            let lo = min_xy[1].min(center[1]);
+            let hi = max_xy[1].max(center[1]);
+            ([center[0], lo, center[2]], [center[0], hi, center[2]])
+        }
+    };
+    Some((start, end))
 }
 
 /// World-to-screen transform for the plan view.
@@ -608,7 +842,33 @@ impl BoundsAcc {
 }
 
 fn empty_scene() -> Scene {
-    Scene { strokes: Vec::new(), pierces: Vec::new(), labels: Vec::new(), bounds: None, z_range: None, total_length: 0.0, names: Vec::new() }
+    Scene {
+        strokes: Vec::new(),
+        pierces: Vec::new(),
+        labels: Vec::new(),
+        bounds: None,
+        z_range: None,
+        total_length: 0.0,
+        names: Vec::new(),
+        rotary: None,
+    }
+}
+
+/// Tool tip and rotary angle after one motion. The angle is `None` on a 3-axis pose.
+struct Placed {
+    at: [f64; 3],
+    angle: Option<f64>,
+}
+
+fn rotary_preview(setup: &RotarySetup, bounds: Option<([f64; 2], [f64; 2])>, samples: &[RotarySample]) -> RotaryPreview {
+    let center_v = setup.center();
+    let center = [center_v.x(), center_v.y(), center_v.z()];
+    let label = match setup.axis() {
+        RotaryAxisKind::A => "A",
+        RotaryAxisKind::B => "B",
+    };
+    let line = bounds.and_then(|bounds| rotary_axis_endpoints(setup.axis(), center, bounds));
+    RotaryPreview { label, center, line, span: rotary_span(samples) }
 }
 
 fn push_stroke(
@@ -620,9 +880,11 @@ fn push_stroke(
     motion: &ClMotion,
     start: [f64; 3],
     end: [f64; 3],
+    start_angle: Option<f64>,
+    end_angle: Option<f64>,
     tol: f64,
 ) {
-    let stroke = stroke_from_motion(toolpath, motion, start, end, tol);
+    let stroke = stroke_from_motion(toolpath, motion, start, end, start_angle, end_angle, tol);
     if stroke.points.is_empty() {
         return;
     }
@@ -669,16 +931,31 @@ fn record_event(scene: &mut Scene, toolpath: usize, event: &Event, cursor: Optio
     }
 }
 
-fn motion_tip(motion: &ClMotion) -> Option<[f64; 3]> {
-    let pose = match motion {
+fn motion_pose(motion: &ClMotion) -> &campanion_ir::Pose {
+    match motion {
         ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => to,
-    };
-    let tip = pose.tip();
+    }
+}
+
+fn motion_tip(motion: &ClMotion) -> Option<[f64; 3]> {
+    let tip = motion_pose(motion).tip();
     let point = [tip.x(), tip.y(), tip.z()];
     if point.iter().all(|value| value.is_finite()) { Some(point) } else { None }
 }
 
-fn stroke_from_motion(toolpath: usize, motion: &ClMotion, start: [f64; 3], end: [f64; 3], tol: f64) -> Stroke {
+fn motion_angle(motion: &ClMotion) -> Option<f64> {
+    motion_pose(motion).rotary().filter(|deg| deg.is_finite())
+}
+
+fn stroke_from_motion(
+    toolpath: usize,
+    motion: &ClMotion,
+    start: [f64; 3],
+    end: [f64; 3],
+    start_angle: Option<f64>,
+    end_angle: Option<f64>,
+    tol: f64,
+) -> Stroke {
     let start_xy = [start[0], start[1]];
     let end_xy = [end[0], end[1]];
     let (points, rapid) = match motion {
@@ -694,8 +971,15 @@ fn stroke_from_motion(toolpath: usize, motion: &ClMotion, start: [f64; 3], end: 
         }
     };
     let zs = heights_for(motion, &points, start[2], end[2]);
+    let angles = match end_angle.filter(|angle| angle.is_finite()) {
+        Some(end_angle) => {
+            let start_angle = start_angle.filter(|angle| angle.is_finite()).unwrap_or(end_angle);
+            heights_for(motion, &points, start_angle, end_angle)
+        }
+        None => Vec::new(),
+    };
     let length = polyline_length_zs(&points, &zs);
-    Stroke { kind: stroke_kind(rapid, &points), toolpath, points, zs, z_start: start[2], z_end: end[2], length }
+    Stroke { kind: stroke_kind(rapid, &points), toolpath, points, zs, z_start: start[2], z_end: end[2], angles, length }
 }
 
 /// Heights for every plan point. Lines keep the real endpoint Z. Arcs and helices follow XY arc length.
@@ -929,12 +1213,17 @@ fn cut_stroke(stroke: &Stroke, dist: f64) -> Stroke {
     let z_start = finite_z(stroke.z_start, 0.0);
     let z_end = finite_z(stroke.z_end, z_start);
     let segments = stroke.points.len().saturating_sub(1);
+    let track_angles = stroke.angles.len() == stroke.points.len();
     let Some(&first) = stroke.points.first() else {
-        return cut_piece(stroke, Vec::new(), Vec::new(), z_start, z_start, 0.0);
+        return cut_piece(stroke, Vec::new(), Vec::new(), Vec::new(), z_start, z_start, 0.0);
     };
     let z_first = stored_z(stroke, 0, segments, z_start, z_end);
+    let mut angles = Vec::new();
+    if track_angles {
+        angles.push(stored_angle(stroke, 0));
+    }
     if segments == 0 || dist <= 0.0 {
-        return cut_piece(stroke, vec![first], vec![z_first], z_start, z_start, 0.0);
+        return cut_piece(stroke, vec![first], vec![z_first], angles, z_start, z_start, 0.0);
     }
     let mut traveled = 0.0;
     let mut points = vec![first];
@@ -952,6 +1241,9 @@ fn cut_stroke(stroke: &Stroke, dist: f64) -> Stroke {
         if !segment.is_finite() || segment <= 0.0 {
             points.push(*end);
             zs.push(z1);
+            if track_angles {
+                angles.push(stored_angle(stroke, index + 1));
+            }
             continue;
         }
         if traveled + segment + LEN_EPS_MM >= dist {
@@ -959,18 +1251,28 @@ fn cut_stroke(stroke: &Stroke, dist: f64) -> Stroke {
             if t > LEN_EPS_MM {
                 points.push([start[0] + delta_x * t, start[1] + delta_y * t]);
                 zs.push(z0 + delta_z * t);
+                if track_angles {
+                    angles.push(lerp(stored_angle(stroke, index), stored_angle(stroke, index + 1), t));
+                }
             }
-            return cut_piece(stroke, points, zs, z_start, z0 + delta_z * t, dist);
+            return cut_piece(stroke, points, zs, angles, z_start, z0 + delta_z * t, dist);
         }
         traveled += segment;
         points.push(*end);
         zs.push(z1);
+        if track_angles {
+            angles.push(stored_angle(stroke, index + 1));
+        }
     }
-    cut_piece(stroke, points, zs, z_start, z_end, traveled)
+    cut_piece(stroke, points, zs, angles, z_start, z_end, traveled)
 }
 
-fn cut_piece(stroke: &Stroke, points: Vec<[f64; 2]>, zs: Vec<f64>, z_start: f64, z_end: f64, length: f64) -> Stroke {
-    Stroke { kind: stroke.kind, toolpath: stroke.toolpath, points, zs, z_start, z_end, length }
+fn cut_piece(stroke: &Stroke, points: Vec<[f64; 2]>, zs: Vec<f64>, angles: Vec<f64>, z_start: f64, z_end: f64, length: f64) -> Stroke {
+    Stroke { kind: stroke.kind, toolpath: stroke.toolpath, points, zs, z_start, z_end, angles, length }
+}
+
+fn stored_angle(stroke: &Stroke, index: usize) -> f64 {
+    stroke.angles.get(index).copied().filter(|angle| angle.is_finite()).unwrap_or(0.0)
 }
 
 /// Stored height at `index`, or the same uniform split `cut_stroke` used before `zs` existed.
@@ -1035,8 +1337,9 @@ fn shortest_angle(start: f64, end: f64) -> f64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::{
-        Label, Playback, Projection, Stroke, StrokeKind, View, build_scene, find_system_font, height_color, load_scene, merge_labels,
-        polyline_length_3d, project, projected_bounds, stroke_kind, tessellate_arc, tool_position, visible,
+        Label, Playback, Projection, RotarySample, RotarySpan, Stroke, StrokeKind, View, angle_color, angle_legend, build_scene, find_system_font,
+        format_angle_deg, height_color, load_scene, merge_labels, polyline_length_3d, project, projected_bounds, rotary_axis_endpoints,
+        rotary_overlay, rotary_span, stroke_kind, tessellate_arc, tool_position, visible,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -1179,6 +1482,7 @@ mod tests {
                     zs: vec![0.0, 0.0],
                     z_start: 0.0,
                     z_end: 0.0,
+                    angles: Vec::new(),
                     length: 10.0,
                 },
                 Stroke {
@@ -1188,6 +1492,7 @@ mod tests {
                     zs: vec![0.0, 0.0],
                     z_start: 0.0,
                     z_end: 0.0,
+                    angles: Vec::new(),
                     length: 10.0,
                 },
             ],
@@ -1197,6 +1502,7 @@ mod tests {
             z_range: Some((0.0, 0.0)),
             total_length: 20.0,
             names: vec!["path".to_string()],
+            rotary: None,
         }
     }
 
@@ -1236,6 +1542,7 @@ mod tests {
                 zs: vec![0.0, 0.0, 0.0],
                 z_start: 0.0,
                 z_end: 0.0,
+                angles: Vec::new(),
                 length: 20.0,
             }],
             pierces: Vec::new(),
@@ -1244,6 +1551,7 @@ mod tests {
             z_range: Some((0.0, 0.0)),
             total_length: 20.0,
             names: Vec::new(),
+            rotary: None,
         };
         let shown = visible(&bend, 15.0);
         assert_eq!(shown.len(), 1);
@@ -1263,6 +1571,7 @@ mod tests {
                 zs: vec![0.0, 10.0],
                 z_start: 0.0,
                 z_end: 10.0,
+                angles: Vec::new(),
                 length,
             }],
             pierces: Vec::new(),
@@ -1271,6 +1580,7 @@ mod tests {
             z_range: Some((0.0, 10.0)),
             total_length: length,
             names: Vec::new(),
+            rotary: None,
         };
         let half = visible(&ramp, length * 0.5);
         assert_eq!(half.len(), 1);
@@ -1520,6 +1830,7 @@ mod tests {
             z_range: None,
             total_length: 0.0,
             names: Vec::new(),
+            rotary: None,
         };
         assert!(projected_bounds(&empty, Projection::Top).is_none());
         assert!(projected_bounds(&empty, Projection::Iso).is_none());
@@ -1547,5 +1858,200 @@ mod tests {
         }
         assert!(any);
         assert!(hit_min_x && hit_min_y && hit_max_x && hit_max_y, "bounds are loose for {projection:?}: {min:?} {max:?}");
+    }
+
+    #[test]
+    fn non_rotary_scene_has_no_axis_and_no_angles() {
+        let scene = curve_scene();
+        assert!(scene.rotary.is_none());
+        for stroke in &scene.strokes {
+            assert!(stroke.angles.is_empty(), "{:?} stored angles", stroke.kind);
+        }
+    }
+
+    #[test]
+    fn rotary_axis_endpoints_follow_the_extent_through_the_centre() {
+        use campanion_ir::RotaryAxisKind;
+        let bounds = ([0.0, -5.0], [30.0, 15.0]);
+        let center = [4.0, 2.0, 7.0];
+        let (start, end) = rotary_axis_endpoints(RotaryAxisKind::A, center, bounds).expect("a axis");
+        assert_eq!(start, [0.0, 2.0, 7.0]);
+        assert_eq!(end, [30.0, 2.0, 7.0]);
+
+        let outside = [40.0, 2.0, 7.0];
+        let (start, end) = rotary_axis_endpoints(RotaryAxisKind::A, outside, bounds).expect("a past the part");
+        assert_eq!(start, [0.0, 2.0, 7.0]);
+        assert_eq!(end, [40.0, 2.0, 7.0]);
+
+        let (start, end) = rotary_axis_endpoints(RotaryAxisKind::B, center, bounds).expect("b axis");
+        assert_eq!(start, [4.0, -5.0, 7.0]);
+        assert_eq!(end, [4.0, 15.0, 7.0]);
+
+        let below = [4.0, -9.0, 1.0];
+        let (start, end) = rotary_axis_endpoints(RotaryAxisKind::B, below, bounds).expect("b below the part");
+        assert_eq!(start, [4.0, -9.0, 1.0]);
+        assert_eq!(end, [4.0, 15.0, 1.0]);
+
+        assert!(rotary_axis_endpoints(RotaryAxisKind::A, [f64::NAN, 0.0, 0.0], bounds).is_none());
+        assert!(rotary_axis_endpoints(RotaryAxisKind::B, center, ([f64::INFINITY, 0.0], [1.0, 1.0])).is_none());
+    }
+
+    #[test]
+    fn angle_color_maps_the_range_and_the_legend_labels_the_ends() {
+        assert_eq!(angle_color(0.0, (0.0, 90.0)), [0, 0, 255]);
+        assert_eq!(angle_color(90.0, (0.0, 90.0)), [255, 0, 0]);
+        assert_eq!(angle_color(-5.0, (0.0, 90.0)), [0, 0, 255]);
+        assert_eq!(angle_color(180.0, (0.0, 90.0)), [255, 0, 0]);
+        assert_eq!(angle_color(10.0, (10.0, 10.0)), [90, 200, 250]);
+        assert_eq!(angle_color(f64::NAN, (0.0, 90.0)), [90, 200, 250]);
+        assert_eq!(angle_color(45.0, (0.0, 90.0)), height_color(45.0, (0.0, 90.0)));
+        let mid = angle_color(45.0, (0.0, 90.0));
+        assert!(mid[1] > mid[0] && mid[1] >= mid[2], "middle of the ramp should be green or yellow, got {mid:?}");
+
+        let legend = angle_legend((0.0, 90.0), 2).expect("legend");
+        assert_eq!(legend.low_label, "0°");
+        assert_eq!(legend.high_label, "90°");
+        assert_eq!(legend.colours, vec![[0, 0, 255], [255, 0, 0]]);
+        assert!(angle_legend((90.0, 90.0), 4).is_none());
+        assert!(angle_legend((0.0, 90.0), 0).is_none());
+        assert_eq!(format_angle_deg(-90.0), "-90°");
+        assert_eq!(format_angle_deg(12.5), "12.5°");
+        assert_eq!(format_angle_deg(-0.0), "0°");
+    }
+
+    #[test]
+    fn rotary_span_lists_indexes_and_ranges_continuous_feeds() {
+        let indexed = rotary_span(&[
+            RotarySample { start_deg: 0.0, end_deg: 0.0, rapid: true },
+            RotarySample { start_deg: 0.0, end_deg: 0.0, rapid: false },
+            RotarySample { start_deg: 0.0, end_deg: 90.0, rapid: true },
+            RotarySample { start_deg: 90.0, end_deg: 90.0, rapid: false },
+            RotarySample { start_deg: 90.0, end_deg: 90.0 + 1e-9, rapid: false },
+        ])
+        .expect("span");
+        assert_eq!(indexed, RotarySpan::Indexed(vec![0.0, 90.0]));
+        assert_eq!(rotary_overlay(&indexed), "Index: 0°, 90°");
+
+        let reversed = rotary_span(&[
+            RotarySample { start_deg: 90.0, end_deg: 90.0, rapid: false },
+            RotarySample { start_deg: 90.0, end_deg: -90.0, rapid: true },
+            RotarySample { start_deg: -90.0, end_deg: -90.0, rapid: false },
+        ])
+        .expect("span");
+        assert_eq!(rotary_overlay(&reversed), "Index: -90°, 90°");
+
+        let continuous = rotary_span(&[
+            RotarySample { start_deg: 0.0, end_deg: 0.0, rapid: true },
+            RotarySample { start_deg: 0.0, end_deg: 180.0, rapid: false },
+            RotarySample { start_deg: 180.0, end_deg: 270.5, rapid: false },
+        ])
+        .expect("span");
+        assert_eq!(continuous, RotarySpan::Continuous { min_deg: 0.0, max_deg: 270.5 });
+        assert_eq!(rotary_overlay(&continuous), "Angle: 0°..270.5°");
+        assert!(rotary_span(&[RotarySample { start_deg: f64::NAN, end_deg: 1.0, rapid: false }]).is_none());
+    }
+
+    fn rotary_tip(setup: &campanion_ir::RotarySetup, x: f64, y: f64, z: f64, angle: f64) -> campanion_ir::Pose {
+        use campanion_ir::{Pose, Vec3, rotate_vector};
+        let tip = Vec3::new(x, y, z).expect("tip");
+        let axis = rotate_vector(setup, Vec3::Z, -angle);
+        Pose::new(tip, axis).expect("pose").with_rotary(angle).expect("angle")
+    }
+
+    /// Two indexed faces, 0° then 90°, with the A axis offset from the origin.
+    fn indexed_example() -> super::Scene {
+        use campanion_ir::{
+            ClBlock, ClMotion, ClPath, CompensationMode, Document, Feeds, MoveRole, Program, RotaryAxisKind, RotaryDirection, RotarySetup, Vec3,
+        };
+        let center = Vec3::new(5.0, -2.0, 3.0).expect("centre");
+        let setup = RotarySetup::new(RotaryAxisKind::A, center, RotaryDirection::Positive, None).expect("setup");
+        let feeds = Feeds::try_new(1000.0, None, None, Some(300.0), None).expect("feeds");
+        let face0 = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: rotary_tip(&setup, 0.0, 0.0, 5.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 20.0, 0.0, 5.0, 0.0), feed: 1000.0, role: MoveRole::Cut }),
+        ];
+        let face90 = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: rotary_tip(&setup, 20.0, 8.0, 5.0, 90.0), feed: None }),
+            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 0.0, 8.0, 5.0, 90.0), feed: 1000.0, role: MoveRole::Cut }),
+        ];
+        let path =
+            |name: &str, blocks| ClPath::try_new(Some(name.to_string()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let program = Program::try_new(
+            Some("indexed".into()),
+            Vec::new(),
+            None,
+            vec![path("face0", face0), path("face90", face90)],
+            Vec::new(),
+            Vec::new(),
+            Some(setup),
+        )
+        .expect("program");
+        build_scene(&Document::new(program).expect("document"), 0.05)
+    }
+
+    #[test]
+    fn indexed_example_draws_the_axis_and_lists_the_angles() {
+        let scene = indexed_example();
+        let rotary = scene.rotary.clone().expect("rotary setup");
+        assert_eq!(rotary.label, "A");
+        assert_eq!(rotary.center, [5.0, -2.0, 3.0]);
+        let (start, end) = rotary.line.expect("axis line");
+        assert_eq!(start, [0.0, -2.0, 3.0]);
+        assert_eq!(end, [20.0, -2.0, 3.0]);
+        assert_eq!(rotary.overlay().as_deref(), Some("Index: 0°, 90°"));
+        assert_eq!(rotary.angle_range(), Some((0.0, 90.0)));
+        assert_eq!(angle_color(0.0, rotary.angle_range().expect("range")), [0, 0, 255]);
+        assert_eq!(angle_color(90.0, rotary.angle_range().expect("range")), [255, 0, 0]);
+
+        assert_eq!(scene.strokes.len(), 3);
+        let cut0 = &scene.strokes[0];
+        assert_eq!(cut0.kind, StrokeKind::Cut);
+        assert_eq!(cut0.angles, vec![0.0, 0.0]);
+        let change = &scene.strokes[1];
+        assert_eq!(change.kind, StrokeKind::Rapid);
+        assert_eq!(change.angles, vec![0.0, 90.0]);
+        let cut90 = &scene.strokes[2];
+        assert_eq!(cut90.kind, StrokeKind::Cut);
+        assert_eq!(cut90.angles, vec![90.0, 90.0]);
+
+        let (min, max) = projected_bounds(&scene, Projection::Top).expect("bounds");
+        assert!(min[1] <= -2.0 + 1e-9, "axis y must be inside the fit bounds, min {min:?}");
+        assert!(max[0] + 1e-9 >= 20.0 && min[0] <= 1e-9, "axis x extent {min:?} {max:?}");
+    }
+
+    #[test]
+    fn continuous_rotary_reports_the_range_and_interpolates_the_angle() {
+        use campanion_ir::{
+            ClBlock, ClMotion, ClPath, CompensationMode, Document, Feeds, MoveRole, Program, RotaryAxisKind, RotaryDirection, RotarySetup, Vec3,
+        };
+        let setup = RotarySetup::new(RotaryAxisKind::B, Vec3::new(1.0, 2.0, 3.0).expect("centre"), RotaryDirection::Positive, None).expect("setup");
+        let feeds = Feeds::try_new(800.0, None, None, None, None).expect("feeds");
+        let blocks = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: rotary_tip(&setup, 0.0, 0.0, 0.0, 10.0), feed: None }),
+            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 0.0, 10.0, 0.0, 190.0), feed: 800.0, role: MoveRole::Cut }),
+        ];
+        let path = ClPath::try_new(Some("wrap".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), Some(setup)).expect("program");
+        let scene = build_scene(&Document::new(program).expect("document"), 0.05);
+
+        let rotary = scene.rotary.clone().expect("rotary");
+        assert_eq!(rotary.label, "B");
+        let (start, end) = rotary.line.expect("axis");
+        assert_eq!(start, [1.0, 0.0, 3.0]);
+        assert_eq!(end, [1.0, 10.0, 3.0]);
+        assert_eq!(rotary.overlay().as_deref(), Some("Angle: 10°..190°"));
+
+        assert_eq!(scene.strokes.len(), 1);
+        let cut = &scene.strokes[0];
+        assert_eq!(cut.kind, StrokeKind::Cut);
+        assert_eq!(cut.angles.len(), 2);
+        assert_close(cut.angles[0], 10.0);
+        assert_close(cut.angles[1], 190.0);
+
+        let half = visible(&scene, cut.length * 0.5);
+        let shown = half.last().expect("half cut");
+        assert_eq!(shown.angles.len(), shown.points.len());
+        assert_close(*shown.angles.last().expect("angle"), 100.0);
+        assert_pt(*shown.points.last().expect("point"), [0.0, 5.0]);
     }
 }
