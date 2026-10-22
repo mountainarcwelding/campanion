@@ -56,7 +56,7 @@ impl Layers {
 struct Import {
     tolerance: Tolerance,
     gap: f64,
-    flatten_tol: f64,
+    fit_tol: f64,
     root_affine: Affine,
     layers: Layers,
     skipped: usize,
@@ -70,7 +70,7 @@ impl Import {
         Self {
             tolerance,
             gap: options.gap(),
-            flatten_tol: tolerance.linear(),
+            fit_tol: tolerance.chord(),
             root_affine,
             layers: Layers { order: Vec::new(), paths: HashMap::new() },
             skipped: 0,
@@ -134,7 +134,7 @@ impl Import {
 
     /// Similarity: circular arcs stay exact; other elements go through the fitter.
     fn commit_similarity(&mut self, layer: &str, items: &[PathItem], full: Affine, scale: f64) -> Result<()> {
-        let subpaths = fit_items(items, full, scale, self.flatten_tol, self.budget())?;
+        let subpaths = fit_items(items, full, scale, self.fit_tol, self.budget())?;
         self.add_subpaths(layer, subpaths)
     }
 
@@ -231,7 +231,7 @@ impl Import {
             return Ok(());
         }
         path.apply_affine(full);
-        let subpaths = fit_path(&path, self.flatten_tol, self.budget())?;
+        let subpaths = fit_path(&path, self.fit_tol, self.budget())?;
         self.add_subpaths(layer, subpaths)
     }
 
