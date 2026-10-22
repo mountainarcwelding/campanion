@@ -25,6 +25,9 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     if !program.channel_programs().is_empty() {
         return Err(unsupported("channel programs are not supported; only cutter-location toolpaths are posted"));
     }
+    if poses_use_rotary(program) {
+        return Err(unsupported(format!("post `{}` does not support a rotary axis", post.id())));
+    }
     let mut writer = Writer::new(post, options);
     let name = sanitize(program.name().unwrap_or(""));
     let number = post.program_number.clone().unwrap_or_default();
@@ -679,6 +682,25 @@ fn substitute(field_name: &str, line: &str, vars: &[(&str, &str)]) -> Result<Str
 fn meaningless(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.is_empty() || trimmed == "()" || trimmed == ";"
+}
+
+/// True when any cutter-location pose, including a probe target, carries a rotary angle.
+fn poses_use_rotary(program: &Program) -> bool {
+    program.toolpaths().iter().any(|path| path.blocks().iter().any(block_uses_rotary))
+}
+
+fn block_uses_rotary(block: &ClBlock) -> bool {
+    match block {
+        ClBlock::Motion(motion) => motion_uses_rotary(motion),
+        ClBlock::Event(Event::Probe { toward: Some(pose), .. }) => pose.rotary().is_some(),
+        ClBlock::Event(_) => false,
+    }
+}
+
+fn motion_uses_rotary(motion: &ClMotion) -> bool {
+    match motion {
+        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => to.rotary().is_some(),
+    }
 }
 
 fn sanitize(text: &str) -> String {

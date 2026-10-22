@@ -1,0 +1,47 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "dome.stl",
+    "hash": "63fcad5e5dca92dc"
+  },
+  "units": "mm",
+  "heights": {
+    "clearance": 30.0,
+    "retract": 25.0
+  },
+  "rotary": {
+    "axis": "a",
+    "center": [0.0, 0.0, 0.0],
+    "direction": "positive"
+  },
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0,
+      "shape": "ball"
+    }
+  ],
+  "operations": [
+    {
+      "name": "face0",
+      "type": "surface",
+      "tool_id": 1,
+      "stepover": 6.0,
+      "index_deg": 0,
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    },
+    {
+      "name": "face90",
+      "type": "surface",
+      "tool_id": 1,
+      "stepover": 6.0,
+      "index_deg": 90,
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  }
+}

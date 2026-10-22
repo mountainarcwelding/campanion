@@ -28,6 +28,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
   Pass `--post` to write a controller dialect instead of the test sink. See [Posts](#posts).
 - The toolpath is verified before anything is written; errors stop the run.
 - `examples/sample_delays.job.json` shows pierce height and pierce/post delays.
+- `examples/indexed.job.json` finishes `examples/dome.stl` at two rotary indexes. See [Indexed 3+1](docs/job-file.md#indexed-31) in the job-file docs.
 
 ## Usage
 
@@ -45,7 +46,9 @@ Tolerance is 0.01 mm, the job file's default chord tolerance. Samples are `min(0
 mm apart. A gouge is printed like any other verify error and names the operation, the position and
 the depth. `campanion run` on an STL job does the same check with each operation's cutter and the
 job's chord tolerance. XY arcs are sampled with Z interpolated from start to end. An arc in another
-plane is an error. Surface operations emit lines.
+plane is an error. Surface operations emit lines. An indexed mesh operation is checked in that
+indexed view: the mesh is turned by the same angle, and the path is mapped back to machine XY
+before it is sampled.
 
 ## Posts
 

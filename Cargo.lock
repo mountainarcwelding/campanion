@@ -219,6 +219,7 @@ dependencies = [
  "campanion-mesh",
  "campanion-path",
  "campanion-post",
+ "proptest",
  "serde_json",
 ]
 

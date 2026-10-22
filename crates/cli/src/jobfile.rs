@@ -65,6 +65,13 @@
 //! `depth` and `step_down` in the file are rejected on a chamfer. A surface rejects both.
 //! A rough requires `step_down` and rejects `depth`. Every other kind requires both.
 //! The chamfer keys are rejected on every other kind. A kerf tool cannot chamfer.
+//!
+//! An optional top-level `rotary` object is a 4th-axis table: `axis` `"a"` or `"b"`, `center`
+//! `[x, y, z]` (scaled by `units`), `direction` `"positive"` or `"negative"`, and optional
+//! `limits` `{min_deg, max_deg}` in degrees (not scaled). An operation may set `index_deg`,
+//! a finite angle in degrees, also not scaled. `index_deg` without `rotary` is an error that
+//! names the operation. With a setup and no `index_deg`, the operation runs at 0°. See
+//! `docs/job-file.md`.
 
 use std::fmt;
 use std::fs::File;
@@ -72,7 +79,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use campanion_geom::Tolerance;
-use campanion_ir::{Feeds, ProcessParams, Tool as IrTool};
+use campanion_ir::{Feeds, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, Tool as IrTool, Vec3};
 use campanion_path::{DepthEntry, ProfileSide, Tool as PathTool};
 use serde_json::{Map, Number, Value};
 
@@ -408,6 +415,8 @@ impl Finish {
 /// [`Self::tip_clearance`] describe a chamfer. Other kinds store 0.
 /// [`Self::top_z`] and [`Self::grid`] describe a rough or a waterline. Other kinds store `None`.
 /// [`Self::min_slope_deg`] describes a waterline. Other kinds store 0.
+/// [`Self::index_deg`] is the machine A/B angle for this operation, in degrees. `None` means the
+/// file omitted it. A job with a rotary setup then runs the operation at 0°.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -444,6 +453,8 @@ pub struct Operation {
     entry: DepthEntry,
     feeds: Feeds,
     params: ProcessParams,
+    /// Machine A/B index in degrees. `None` when the file omits `index_deg`.
+    index_deg: Option<f64>,
 }
 
 impl Operation {
@@ -584,12 +595,20 @@ impl Operation {
     pub fn params(&self) -> &ProcessParams {
         &self.params
     }
+
+    /// Machine A/B index in degrees. `None` when the file omits `index_deg`.
+    ///
+    /// The number is not scaled by `units`. A job with a rotary setup and no index runs at 0°.
+    pub fn index_deg(&self) -> Option<f64> {
+        self.index_deg
+    }
 }
 
 /// A loaded `campanion-job/1` file.
 ///
 /// [`Self::clearance`] and [`Self::retract`] are millimetres. They come from the optional
 /// job-level `heights` object. An omitted clearance is 5 mm and an omitted retract is 2 mm.
+/// [`Self::rotary`] is the 4th-axis table, when the file has one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobFile {
     path: PathBuf,
@@ -600,6 +619,7 @@ pub struct JobFile {
     operations: Vec<Operation>,
     clearance: f64,
     retract: f64,
+    rotary: Option<RotarySetup>,
 }
 
 impl JobFile {
@@ -649,6 +669,11 @@ impl JobFile {
     pub fn tool(&self, id: u32) -> Option<&JobTool> {
         self.tools.iter().find(|tool| tool.id() == id)
     }
+
+    /// Fourth-axis table. `None` when the file omits `rotary`. Centre coordinates are millimetres.
+    pub fn rotary(&self) -> Option<RotarySetup> {
+        self.rotary
+    }
 }
 
 struct Body {
@@ -659,6 +684,7 @@ struct Body {
     operations: Vec<Operation>,
     clearance: f64,
     retract: f64,
+    rotary: Option<RotarySetup>,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -674,6 +700,7 @@ pub fn load(path: &Path) -> Result<JobFile, JobFileError> {
         operations: body.operations,
         clearance: body.clearance,
         retract: body.retract,
+        rotary: body.rotary,
     })
 }
 
@@ -738,16 +765,22 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
         None => return Err(JobFileError::invalid("missing format tag")),
     };
     check_format(tag)?;
-    check_keys(map, &["format", "source", "units", "tolerance", "heights", "tools", "operations"], "job").map_err(from_cli)?;
+    check_keys(map, &["format", "source", "units", "tolerance", "heights", "tools", "operations", "rotary"], "job").map_err(from_cli)?;
     let units = parse_units(require(map, "units").map_err(from_cli)?)?;
     let scale = units.mm_per_unit();
     let source = parse_source(require(map, "source").map_err(from_cli)?)?;
     let tolerance = parse_tolerance(optional(map, "tolerance"), scale)?;
     let (clearance, retract) = parse_heights(optional(map, "heights"), scale)?;
+    let rotary = parse_rotary(optional(map, "rotary"), scale)?;
     let tools = parse_tools(require(map, "tools").map_err(from_cli)?, scale)?;
     let operations = parse_operations(require(map, "operations").map_err(from_cli)?, scale, &tools)?;
+    if rotary.is_none()
+        && let Some(operation) = operations.iter().find(|operation| operation.index_deg().is_some())
+    {
+        return Err(JobFileError::invalid(format!("operation `{}`: index_deg needs a rotary setup", operation.name())));
+    }
     check_mesh_source(&source, &operations, &tools)?;
-    Ok(Body { source, units, tolerance, tools, operations, clearance, retract })
+    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary })
 }
 
 /// An STL part only accepts `surface`, `rough` and `waterline`. Each only accepts an STL part.
@@ -1035,21 +1068,23 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "cut_height",
             "pierce_height",
             "timing",
+            "index_deg",
         ],
         "operation",
     )
     .map_err(from_cli)?;
     let name_value = require(map, "name").map_err(from_cli)?;
     let name = required_name(as_str(name_value, "operation name").map_err(from_cli)?, "operation name").map_err(from_cli)?;
+    let index_deg = parse_index_deg(optional(map, "index_deg"))?;
     let kind = parse_kind(map)?;
     if matches!(kind, OperationKind::Surface) {
-        return finish_surface(name, map, scale, tools);
+        return Ok(with_index(finish_surface(name, map, scale, tools)?, index_deg));
     }
     if matches!(kind, OperationKind::Rough) {
-        return finish_rough(name, map, scale, tools);
+        return Ok(with_index(finish_rough(name, map, scale, tools)?, index_deg));
     }
     if matches!(kind, OperationKind::Waterline) {
-        return finish_waterline(name, map, scale, tools);
+        return Ok(with_index(finish_waterline(name, map, scale, tools)?, index_deg));
     }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
@@ -1108,6 +1143,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         entry,
         feeds,
         params,
+        index_deg,
     })
 }
 
@@ -1210,6 +1246,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         entry: DepthEntry::Plunge,
         feeds,
         params,
+        index_deg: None,
     })
 }
 
@@ -1319,6 +1356,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         entry,
         feeds,
         params,
+        index_deg: None,
     })
 }
 
@@ -1427,7 +1465,68 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         entry: DepthEntry::Plunge,
         feeds,
         params,
+        index_deg: None,
     })
+}
+
+fn with_index(mut operation: Operation, index_deg: Option<f64>) -> Operation {
+    operation.index_deg = index_deg;
+    operation
+}
+
+/// `index_deg` is a finite number of degrees. It is not scaled by `units`.
+fn parse_index_deg(value: Option<&Value>) -> Result<Option<f64>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    Ok(Some(as_f64(value, "index_deg").map_err(from_cli)?))
+}
+
+/// Fourth-axis table. Lengths in `center` are scaled. Angles are degrees and are not scaled.
+fn parse_rotary(value: Option<&Value>, scale: f64) -> Result<Option<RotarySetup>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let map = object(value, "rotary").map_err(from_cli)?;
+    check_keys(map, &["axis", "center", "direction", "limits"], "rotary").map_err(from_cli)?;
+    let axis_text = as_str(require(map, "axis").map_err(from_cli)?, "rotary axis").map_err(from_cli)?;
+    let axis = match axis_text {
+        "a" => RotaryAxisKind::A,
+        "b" => RotaryAxisKind::B,
+        _ => return Err(JobFileError::invalid("rotary axis must be \"a\" or \"b\"")),
+    };
+    let direction_text = as_str(require(map, "direction").map_err(from_cli)?, "rotary direction").map_err(from_cli)?;
+    let direction = match direction_text {
+        "positive" => RotaryDirection::Positive,
+        "negative" => RotaryDirection::Negative,
+        _ => return Err(JobFileError::invalid("rotary direction must be \"positive\" or \"negative\"")),
+    };
+    let center = parse_rotary_center(require(map, "center").map_err(from_cli)?, scale)?;
+    let limits = match optional(map, "limits") {
+        Some(value) => Some(parse_rotary_limits(value)?),
+        None => None,
+    };
+    RotarySetup::new(axis, center, direction, limits).map(Some).map_err(|err| JobFileError::Invalid { message: err.to_string() })
+}
+
+fn parse_rotary_center(value: &Value, scale: f64) -> Result<Vec3, JobFileError> {
+    let list = array(value, "rotary center", 3)?;
+    if list.len() != 3 {
+        return Err(JobFileError::invalid("rotary center must be exactly 3 numbers"));
+    }
+    let mut coords = [0.0; 3];
+    for (slot, item) in coords.iter_mut().zip(list) {
+        *slot = finite_height(scale_f64(item, scale, "rotary center")?, "rotary center")?;
+    }
+    Vec3::new(coords[0], coords[1], coords[2]).map_err(|err| JobFileError::Invalid { message: err.to_string() })
+}
+
+fn parse_rotary_limits(value: &Value) -> Result<RotaryLimits, JobFileError> {
+    let map = object(value, "rotary limits").map_err(from_cli)?;
+    check_keys(map, &["min_deg", "max_deg"], "rotary limits").map_err(from_cli)?;
+    let min_deg = as_f64(require(map, "min_deg").map_err(from_cli)?, "rotary limit minimum").map_err(from_cli)?;
+    let max_deg = as_f64(require(map, "max_deg").map_err(from_cli)?, "rotary limit maximum").map_err(from_cli)?;
+    RotaryLimits::new(min_deg, max_deg).map_err(|err| JobFileError::Invalid { message: err.to_string() })
 }
 
 /// Chamfer numbers after scaling. `tip_depth` is `width / tan(v_angle / 2) + tip_clearance`.
@@ -3766,6 +3865,98 @@ mod tests {
         for (index, (text, needle)) in cases.iter().enumerate() {
             let path = write_job(&format!("waterline-bad-{index}"), text);
             let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
+    }
+
+    #[test]
+    fn rotary_setup_and_index_angles_load_and_inches_scale_the_centre_only() {
+        let text = r#"{
+          "format": "campanion-job/1",
+          "source": { "path": "dome.stl", "hash": "cbf29ce484222325" },
+          "units": "inch",
+          "rotary": {
+            "axis": "b",
+            "center": [1.0, 0.0, -2.0],
+            "direction": "negative",
+            "limits": { "min_deg": -30.0, "max_deg": 120.5 }
+          },
+          "tools": [ { "id": 1, "diameter": 0.25, "shape": "ball" } ],
+          "operations": [
+            {
+              "name": "face",
+              "type": "surface",
+              "tool_id": 1,
+              "stepover": 0.1,
+              "index_deg": 90.0,
+              "feeds": { "cut": 10.0 }
+            },
+            {
+              "name": "other",
+              "type": "rough",
+              "tool_id": 1,
+              "step_down": 0.05,
+              "feeds": { "cut": 10.0 }
+            }
+          ]
+        }"#;
+        let job = load(&write_job("rotary-inch", text)).expect("rotary job");
+        let setup = job.rotary().expect("rotary");
+        assert_eq!(setup.axis(), RotaryAxisKind::B);
+        assert_eq!(setup.direction(), RotaryDirection::Negative);
+        near(setup.center().x(), 25.4);
+        near(setup.center().y(), 0.0);
+        near(setup.center().z(), -50.8);
+        let limits = setup.limits().expect("limits");
+        near(limits.min_deg(), -30.0);
+        near(limits.max_deg(), 120.5);
+        assert_eq!(job.operations()[0].index_deg(), Some(90.0));
+        assert_eq!(job.operations()[1].index_deg(), None);
+
+        let plain = envelope(
+            "plate.dxf",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"outer","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}]"#,
+        );
+        let plain = load(&write_job("rotary-absent", &plain)).expect("plain");
+        assert!(plain.rotary().is_none());
+        assert_eq!(plain.operations()[0].index_deg(), None);
+    }
+
+    #[test]
+    fn index_without_rotary_names_the_operation_and_bad_rotary_fields_fail() {
+        let indexed = envelope(
+            "plate.dxf",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"outer","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"index_deg":45,"feeds":{"cut":1}}]"#,
+        );
+        let err = load(&write_job("index-without-rotary", &indexed)).expect_err("index");
+        assert!(err.to_string().contains("operation `outer`"), "{err}");
+        assert!(err.to_string().contains("index_deg needs a rotary setup"), "{err}");
+
+        let base = |rotary: &str, op: &str| {
+            format!(
+                r#"{{"format":"campanion-job/1","source":{{"path":"dome.stl","hash":"{EMPTY_HASH}"}},"units":"mm","rotary":{rotary},"tools":[{{"id":1,"diameter":6,"shape":"ball"}}],"operations":[{op}]}}"#
+            )
+        };
+        let op = r#"{"name":"face","type":"surface","tool_id":1,"stepover":1,"feeds":{"cut":1}}"#;
+        let cases = [
+            (base(r#"{"axis":"c","center":[0,0,0],"direction":"positive"}"#, op), "rotary axis must be"),
+            (base(r#"{"axis":"a","center":[0,0,0],"direction":"cw"}"#, op), "rotary direction must be"),
+            (base(r#"{"axis":"A","center":[0,0,0],"direction":"positive"}"#, op), "rotary axis must be"),
+            (base(r#"{"axis":"a","center":[0,0],"direction":"positive"}"#, op), "exactly 3"),
+            (base(r#"{"axis":"a","center":[0,0,0],"direction":"positive","limits":{"min_deg":10,"max_deg":10}}"#, op), "rotary limit"),
+            (base(r#"{"axis":"a","center":[0,0,0],"direction":"positive","limits":{"min_deg":90,"max_deg":-90}}"#, op), "rotary limit"),
+            (
+                base(
+                    r#"{"axis":"a","center":[0,0,0],"direction":"positive"}"#,
+                    r#"{"name":"face","type":"surface","tool_id":1,"stepover":1,"index_deg":"90","feeds":{"cut":1}}"#,
+                ),
+                "index_deg must be a number",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("rotary-bad-{index}"), text)).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
     }

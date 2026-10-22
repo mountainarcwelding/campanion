@@ -11,6 +11,7 @@
 
 mod error;
 mod gouge;
+mod index;
 mod job;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]

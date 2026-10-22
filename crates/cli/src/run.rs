@@ -52,7 +52,15 @@
 //! is the job chord tolerance. A gouge is a verify error. Roughing, surfacing and waterline are
 //! compared with the drop-cutter surface of the part. `stock_to_leave` is not added to that
 //! surface: the cuts sit above the surface plus the stock.
+//!
+//! A job with a rotary setup plans each operation in the indexed view at `index_deg` (0° when
+//! that field is omitted). Two-dimensional geometry is used as drawn. Mesh operations see the
+//! mesh turned by that angle. The resulting poses are mapped back into the part frame and tagged
+//! with the angle. When the index changes, a retract to the index safe height is appended to the
+//! operation being left and a rotary rapid at the new angle is prepended to the next one. Jobs
+//! without `rotary` stay 3-axis and are not mapped.
 
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Write};
@@ -61,7 +69,7 @@ use std::process::ExitCode;
 
 use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
-use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program};
+use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, Vec3};
 use campanion_mesh::Mesh;
 use campanion_path::{
     ChamferOp, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
@@ -70,6 +78,7 @@ use campanion_path::{
 use campanion_post::PostDef;
 
 use crate::error::{CliError, MAX_JSON_BYTES};
+use crate::index::{self, IndexedOp};
 use crate::job::read_text;
 use crate::jobfile::{self, Finish, JobFile, JobTool, Operation, OperationKind};
 use crate::report;
@@ -175,23 +184,25 @@ pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>, CliError> {
 }
 
 fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
-    let mut paths = Vec::new();
+    let mut groups = Vec::new();
     for op in job.operations() {
         let Some(tool) = job.tool(op.tool_id()) else {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
         };
         let import = import_for(op, tool)?;
+        let view = planning_mesh(job, mesh, op)?;
         let path = match op.kind() {
-            OperationKind::Surface => surface::finish(job, op, tool, mesh)?,
-            OperationKind::Rough => rough::rough(job, op, tool, mesh)?,
-            OperationKind::Waterline => waterline::finish(job, op, tool, mesh)?,
+            OperationKind::Surface => surface::finish(job, op, tool, view.as_ref())?,
+            OperationKind::Rough => rough::rough(job, op, tool, view.as_ref())?,
+            OperationKind::Waterline => waterline::finish(job, op, tool, view.as_ref())?,
             _ => return Err(op_err(op, "an STL source only allows surface, rough or waterline operations")),
         };
+        let mut paths = Vec::new();
         push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
+        groups.push(indexed_op(op, paths));
     }
-    let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
-    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), None)?;
-    Ok(Document::new(program)?)
+    let sweep = if job.rotary().is_some() { mesh_vertices(mesh)? } else { Vec::new() };
+    finish_program(job, groups, None, &sweep)
 }
 
 fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::GougeNote], post: Option<&PostDef>) -> Result<ExitCode, CliError> {
@@ -277,7 +288,8 @@ fn starts_with_dash(arg: &OsStr) -> bool {
 fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
     // One nesting pass for the drawing. Operations then pick OUTER / INNER instead of layer "0".
     let step_labels = if job.source().is_step() { Some(step_contour_labels(drawing, &job.tolerance())?) } else { None };
-    let mut paths = Vec::new();
+    let mut groups = Vec::new();
+    let mut stock = StockBox::default();
     for op in job.operations() {
         let contours = select(drawing, op.layers(), step_labels.as_deref());
         if contours.is_empty() {
@@ -286,11 +298,15 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
         if contours.len() > MAX_CONTOURS {
             return Err(op_err(op, format!("too many contours: {} > {MAX_CONTOURS}", contours.len())));
         }
+        if job.rotary().is_some() {
+            stock.include(op, &contours)?;
+        }
         let Some(tool) = job.tool(op.tool_id()) else {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
         };
         let import = import_for(op, tool)?;
         let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours: &contours, job };
+        let mut paths = Vec::new();
         match op.kind() {
             OperationKind::Profile { side } => profile_paths(&mut paths, &cut, side)?,
             OperationKind::Pocket => pocket_paths(&mut paths, &cut)?,
@@ -302,9 +318,94 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Rough => return Err(op_err(op, "roughing needs an STL source")),
             OperationKind::Waterline => return Err(op_err(op, "waterline finishing needs an STL source")),
         }
+        groups.push(indexed_op(op, paths));
     }
+    let corners = if job.rotary().is_some() { Some(stock.corners()?) } else { None };
+    finish_program(job, groups, corners.as_deref(), &[])
+}
+
+/// Axis-aligned stock for a 2D job: contour bounds in XY, and Z from `-depth` up to the stock surface.
+#[derive(Clone, Copy)]
+struct StockBox {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+    deepest: f64,
+    any: bool,
+}
+
+impl Default for StockBox {
+    fn default() -> Self {
+        Self { min_x: f64::INFINITY, min_y: f64::INFINITY, max_x: f64::NEG_INFINITY, max_y: f64::NEG_INFINITY, deepest: 0.0, any: false }
+    }
+}
+
+impl StockBox {
+    fn include(&mut self, op: &Operation, contours: &[Contour]) -> Result<(), CliError> {
+        self.deepest = self.deepest.max(op.depth());
+        for contour in contours {
+            let bbox = contour.bounding_box().map_err(|err| op_err(op, err))?;
+            self.any = true;
+            self.min_x = self.min_x.min(bbox.min().x());
+            self.min_y = self.min_y.min(bbox.min().y());
+            self.max_x = self.max_x.max(bbox.max().x());
+            self.max_y = self.max_y.max(bbox.max().y());
+        }
+        Ok(())
+    }
+
+    fn corners(&self) -> Result<Vec<Vec3>, CliError> {
+        if !self.any {
+            return Ok(Vec::new());
+        }
+        let min = Vec3::new(self.min_x, self.min_y, -self.deepest)?;
+        let max = Vec3::new(self.max_x, self.max_y, 0.0)?;
+        index::box_corners(min, max)
+    }
+}
+
+fn indexed_op(op: &Operation, paths: Vec<ClPath>) -> IndexedOp {
+    IndexedOp { angle_deg: op.index_deg().unwrap_or(0.0), tool_id: Some(op.tool_id()), feeds: op.feeds(), paths }
+}
+
+/// Mesh the planner sees. Angle 0 and a job with no rotary setup keep the part mesh.
+fn planning_mesh<'a>(job: &JobFile, mesh: &'a Mesh, op: &Operation) -> Result<Cow<'a, Mesh>, CliError> {
+    let Some(setup) = job.rotary() else {
+        return Ok(Cow::Borrowed(mesh));
+    };
+    let angle = op.index_deg().unwrap_or(0.0);
+    if !index::angles_differ(angle, 0.0) {
+        return Ok(Cow::Borrowed(mesh));
+    }
+    Ok(Cow::Owned(index::rotate_mesh(mesh, &setup, angle)?))
+}
+
+fn mesh_vertices(mesh: &Mesh) -> Result<Vec<Vec3>, CliError> {
+    let mut points = Vec::new();
+    for triangle in mesh.triangles() {
+        for point in [triangle.a, triangle.b, triangle.c] {
+            points.push(Vec3::new(point.x, point.y, point.z)?);
+        }
+    }
+    Ok(points)
+}
+
+/// Part-frame program. Without a rotary setup the toolpaths are stored as planned.
+fn finish_program(job: &JobFile, groups: Vec<IndexedOp>, stock_corners: Option<&[Vec3]>, mesh_vertices: &[Vec3]) -> Result<Document, CliError> {
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
-    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), None)?;
+    let (paths, rotary) = match job.rotary() {
+        None => (groups.into_iter().flat_map(|group| group.paths).collect::<Vec<_>>(), None),
+        Some(setup) => {
+            let radius = index::swept_radius(&setup, stock_corners, mesh_vertices);
+            let safe_z = index::index_safe_z(job.clearance(), radius, job.clearance());
+            (index::frame_operations(&setup, groups, safe_z, job.tolerance().chord())?, Some(setup))
+        }
+    };
+    if paths.len() > MAX_TOOLPATHS {
+        return Err(CliError::invalid(format!("too many toolpaths: {} > {MAX_TOOLPATHS}", paths.len())));
+    }
+    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), rotary)?;
     Ok(Document::new(program)?)
 }
 
