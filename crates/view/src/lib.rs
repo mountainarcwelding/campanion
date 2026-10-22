@@ -29,6 +29,9 @@ const MIN_SWEEP_RAD: f64 = 1e-12;
 /// Length comparisons below this (millimetres) are ties.
 const LEN_EPS_MM: f64 = 1e-9;
 
+/// Plan labels closer than this (millimetres) share one callout.
+const LABEL_MERGE_MM: f64 = 0.5;
+
 /// Kind of motion drawn in the plan preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrokeKind {
@@ -87,7 +90,7 @@ pub struct Scene {
     pub strokes: Vec<Stroke>,
     /// One marker for each `ProcessOn` that happens after the cursor exists.
     pub pierces: Vec<Marker>,
-    /// One label for each toolpath that contains a cut or a plunge.
+    /// Callouts for toolpaths that cut or plunge. Starts within 0.5 mm share one label (`"2, 3"`).
     pub labels: Vec<Label>,
     /// Axis-aligned bounds of every stroke point, rapids included. `None` when nothing was drawn.
     /// The pair is `(min_xy, max_xy)`.
@@ -123,6 +126,9 @@ pub fn load_scene(json: &str, arc_tol: f64) -> Result<Scene, String> {
 /// total angle in radians (the sign is ignored; [`ArcSense`] picks the direction). Arcs and
 /// helices on any other plane are drawn as a straight chord. The end point of every stroke is the
 /// motion tip exactly.
+///
+/// Labels whose points lie within 0.5 mm of an earlier label are then merged into that label.
+/// Texts join with `", "` (for example `"2, 3"`) and the earlier label keeps its position.
 pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     let tol = sanitize_tol(arc_tol);
     let mut scene = empty_scene();
@@ -151,7 +157,34 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     }
 
     scene.bounds = bounds.finish();
+    scene.labels = merge_labels(std::mem::take(&mut scene.labels), LABEL_MERGE_MM);
     scene
+}
+
+/// Join labels that land on the same plan point.
+///
+/// Each label is compared with the labels already kept, in order. When its point is within
+/// `radius_mm` of an earlier label, its text is appended with `", "` and that earlier label keeps
+/// its position. A label farther than `radius_mm` from every kept label stays on its own, so the
+/// order of first occurrences is unchanged.
+pub fn merge_labels(labels: Vec<Label>, radius_mm: f64) -> Vec<Label> {
+    let mut merged: Vec<Label> = Vec::with_capacity(labels.len());
+    for label in labels {
+        let mut joined = false;
+        for earlier in &mut merged {
+            let distance = (earlier.at[0] - label.at[0]).hypot(earlier.at[1] - label.at[1]);
+            if distance.is_finite() && distance <= radius_mm {
+                earlier.text.push_str(", ");
+                earlier.text.push_str(&label.text);
+                joined = true;
+                break;
+            }
+        }
+        if !joined {
+            merged.push(label);
+        }
+    }
+    merged
 }
 
 /// Tessellate a circular arc in the plane into a polyline whose chord deviation is at most `tol`.
@@ -767,7 +800,8 @@ fn shortest_angle(start: f64, end: f64) -> f64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::{
-        Playback, Stroke, StrokeKind, View, find_system_font, load_scene, polyline_length_3d, stroke_kind, tessellate_arc, tool_position, visible,
+        Label, Playback, Stroke, StrokeKind, View, find_system_font, load_scene, merge_labels, polyline_length_3d, stroke_kind, tessellate_arc,
+        tool_position, visible,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -1047,6 +1081,28 @@ mod tests {
         assert_eq!(stroke_kind(false, &[[0.0, 0.0], [1.0, 0.0]]), StrokeKind::Cut);
         let circle = tessellate_arc([1.0, 0.0], [1.0, 0.0], [0.0, 0.0], true, 0.1);
         assert_eq!(stroke_kind(false, &circle), StrokeKind::Cut);
+    }
+
+    #[test]
+    fn merge_labels_joins_nearby_callouts_and_keeps_order() {
+        // Scene labels are 1-based toolpath numbers at the first cut. "2" sits on the radius of
+        // "1", "4" is closer still, "3" is far, and "5" is just beyond "3".
+        let labels = vec![
+            Label { at: [0.0, 0.0], text: "1".to_string() },
+            Label { at: [0.5, 0.0], text: "2".to_string() },
+            Label { at: [20.0, 5.0], text: "3".to_string() },
+            Label { at: [0.1, -0.2], text: "4".to_string() },
+            Label { at: [20.0, 5.6], text: "5".to_string() },
+        ];
+        let merged = merge_labels(labels, 0.5);
+        assert_eq!(
+            merged,
+            vec![
+                Label { at: [0.0, 0.0], text: "1, 2, 4".to_string() },
+                Label { at: [20.0, 5.0], text: "3".to_string() },
+                Label { at: [20.0, 5.6], text: "5".to_string() },
+            ]
+        );
     }
 
     #[test]
