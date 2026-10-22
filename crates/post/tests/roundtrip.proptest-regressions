@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b89d0b6c5ff82a691d944510f508f5724c4a479f9ba1f1a9cc068ae22ba5eb57 # shrinks to steps = [Rapid { x: 0.0, y: 0.0, z: 0.0 }, Linear { x: 163.31875700602646, y: 0.0, z: -16.334859169870615, feed: 20.0 }, Arc { radius: 10.007848623236507, sweep: 0.4, ccw: false, feed: 20.0 }]

@@ -273,6 +273,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "campanion-post"
+version = "0.3.0"
+dependencies = [
+ "campanion-ir",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "campanion-view"
 version = "0.3.1"
 dependencies = [
