@@ -1,0 +1,19 @@
+[package]
+name = "campanion-import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Import 2D contours from ASCII DXF into campanion-geom"
+
+[lints]
+workspace = true
+
+[dependencies]
+campanion-geom.workspace = true
+kurbo = "0.13.1"
+roxmltree = "0.21.1"
+svgtypes = "0.16.1"
+thiserror.workspace = true

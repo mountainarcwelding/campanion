@@ -1,0 +1,19 @@
+[package]
+name = "campanion-geom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cavalier_contours.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# `std` only: the default set pulls `fork`/`timeout` (process spawning), which these tests do not need.
+proptest = { version = "1.12", default-features = false, features = ["std"] }

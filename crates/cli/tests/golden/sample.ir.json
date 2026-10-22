@@ -1,0 +1,297 @@
+{
+  "format": "campanion-ir/1",
+  "program": {
+    "name": "sample",
+    "tools": [
+      {
+        "id": 1,
+        "name": "endmill",
+        "diameter": 6.0,
+        "kerf": null
+      }
+    ],
+    "machine": null,
+    "toolpaths": [
+      {
+        "name": "sample",
+        "tool_id": 1,
+        "compensation": "computed",
+        "feeds": {
+          "cut": 1000.0,
+          "lead_in": 600.0,
+          "lead_out": 600.0,
+          "plunge": 300.0,
+          "retract": null
+        },
+        "pierce": {
+          "x": 16.0,
+          "y": 23.0,
+          "z": 0.0
+        },
+        "tabs": [],
+        "blocks": [
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 16.0,
+                "y": 23.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "process_on",
+            "process": "spindle",
+            "params": {
+              "speed": 12000.0,
+              "power": null,
+              "pierce_delay_s": 0.25,
+              "pierce_process_on_during_delay": true,
+              "post_delay_s": 0.1,
+              "post_process_on_during_delay": false,
+              "pierce_height": null,
+              "cut_height": null,
+              "extra": {}
+            }
+          },
+          {
+            "type": "dwell",
+            "seconds": 0.25
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 20.0,
+                "y": 23.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 600.0,
+            "role": "lead_in"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 40.0,
+                "y": 23.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": 43.0,
+                "y": 20.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "plane": "xy",
+            "center": {
+              "x": 40.0,
+              "y": 20.0,
+              "z": 0.0
+            },
+            "sense": "cw",
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 43.0,
+                "y": 0.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": 40.0,
+                "y": -2.9999999999999996,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "plane": "xy",
+            "center": {
+              "x": 40.0,
+              "y": -4.440892098500626e-16,
+              "z": 0.0
+            },
+            "sense": "cw",
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 0.0,
+                "y": -3.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": -2.9999999999999996,
+                "y": -7.669517010585678e-17,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "plane": "xy",
+            "center": {
+              "x": -4.440892098500626e-16,
+              "y": -4.440892098500626e-16,
+              "z": 0.0
+            },
+            "sense": "cw",
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": -3.0,
+                "y": 20.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": 4.0574162479713403e-16,
+                "y": 23.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "plane": "xy",
+            "center": {
+              "x": -4.440892098500626e-16,
+              "y": 20.0,
+              "z": 0.0
+            },
+            "sense": "cw",
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 20.0,
+                "y": 23.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 1000.0,
+            "role": "cut"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 24.0,
+                "y": 23.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 600.0,
+            "role": "lead_out"
+          },
+          {
+            "type": "process_off",
+            "process": "spindle"
+          },
+          {
+            "type": "dwell",
+            "seconds": 0.1
+          }
+        ]
+      }
+    ],
+    "channel_programs": [],
+    "syncs": []
+  }
+}

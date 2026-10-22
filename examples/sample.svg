@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="60mm" viewBox="0 0 100 60">
+  <g id="OUTER">
+    <rect x="0" y="0" width="100" height="60"/>
+  </g>
+  <g id="INNER">
+    <circle cx="15" cy="30" r="5"/>
+    <circle cx="85" cy="30" r="5"/>
+    <path d="M 40 25 H 60 A 5 5 0 0 1 60 35 H 40 A 5 5 0 0 1 40 25 Z"/>
+  </g>
+</svg>

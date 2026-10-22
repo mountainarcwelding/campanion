@@ -1,0 +1,173 @@
+use std::ffi::OsStr;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn campanion<I, S>(args: I) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(env!("CARGO_BIN_EXE_campanion")).args(args).output()
+}
+
+fn text(bytes: &[u8]) -> Result<String, String> {
+    String::from_utf8(bytes.to_vec()).map_err(|err| err.to_string())
+}
+
+fn success_stdout(args: &[&str]) -> Result<String, String> {
+    let output = campanion(args).map_err(|err| err.to_string())?;
+    let stderr = text(&output.stderr)?;
+    if output.status.code() != Some(0) {
+        return Err(format!("exit {:?} stderr {stderr}", output.status.code()));
+    }
+    text(&output.stdout)
+}
+
+fn assert_golden(name: &str, actual: &str) -> Result<(), String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden").join(name);
+    if std::env::var("UPDATE_GOLDEN").ok().as_deref() == Some("1") {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        std::fs::write(&path, actual).map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    let expected = std::fs::read_to_string(&path).map_err(|err| format!("read {}: {err} (set UPDATE_GOLDEN=1 to create)", path.display()))?;
+    if actual != expected {
+        return Err(format!("golden mismatch for {} (set UPDATE_GOLDEN=1 to regenerate)", path.display()));
+    }
+    Ok(())
+}
+
+fn temp_path(name: &str) -> PathBuf {
+    let dir = std::env::var_os("CARGO_TARGET_TMPDIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    dir.join(name)
+}
+
+#[test]
+fn version_flag_exits_zero_and_prints_name() {
+    let output = campanion(["--version"]).expect("failed to run campanion");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = text(&output.stdout).expect("utf-8");
+    assert!(stdout.starts_with("campanion "), "stdout was {stdout:?}");
+}
+
+#[test]
+fn help_lists_commands() {
+    let stdout = success_stdout(&["--help"]).expect("help");
+    for word in ["ir", "ngc", "verify", "schema", "--job", "--version"] {
+        assert!(stdout.contains(word), "help missing {word}: {stdout}");
+    }
+}
+
+#[test]
+fn usage_errors_exit_two() {
+    for args in [Vec::new(), vec!["nope"], vec!["verify"], vec!["ir", "--job"], vec!["schema", "extra"]] {
+        let output = campanion(&args).expect("run");
+        let stderr = text(&output.stderr).expect("utf-8");
+        assert_eq!(output.status.code(), Some(2), "{args:?} {stderr}");
+        assert!(stderr.contains("Usage:"), "{args:?} {stderr}");
+    }
+}
+
+#[test]
+fn sample_ir_matches_golden() {
+    let stdout = success_stdout(&["ir"]).expect("ir");
+    assert!(stdout.contains("\"format\": \"campanion-ir/1\""), "{stdout}");
+    assert_golden("sample.ir.json", &stdout).expect("golden ir");
+}
+
+#[test]
+fn sample_ngc_matches_golden() {
+    let stdout = success_stdout(&["ngc"]).expect("ngc");
+    assert!(stdout.starts_with("G21\nG90\n"), "{stdout}");
+    assert_golden("sample.ngc", &stdout).expect("golden ngc");
+}
+
+#[test]
+fn job_file_matches_builtin_sample() {
+    let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/sample.job.json");
+    let sample = sample.to_str().expect("sample path");
+    let from_file = success_stdout(&["ir", "--job", sample]).expect("ir --job");
+    let builtin = success_stdout(&["ir"]).expect("ir");
+    assert_eq!(from_file, builtin);
+    let ngc = success_stdout(&["ngc", "--job", sample]).expect("ngc --job");
+    assert_eq!(ngc, success_stdout(&["ngc"]).expect("ngc"));
+}
+
+#[test]
+fn bad_job_reports_invalid_input() {
+    let path = temp_path("campanion-bad-job.json");
+    std::fs::write(&path, "{}").expect("write job");
+    let output = campanion(["ir", "--job", path.to_str().expect("path")]).expect("run");
+    let stderr = text(&output.stderr).expect("utf-8");
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("invalid input"), "{stderr}");
+    assert!(stderr.contains("process"), "{stderr}");
+}
+
+#[test]
+fn verify_clean_and_broken() {
+    let clean_path = temp_path("campanion-verify-clean.json");
+    std::fs::write(&clean_path, success_stdout(&["ir"]).expect("ir")).expect("write clean ir");
+    let clean = campanion(["verify", clean_path.to_str().expect("clean path")]).expect("verify clean");
+    let clean_stdout = text(&clean.stdout).expect("utf-8");
+    assert_eq!(clean.status.code(), Some(0), "stderr {} stdout {clean_stdout}", text(&clean.stderr).expect("utf-8"));
+    assert!(clean_stdout.contains("status ok"), "{clean_stdout}");
+    assert!(clean_stdout.contains("issues 0"), "{clean_stdout}");
+    assert!(clean_stdout.contains("bounds_min_mm"), "{clean_stdout}");
+
+    let broken_path = temp_path("campanion-verify-broken.json");
+    std::fs::write(&broken_path, BROKEN_IR).expect("write broken ir");
+    let broken = campanion(["verify", broken_path.to_str().expect("broken path")]).expect("verify broken");
+    let broken_stdout = text(&broken.stdout).expect("utf-8");
+    assert_eq!(broken.status.code(), Some(1), "stderr {} stdout {broken_stdout}", text(&broken.stderr).expect("utf-8"));
+    assert!(broken_stdout.contains("status errors"), "{broken_stdout}");
+    assert!(broken_stdout.contains("process_not_closed"), "{broken_stdout}");
+    assert!(broken_stdout.contains("torch"), "{broken_stdout}");
+
+    let invalid_path = temp_path("campanion-verify-invalid.json");
+    std::fs::write(&invalid_path, "{").expect("write invalid");
+    let invalid = campanion(["verify", invalid_path.to_str().expect("invalid path")]).expect("verify invalid");
+    let stderr = text(&invalid.stderr).expect("utf-8");
+    assert_eq!(invalid.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("json"), "{stderr}");
+}
+
+#[test]
+fn schema_prints_json_schema() {
+    let stdout = success_stdout(&["schema"]).expect("schema");
+    assert!(stdout.contains("\"$schema\""), "{stdout}");
+    assert!(stdout.contains("format"), "{stdout}");
+}
+
+const BROKEN_IR: &str = r#"{
+  "format": "campanion-ir/1",
+  "program": {
+    "tools": [],
+    "toolpaths": [
+      {
+        "compensation": "off",
+        "feeds": { "cut": 100.0 },
+        "tabs": [],
+        "blocks": [
+          {
+            "type": "process_on",
+            "process": "torch",
+            "params": {
+              "pierce_delay_s": 0.0,
+              "pierce_process_on_during_delay": true,
+              "post_delay_s": 0.0,
+              "post_process_on_during_delay": false,
+              "extra": {}
+            }
+          }
+        ]
+      }
+    ],
+    "channel_programs": [],
+    "syncs": []
+  }
+}
+"#;

@@ -1,0 +1,30 @@
+{
+  "name": "sample",
+  "process": "spindle",
+  "cut_feed": 1000.0,
+  "tool": {
+    "id": 1,
+    "name": "endmill",
+    "diameter": 6.0
+  },
+  "feeds": {
+    "lead_in": 600.0,
+    "lead_out": 600.0,
+    "plunge": 300.0
+  },
+  "params": {
+    "speed": 12000.0,
+    "pierce_delay_s": 0.25,
+    "post_delay_s": 0.1
+  },
+  "profile": {
+    "side": "outside",
+    "direction": "climb",
+    "compensation": "computed",
+    "z": 0.0,
+    "lead_in": { "type": "line", "length": 4.0 },
+    "lead_out": { "type": "line", "length": 4.0 },
+    "closed": true,
+    "points": [[0.0, 0.0], [40.0, 0.0], [40.0, 20.0], [0.0, 20.0]]
+  }
+}

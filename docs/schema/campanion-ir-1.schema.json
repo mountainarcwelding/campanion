@@ -1,0 +1,1396 @@
+{
+  "$defs": {
+    "ArcSense": {
+      "description": "Clockwise or counter-clockwise when looking along the plane normal (+Z for XY, +Y for ZX, +X for YZ).",
+      "oneOf": [
+        {
+          "const": "cw",
+          "description": "Clockwise.",
+          "type": "string"
+        },
+        {
+          "const": "ccw",
+          "description": "Counter-clockwise.",
+          "type": "string"
+        }
+      ]
+    },
+    "Axis": {
+      "additionalProperties": false,
+      "description": "One joint.",
+      "properties": {
+        "chain": {
+          "$ref": "#/$defs/KinematicNode"
+        },
+        "id": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/AxisKind"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AxisLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "$ref": "#/$defs/AxisName"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "chain"
+      ],
+      "type": "object"
+    },
+    "AxisBlock": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AxisMotion",
+          "description": "Joint move."
+        },
+        {
+          "$ref": "#/$defs/Event",
+          "description": "The same events a tool-space path can carry."
+        }
+      ],
+      "description": "One axis-space step."
+    },
+    "AxisIndex": {
+      "additionalProperties": false,
+      "description": "Zero-based index of an axis past the nine letters. Valid values are `9..MAX_AXES`.",
+      "properties": {
+        "index": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index"
+      ],
+      "type": "object"
+    },
+    "AxisKind": {
+      "description": "Linear travel or rotation.",
+      "oneOf": [
+        {
+          "const": "linear",
+          "description": "Millimetres along the kinematic direction.",
+          "type": "string"
+        },
+        {
+          "const": "rotary",
+          "description": "Radians about the kinematic direction, right-handed.",
+          "type": "string"
+        }
+      ]
+    },
+    "AxisLetter": {
+      "description": "X Y Z A B C U V W, in that order. Further axes use an index.",
+      "oneOf": [
+        {
+          "const": "X",
+          "description": "Linear X.",
+          "type": "string"
+        },
+        {
+          "const": "Y",
+          "description": "Linear Y.",
+          "type": "string"
+        },
+        {
+          "const": "Z",
+          "description": "Linear Z.",
+          "type": "string"
+        },
+        {
+          "const": "A",
+          "description": "Rotary about X.",
+          "type": "string"
+        },
+        {
+          "const": "B",
+          "description": "Rotary about Y.",
+          "type": "string"
+        },
+        {
+          "const": "C",
+          "description": "Rotary about Z.",
+          "type": "string"
+        },
+        {
+          "const": "U",
+          "description": "Secondary linear parallel to X.",
+          "type": "string"
+        },
+        {
+          "const": "V",
+          "description": "Secondary linear parallel to Y.",
+          "type": "string"
+        },
+        {
+          "const": "W",
+          "description": "Secondary linear parallel to Z.",
+          "type": "string"
+        }
+      ]
+    },
+    "AxisLimits": {
+      "additionalProperties": false,
+      "description": "Inclusive travel limits. Millimetres when linear, radians when rotary.",
+      "properties": {
+        "max": {
+          "format": "double",
+          "type": "number"
+        },
+        "min": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": "object"
+    },
+    "AxisMotion": {
+      "description": "Axis-space motion. Targets are joint values at the end of the move.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Joint rapid.",
+          "properties": {
+            "feed": {
+              "default": null,
+              "description": "Optional rapid feed.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "targets": {
+              "description": "End joint values.",
+              "items": {
+                "$ref": "#/$defs/AxisTarget"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "rapid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "targets"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Joint linear feed.",
+          "properties": {
+            "feed": {
+              "description": "Feed.",
+              "format": "double",
+              "type": "number"
+            },
+            "targets": {
+              "description": "End joint values.",
+              "items": {
+                "$ref": "#/$defs/AxisTarget"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "linear",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "targets",
+            "feed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Arc expressed in the machine base frame, with joint values at the end.",
+          "properties": {
+            "center": {
+              "$ref": "#/$defs/Vec3",
+              "description": "Arc centre in the base frame, millimetres."
+            },
+            "feed": {
+              "description": "Feed.",
+              "format": "double",
+              "type": "number"
+            },
+            "plane": {
+              "$ref": "#/$defs/Plane",
+              "description": "Plane."
+            },
+            "sense": {
+              "$ref": "#/$defs/ArcSense",
+              "description": "Clockwise or counter-clockwise."
+            },
+            "targets": {
+              "description": "End joint values.",
+              "items": {
+                "$ref": "#/$defs/AxisTarget"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "arc",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "targets",
+            "plane",
+            "center",
+            "sense",
+            "feed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Helix in the machine base frame, with joint values at the end.",
+          "properties": {
+            "center": {
+              "$ref": "#/$defs/Vec3",
+              "description": "A point on the helix axis, millimetres."
+            },
+            "feed": {
+              "description": "Feed.",
+              "format": "double",
+              "type": "number"
+            },
+            "plane": {
+              "$ref": "#/$defs/Plane",
+              "description": "Plane."
+            },
+            "sense": {
+              "$ref": "#/$defs/ArcSense",
+              "description": "Clockwise or counter-clockwise."
+            },
+            "sweep": {
+              "description": "Absolute sweep in radians.",
+              "format": "double",
+              "type": "number"
+            },
+            "targets": {
+              "description": "End joint values.",
+              "items": {
+                "$ref": "#/$defs/AxisTarget"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "helix",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "targets",
+            "plane",
+            "center",
+            "sense",
+            "sweep",
+            "feed"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AxisName": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AxisLetter",
+          "description": "One of X Y Z A B C U V W."
+        },
+        {
+          "$ref": "#/$defs/AxisIndex",
+          "description": "Indexed extra. The index is the zero-based ordinal, from 9 upward."
+        }
+      ],
+      "description": "Letter or index that names an axis."
+    },
+    "AxisTarget": {
+      "additionalProperties": false,
+      "description": "One joint position at the end of an axis-space move.",
+      "properties": {
+        "axis": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "value": {
+          "description": "Millimetres or radians, matching the axis kind.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "axis",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Channel": {
+      "additionalProperties": false,
+      "description": "A group of axes that move together: one head, spindle or turret.",
+      "properties": {
+        "axes": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "axes"
+      ],
+      "type": "object"
+    },
+    "ChannelProgram": {
+      "additionalProperties": false,
+      "description": "Motion for one channel.",
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/AxisBlock"
+          },
+          "type": "array"
+        },
+        "channel": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel",
+        "blocks"
+      ],
+      "type": "object"
+    },
+    "ClBlock": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClMotion",
+          "description": "Geometric move."
+        },
+        {
+          "$ref": "#/$defs/Event",
+          "description": "Process, dwell, tool change or other event."
+        }
+      ],
+      "description": "One tool-space step: a motion or an event."
+    },
+    "ClMotion": {
+      "description": "Tool-space motion. `feed` is millimetres per minute. Rapid feed is `None` for a machine rapid.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Non-cutting positioning move.",
+          "properties": {
+            "feed": {
+              "default": null,
+              "description": "Optional rapid feed.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "to": {
+              "$ref": "#/$defs/Pose",
+              "description": "End pose."
+            },
+            "type": {
+              "const": "rapid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "to"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Straight feed.",
+          "properties": {
+            "feed": {
+              "description": "Feed.",
+              "format": "double",
+              "type": "number"
+            },
+            "role": {
+              "$ref": "#/$defs/MoveRole",
+              "description": "Cut, lead, plunge or retract."
+            },
+            "to": {
+              "$ref": "#/$defs/Pose",
+              "description": "End pose."
+            },
+            "type": {
+              "const": "linear",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "to",
+            "feed",
+            "role"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Circular feed of at most one full turn. The sense and the endpoints pick the sweep.",
+          "properties": {
+            "center": {
+              "$ref": "#/$defs/Vec3",
+              "description": "Arc centre, millimetres."
+            },
+            "feed": {
+              "description": "Feed.",
+              "format": "double",
+              "type": "number"
+            },
+            "plane": {
+              "$ref": "#/$defs/Plane",
+              "description": "Plane."
+            },
+            "role": {
+              "$ref": "#/$defs/MoveRole",
+              "description": "Cut, lead, plunge or retract."
+            },
+            "sense": {
+              "$ref": "#/$defs/ArcSense",
+              "description": "Clockwise or counter-clockwise."
+            },
+            "to": {
+              "$ref": "#/$defs/Pose",
+              "description": "End pose."
+            },
+            "type": {
+              "const": "arc",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "to",
+            "plane",
+            "center",
+            "sense",
+            "feed",
+            "role"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Circular feed plus travel along the plane normal. `sweep` is radians and may exceed one turn.",
+          "properties": {
+            "center": {
+              "$ref": "#/$defs/Vec3",
+              "description": "A point on the helix axis, millimetres."
+            },
+            "feed": {
+              "description": "Feed.",
+              "format": "double",
+              "type": "number"
+            },
+            "plane": {
+              "$ref": "#/$defs/Plane",
+              "description": "Plane."
+            },
+            "role": {
+              "$ref": "#/$defs/MoveRole",
+              "description": "Cut, lead, plunge or retract."
+            },
+            "sense": {
+              "$ref": "#/$defs/ArcSense",
+              "description": "Clockwise or counter-clockwise."
+            },
+            "sweep": {
+              "description": "Absolute sweep in radians. One full turn is `2π`.",
+              "format": "double",
+              "type": "number"
+            },
+            "to": {
+              "$ref": "#/$defs/Pose",
+              "description": "End pose."
+            },
+            "type": {
+              "const": "helix",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "to",
+            "plane",
+            "center",
+            "sense",
+            "sweep",
+            "feed",
+            "role"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ClPath": {
+      "additionalProperties": false,
+      "description": "A cutter-location path: what an operation produces before kinematics.",
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/ClBlock"
+          },
+          "type": "array"
+        },
+        "compensation": {
+          "$ref": "#/$defs/CompensationMode"
+        },
+        "feeds": {
+          "$ref": "#/$defs/Feeds"
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pierce": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Vec3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where the process turns on, when the source operation recorded it."
+        },
+        "tabs": {
+          "items": {
+            "$ref": "#/$defs/ProfileTab"
+          },
+          "type": "array"
+        },
+        "tool_id": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "compensation",
+        "feeds",
+        "tabs",
+        "blocks"
+      ],
+      "type": "object"
+    },
+    "CompensationMode": {
+      "description": "Where compensation was applied.",
+      "oneOf": [
+        {
+          "const": "computed",
+          "description": "The path is already offset by the tool radius or half the kerf.",
+          "type": "string"
+        },
+        {
+          "const": "controller_left",
+          "description": "A later post should keep the tool to the left of travel.",
+          "type": "string"
+        },
+        {
+          "const": "controller_right",
+          "description": "A later post should keep the tool to the right of travel.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "No radius compensation.",
+          "type": "string"
+        }
+      ]
+    },
+    "CoolantMode": {
+      "description": "Coolant, air or process assist.",
+      "oneOf": [
+        {
+          "const": "off",
+          "description": "Coolant off.",
+          "type": "string"
+        },
+        {
+          "const": "flood",
+          "description": "Flood coolant.",
+          "type": "string"
+        },
+        {
+          "const": "mist",
+          "description": "Mist coolant.",
+          "type": "string"
+        },
+        {
+          "const": "air",
+          "description": "Air blast.",
+          "type": "string"
+        },
+        {
+          "const": "through_tool",
+          "description": "Through-tool coolant.",
+          "type": "string"
+        },
+        {
+          "const": "assist",
+          "description": "Gas or air assist for a laser, plasma or similar process.",
+          "type": "string"
+        }
+      ]
+    },
+    "Event": {
+      "description": "One non-motion step.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Turn a process on. `params` includes pierce and post timing.",
+          "properties": {
+            "params": {
+              "$ref": "#/$defs/ProcessParams",
+              "description": "Speeds, delays and toggles."
+            },
+            "process": {
+              "$ref": "#/$defs/ProcessKind",
+              "description": "Which process."
+            },
+            "type": {
+              "const": "process_on",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Turn a process off.",
+          "properties": {
+            "process": {
+              "$ref": "#/$defs/ProcessKind",
+              "description": "Which process."
+            },
+            "type": {
+              "const": "process_off",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "process"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Pause, in seconds. The tool does not move.",
+          "properties": {
+            "seconds": {
+              "description": "Seconds. Zero is allowed.",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "dwell",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Select a tool by its id.",
+          "properties": {
+            "tool_id": {
+              "description": "Tool id.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "tool_change",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tool_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Coolant or assist.",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/CoolantMode",
+              "description": "Mode."
+            },
+            "type": {
+              "const": "coolant",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Probe. `toward` is the expected contact pose when the path states one.",
+          "properties": {
+            "feed": {
+              "default": null,
+              "description": "Probe feed, millimetres per minute.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "toward": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Pose"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Expected contact, when known."
+            },
+            "type": {
+              "const": "probe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Human-readable note. Posts may emit it as a comment.",
+          "properties": {
+            "text": {
+              "description": "Note text.",
+              "type": "string"
+            },
+            "type": {
+              "const": "comment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Named extension point. `name` is not a machine code.",
+          "properties": {
+            "name": {
+              "description": "Event name.",
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ParamValue"
+              },
+              "description": "Named parameters.",
+              "type": "object"
+            },
+            "type": {
+              "const": "custom",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Wait until every channel listed on this sync id arrives.",
+          "properties": {
+            "id": {
+              "description": "Sync point id.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "sync",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Feeds": {
+      "additionalProperties": false,
+      "description": "Operation feeds, millimetres per minute.\n\nEach cutting move also stores its own feed. Role-specific fields override `cut` when a path\nis converted. `None` means \"use `cut`\".",
+      "properties": {
+        "cut": {
+          "format": "double",
+          "type": "number"
+        },
+        "lead_in": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "lead_out": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "plunge": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "retract": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cut"
+      ],
+      "type": "object"
+    },
+    "KinematicNode": {
+      "additionalProperties": false,
+      "description": "Where a joint sits on its parent.\n\n`direction` is the positive linear travel, or the rotary axis, in the parent frame.\n`offset` is the joint origin relative to the parent origin, in millimetres.\n`parent` is `None` when the joint is mounted on the machine base.",
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "offset": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "parent": {
+          "default": null,
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "direction",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "Machine": {
+      "additionalProperties": false,
+      "description": "The joints of one machine and the channels that group them.",
+      "properties": {
+        "axes": {
+          "items": {
+            "$ref": "#/$defs/Axis"
+          },
+          "type": "array"
+        },
+        "channels": {
+          "items": {
+            "$ref": "#/$defs/Channel"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "axes",
+        "channels"
+      ],
+      "type": "object"
+    },
+    "MoveRole": {
+      "description": "Why a feed move exists. Rapids have no role.",
+      "oneOf": [
+        {
+          "const": "cut",
+          "description": "Cutting feed.",
+          "type": "string"
+        },
+        {
+          "const": "lead_in",
+          "description": "Approach onto the profile.",
+          "type": "string"
+        },
+        {
+          "const": "lead_out",
+          "description": "Departure off the profile.",
+          "type": "string"
+        },
+        {
+          "const": "plunge",
+          "description": "Vertical entry.",
+          "type": "string"
+        },
+        {
+          "const": "retract",
+          "description": "Vertical exit.",
+          "type": "string"
+        }
+      ]
+    },
+    "ParamValue": {
+      "anyOf": [
+        {
+          "description": "Boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "Finite number.",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "Text.",
+          "type": "string"
+        }
+      ],
+      "description": "A JSON parameter: a bool, a finite number, or text."
+    },
+    "Plane": {
+      "description": "Plane of a circular arc or helix, named by its two axes.",
+      "oneOf": [
+        {
+          "const": "xy",
+          "description": "XY, viewed from +Z. The usual flat work plane.",
+          "type": "string"
+        },
+        {
+          "const": "zx",
+          "description": "ZX, viewed from +Y.",
+          "type": "string"
+        },
+        {
+          "const": "yz",
+          "description": "YZ, viewed from +X.",
+          "type": "string"
+        }
+      ]
+    },
+    "Pose": {
+      "additionalProperties": false,
+      "description": "Tool pose in the part frame.\n\n`tip` is the tool tip. `axis` points from the tip toward the spindle (or along the process\ndirection). It is stored as given; a unit vector is the convention.",
+      "properties": {
+        "axis": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "tip": {
+          "$ref": "#/$defs/Vec3"
+        }
+      },
+      "required": [
+        "tip",
+        "axis"
+      ],
+      "type": "object"
+    },
+    "ProcessKind": {
+      "description": "What a process-on event turns on.",
+      "oneOf": [
+        {
+          "const": "spindle",
+          "description": "Rotating cutter.",
+          "type": "string"
+        },
+        {
+          "const": "torch",
+          "description": "Plasma or fuel torch.",
+          "type": "string"
+        },
+        {
+          "const": "laser",
+          "description": "Laser.",
+          "type": "string"
+        },
+        {
+          "const": "extruder",
+          "description": "Filament or paste extruder.",
+          "type": "string"
+        },
+        {
+          "const": "knife",
+          "description": "Drag knife.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Any later process. The string is a short name, not a machine id.",
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProcessParams": {
+      "additionalProperties": false,
+      "description": "Parameters stored with a process-on event.\n\nDelays are seconds. Heights are absolute Z in millimetres. `pierce_process_on_during_delay`\ndefaults to true and `post_process_on_during_delay` defaults to false, matching\n`campanion_path::ProcessTiming`.",
+      "properties": {
+        "cut_height": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "extra": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ParamValue"
+          },
+          "type": "object"
+        },
+        "pierce_delay_s": {
+          "format": "double",
+          "type": "number"
+        },
+        "pierce_height": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pierce_process_on_during_delay": {
+          "type": "boolean"
+        },
+        "post_delay_s": {
+          "format": "double",
+          "type": "number"
+        },
+        "post_process_on_during_delay": {
+          "type": "boolean"
+        },
+        "power": {
+          "default": null,
+          "description": "Process power. The unit depends on the process (watts, a fraction, a current).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "speed": {
+          "default": null,
+          "description": "Spindle revolutions per minute, or a process-defined rate.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pierce_delay_s",
+        "pierce_process_on_during_delay",
+        "post_delay_s",
+        "post_process_on_during_delay",
+        "extra"
+      ],
+      "type": "object"
+    },
+    "ProfileTab": {
+      "additionalProperties": false,
+      "description": "One tab left uncut along a profile. Lengths are millimetres along the path. Height is a lift in Z.",
+      "properties": {
+        "height": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "start": {
+          "format": "double",
+          "type": "number"
+        },
+        "width": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start",
+        "width"
+      ],
+      "type": "object"
+    },
+    "Program": {
+      "additionalProperties": false,
+      "description": "Tools, machine, toolpaths and channel programs.",
+      "properties": {
+        "channel_programs": {
+          "items": {
+            "$ref": "#/$defs/ChannelProgram"
+          },
+          "type": "array"
+        },
+        "machine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Machine"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "syncs": {
+          "items": {
+            "$ref": "#/$defs/SyncPoint"
+          },
+          "type": "array"
+        },
+        "toolpaths": {
+          "items": {
+            "$ref": "#/$defs/ClPath"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/Tool"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tools",
+        "toolpaths",
+        "channel_programs",
+        "syncs"
+      ],
+      "type": "object"
+    },
+    "SyncPoint": {
+      "additionalProperties": false,
+      "description": "Channels that must arrive together. A sync event waits on this id.",
+      "properties": {
+        "channels": {
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "channels"
+      ],
+      "type": "object"
+    },
+    "Tool": {
+      "additionalProperties": false,
+      "description": "A cutter or a kerf-only process.",
+      "properties": {
+        "diameter": {
+          "default": null,
+          "description": "Rotating tool diameter, millimetres.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kerf": {
+          "default": null,
+          "description": "Kerf width, millimetres. Set for a process that has no rotating cutter.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "Vec3": {
+      "additionalProperties": false,
+      "description": "A vector in millimetres, or a unitless direction.",
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        },
+        "z": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A toolpath document. `format` is `campanion-ir/1` for documents this build writes.",
+  "properties": {
+    "format": {
+      "type": "string"
+    },
+    "program": {
+      "$ref": "#/$defs/Program"
+    }
+  },
+  "required": [
+    "format",
+    "program"
+  ],
+  "title": "Document",
+  "type": "object"
+}

@@ -1,0 +1,30 @@
+{
+  "format": "campanion-job/1",
+  "source": { "path": "sample.dxf", "hash": "cee9f36f5ba230a2" },
+  "units": "mm",
+  "tools": [
+    { "id": 1, "diameter": 6.0 }
+  ],
+  "operations": [
+    {
+      "name": "inner",
+      "type": "profile",
+      "layers": ["INNER"],
+      "side": "inside",
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 3.0,
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    },
+    {
+      "name": "outer",
+      "type": "profile",
+      "layers": ["OUTER"],
+      "side": "outside",
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 3.0,
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    }
+  ]
+}

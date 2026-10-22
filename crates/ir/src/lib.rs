@@ -1,0 +1,133 @@
+//! Machine-neutral toolpath intermediate representation.
+//!
+//! A [`Document`] is JSON tagged [`FORMAT_TAG`]. It holds two levels:
+//! - **Tool space** (cutter location): tool tip position and tool axis direction in the part frame.
+//! - **Axis space**: joint targets for one machine of up to [`MAX_AXES`] axes, grouped into channels.
+//!
+//! Units are millimetres, radians and seconds. Feeds are millimetres per minute. Motion keeps
+//! lines, arcs and helices. Process timing from `campanion-path` is stored on the process
+//! parameters and, when a path is converted, expanded into process events and dwells in that order.
+//! [`write_ngc`] prints a program as generic RS274/NGC text for tests. It is not a machine post.
+//! The text ends with `M30`, or with `M2` when [`NgcOptions`] says so.
+
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+mod check;
+mod convert;
+mod geom;
+mod machine;
+mod motion;
+mod ngc;
+mod process;
+mod program;
+mod schema;
+mod verify;
+
+pub use convert::Import;
+pub use geom::{ArcSense, Plane, Pose, Vec3};
+pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
+pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
+pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};
+pub use process::{CoolantMode, Event, ParamValue, ProcessKind, ProcessParams, Tool};
+pub use program::{Document, Program, SyncPoint};
+pub use schema::json_schema;
+pub use verify::{Bounds, Issue, RefKind, VerifyOptions, VerifyReport, verify, verify_with};
+
+/// Crate version from the package manifest.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Identifier for the current on-disk / interchange IR format.
+pub const FORMAT_TAG: &str = "campanion-ir/1";
+
+/// Major version this build reads and writes.
+pub const FORMAT_MAJOR: u32 = 1;
+
+/// Hard cap on joint/axis count.
+///
+/// The target is 13 axes and 16 is the hard cap matching common controller joint limits.
+pub const MAX_AXES: usize = 16;
+
+/// Hard cap on channels in one machine.
+pub const MAX_CHANNELS: usize = 16;
+
+/// How many named axis letters exist before extras are indexed.
+///
+/// The letters are X Y Z A B C U V W, in that order.
+pub const AXIS_LETTER_COUNT: usize = 9;
+
+/// Result type for IR operations.
+pub type Result<T> = std::result::Result<T, IrError>;
+
+/// Errors from IR encode/decode and validation.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum IrError {
+    /// The requested operation is not supported yet.
+    #[error("not supported yet: {0}")]
+    NotSupported(String),
+    /// The caller supplied invalid input.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    /// `format` names this family but the major version is not [`FORMAT_MAJOR`].
+    #[error("unsupported IR major version {found}; this build reads major {supported}")]
+    UnsupportedVersion {
+        /// Major version parsed from the document tag.
+        found: u32,
+        /// Major version this build accepts.
+        supported: u32,
+    },
+    /// `format` is missing the `campanion-ir/` prefix or is otherwise not a version tag.
+    #[error("unrecognised format tag `{0}`")]
+    UnknownFormat(String),
+    /// JSON parse or encode failed.
+    #[error("json: {0}")]
+    Json(String),
+    /// A path operation failed while converting into the IR.
+    #[error(transparent)]
+    Path(#[from] campanion_path::PathError),
+}
+
+/// Accept [`FORMAT_TAG`] and later minor tags of the same major (`campanion-ir/1.2`).
+///
+/// A different major is [`IrError::UnsupportedVersion`]. Anything that is not a
+/// `campanion-ir/<major>` tag is [`IrError::UnknownFormat`].
+pub fn check_format(tag: &str) -> Result<()> {
+    let Some(rest) = tag.strip_prefix("campanion-ir/") else {
+        return Err(IrError::UnknownFormat(tag.to_string()));
+    };
+    let (major_token, minor) = match rest.split_once('.') {
+        Some((major, minor)) => (major, Some(minor)),
+        None => (rest, None),
+    };
+    let Some(major) = parse_major(major_token) else {
+        return Err(IrError::UnknownFormat(tag.to_string()));
+    };
+    if major != FORMAT_MAJOR {
+        return Err(IrError::UnsupportedVersion { found: major, supported: FORMAT_MAJOR });
+    }
+    if let Some(minor) = minor
+        && !valid_minor(minor)
+    {
+        return Err(IrError::UnknownFormat(tag.to_string()));
+    }
+    Ok(())
+}
+
+fn parse_major(token: &str) -> Option<u32> {
+    if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if token.len() > 1 && token.starts_with('0') {
+        return None;
+    }
+    token.parse().ok()
+}
+
+fn valid_minor(minor: &str) -> bool {
+    if minor.is_empty() || minor.starts_with('.') || minor.ends_with('.') || minor.contains("..") {
+        return false;
+    }
+    minor.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+}
+
+#[cfg(test)]
+mod tests;

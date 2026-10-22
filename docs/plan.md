@@ -1,0 +1,154 @@
+# CAMpanion plan
+
+## Goal
+An open, machine-neutral CAM engine in Rust that turns geometry into good toolpaths, starting with
+2D and working up to complex machines. It is a companion to SolidCraft now and is meant to merge
+into it later.
+
+Direction (2026-10-21):
+- Rust, following SolidCraft's source rules (see `AGENTS.md`), so a merge is straightforward.
+- Not tied to one machine or process yet. Mill, router, plasma, laser, waterjet, drag knife and
+  additive are all "processes" on the same engine.
+- Get path processing right first. Start with 2D, then 2.5D, 3-axis, 4/5-axis, turning and
+  multi-channel machines.
+- The toolpath format must support up to **13 axes** by the end. The format's hard cap is 16 axes per machine, matching common
+  controller joint limits, so 13 fits with room to spare.
+
+## Design principles
+1. **Machine-neutral core.** Operations produce toolpaths in a neutral format (the IR). Machine
+   definitions and posts come last and only consume the IR. No operation assumes a controller.
+2. **Exact geometry where possible.** Keep lines and true arcs through offsetting and output, so
+   G2/G3 come out as arcs, not chord soup. Splines are approximated within a stated tolerance.
+3. **One tolerance model.** Every operation takes explicit tolerances (linear, angular, chord
+   error) with sane defaults; results say what tolerance they met.
+4. **Never crash, always explain.** Bad geometry returns an error that names the problem
+   (open contour at x,y; self-intersection; tool too big for feature).
+5. **Everything is callable headless.** Library API first, CLI second, UI last. That matches
+   SolidCraft's "everything is a command" rule and makes integration easy.
+6. **Verifiable.** Each milestone lands with analytic tests, property tests and a simple
+   verifier (gouge/limit checks), not only golden files.
+
+## Milestones
+
+### M0: Scaffold (in progress)
+Cargo workspace, crates `campanion-geom`, `campanion-path`, `campanion-ir` and `campanion-cli` (binary `campanion`),
+SolidCraft's lint and format settings, CI workflow, `cargo-deny` licence check, local
+`scripts/check.sh`.
+Done when: a clean checkout passes fmt, clippy, tests, the wasm check and cargo-deny.
+
+### M1: 2D geometry core
+- Primitives: points, vectors, lines, arcs (centre/radius/sweep and bulge form), closed and open
+  contours made of lines and arcs, bounding boxes, orientation, area, length, point-in-contour.
+- Tolerance model and robust predicates (near-zero lengths, near-tangent joins, almost-closed
+  contours).
+- Cleanup: join loose segments into contours, remove duplicates and zero-length pieces, merge
+  collinear lines and co-circular arcs, fix direction (outer counter-clockwise, holes clockwise).
+- Offsetting with true arcs (inward and outward, round corners), including self-intersection
+  removal and split results.
+- Region booleans (union, difference, intersection) on line/arc contours.
+- Library choice is an ADR in M1: candidates are our own implementation or permissive crates such as
+  `cavalier_contours` (MIT OR Apache-2.0, line/arc offsets) and `i_overlay` (MIT OR Apache-2.0,
+  booleans). They are wrapped behind our own types so they can be swapped.
+Done when: offsets match analytic results (circles, rectangles, slots) to 1e-6 mm, property tests
+(offset out then in returns the shape; area relations; no self-intersections) pass on random
+inputs, and hostile input never panics.
+
+### M2: 2D path processing
+- Profile/contour: inside, outside or on the line; climb or conventional; tool radius or kerf
+  compensation, done in the CAM (computed path) or left to the controller (G41/G42 flag in the IR).
+- Pockets: offset rings and zigzag/raster, islands, corner clean-up, stepover control.
+- Drilling points from circles and points (positions only; cycles are expanded or marked in IR).
+- Engraving/on-line following, with optional V-carve later.
+- Lead-in/lead-out (line, arc, perpendicular), overcut, pierce points, tabs/bridges.
+- Start-point selection, cut ordering (inside features before outside, nearest-neighbour then
+  improved), linking moves and rapid minimisation.
+- Depth passes and ramp/helix entry for 2.5D-ready output.
+- Per-operation process timing, as generic events and dwells: pierce delay (dwell at process
+  start) and post/end delay (dwell at process stop, before the next rapid), each with a toggle
+  for whether the process stays on during the dwell (defaults: pierce on, post off), plus
+  optional pierce height and cut height on the process axis. Applied at every start and stop,
+  including around tabs and after lead-ins/lead-outs.
+Done when: a test plate (outer profile, holes, slots, a pocket with an island) produces correct,
+ordered toolpaths for both a router-style tool and a kerf-only process, checked by the verifier.
+
+### M3: Machine-neutral toolpath IR
+Two levels, both serde JSON with a published JSON Schema and a format tag (`campanion-ir/N`):
+- **Tool-space (CL) level:** what the operations produce. Tool tip position plus tool axis
+  direction in the part frame, so 2D, 3-axis and 5-axis paths share one model.
+- **Axis-space level:** what a machine runs, produced later by kinematics for a specific machine.
+  Up to 16 axes per machine (target 13), each with an id, a letter or index (X Y Z A B C U V W,
+  then indexed extras), linear or rotary, limits, and its place in a kinematic chain
+  (parent link, direction, offset). Channels group axes for machines with several heads or
+  spindles; sync points coordinate channels.
+- Motion: rapid, linear, arc (with plane), helix, and later splines; feed rate per move.
+- Process timing from M2 appears as process on/off events plus dwells in the order chosen by
+  the toggles; posts never re-derive it.
+- Process events are generic, not machine-specific: process on/off with a process type
+  (spindle, torch, laser, extruder, knife, …) and parameters (speed, power, pierce delay),
+  dwell, tool change, coolant/air/assist, probe, comments, and named custom events for later.
+- A simple simulator/verifier: total length and time estimate, bounds, rapids into material,
+  axis limit checks.
+- A generic RS274/NGC writer used only as a **test sink** to inspect output. It is not a post for a
+  real machine.
+Done when: the IR round-trips through JSON unchanged, the schema validates sample files, and a
+13-axis sample with two channels loads and checks.
+
+### M4: Inputs and job files
+- DXF and SVG import of 2D geometry (layers, blocks, arcs, polylines with bulges, splines).
+- STEP parts through `solidcraft-cli` (sections and planar faces to 2D contours).
+- A job file that links to the source part by path and content hash, so a changed part
+  regenerates its toolpaths instead of going stale.
+Status: DXF (LINE, ARC, CIRCLE, LWPOLYLINE) and SVG (paths, basic shapes, transforms, units,
+layers) are in. Good first contributions: DXF POLYLINE (old-style, with VERTEX), ELLIPSE
+(`crates/import/src/ellipse.rs` has the maths), SPLINE, and SVG curves fitted as arcs
+instead of flattened to lines.
+Done when: the test plate imports from DXF, SVG and a SolidCraft STEP export with identical results.
+
+### M5: Viewer and preview
+An egui viewer (same toolkit as SolidCraft) for 2D/3D toolpath preview: cutting moves, rapids,
+lead-ins, pierces, order numbers and a simple playback. It only reads the IR.
+
+### Later (each its own milestone when we get there)
+- **2.5D:** multi-depth pockets, facing, chamfer and deburr, thread milling, adaptive clearing.
+- **3-axis surfacing:** mesh-based drop-cutter, waterline, parallel and scallop finishing, rest
+  machining, stock simulation. All clean-room, with no OpenCAMLib.
+- **4/5-axis:** indexed (3+2) first, then continuous with tool-axis control and collision checks.
+- **Turning:** XZ profiles, facing, roughing/finishing, grooving, threading, parting; then live
+  tooling (C/Y) and sub-spindle.
+- **Multi-channel up to 13 axes:** mill-turn and multi-head machines, sync between channels.
+- **Machine definitions and posts:** machine files (axes, limits, kinematics, process heads) and
+  posts as data plus small code where needed: LinuxCNC and GRBL first, then others,
+  written from public controller manuals.
+- **Additive:** a slicer-style process on the same IR (later; only if it still makes sense then).
+
+## SolidCraft integration path
+1. **Now: companion over files and the CLI.** SolidCraft exports STEP; we read it (and DXF/SVG),
+   and we can call `solidcraft-cli` for sections and faces. Our CLI and, later, an MCP server
+   let SolidCraft's in-app agent or the user drive CAM jobs.
+2. **When SolidCraft plugins exist (issue #1221, WebAssembly with a WIT interface):** the
+   libraries already build for wasm, so `campanion-geom`/`campanion-path`/`campanion-ir` can sit behind a plugin
+   interface. Their current plugin design has no custom UI or preview, so the viewer stays
+   separate until it does.
+3. **Upstream:** offer the crates (renamed to their conventions) as SolidCraft crates. Their
+   tracking issue #2652 sets the boundary as "STEP + manufacturing settings in, path segments
+   (plus an optional post) out; the design never stores toolpaths". Our IR maps onto that
+   path-segment idea, and we track their open CAM PRs (#2612 document core with `PathSegment`,
+   #2819 2D contour/pocket crate, #4158 2.5D core) so we align types rather than compete.
+
+Watch items: SolidCraft's kernel decision (#3992), plugin system (#1221), and which CAM PR lands
+first. If upstream lands a CAM core, we contribute to it and keep only what it lacks here.
+
+## Testing approach
+- Analytic tests (exact offsets of circles, rectangles, slots).
+- Property tests for geometry invariants.
+- Hostile-input tests: NaN, huge counts, degenerate contours, never a panic.
+- Verifier checks on generated toolpaths (gouges against the 2D target, rapids through material).
+- Reference values only from analytic math or open tools, never from commercial CAM.
+
+## Decision log
+- 2026-10-21: Project started. Rust, MIT OR Apache-2.0, SolidCraft source rules. Name:
+  **CAMpanion** (repo `campanion`, crates `campanion-*`, binary `campanion`). We avoid
+  `solidcraft-*` names: SolidCraft reserves them, and its own open PR #2819 already proposes a
+  crate called `solidcraft-cam`.
+- 2026-10-21: Machine-neutral first; 2D path processing first; IR designed for up to 13 axes
+  (hard cap 16).
