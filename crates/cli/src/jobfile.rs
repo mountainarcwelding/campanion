@@ -1316,7 +1316,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         tip_clearance: 0.0,
         stock_to_leave: StockToLeave { wall: 0.0, floor: stock },
         finish: None,
-        entry: DepthEntry::Plunge,
+        entry,
         feeds,
         params,
     })
@@ -1424,7 +1424,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         tip_clearance: 0.0,
         stock_to_leave: StockToLeave { wall: 0.0, floor: stock },
         finish: None,
-        entry,
+        entry: DepthEntry::Plunge,
         feeds,
         params,
     })
