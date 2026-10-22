@@ -21,6 +21,18 @@
 //! The source hash is FNV-1a 64 of the part file's bytes. It is a change-detection checksum,
 //! not a cryptographic hash. See `docs/job-file.md`.
 //!
+//! An STL source, a path ending in `.stl` in any case, is a triangle mesh. Its hash is those
+//! raw bytes. A mesh job may only contain `surface` operations, and `surface` is rejected on
+//! every other source. A surface rasters the mesh: `stepover` is required, `sample_step`
+//! defaults to half of that, `angle_deg` is 0 or 90, `margin` grows the mesh XY bounds, and
+//! `floor_z` defaults to the mesh minimum Z. `stock_to_leave` on a surface is one length that
+//! raises every cutter-location Z. That is an axial offset, not a 3D rest offset. `layers`,
+//! `depth`, `step_down` and `side` are rejected.
+//!
+//! A tool may set `shape`: `"flat"` (the default), `"ball"`, or `{"bull": corner_radius}`.
+//! A shape other than flat is only used by a surface operation. Two-dimensional operations
+//! keep the flat diameter offset.
+//!
 //! A face clears the bounding box of its layers. `angle_deg` is 0 or 90 and is stored as
 //! radians. `margin` grows that box on every side. `stepover` defaults to three quarters of
 //! the tool diameter. A kerf tool cannot face. `stock_to_leave` and `finish` stay on profiles
@@ -211,13 +223,44 @@ impl Source {
     pub fn is_step(&self) -> bool {
         path_is_step(&self.path)
     }
+
+    /// True when the path extension is `stl`, ignoring ASCII case.
+    pub fn is_stl(&self) -> bool {
+        path_is_stl(&self.path)
+    }
+}
+
+fn path_extension_is(path: &str, extension: &str) -> bool {
+    Path::new(path).extension().and_then(|extension| extension.to_str()).is_some_and(|text| text.eq_ignore_ascii_case(extension))
 }
 
 fn path_is_step(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("step") || extension.eq_ignore_ascii_case("stp"))
+    path_extension_is(path, "step") || path_extension_is(path, "stp")
+}
+
+fn path_is_stl(path: &str) -> bool {
+    path_extension_is(path, "stl")
+}
+
+/// Rotating-cutter profile. Flat is the default and the only shape a 2D operation uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ToolShape {
+    /// Flat end mill. The bottom is a disk of the tool radius at the tip.
+    Flat,
+    /// Ball nose. The sphere radius is the tool radius.
+    Ball,
+    /// Bull nose. `corner_radius` lies in `(0, tool radius)`.
+    Bull {
+        /// Toroidal corner radius, in millimetres.
+        corner_radius: f64,
+    },
+}
+
+impl ToolShape {
+    /// True for [`Self::Flat`], including a tool that omits `shape`.
+    pub fn is_flat(self) -> bool {
+        matches!(self, Self::Flat)
+    }
 }
 
 /// One cutter. `id` matches [`IrTool::id`].
@@ -226,6 +269,7 @@ pub struct JobTool {
     id: u32,
     path_tool: PathTool,
     ir: IrTool,
+    shape: ToolShape,
 }
 
 impl JobTool {
@@ -246,6 +290,11 @@ impl JobTool {
     /// Rotating-cutter diameter in millimetres. `None` for a kerf tool.
     pub fn diameter(&self) -> Option<f64> {
         self.ir.diameter()
+    }
+
+    /// Cutter profile. Omitted `shape` is [`ToolShape::Flat`]. A 2D operation ignores this.
+    pub fn shape(&self) -> ToolShape {
+        self.shape
     }
 }
 
@@ -270,6 +319,8 @@ pub enum OperationKind {
         /// Inside or outside the contour.
         side: ProfileSide,
     },
+    /// Parallel finish over an STL mesh. No layers and no side.
+    Surface,
 }
 
 /// Stock left by a roughing pass, in millimetres. Zero means cut to the contour and to `depth`.
@@ -331,6 +382,10 @@ pub struct Operation {
     depth: f64,
     step_down: f64,
     stepover: Option<f64>,
+    /// Spacing of the regular surface samples, in millimetres. `None` except on a surface.
+    sample_step: Option<f64>,
+    /// Tip floor for a surface, in millimetres. `None` means the mesh minimum Z, and other kinds store `None`.
+    floor_z: Option<f64>,
     face_angle: f64,
     margin: f64,
     width: f64,
@@ -412,9 +467,21 @@ impl Operation {
 
     /// Extra material around the geometry bounding box, in millimetres, on every side.
     ///
-    /// Only a face sets this. Other operations store `0`.
+    /// A face or a surface sets this. Other operations store `0`.
     pub fn margin(&self) -> f64 {
         self.margin
+    }
+
+    /// Maximum gap between regular surface samples, in millimetres.
+    ///
+    /// `None` except on a surface, where an omitted file value is half of [`Self::stepover`].
+    pub fn sample_step(&self) -> Option<f64> {
+        self.sample_step
+    }
+
+    /// Surface tip floor, in millimetres. `None` means the mesh minimum Z when the job runs.
+    pub fn floor_z(&self) -> Option<f64> {
+        self.floor_z
     }
 
     /// Stock left by roughing, in millimetres. Omitted fields are zero.
@@ -603,7 +670,34 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
     let (clearance, retract) = parse_heights(optional(map, "heights"), scale)?;
     let tools = parse_tools(require(map, "tools").map_err(from_cli)?, scale)?;
     let operations = parse_operations(require(map, "operations").map_err(from_cli)?, scale, &tools)?;
+    check_mesh_source(&source, &operations, &tools)?;
     Ok(Body { source, units, tolerance, tools, operations, clearance, retract })
+}
+
+/// An STL part only accepts `surface`. `surface` only accepts an STL part.
+/// A non-flat tool shape is rejected when a 2D operation uses that tool.
+fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool]) -> Result<(), JobFileError> {
+    let stl = source.is_stl();
+    for operation in operations {
+        let surface = matches!(operation.kind(), OperationKind::Surface);
+        if stl && !surface {
+            return Err(JobFileError::invalid("an STL source only allows surface operations"));
+        }
+        if surface && !stl {
+            return Err(JobFileError::invalid("surface is only valid on an STL source"));
+        }
+    }
+    for tool in tools {
+        if tool.shape().is_flat() {
+            continue;
+        }
+        let used_on_flat_work =
+            operations.iter().any(|operation| operation.tool_id() == tool.id() && !matches!(operation.kind(), OperationKind::Surface));
+        if used_on_flat_work {
+            return Err(JobFileError::invalid(format!("tool {} shape is only valid on a surface operation", tool.id())));
+        }
+    }
+    Ok(())
 }
 
 fn check_format(tag: &str) -> Result<(), JobFileError> {
@@ -769,13 +863,46 @@ fn parse_tools(value: &Value, scale: f64) -> Result<Vec<JobTool>, JobFileError> 
 
 fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> {
     let map = object(value, "tool").map_err(from_cli)?;
-    check_keys(map, &["id", "diameter", "kerf"], "tool").map_err(from_cli)?;
+    check_keys(map, &["id", "diameter", "kerf", "shape"], "tool").map_err(from_cli)?;
     let mut scaled = map.clone();
+    scaled.remove("shape");
     scale_key(&mut scaled, "diameter", scale)?;
     scale_key(&mut scaled, "kerf", scale)?;
     let parsed = parse_tool(&Value::Object(scaled)).map_err(from_cli)?;
     parsed.path_tool().compensation_distance().map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
-    Ok(JobTool { id: parsed.ir().id(), path_tool: parsed.path_tool(), ir: parsed.ir().clone() })
+    let shape = parse_tool_shape(optional(map, "shape"), parsed.ir().diameter(), scale)?;
+    Ok(JobTool { id: parsed.ir().id(), path_tool: parsed.path_tool(), ir: parsed.ir().clone(), shape })
+}
+
+/// `"flat"`, `"ball"`, or `{"bull": corner_radius}`. The corner radius is a length in file units.
+fn parse_tool_shape(value: Option<&Value>, diameter: Option<f64>, scale: f64) -> Result<ToolShape, JobFileError> {
+    let Some(value) = value else {
+        return Ok(ToolShape::Flat);
+    };
+    let Some(diameter) = diameter else {
+        return Err(JobFileError::invalid("shape is only valid on a diameter tool"));
+    };
+    let radius = diameter * 0.5;
+    if let Some(text) = value.as_str() {
+        return match text {
+            "flat" => Ok(ToolShape::Flat),
+            "ball" => Ok(ToolShape::Ball),
+            other => Err(JobFileError::invalid(format!("unknown tool shape `{other}`"))),
+        };
+    }
+    if !value.is_object() {
+        return Err(JobFileError::invalid("tool shape must be \"flat\", \"ball\" or {\"bull\": corner_radius}"));
+    }
+    let map = object(value, "shape").map_err(from_cli)?;
+    check_keys(map, &["bull"], "shape").map_err(from_cli)?;
+    let Some(corner_value) = optional(map, "bull") else {
+        return Err(JobFileError::invalid("tool shape object needs a bull corner radius"));
+    };
+    let corner = positive_length(corner_value, scale, "bull corner radius")?;
+    if corner >= radius {
+        return Err(JobFileError::invalid("bull corner radius must be less than the tool radius"));
+    }
+    Ok(ToolShape::Bull { corner_radius: corner })
 }
 
 fn parse_operations(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Vec<Operation>, JobFileError> {
@@ -804,8 +931,10 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "depth",
             "step_down",
             "stepover",
+            "sample_step",
             "angle_deg",
             "margin",
+            "floor_z",
             "width",
             "v_angle_deg",
             "tip_diameter",
@@ -824,6 +953,15 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let name_value = require(map, "name").map_err(from_cli)?;
     let name = required_name(as_str(name_value, "operation name").map_err(from_cli)?, "operation name").map_err(from_cli)?;
     let kind = parse_kind(map)?;
+    if matches!(kind, OperationKind::Surface) {
+        return finish_surface(name, map, scale, tools);
+    }
+    if optional(map, "sample_step").is_some() {
+        return Err(JobFileError::invalid("sample_step is only valid on a surface"));
+    }
+    if optional(map, "floor_z").is_some() {
+        return Err(JobFileError::invalid("floor_z is only valid on a surface"));
+    }
     reject_chamfer_cut_keys(map, kind)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
     let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
@@ -846,6 +984,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         depth,
         step_down,
         stepover,
+        sample_step: None,
+        floor_z: None,
         face_angle,
         margin,
         width: chamfer.width,
@@ -855,6 +995,81 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         stock_to_leave,
         finish,
         entry,
+        feeds,
+        params,
+    })
+}
+
+/// Keys a surface does not accept. `side` is already rejected by [`parse_kind`].
+fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError> {
+    for key in [
+        "layers",
+        "depth",
+        "step_down",
+        "width",
+        "v_angle_deg",
+        "tip_diameter",
+        "tip_clearance",
+        "finish",
+        "entry",
+        "cut_height",
+        "pierce_height",
+        "timing",
+    ] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is not valid on a surface")));
+        }
+    }
+    Ok(())
+}
+
+/// Parallel finish. Depth stays 0: the mesh and `floor_z` decide the tip height.
+fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
+    reject_surface_foreign_keys(map)?;
+    let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
+    let tool = tools.iter().find(|tool| tool.id() == tool_id).ok_or_else(|| JobFileError::invalid(format!("unknown tool {tool_id}")))?;
+    let Some(diameter) = tool.diameter() else {
+        return Err(JobFileError::invalid("surface is not valid with a kerf tool"));
+    };
+    let Some(step_value) = optional(map, "stepover") else {
+        return Err(JobFileError::invalid("surface needs a stepover"));
+    };
+    let stepover = positive_length(step_value, scale, "stepover")?;
+    if stepover > diameter {
+        return Err(JobFileError::invalid("stepover is larger than the tool diameter"));
+    }
+    let sample_step = match optional(map, "sample_step") {
+        Some(value) => positive_length(value, scale, "sample_step")?,
+        None => stepover * 0.5,
+    };
+    let face_angle = parse_face_angle(optional(map, "angle_deg"), OperationKind::Surface)?;
+    let margin = parse_margin(optional(map, "margin"), OperationKind::Surface, scale)?;
+    let floor_z = match optional(map, "floor_z") {
+        Some(value) => Some(finite_height(scale_f64(value, scale, "floor_z")?, "floor_z")?),
+        None => None,
+    };
+    let stock_to_leave = parse_stock_to_leave(optional(map, "stock_to_leave"), OperationKind::Surface, 0.0, scale)?;
+    let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
+    let params = parse_params(None).map_err(from_cli)?;
+    Ok(Operation {
+        name,
+        kind: OperationKind::Surface,
+        layers: Vec::new(),
+        tool_id,
+        depth: 0.0,
+        step_down: 0.0,
+        stepover: Some(stepover),
+        sample_step: Some(sample_step),
+        floor_z,
+        face_angle,
+        margin,
+        width: 0.0,
+        v_angle: 0.0,
+        tip_diameter: 0.0,
+        tip_clearance: 0.0,
+        stock_to_leave,
+        finish: None,
+        entry: DepthEntry::Plunge,
         feeds,
         params,
     })
@@ -1013,8 +1228,8 @@ fn parse_face_angle(value: Option<&Value>, kind: OperationKind) -> Result<f64, J
     let Some(value) = value else {
         return Ok(0.0);
     };
-    if !matches!(kind, OperationKind::Face) {
-        return Err(JobFileError::invalid("angle_deg is only valid on a face"));
+    if !matches!(kind, OperationKind::Face | OperationKind::Surface) {
+        return Err(JobFileError::invalid("angle_deg is only valid on a face or a surface"));
     }
     let degrees = as_f64(value, "angle_deg").map_err(from_cli)?;
     if degrees == 0.0 {
@@ -1031,8 +1246,8 @@ fn parse_margin(value: Option<&Value>, kind: OperationKind, scale: f64) -> Resul
     let Some(value) = value else {
         return Ok(0.0);
     };
-    if !matches!(kind, OperationKind::Face) {
-        return Err(JobFileError::invalid("margin is only valid on a face"));
+    if !matches!(kind, OperationKind::Face | OperationKind::Surface) {
+        return Err(JobFileError::invalid("margin is only valid on a face or a surface"));
     }
     let margin = non_negative_length(value, scale, "margin")?;
     cap_under(margin, MAX_MM, "margin")
@@ -1042,8 +1257,16 @@ fn parse_stock_to_leave(value: Option<&Value>, kind: OperationKind, depth: f64, 
     let Some(value) = value else {
         return Ok(StockToLeave::default());
     };
+    if matches!(kind, OperationKind::Surface) {
+        if !value.is_number() {
+            return Err(JobFileError::invalid("surface stock_to_leave must be a number"));
+        }
+        let axial = non_negative_length(value, scale, "stock_to_leave")?;
+        let axial = cap_under(axial, MAX_MM, "stock_to_leave")?;
+        return Ok(StockToLeave { wall: 0.0, floor: axial });
+    }
     if !matches!(kind, OperationKind::Profile { .. } | OperationKind::Pocket) {
-        return Err(JobFileError::invalid("stock_to_leave is only valid on a profile or pocket"));
+        return Err(JobFileError::invalid("stock_to_leave is only valid on a profile or pocket or a surface"));
     }
     let map = object(value, "stock_to_leave").map_err(from_cli)?;
     check_keys(map, &["wall", "floor"], "stock_to_leave").map_err(from_cli)?;
@@ -1181,6 +1404,10 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
         "face" => {
             reject_side(side)?;
             Ok(OperationKind::Face)
+        }
+        "surface" => {
+            reject_side(side)?;
+            Ok(OperationKind::Surface)
         }
         "chamfer" => {
             let Some(side) = side else {
@@ -2635,6 +2862,110 @@ mod tests {
             let err = load(&path).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
             assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn parses_surface_shapes_and_rejects_the_wrong_source() {
+        let text = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":6,"shape":"ball"},{"id":2,"diameter":10,"shape":{"bull":1}}]"#,
+            r#"[{"name":"dome","type":"surface","tool_id":1,"stepover":1,"margin":0.5,"angle_deg":90,"stock_to_leave":0.2,"feeds":{"cut":1000,"plunge":300}}]"#,
+        );
+        let job = load(&write_job("surface-mm", &text)).expect("surface");
+        assert!(job.source().is_stl());
+        assert!(!job.source().is_step());
+        let op = &job.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Surface);
+        assert!(op.layers().is_empty());
+        near(op.stepover().expect("stepover"), 1.0);
+        near(op.sample_step().expect("sample"), 0.5);
+        assert_eq!(op.floor_z(), None);
+        near(op.margin(), 0.5);
+        near(op.face_angle(), std::f64::consts::FRAC_PI_2);
+        near(op.stock_to_leave().wall(), 0.0);
+        near(op.stock_to_leave().floor(), 0.2);
+        assert_eq!(op.depth(), 0.0);
+        assert!(matches!(job.tool(1).expect("ball").shape(), ToolShape::Ball));
+        match job.tool(2).expect("bull").shape() {
+            ToolShape::Bull { corner_radius } => near(corner_radius, 1.0),
+            other => panic!("expected a bull nose, got {other:?}"),
+        }
+
+        let inch = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"dome.STL","hash":"{EMPTY_HASH}"}},"units":"inch","tools":[{{"id":1,"diameter":0.25,"shape":"flat"}}],"operations":[{{"name":"cap","type":"surface","tool_id":1,"stepover":0.04,"sample_step":0.02,"floor_z":-0.1,"angle_deg":0,"stock_to_leave":0.01,"feeds":{{"cut":10}}}}]}}"#
+        );
+        let inch = load(&write_job("surface-inch", &inch)).expect("inch surface");
+        assert!(inch.source().is_stl());
+        let op = &inch.operations()[0];
+        near(op.stepover().expect("stepover"), 0.04 * 25.4);
+        near(op.sample_step().expect("sample"), 0.02 * 25.4);
+        near(op.floor_z().expect("floor"), -0.1 * 25.4);
+        near(op.face_angle(), 0.0);
+        near(op.stock_to_leave().floor(), 0.01 * 25.4);
+        assert!(inch.tool(1).expect("flat").shape().is_flat());
+
+        let surface = r#"{"name":"a","type":"surface","tool_id":1,"stepover":1,"feeds":{"cut":1}}"#;
+        let profile = r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}"#;
+        let cases = [
+            (envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{surface}]")), "surface is only valid on an STL source"),
+            (envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, &format!("[{profile}]")), "an STL source only allows surface operations"),
+            (
+                envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{profile}]")),
+                "shape is only valid on a surface operation",
+            ),
+            (envelope("part.stl", r#"[{"id":1,"kerf":1.2}]"#, &format!("[{surface}]")), "surface is not valid with a kerf tool"),
+            (envelope("part.stl", r#"[{"id":1,"kerf":1.2,"shape":"ball"}]"#, "[]"), "shape is only valid on a diameter tool"),
+            (envelope("part.stl", r#"[{"id":1,"diameter":6,"shape":{"bull":3}}]"#, "[]"), "bull corner radius must be less than the tool radius"),
+            (
+                envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, r#"[{"name":"a","type":"surface","tool_id":1,"feeds":{"cut":1}}]"#),
+                "surface needs a stepover",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"stepover":1,"layers":["L"],"feeds":{"cut":1}}]"#,
+                ),
+                "layers is not valid on a surface",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"stepover":1,"depth":1,"feeds":{"cut":1}}]"#,
+                ),
+                "depth is not valid on a surface",
+            ),
+            (
+                envelope(
+                    "plate.dxf",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"sample_step":0.5}]"#,
+                ),
+                "sample_step is only valid on a surface",
+            ),
+            (
+                envelope(
+                    "plate.dxf",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"floor_z":0}]"#,
+                ),
+                "floor_z is only valid on a surface",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"stepover":1,"stock_to_leave":{"wall":0.1},"feeds":{"cut":1}}]"#,
+                ),
+                "surface stock_to_leave must be a number",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let path = write_job(&format!("surface-bad-{index}"), text);
+            let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
     }
 }

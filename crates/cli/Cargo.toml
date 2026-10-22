@@ -18,5 +18,10 @@ path = "src/main.rs"
 campanion-geom.workspace = true
 campanion-import.workspace = true
 campanion-ir.workspace = true
+campanion-mesh.workspace = true
 campanion-path.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+campanion-mesh.workspace = true
 serde_json.workspace = true
