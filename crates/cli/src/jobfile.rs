@@ -13,6 +13,11 @@
 //! same angle; one turn drops `2π r tan(angle)` millimetres, which is [`DepthEntry::Helix`]'s
 //! pitch. The angle is in `(0, 90]` degrees. The radius is positive and at most 1e6 mm.
 //!
+//! A STEP source, a path ending in `.step` or `.stp` in any case, must include `face`: a
+//! point `[x, y, z]` on the planar face to cut. Those coordinates are millimetres in model
+//! space and are never multiplied by `units`. The face outline and its holes are the 2D
+//! geometry. Every other source must leave `face` out.
+//!
 //! The source hash is FNV-1a 64 of the part file's bytes. It is a change-detection checksum,
 //! not a cryptographic hash. See `docs/job-file.md`.
 
@@ -154,11 +159,19 @@ impl fmt::Display for Units {
 }
 
 /// Part file the job was built from. `path` is relative to the job file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// [`Self::face`] is set for a STEP part: a point on the planar face whose outline and holes
+/// become the 2D geometry. The point is millimetres in model coordinates and is never scaled
+/// by the job's units.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Source {
     path: String,
     hash: String,
+    face: Option<[f64; 3]>,
 }
+
+// `parse_face` only stores finite coordinates, so equality is an equivalence.
+impl Eq for Source {}
 
 impl Source {
     /// Relative path as written in the file.
@@ -170,6 +183,26 @@ impl Source {
     pub fn hash(&self) -> &str {
         &self.hash
     }
+
+    /// Point on the planar face to cut, in millimetres and model coordinates.
+    ///
+    /// Present only on a STEP source. The outline and holes of that face become the 2D geometry.
+    /// The point is never scaled by the job's `units`.
+    pub fn face(&self) -> Option<[f64; 3]> {
+        self.face
+    }
+
+    /// True when the path extension is `step` or `stp`, ignoring ASCII case.
+    pub fn is_step(&self) -> bool {
+        path_is_step(&self.path)
+    }
+}
+
+fn path_is_step(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("step") || extension.eq_ignore_ascii_case("stp"))
 }
 
 /// One cutter. `id` matches [`IrTool::id`].
@@ -453,14 +486,50 @@ fn check_format(tag: &str) -> Result<(), JobFileError> {
 
 fn parse_source(value: &Value) -> Result<Source, JobFileError> {
     let map = object(value, "source").map_err(from_cli)?;
-    check_keys(map, &["path", "hash"], "source").map_err(from_cli)?;
+    check_keys(map, &["path", "hash", "face"], "source").map_err(from_cli)?;
     let path_value = require(map, "path").map_err(from_cli)?;
     let Some(path) = path_value.as_str() else {
         return Err(JobFileError::invalid("source path must be a string"));
     };
     check_source_path(path)?;
     let hash_text = as_str(require(map, "hash").map_err(from_cli)?, "source hash").map_err(from_cli)?;
-    Ok(Source { path: path.to_string(), hash: normalize_hash(hash_text)? })
+    // `face` is model millimetres, not a file-unit length, so it is not multiplied by the job scale.
+    let face = parse_source_face(path, optional(map, "face"))?;
+    Ok(Source { path: path.to_string(), hash: normalize_hash(hash_text)?, face })
+}
+
+fn parse_source_face(path: &str, face: Option<&Value>) -> Result<Option<[f64; 3]>, JobFileError> {
+    if path_is_step(path) {
+        let Some(value) = face else {
+            return Err(JobFileError::invalid("a STEP source needs `face`: a point [x, y, z] in mm on the planar face to cut"));
+        };
+        return Ok(Some(parse_face(value)?));
+    }
+    if face.is_some() {
+        return Err(JobFileError::invalid("`face` only applies to STEP sources"));
+    }
+    Ok(None)
+}
+
+fn parse_face(value: &Value) -> Result<[f64; 3], JobFileError> {
+    let Some(list) = value.as_array() else {
+        return Err(JobFileError::invalid("face must be an array of 3 numbers"));
+    };
+    if list.len() != 3 {
+        return Err(JobFileError::invalid("face must be exactly 3 numbers"));
+    }
+    let mut point = [0.0; 3];
+    for (slot, item) in point.iter_mut().zip(list.iter()) {
+        let number = as_f64(item, "face").map_err(from_cli)?;
+        if !number.is_finite() {
+            return Err(JobFileError::invalid("face must be finite"));
+        }
+        if number.abs() > MAX_MM {
+            return Err(JobFileError::invalid(format!("face is outside ±{MAX_MM} mm")));
+        }
+        *slot = number;
+    }
+    Ok(point)
 }
 
 fn check_source_path(text: &str) -> Result<(), JobFileError> {
@@ -1100,6 +1169,65 @@ mod tests {
         let explicit = load(&write_job("tol-chord", &tolerance_job("mm", r#"{"linear":0.001,"chord":0.05}"#))).expect("explicit");
         near(explicit.tolerance().linear(), 0.001);
         assert_eq!(explicit.tolerance().chord(), 0.05);
+    }
+
+    #[test]
+    fn inch_job_without_tolerance_keeps_millimetre_defaults() {
+        // 0.01 mm is about 0.0004 in. Stored tolerances are millimetres, so these defaults
+        // must not be multiplied by 25.4 when the job is written in inches.
+        let job = load(&write_job("tol-inch-absent", &tolerance_job("inch", ""))).expect("inch defaults");
+        assert_eq!(job.units(), Units::Inch);
+        assert_eq!(job.tolerance().chord(), 0.01);
+        assert_eq!(job.tolerance().chord(), DEFAULT_JOB_CHORD_MM);
+        assert_eq!(job.tolerance().linear(), 1e-6);
+        assert_eq!(job.tolerance().linear(), Tolerance::DEFAULT_LINEAR_MM);
+        assert_eq!(job.tolerance().angular(), Tolerance::DEFAULT_ANGULAR_RAD);
+    }
+
+    fn source_job(path: &str, face: &str, units: &str) -> String {
+        let face = if face.is_empty() { String::new() } else { format!(r#","face":{face}"#) };
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"{path}","hash":"{EMPTY_HASH}"{face}}},"units":"{units}","tools":[],"operations":[]}}"#
+        )
+    }
+
+    #[test]
+    fn step_face_parses_unscaled_and_is_rejected_elsewhere() {
+        let step = load(&write_job("step-face", &source_job("part.step", "[12.5, -3.0, 1.0]", "mm"))).expect("step");
+        assert!(step.source().is_step());
+        assert_eq!(step.source().path(), "part.step");
+        assert_eq!(step.source().face(), Some([12.5, -3.0, 1.0]));
+
+        let missing = load(&write_job("step-missing-face", &source_job("part.step", "", "mm")));
+        let err = missing.expect_err("step without face");
+        assert!(err.to_string().contains("a STEP source needs `face`: a point [x, y, z] in mm on the planar face to cut"), "{err}");
+        assert!(matches!(err, JobFileError::Invalid { .. }), "{err:?}");
+
+        let dxf = load(&write_job("dxf-face", &source_job("plate.dxf", "[0.0, 0.0, 0.0]", "mm")));
+        let err = dxf.expect_err("dxf with face");
+        assert!(err.to_string().contains("`face` only applies to STEP sources"), "{err}");
+        assert!(matches!(err, JobFileError::Invalid { .. }), "{err:?}");
+
+        let plain = load(&write_job("dxf-plain", &source_job("plate.dxf", "", "mm"))).expect("dxf");
+        assert!(!plain.source().is_step());
+        assert_eq!(plain.source().face(), None);
+
+        // `.STP` is STEP. Face stays in model millimetres even when the job units are inches.
+        let stp = load(&write_job("stp-face", &source_job("parts/Cover.STP", "[4.0, 5.0, 6.0]", "inch"))).expect("stp");
+        assert!(stp.source().is_step());
+        assert_eq!(stp.units(), Units::Inch);
+        assert_eq!(stp.source().face(), Some([4.0, 5.0, 6.0]));
+
+        let edge = load(&write_job("step-edge-face", &source_job("part.step", "[-1000000.0, 1000000.0, 0.0]", "mm"))).expect("edge");
+        assert_eq!(edge.source().face(), Some([-1.0e6, 1.0e6, 0.0]));
+
+        let short = load(&write_job("step-short-face", &source_job("part.step", "[1.0, 2.0]", "mm")));
+        let err = short.expect_err("short face");
+        assert!(err.to_string().contains("face must be exactly 3 numbers"), "{err}");
+
+        let huge = load(&write_job("step-huge-face", &source_job("part.step", "[0.0, 0.0, 1000001.0]", "mm")));
+        let err = huge.expect_err("huge face");
+        assert!(err.to_string().contains("face is outside"), "{err}");
     }
 
     fn height_job(units_and_heights: &str) -> String {
