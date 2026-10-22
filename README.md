@@ -15,7 +15,8 @@ Tangency Labs.
 ## Quick start
 
 Build and run the sample job, which turns a DXF drawing into G-code
-(`examples/sample_svg.job.json` does the same from an SVG):
+(`examples/sample_svg.job.json` does the same from an SVG, and `examples/step.job.json` from a
+STEP part through SolidCraft's `solidcraft-cli`; see docs/job-file.md):
 
 ```sh
 cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.json
