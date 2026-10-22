@@ -171,14 +171,45 @@ Done when: property tests show indexing round-trips and unwrapping a wrap gives 
 path, rotary finishing passes the gouge check, and every 4-axis post has golden files.
 Releases: v0.5.0, including continuous rotary finishing and the viewer.
 
+### M10: Turning (in progress)
+Lathe work on the main spindle with one turret, X and Z only. The setup model is built so live
+tooling, Y, B and a sub-spindle (M11) slot in without a rewrite.
+- **Machine model:** a lathe machine has named spindles (`main`, later `sub`), each with its own
+  C axis and work zero, and turrets/heads that carry X and Z and optionally Y and B. Every
+  operation names its spindle and head. Multiple channels use the IR's existing channels and
+  sync points (up to 13 axes). XZ toolpaths are stored as part-frame poses in radius; diameter
+  mode is applied only in the post.
+1. **Turning setup and IR:** X in diameter or radius (post setting), Z, constant surface speed
+   (G96) with a spindle limit and fixed RPM (G97); bar and tube stock; insert shape, nose
+   radius and orientation as data.
+2. **Profile input:** a 2D half-profile from DXF/SVG; a revolved section from STEP (through
+   `solidcraft-cli`) or STL.
+3. **Facing and OD/ID turning:** facing, OD and ID roughing with stock to leave, finishing with
+   computed nose-radius compensation (the path is the compensated tool-centre or tip path, not
+   G41/G42 by default).
+4. **Threading, grooving, parting, drilling:** single-point threading as explicit passes
+   (infeed angle, spring passes; canned G76 as a post option), grooving, parting off, and
+   centreline drilling.
+5. **Checks:** insert-versus-profile gouge and holder collision checks, with property tests.
+6. **Lathe posts as data files:** LinuxCNC lathe, Fanuc/Haas lathe and a Grbl-style lathe,
+   with golden files and read-back.
+7. **Viewer:** an XZ half-section showing stock, the part and the removed region.
+Releases: v0.6.0 after 1, 2, 3 and 6; v0.6.1 after 4, 5 and 7.
+
+### M11: 5-axis and advanced turning
+Aimed at mill-turn machines in the class of the Haas ST and DS lines: live tooling with C and
+Y, sub-spindle work and part transfer, synchronised channels, and B-axis heads. Simultaneous
+5-axis milling (indexed 3+2 first, then continuous with tool-axis control and collision checks)
+belongs here too. The detailed breakdown is proposed when M10 is done.
+
+### M12: Additive and non-planar slicing
+See the additive entry under Later; it becomes M12 after M11.
+
 ### Later (each its own milestone when we get there)
 - **2.5D extras:** thread milling, adaptive clearing.
 - **3-axis extras:** scallop finishing, rest machining, stock simulation.
-- **5-axis:** indexed (3+2) first, then continuous with tool-axis control and collision checks.
-- **Turning:** XZ profiles, facing, roughing/finishing, grooving, threading, parting; then live
-  tooling (C/Y) and sub-spindle.
-- **Multi-channel up to 13 axes:** mill-turn and multi-head machines, sync between channels.
-- **Additive and non-planar slicing (after the multi-axis work):** extrusion as one more process
+- **Multi-channel up to 13 axes:** multi-head machines beyond M11, sync between channels.
+- **Additive and non-planar slicing (M12):** extrusion as one more process
   in the IR: an extrusion axis `E`, with flow, temperature and fan as process parameters. Planar
   slicing comes first as a baseline (perimeters, infill, supports and retraction). Then
   non-planar layers follow the part surface, reusing the mesh, drop-cutter and surface code.
@@ -222,5 +253,7 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   and beyond.
 - 2026-10-22: M8 done (v0.4.0). M9 is the 4th axis: indexing, wrapping, rotary posts, then
   continuous rotary finishing and viewer support.
-- 2026-10-22: M9 done. Indexing, wrapping, rotary posts, continuous rotary finishing and the
-  viewer are in. `examples/rotary.job.json` is the rotary finish.
+- 2026-10-22: M9 done (v0.5.1). Indexing, wrapping, rotary posts, continuous rotary finishing and the
+  viewer are in. `examples/rotary.job.json` is the rotary finish. Order from here: M10 turning,
+  then M11 5-axis and advanced turning (mill-turn, live tooling, sub-spindle, B-axis), then M12
+  additive and non-planar slicing.
