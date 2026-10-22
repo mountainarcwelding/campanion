@@ -5,14 +5,16 @@
 //! contours on its layers. Profile sides use the same `inside` / `outside` / `on` values as the
 //! profile job. Compensation is computed here, and travel is climb. Pocket and drill use the
 //! matching `campanion-path` operations. Profile and engrave are depth passes linked per operation.
+//! Each pocket region, at each depth, is linked the same way, and every region at one depth is
+//! linked before the next depth.
 //!
-//! Stock Z is 0. A depth pass cuts at `z = -pass` (Z is up). For a linked profile or engrave the
-//! tool rapids at clearance, rapids down to the job retract height, and plunge-feeds each pass.
-//! Those link rapids stay at or above the retract height. After linking, the operation's process
-//! timing is applied: process on and the pierce dwell at the pierce height before the plunge, and
-//! process off and the post delay before the rapid retract to clearance. The job file has no
-//! pocket stepover, so rings are spaced by the tool radius. Drill cycles are not in this job
-//! version: each hole is a rapid to the final depth, not an expanded peck.
+//! Stock Z is 0. A depth pass cuts at `z = -pass` (Z is up). For a linked profile, pocket, or
+//! engrave the tool rapids at clearance, rapids down to the job retract height, and then feeds
+//! the plunge or ramp. Those link rapids stay at or above the retract height. After linking, the
+//! operation's process timing is applied: process on and the pierce dwell at the pierce height
+//! before the plunge, and process off and the post delay before the rapid retract to clearance.
+//! The job file has no pocket stepover, so rings are spaced by the tool radius. Drill cycles are
+//! not in this job version: each hole is a rapid to the final depth, not an expanded peck.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
 //! and retract height is the job retract. Issues are printed and the process exits 1.
 
@@ -204,7 +206,10 @@ fn pocket_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> 
     let stepover = cut.tool.path_tool().compensation_distance().map_err(|err| op_err(cut.op, err))?;
     let regions = pocket_regions(cut.op, cut.contours, &cut.tolerance)?;
     let retract = retract_z(cut.job);
+    // All regions at one depth, then the next depth. Linking each depth on its own keeps that
+    // order; `order_and_link` only chooses the travel order inside the depth.
     for z in cut_levels(cut.op)? {
+        let mut features = Vec::with_capacity(regions.len());
         for region in &regions {
             let pocket = PocketOp::new(cut.tool.path_tool(), PocketStrategy::OffsetRings, stepover)
                 .z(z)
@@ -212,8 +217,12 @@ fn pocket_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> 
                 .tolerance(cut.tolerance)
                 .generate(region)
                 .map_err(|err| op_err(cut.op, err))?;
-            push_doc(paths, Document::from_toolpath(pocket.toolpath(), cut.import)?)?;
+            // The generator feeds back to retract after process-off. Drop that move so the same
+            // clearance rapid profiles use can follow process-off.
+            let toolpath = clearance_retracts(cut, &moves_through_process_off(pocket.toolpath()))?;
+            features.push(Feature::new(region.outer().clone(), toolpath));
         }
+        link_operation(paths, cut, &features)?;
     }
     Ok(())
 }
@@ -240,19 +249,35 @@ fn engrave_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError>
     link_operation(paths, cut, &features)
 }
 
-/// Depth passes from stock Z 0. The first rapid sits at clearance so the linker does not feed
-/// down from there; the next rapid drops to the job retract height. The return to clearance is
-/// a rapid inserted after process-off, so a post delay can sit between that stop and the retract.
+/// Depth passes from stock Z 0, with the same clearance and retract links as a pocket section.
 /// Plunge moves use the operation plunge feed.
 fn depth_at_retract(cut: &Cut<'_>, contour: &Contour) -> Result<Toolpath, CliError> {
     let plan = DepthPlan::new(0.0, cut.op.depth(), cut.op.step_down(), cut.op.entry());
     let path = campanion_path::depth_toolpath(contour, &plan, &cut.tolerance).map_err(|err| op_err(cut.op, err))?;
+    clearance_retracts(cut, path.moves())
+}
+
+/// Moves through the last process-off. Anything after that is the generator retract, which the
+/// clearance link replaces with a rapid.
+fn moves_through_process_off(path: &Toolpath) -> Vec<Move> {
+    let moves = path.moves();
+    let end = match moves.iter().rposition(|mv| matches!(mv, Move::Event(ProcessEvent::Off))) {
+        Some(index) => index.saturating_add(1),
+        None => moves.len(),
+    };
+    moves.iter().take(end).copied().collect()
+}
+
+/// The first rapid sits at clearance so the linker does not feed down from there; the next rapid
+/// drops to the job retract height. The return to clearance is a rapid inserted after process-off,
+/// so a post delay can sit between that stop and the retract.
+fn clearance_retracts(cut: &Cut<'_>, source: &[Move]) -> Result<Toolpath, CliError> {
     let retract = cut.job.retract();
     let clearance = cut.job.clearance();
-    let mut moves = Vec::with_capacity(path.moves().len().saturating_add(2));
+    let mut moves = Vec::with_capacity(source.len().saturating_add(2));
     let mut saw_rapid = false;
     let mut at: Option<Point3> = None;
-    for mv in path.moves() {
+    for mv in source {
         if !saw_rapid && let Move::Rapid { to } = *mv {
             let at_clearance = Point3::new(to.x(), to.y(), clearance).map_err(|err| op_err(cut.op, err))?;
             moves.push(Move::Rapid { to: at_clearance });
