@@ -7,9 +7,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod dropcutter;
+mod raster;
 mod stl;
 
 pub use dropcutter::{Cutter, DropCutter, drop_cutter_triangle};
+pub use raster::{RasterAngle, RasterParams, parallel_finish};
 pub use stl::{parse_stl, write_stl_binary};
 
 /// Crate version from the package manifest.
