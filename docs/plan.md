@@ -156,7 +156,12 @@ IR within tolerance, and golden files cover each post.
 - **Turning:** XZ profiles, facing, roughing/finishing, grooving, threading, parting; then live
   tooling (C/Y) and sub-spindle.
 - **Multi-channel up to 13 axes:** mill-turn and multi-head machines, sync between channels.
-- **Additive:** a slicer-style process on the same IR (later; only if it still makes sense then).
+- **Additive and non-planar slicing (after the multi-axis work):** extrusion as one more process
+  in the IR: an extrusion axis `E`, with flow, temperature and fan as process parameters. Planar
+  slicing comes first as a baseline (perimeters, infill, supports and retraction). Then
+  non-planar layers follow the part surface, reusing the mesh, drop-cutter and surface code.
+  Nozzle and carriage collision checks run against the part as printed so far. Until then the
+  IR must not assume a subtractive process: process kinds, axes and verify rules stay generic.
 
 ## SolidCraft integration path
 1. **Now: companion over files and the CLI.** SolidCraft exports STEP; we read it (and DXF/SVG),
