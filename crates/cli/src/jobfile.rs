@@ -22,19 +22,27 @@
 //! not a cryptographic hash. See `docs/job-file.md`.
 //!
 //! An STL source, a path ending in `.stl` in any case, is a triangle mesh. Its hash is those
-//! raw bytes. A mesh job may only contain `surface` operations, and `surface` is rejected on
-//! every other source. A surface rasters the mesh. It requires exactly one of `stepover` and
-//! `scallop_height`. `scallop_height` is a flat-floor cusp height; the run turns it into an XY
-//! stepover and caps that stepover at the tool diameter. On a slope the real cusp is larger
-//! for the same XY stepover, because raster spacing is measured in XY. `sample_step` defaults
-//! to half of the stepover that is used. `angle_deg` is 0 or 90, `margin` grows the mesh XY
-//! bounds, and `floor_z` defaults to the mesh minimum Z. `stock_to_leave` on a surface is one
-//! length that raises every cutter-location Z. That is an axial offset, not a 3D rest offset.
-//! `layers`, `depth`, `step_down` and `side` are rejected.
+//! raw bytes. A mesh job may only contain `surface` and `rough` operations, and both are
+//! rejected on every other source. A surface rasters the mesh. It requires exactly one of
+//! `stepover` and `scallop_height`. `scallop_height` is a flat-floor cusp height; the run turns
+//! it into an XY stepover and caps that stepover at the tool diameter. On a slope the real
+//! cusp is larger for the same XY stepover, because raster spacing is measured in XY.
+//! `sample_step` defaults to half of the stepover that is used. `angle_deg` is 0 or 90,
+//! `margin` grows the mesh XY bounds, and `floor_z` defaults to the mesh minimum Z.
+//! `stock_to_leave` on a surface is one length that raises every cutter-location Z. That is an
+//! axial offset, not a 3D rest offset. `layers`, `depth`, `step_down` and `side` are rejected.
+//!
+//! `rough` is Z-level roughing. `step_down` is required. `stepover` defaults to 0.4 times the
+//! tool diameter. `margin` defaults to the tool radius and grows the mesh XY bounds into the
+//! stock rectangle. `top_z` defaults to the mesh maximum Z and `floor_z` to the minimum.
+//! `grid` defaults to the minimum of `stepover / 4` and 0.5 mm. `stock_to_leave` is one length;
+//! omitted, it is 0.5 mm, which is not scaled again when the file is in inches. Entry is a
+//! plunge. Ramp entry is future work, so `entry` is rejected, as are keys that belong to other
+//! kinds.
 //!
 //! A tool may set `shape`: `"flat"` (the default), `"ball"`, or `{"bull": corner_radius}`.
-//! A shape other than flat is only used by a surface operation. Two-dimensional operations
-//! keep the flat diameter offset.
+//! A shape other than flat is only used by a surface or rough operation. Two-dimensional
+//! operations keep the flat diameter offset.
 //!
 //! A face clears the bounding box of its layers. `angle_deg` is 0 or 90 and is stored as
 //! radians. `margin` grows that box on every side. `stepover` defaults to three quarters of
@@ -46,8 +54,9 @@
 //! angle in degrees and is stored as radians. `tip_diameter` and `tip_clearance` default to 0.
 //! `tip_diameter` is strictly less than the tool diameter. The tip depth is
 //! `width / tan(v_angle / 2) + tip_clearance`; `depth()` and `step_down()` return that value.
-//! `depth` and `step_down` in the file are rejected on a chamfer and required on every other
-//! kind. The chamfer keys are rejected on every other kind. A kerf tool cannot chamfer.
+//! `depth` and `step_down` in the file are rejected on a chamfer. A surface rejects both.
+//! A rough requires `step_down` and rejects `depth`. Every other kind requires both.
+//! The chamfer keys are rejected on every other kind. A kerf tool cannot chamfer.
 
 use std::fmt;
 use std::fs::File;
@@ -87,6 +96,12 @@ const DEFAULT_CLEARANCE_MM: f64 = 5.0;
 const DEFAULT_RETRACT_MM: f64 = 2.0;
 /// Face stepover when the file omits it, as a fraction of the tool diameter.
 const FACE_STEPOVER_OF_DIAMETER: f64 = 0.75;
+/// Roughing stepover when the file omits it, as a fraction of the tool diameter.
+const ROUGH_STEPOVER_OF_DIAMETER: f64 = 0.4;
+/// Stock left by a rough when the file omits `stock_to_leave`, in millimetres.
+const DEFAULT_ROUGH_STOCK_MM: f64 = 0.5;
+/// Upper bound of the default roughing sample grid, in millimetres.
+const DEFAULT_ROUGH_GRID_MM: f64 = 0.5;
 const MAX_FEED_MM_PER_MIN: f64 = 1.0e9;
 const MAX_DELAY_S: f64 = 1.0e6;
 const MAX_TOOLS: usize = 256;
@@ -324,6 +339,8 @@ pub enum OperationKind {
     },
     /// Parallel finish over an STL mesh. No layers and no side.
     Surface,
+    /// Z-level roughing over an STL mesh. No layers and no side. Entry is a plunge.
+    Rough,
 }
 
 /// Stock left by a roughing pass, in millimetres. Zero means cut to the contour and to `depth`.
@@ -373,9 +390,11 @@ impl Finish {
 /// Heights on [`Self::params`] are absolute Z. [`Self::entry`] is how each pass is entered.
 /// An omitted entry is a plunge. [`Self::stock_to_leave`] is millimetres of material
 /// left by roughing; an omitted [`Self::finish`] means no finishing pass.
-/// [`Self::face_angle`] and [`Self::margin`] describe a face. Other kinds store 0.
-/// [`Self::width`], [`Self::v_angle`], [`Self::tip_diameter`] and [`Self::tip_clearance`]
-/// describe a chamfer. Other kinds store 0.
+/// [`Self::face_angle`] and [`Self::margin`] describe a face or a mesh operation.
+/// A rough stores its margin (the file value, or the tool radius when omitted). Other kinds
+/// store 0. [`Self::width`], [`Self::v_angle`], [`Self::tip_diameter`] and
+/// [`Self::tip_clearance`] describe a chamfer. Other kinds store 0.
+/// [`Self::top_z`] and [`Self::grid`] describe a rough. Other kinds store `None`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -389,8 +408,15 @@ pub struct Operation {
     scallop_height: Option<f64>,
     /// Spacing of the regular surface samples, in millimetres. `None` except on a surface.
     sample_step: Option<f64>,
-    /// Tip floor for a surface, in millimetres. `None` means the mesh minimum Z, and other kinds store `None`.
+    /// Tip floor for a surface, or the deepest roughing level, in millimetres.
+    /// `None` means the mesh minimum Z. Other kinds store `None`.
     floor_z: Option<f64>,
+    /// Top of the roughing stock, in millimetres. `None` means the mesh maximum Z.
+    /// Other kinds store `None`.
+    top_z: Option<f64>,
+    /// Roughing sample grid, in millimetres. `None` except on a rough, where an omitted file
+    /// value is `min(stepover / 4, 0.5 mm)`.
+    grid: Option<f64>,
     face_angle: f64,
     margin: f64,
     width: f64,
@@ -482,7 +508,8 @@ impl Operation {
 
     /// Extra material around the geometry bounding box, in millimetres, on every side.
     ///
-    /// A face or a surface sets this. Other operations store `0`.
+    /// A face, a surface, or a rough sets this. A rough that omits it stores the tool radius.
+    /// Other operations store `0`.
     pub fn margin(&self) -> f64 {
         self.margin
     }
@@ -496,9 +523,20 @@ impl Operation {
         self.sample_step
     }
 
-    /// Surface tip floor, in millimetres. `None` means the mesh minimum Z when the job runs.
+    /// Surface tip floor, or the deepest roughing level, in millimetres.
+    /// `None` means the mesh minimum Z when the job runs.
     pub fn floor_z(&self) -> Option<f64> {
         self.floor_z
+    }
+
+    /// Top of the roughing stock, in millimetres. `None` means the mesh maximum Z when the job runs.
+    pub fn top_z(&self) -> Option<f64> {
+        self.top_z
+    }
+
+    /// Roughing sample grid, in millimetres. `None` except on a rough.
+    pub fn grid(&self) -> Option<f64> {
+        self.grid
     }
 
     /// Stock left by roughing, in millimetres. Omitted fields are zero.
@@ -691,27 +729,31 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
     Ok(Body { source, units, tolerance, tools, operations, clearance, retract })
 }
 
-/// An STL part only accepts `surface`. `surface` only accepts an STL part.
+/// An STL part only accepts `surface` and `rough`. Both only accept an STL part.
 /// A non-flat tool shape is rejected when a 2D operation uses that tool.
 fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool]) -> Result<(), JobFileError> {
     let stl = source.is_stl();
     for operation in operations {
-        let surface = matches!(operation.kind(), OperationKind::Surface);
-        if stl && !surface {
-            return Err(JobFileError::invalid("an STL source only allows surface operations"));
+        let mesh_op = matches!(operation.kind(), OperationKind::Surface | OperationKind::Rough);
+        if stl && !mesh_op {
+            return Err(JobFileError::invalid("an STL source only allows surface or rough operations"));
         }
-        if surface && !stl {
+        if matches!(operation.kind(), OperationKind::Surface) && !stl {
             return Err(JobFileError::invalid("surface is only valid on an STL source"));
+        }
+        if matches!(operation.kind(), OperationKind::Rough) && !stl {
+            return Err(JobFileError::invalid("rough is only valid on an STL source"));
         }
     }
     for tool in tools {
         if tool.shape().is_flat() {
             continue;
         }
-        let used_on_flat_work =
-            operations.iter().any(|operation| operation.tool_id() == tool.id() && !matches!(operation.kind(), OperationKind::Surface));
+        let used_on_flat_work = operations
+            .iter()
+            .any(|operation| operation.tool_id() == tool.id() && !matches!(operation.kind(), OperationKind::Surface | OperationKind::Rough));
         if used_on_flat_work {
-            return Err(JobFileError::invalid(format!("tool {} shape is only valid on a surface operation", tool.id())));
+            return Err(JobFileError::invalid(format!("tool {} shape is only valid on a surface or rough operation", tool.id())));
         }
     }
     Ok(())
@@ -953,6 +995,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "angle_deg",
             "margin",
             "floor_z",
+            "top_z",
+            "grid",
             "width",
             "v_angle_deg",
             "tip_diameter",
@@ -974,6 +1018,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     if matches!(kind, OperationKind::Surface) {
         return finish_surface(name, map, scale, tools);
     }
+    if matches!(kind, OperationKind::Rough) {
+        return finish_rough(name, map, scale, tools);
+    }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
     }
@@ -981,7 +1028,13 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         return Err(JobFileError::invalid("scallop_height is only valid on a surface"));
     }
     if optional(map, "floor_z").is_some() {
-        return Err(JobFileError::invalid("floor_z is only valid on a surface"));
+        return Err(JobFileError::invalid("floor_z is only valid on a surface or a rough"));
+    }
+    if optional(map, "top_z").is_some() {
+        return Err(JobFileError::invalid("top_z is only valid on a rough"));
+    }
+    if optional(map, "grid").is_some() {
+        return Err(JobFileError::invalid("grid is only valid on a rough"));
     }
     reject_chamfer_cut_keys(map, kind)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
@@ -1008,6 +1061,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         scallop_height: None,
         sample_step: None,
         floor_z: None,
+        top_z: None,
+        grid: None,
         face_angle,
         margin,
         width: chamfer.width,
@@ -1028,6 +1083,8 @@ fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileEr
         "layers",
         "depth",
         "step_down",
+        "top_z",
+        "grid",
         "width",
         "v_angle_deg",
         "tip_diameter",
@@ -1104,6 +1161,8 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         scallop_height,
         sample_step,
         floor_z,
+        top_z: None,
+        grid: None,
         face_angle,
         margin,
         width: 0.0,
@@ -1111,6 +1170,113 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         tip_diameter: 0.0,
         tip_clearance: 0.0,
         stock_to_leave,
+        finish: None,
+        entry: DepthEntry::Plunge,
+        feeds,
+        params,
+    })
+}
+
+/// Keys a rough does not accept. `side` is already rejected by [`parse_kind`].
+fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError> {
+    for key in [
+        "layers",
+        "depth",
+        "scallop_height",
+        "sample_step",
+        "angle_deg",
+        "width",
+        "v_angle_deg",
+        "tip_diameter",
+        "tip_clearance",
+        "finish",
+        "entry",
+        "cut_height",
+        "pierce_height",
+        "timing",
+    ] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is not valid on a rough")));
+        }
+    }
+    Ok(())
+}
+
+/// Z-level rough. `depth` stays 0: `top_z` and `floor_z` are absolute and default to the mesh.
+/// Entry is a plunge. Ramp entry is future work.
+fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
+    reject_rough_foreign_keys(map)?;
+    let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
+    let tool = tools.iter().find(|tool| tool.id() == tool_id).ok_or_else(|| JobFileError::invalid(format!("unknown tool {tool_id}")))?;
+    let Some(diameter) = tool.diameter() else {
+        return Err(JobFileError::invalid("rough is not valid with a kerf tool"));
+    };
+    let stepover = match optional(map, "stepover") {
+        Some(value) => {
+            let stepover = positive_length(value, scale, "stepover")?;
+            if stepover > diameter {
+                return Err(JobFileError::invalid("stepover is larger than the tool diameter"));
+            }
+            stepover
+        }
+        None => diameter * ROUGH_STEPOVER_OF_DIAMETER,
+    };
+    let Some(step_value) = optional(map, "step_down") else {
+        return Err(JobFileError::invalid("rough needs a step_down"));
+    };
+    let step_down = positive_length(step_value, scale, "step_down")?;
+    let margin = match optional(map, "margin") {
+        Some(value) => cap_under(non_negative_length(value, scale, "margin")?, MAX_MM, "margin")?,
+        None => diameter * 0.5,
+    };
+    let floor_z = match optional(map, "floor_z") {
+        Some(value) => Some(finite_height(scale_f64(value, scale, "floor_z")?, "floor_z")?),
+        None => None,
+    };
+    let top_z = match optional(map, "top_z") {
+        Some(value) => Some(finite_height(scale_f64(value, scale, "top_z")?, "top_z")?),
+        None => None,
+    };
+    if let (Some(top), Some(floor)) = (top_z, floor_z)
+        && top <= floor
+    {
+        return Err(JobFileError::invalid("top_z must be above floor_z"));
+    }
+    let grid = match optional(map, "grid") {
+        Some(value) => positive_length(value, scale, "grid")?,
+        None => (stepover * 0.25).min(DEFAULT_ROUGH_GRID_MM),
+    };
+    let stock = match optional(map, "stock_to_leave") {
+        Some(value) => {
+            if !value.is_number() {
+                return Err(JobFileError::invalid("rough stock_to_leave must be a number"));
+            }
+            cap_under(non_negative_length(value, scale, "stock_to_leave")?, MAX_MM, "stock_to_leave")?
+        }
+        None => DEFAULT_ROUGH_STOCK_MM,
+    };
+    let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
+    let params = parse_params(None).map_err(from_cli)?;
+    Ok(Operation {
+        name,
+        kind: OperationKind::Rough,
+        layers: Vec::new(),
+        tool_id,
+        depth: 0.0,
+        step_down,
+        stepover: Some(stepover),
+        scallop_height: None,
+        sample_step: None,
+        floor_z,
+        top_z,
+        grid: Some(grid),
+        face_angle: 0.0,
+        margin,
+        width: 0.0,
+        v_angle: 0.0,
+        tip_diameter: 0.0,
+        tip_clearance: 0.0,
+        stock_to_leave: StockToLeave { wall: 0.0, floor: stock },
         finish: None,
         entry: DepthEntry::Plunge,
         feeds,
@@ -1451,6 +1617,10 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
         "surface" => {
             reject_side(side)?;
             Ok(OperationKind::Surface)
+        }
+        "rough" => {
+            reject_side(side)?;
+            Ok(OperationKind::Rough)
         }
         "chamfer" => {
             let Some(side) = side else {
@@ -2952,10 +3122,10 @@ mod tests {
         let profile = r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}"#;
         let cases = [
             (envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{surface}]")), "surface is only valid on an STL source"),
-            (envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, &format!("[{profile}]")), "an STL source only allows surface operations"),
+            (envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, &format!("[{profile}]")), "an STL source only allows surface or rough operations"),
             (
                 envelope("plate.dxf", r#"[{"id":1,"diameter":6,"shape":"ball"}]"#, &format!("[{profile}]")),
-                "shape is only valid on a surface operation",
+                "shape is only valid on a surface or rough operation",
             ),
             (envelope("part.stl", r#"[{"id":1,"kerf":1.2}]"#, &format!("[{surface}]")), "surface is not valid with a kerf tool"),
             (envelope("part.stl", r#"[{"id":1,"kerf":1.2,"shape":"ball"}]"#, "[]"), "shape is only valid on a diameter tool"),
@@ -3089,5 +3259,192 @@ mod tests {
             assert!(err.to_string().contains(needle), "{needle}: {err}");
             assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");
         }
+    }
+
+    #[test]
+    fn parses_rough_and_rejects_other_kinds_keys() {
+        let text = envelope(
+            "dome.stl",
+            r#"[{"id":1,"diameter":6,"shape":"flat"},{"id":2,"diameter":8,"shape":"ball"}]"#,
+            r#"[{"name":"rough","type":"rough","tool_id":1,"step_down":2.5,"stepover":2.4,"stock_to_leave":0.3,"margin":1,"top_z":12,"floor_z":-1,"grid":0.4,"feeds":{"cut":1000,"plunge":300}}]"#,
+        );
+        let job = load(&write_job("rough-mm", &text)).expect("rough");
+        assert!(job.source().is_stl());
+        let op = &job.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Rough);
+        assert!(op.layers().is_empty());
+        near(op.step_down(), 2.5);
+        near(op.stepover().expect("stepover"), 2.4);
+        near(op.stock_to_leave().wall(), 0.0);
+        near(op.stock_to_leave().floor(), 0.3);
+        near(op.margin(), 1.0);
+        near(op.top_z().expect("top"), 12.0);
+        near(op.floor_z().expect("floor"), -1.0);
+        near(op.grid().expect("grid"), 0.4);
+        assert_eq!(op.depth(), 0.0);
+        assert!(op.sample_step().is_none());
+        assert!(op.scallop_height().is_none());
+        assert!(matches!(op.entry(), DepthEntry::Plunge));
+        assert!(job.tool(1).expect("flat").shape().is_flat());
+
+        let defaults =
+            envelope("dome.stl", r#"[{"id":1,"diameter":10}]"#, r#"[{"name":"rough","type":"rough","tool_id":1,"step_down":1,"feeds":{"cut":1}}]"#);
+        let defaults = load(&write_job("rough-defaults", &defaults)).expect("defaults");
+        let op = &defaults.operations()[0];
+        near(op.stepover().expect("stepover"), 4.0);
+        near(op.margin(), 5.0);
+        near(op.stock_to_leave().floor(), 0.5);
+        near(op.grid().expect("grid"), 0.5);
+        assert_eq!(op.top_z(), None);
+        assert_eq!(op.floor_z(), None);
+
+        let fine = envelope(
+            "part.stl",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"rough","type":"rough","tool_id":1,"step_down":1,"stepover":1,"feeds":{"cut":1}}]"#,
+        );
+        let fine = load(&write_job("rough-grid", &fine)).expect("grid");
+        near(fine.operations()[0].grid().expect("grid"), 0.25);
+
+        let inch = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"dome.STL","hash":"{EMPTY_HASH}"}},"units":"inch","tools":[{{"id":1,"diameter":0.25,"shape":"flat"}}],"operations":[{{"name":"cap","type":"rough","tool_id":1,"step_down":0.1,"stepover":0.08,"stock_to_leave":0.01,"margin":0.05,"top_z":0.4,"floor_z":-0.1,"grid":0.02,"feeds":{{"cut":10}}}}]}}"#
+        );
+        let inch = load(&write_job("rough-inch", &inch)).expect("inch rough");
+        let op = &inch.operations()[0];
+        near(op.step_down(), 0.1 * 25.4);
+        near(op.stepover().expect("stepover"), 0.08 * 25.4);
+        near(op.stock_to_leave().floor(), 0.01 * 25.4);
+        near(op.margin(), 0.05 * 25.4);
+        near(op.top_z().expect("top"), 0.4 * 25.4);
+        near(op.floor_z().expect("floor"), -0.1 * 25.4);
+        near(op.grid().expect("grid"), 0.02 * 25.4);
+
+        let rough = r#"{"name":"a","type":"rough","tool_id":1,"step_down":1,"feeds":{"cut":1}}"#;
+        let cases = [
+            (envelope("plate.dxf", r#"[{"id":1,"diameter":6}]"#, &format!("[{rough}]")), "rough is only valid on an STL source"),
+            (envelope("part.stl", r#"[{"id":1,"kerf":1.2}]"#, &format!("[{rough}]")), "rough is not valid with a kerf tool"),
+            (
+                envelope("part.stl", r#"[{"id":1,"diameter":6}]"#, r#"[{"name":"a","type":"rough","tool_id":1,"feeds":{"cut":1}}]"#),
+                "rough needs a step_down",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"stepover":7,"feeds":{"cut":1}}]"#,
+                ),
+                "stepover is larger than the tool diameter",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"layers":["L"],"feeds":{"cut":1}}]"#,
+                ),
+                "layers is not valid on a rough",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"depth":1,"feeds":{"cut":1}}]"#,
+                ),
+                "depth is not valid on a rough",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"scallop_height":0.01,"feeds":{"cut":1}}]"#,
+                ),
+                "scallop_height is not valid on a rough",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"sample_step":0.2,"feeds":{"cut":1}}]"#,
+                ),
+                "sample_step is not valid on a rough",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"angle_deg":0,"feeds":{"cut":1}}]"#,
+                ),
+                "angle_deg is not valid on a rough",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"entry":{"type":"ramp","angle_deg":10},"feeds":{"cut":1}}]"#,
+                ),
+                "entry is not valid on a rough",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"stock_to_leave":{"wall":0.1},"feeds":{"cut":1}}]"#,
+                ),
+                "rough stock_to_leave must be a number",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rough","tool_id":1,"step_down":1,"top_z":0,"floor_z":1,"feeds":{"cut":1}}]"#,
+                ),
+                "top_z must be above floor_z",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"stepover":1,"top_z":1,"feeds":{"cut":1}}]"#,
+                ),
+                "top_z is not valid on a surface",
+            ),
+            (
+                envelope(
+                    "part.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"surface","tool_id":1,"stepover":1,"grid":0.2,"feeds":{"cut":1}}]"#,
+                ),
+                "grid is not valid on a surface",
+            ),
+            (
+                envelope(
+                    "plate.dxf",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"top_z":1,"feeds":{"cut":1}}]"#,
+                ),
+                "top_z is only valid on a rough",
+            ),
+            (
+                envelope(
+                    "plate.dxf",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"grid":0.2,"feeds":{"cut":1}}]"#,
+                ),
+                "grid is only valid on a rough",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let path = write_job(&format!("rough-bad-{index}"), text);
+            let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
+
+        let ball = envelope(
+            "part.stl",
+            r#"[{"id":2,"diameter":8,"shape":"ball"}]"#,
+            r#"[{"name":"a","type":"rough","tool_id":2,"step_down":1,"feeds":{"cut":1}}]"#,
+        );
+        let ball = load(&write_job("rough-ball", &ball)).expect("ball on rough");
+        assert!(matches!(ball.tool(2).expect("ball").shape(), ToolShape::Ball));
+        assert_eq!(ball.operations()[0].kind(), OperationKind::Rough);
     }
 }

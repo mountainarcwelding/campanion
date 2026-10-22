@@ -33,6 +33,11 @@
 //! cutter location, cuts along the raster and along the drop-cutter link between lines, a retract
 //! to the job retract height, then a rapid back to clearance. Rapids stay at clearance, which is
 //! at or above the retract height.
+//! Each `rough` operation is Z-level roughing. Levels run top to bottom and rings stay in order.
+//! For each ring the tool rapids at clearance to the start, rapids down to the retract height,
+//! plunges to the level, cuts the ring, and feeds back to the retract height. Entry is a plunge;
+//! ramp entry is future work. The process turns on once before the first plunge and off after the
+//! last retract, then the tool rapids to clearance.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -52,6 +57,7 @@ use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::job::read_text;
 use crate::jobfile::{self, Finish, JobFile, JobTool, Operation, OperationKind};
 use crate::report;
+use crate::rough;
 use crate::step;
 use crate::surface;
 
@@ -154,7 +160,8 @@ fn build_surface(job: &JobFile, bytes: &[u8]) -> Result<Document, CliError> {
         let import = import_for(op, tool)?;
         let path = match op.kind() {
             OperationKind::Surface => surface::finish(job, op, tool, &mesh)?,
-            _ => return Err(op_err(op, "an STL source only allows surface operations")),
+            OperationKind::Rough => rough::rough(job, op, tool, &mesh)?,
+            _ => return Err(op_err(op, "an STL source only allows surface or rough operations")),
         };
         push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
     }
@@ -251,6 +258,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Face => face_paths(&mut paths, &cut)?,
             OperationKind::Chamfer { side } => chamfer_paths(&mut paths, &cut, side)?,
             OperationKind::Surface => return Err(op_err(op, "surface finishing needs an STL source")),
+            OperationKind::Rough => return Err(op_err(op, "roughing needs an STL source")),
         }
     }
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();

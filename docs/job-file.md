@@ -77,7 +77,8 @@ of that value.
 ball nose whose sphere radius is half the diameter. `{"bull": corner_radius}` is a bull nose;
 `corner_radius` is a length in `units`, greater than 0 and strictly less than the tool radius.
 A shape other than flat is rejected when a profile, pocket, drill, engrave, face or chamfer uses
-that tool. Those operations keep the flat diameter offset and do not read `shape`.
+that tool. Those operations keep the flat diameter offset and do not read `shape`. A surface or
+a rough reads `shape`.
 
 ## Operations
 
@@ -87,23 +88,25 @@ unique within that operation. The same layer may appear on two operations.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | Short unique name. |
-| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer` or `surface`. |
-| `layers` | yes, except surface | One or more layer names. A surface rejects `layers`. |
-| `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face and surface. |
+| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer`, `surface` or `rough`. |
+| `layers` | yes, except surface and rough | One or more layer names. A surface or a rough rejects `layers`. |
+| `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface and rough. |
 | `tool_id` | yes | `id` of a tool in this file. |
-| `depth` | yes, except chamfer and surface | Positive distance downward from the stock surface, in `units`. Not an absolute Z. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface rejects `depth`. |
-| `step_down` | yes, except chamfer and surface | Positive maximum thickness of one pass, in `units`. The last pass stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface rejects `step_down`. |
-| `stepover` | pocket, face and surface | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. |
+| `depth` | yes, except chamfer, surface and rough | Positive distance downward from the stock surface, in `units`. Not an absolute Z. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface or a rough rejects `depth`. |
+| `step_down` | yes, except chamfer and surface | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface rejects `step_down`. A rough requires it: the spacing between Z levels. |
+| `stepover` | pocket, face, surface and rough | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. A rough that omits it uses 0.4 times the tool diameter. |
 | `scallop_height` | surface only | Positive length in `units`. Flat-floor cusp height used instead of `stepover`. See below. Rejected on every other kind. |
 | `sample_step` | surface only | Positive length in `units`. Default is half of the stepover that is used (after a scallop height is resolved and capped). Maximum gap between the regular drop-cutter samples on a raster line, and between the samples on the link from one line to the next. |
 | `angle_deg` | face and surface | `0` (along +X) or `90` (along +Y). Default `0`. Stored as radians. Rejected on every other kind. |
-| `margin` | face and surface | Length in `units`, at least 0, at most 1e6 mm. Default 0. On a face, grows the faced rectangle past the geometry bounding box on every side. On a surface, grows the mesh XY bounds the same way. Rejected on every other kind. |
-| `floor_z` | surface only | Absolute tip Z in `units`. Default is the mesh minimum Z. Where the cutter misses the mesh, the tip stays at this height. |
+| `margin` | face, surface and rough | Length in `units`, at least 0, at most 1e6 mm. Default 0 on a face or a surface, and the tool radius on a rough. On a face, grows the faced rectangle past the geometry bounding box on every side. On a surface or a rough, grows the mesh XY bounds the same way. The rough stock rectangle is that grown box. Rejected on every other kind. |
+| `floor_z` | surface and rough | Absolute Z in `units`. Default is the mesh minimum Z. On a surface, the tip stays at this height where the cutter misses the mesh. On a rough, this is the deepest level. |
+| `top_z` | rough only | Absolute Z in `units`. Default is the mesh maximum Z. The stock surface the depth plan starts from. The first level is `top_z - step_down`, and the last level is exactly `floor_z`. |
+| `grid` | rough only | Positive length in `units`. Spacing of the drop-cutter samples that decide where the tool centre may sit. Default is the minimum of `stepover / 4` and 0.5 mm. The 0.5 mm cap is a millimetre length, not scaled again when `units` is `inch`. |
 | `width` | chamfer | Positive length in `units`, at most 1e6 mm. Horizontal width of the bevel. Rejected on every other kind. |
 | `v_angle_deg` | chamfer | Included angle of the V-bit, in degrees, greater than 0 and less than 180. Stored as radians. Not scaled by `units`. Rejected on every other kind. |
 | `tip_diameter` | chamfer | Length in `units`, at least 0, default 0. Must be less than the tool diameter. Rejected on every other kind. |
 | `tip_clearance` | chamfer | Length in `units`, at least 0, default 0. How far the tip sits below the bottom of the bevel. Rejected on every other kind. |
-| `stock_to_leave` | profile, pocket and surface | On a profile or pocket, an object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. On a surface, a single length in `units`, at least 0, default 0. That length raises every cutter-location Z. It is an axial offset approximation, not a true 3D rest-material offset along the surface normal. Rejected on a face. |
+| `stock_to_leave` | profile, pocket, surface and rough | On a profile or pocket, an object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. On a surface or a rough, a single length in `units`, at least 0. A surface defaults to 0 and adds that length to every cutter-location Z. That is an axial offset approximation, not a true 3D rest-material offset along the surface normal. A rough defaults to 0.5 mm (a millimetre length, not scaled again when `units` is `inch`) and keeps the tool where the drop-cutter tip plus that stock is at or below the level. Rejected on a face. |
 | `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). Rejected on a face. |
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
@@ -149,7 +152,7 @@ the tips are at −0.5 mm and −0.3 mm.
 ### Surface
 
 `type` `surface` is a 3-axis parallel finish of an STL mesh. The source path must end in `.stl`
-(any case). An STL source rejects every other operation type, and `surface` is rejected on a
+(any case). An STL source allows `surface` and `rough` only, and `surface` is rejected on a
 DXF, SVG or STEP source. There are no layers. A kerf tool is rejected.
 
 The raster covers the mesh XY bounds, grown by `margin` on every side. Passes run at `angle_deg`
@@ -187,6 +190,37 @@ the next, retracts to the retract height, turns the process off, and rapids back
 a 0.01 mm chord tolerance. The mesh is a 40 mm square plate at Z = 0 with a dome of radius 15 mm
 at the centre, rising to Z = 10 mm.
 
+### Roughing
+
+`type` `rough` is Z-level roughing of an STL mesh. The source path must end in `.stl` (any case).
+An STL source allows `surface` and `rough` only. `rough` is rejected on a DXF, SVG or STEP source.
+There are no layers. A kerf tool is rejected. The tool `shape` is the flat, ball or bull nose a
+surface uses.
+
+The stock rectangle is the mesh XY bounds, grown by `margin` on every side. Omitted, `margin` is
+the tool radius. `step_down` is required. Levels start one step below `top_z` and continue by
+`step_down`, and the last level is exactly `floor_z`. `top_z` defaults to the mesh maximum Z.
+`floor_z` defaults to the mesh minimum Z. `stepover` is the spacing between inset rings. Omitted,
+it is 0.4 times the tool diameter, and it must be greater than 0 and at most the diameter.
+`grid` is the spacing of the samples that find where the tool centre may sit. Omitted, it is the
+minimum of `stepover / 4` and 0.5 mm.
+
+`stock_to_leave` is one length. The rings stay where the drop-cutter tip plus that stock is at or
+below the level. It is not a separate wall and floor pair. A level where that allowance leaves
+no place for the tool has no ring and adds no moves. On the dome, 0.3 mm of stock keeps the flat
+tool off the plate, so the floor level is empty and the deepest cut is the 2.5 mm level.
+
+Entry is a plunge. Ramp entry is future work, and `entry` is rejected. Levels are cut from the top
+down, and the rings of a level are cut in order. For each ring the tool rapids at clearance to the
+ring start, rapids down to the retract height, plunges to the level, cuts the ring back to the
+start, and feeds back to the retract height. The process turns on once before the first plunge and
+off after the last retract, then the tool rapids to clearance. Clearance and retract stay at the
+job heights. Put those heights above the stock.
+
+`examples/dome_rough.job.json` roughs `examples/dome.stl` with a 6 mm flat end mill, a 2.5 mm
+step-down, a 2.4 mm stepover and 0.3 mm of stock to leave. Clearance is 15 mm and retract is 12 mm,
+above the dome.
+
 Pocket strategy, leads, tabs and drill-cycle fields are not part of this version.
 
 ### Timing
@@ -221,7 +255,7 @@ Hostile numbers and sizes fail the load instead of being passed on:
 - JSON file at most 32 MiB, UTF-8.
 - 256 tools, 1024 operations, 64 layers on one operation.
 - Names at most 256 bytes. Source path at most 4096 bytes.
-- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, floor Z, surface stock, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source.
+- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, grid, floor Z, top Z, surface and rough stock, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source.
 - Feeds at most 1e9 mm/min. Delays at most 1e6 s.
 - At most 1024 depth passes.
 
