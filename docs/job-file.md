@@ -81,15 +81,17 @@ unique within that operation. The same layer may appear on two operations.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | Short unique name. |
-| `type` | yes | `profile`, `pocket`, `drill` or `engrave`. |
+| `type` | yes | `profile`, `pocket`, `drill`, `engrave` or `face`. |
 | `layers` | yes | One or more layer names. |
-| `side` | profile only | `inside`, `outside` or `on`. Rejected on pocket, drill and engrave. Same mapping as the profile job. |
+| `side` | profile only | `inside`, `outside` or `on`. Rejected on pocket, drill, engrave and face. Same mapping as the profile job. |
 | `tool_id` | yes | `id` of a tool in this file. |
 | `depth` | yes | Positive distance downward from the stock surface, in `units`. Not an absolute Z. |
 | `step_down` | yes | Positive maximum thickness of one pass, in `units`. The last pass stops at `depth` and is not deeper. |
-| `stepover` | pocket only | Positive step between pocket passes, in `units`. At most the tool diameter. Rejected on a kerf tool. |
-| `stock_to_leave` | profile and pocket | Object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. |
-| `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). |
+| `stepover` | pocket and face | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). |
+| `angle_deg` | face only | `0` (along +X) or `90` (along +Y). Default `0`. Stored as radians. Rejected on every other kind. |
+| `margin` | face only | Length in `units`, at least 0, at most 1e6 mm. Default 0. Grows the faced rectangle past the geometry bounding box on every side. Rejected on every other kind. |
+| `stock_to_leave` | profile and pocket | Object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. Rejected on a face. |
+| `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). Rejected on a face. |
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
 | `cut_height` | no | Absolute Z to feed to after the pierce, before the cut. |
@@ -101,6 +103,16 @@ When `finish.step_down` is set, it must satisfy the same rule against `depth`.
 
 Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
 removes that remaining stock.
+
+### Facing
+
+`type` `face` clears a rectangle. The rectangle is the union of the bounding boxes of the
+selected contours, expanded by `margin` on every side. Passes run at `angle_deg`. A kerf tool
+is rejected on a face, with or without `stepover`. `side`, `stock_to_leave` and `finish` are
+rejected too.
+
+`examples/face.job.json` faces the outline layer of `examples/curves.svg` 0.5 mm deep in two
+passes with a 20 mm tool and a 2 mm margin.
 
 Pocket strategy, leads, tabs and drill-cycle fields are not part of this version.
 
@@ -136,7 +148,7 @@ Hostile numbers and sizes fail the load instead of being passed on:
 - JSON file at most 32 MiB, UTF-8.
 - 256 tools, 1024 operations, 64 layers on one operation.
 - Names at most 256 bytes. Source path at most 4096 bytes.
-- Tool size, depth, step-down, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad).
+- Tool size, depth, step-down, margin, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad).
 - Feeds at most 1e9 mm/min. Delays at most 1e6 s.
 - At most 1024 depth passes.
 
