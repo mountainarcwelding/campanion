@@ -113,7 +113,7 @@ Multi-depth pockets and profiles with stock to leave (wall and floor) and a fini
 pocket stepover, facing (zigzag with overrun), and chamfer/deburr with V-bits along closed
 contours. Thread milling and adaptive clearing are still to come.
 
-### M7: 3-axis surfacing (in progress)
+### M7: 3-axis surfacing (done)
 Started after the 2.5D milestone (multi-depth pockets and profiles with stock to leave and a
 finishing pass, facing, chamfer and deburr).
 - **Input:** triangle meshes (binary and ASCII STL, and tessellated STEP through
@@ -135,7 +135,7 @@ finishing pass, facing, chamfer and deburr).
 Done when: analytic tests pass (a ball on a plane, a sphere and a cylinder at known Z), and
 property tests on random meshes show no gouge and stay within the scallop height.
 
-### M8: Machine and manufacturer posts (after M7, before 4-axis)
+### M8: Machine and manufacturer posts (done)
 Get the basics solid on real controllers before adding axes. Posts consume only the
 machine-neutral IR and cover everything built so far (2D, 2.5D, 3-axis):
 - LinuxCNC, GRBL, Mach3 and Fanuc/Haas-style mill posts, plus one plasma/laser controller
@@ -149,10 +149,32 @@ Done when: every example job posts to each controller, read-back of each program
 IR within tolerance, and golden files cover each post.
 4th axis and beyond start only after this milestone.
 
+### M9: 4th axis: indexing, wrapping and rotary finishing (in progress)
+One rotary axis (A about X, or B about Y). Simultaneous 5-axis, tool tilt and a machine
+kinematics model are out of scope.
+1. **Machine and setup data:** an optional rotary axis in the setup (axis, centre, direction,
+   travel limits). Posts state which rotary axes they support and how A/B words are written.
+2. **Indexed 3+1:** each operation may set an index angle. Existing 2.5D and 3D operations run
+   in the rotated frame; the post writes the A move and safe retracts between indexes, with
+   clearance checked against the stock's swept radius.
+3. **Wrapped toolpaths:** a flat 2D/2.5D path wrapped onto a cylinder of given diameter as
+   A-axis moves (lettering, flutes, cams), with feed handled as inverse time or degrees per
+   minute, chosen per post.
+4. **Posts:** A-axis output for the LinuxCNC, Mach3, Fanuc and Haas posts with golden files;
+   Grbl only when its post opts in. Read-back compares rotary moves within angle and
+   surface-length tolerance. The IR carries rotary motion as an axis value, not a new move
+   kind; posts without that axis reject the program cleanly.
+5. **Continuous rotary finishing:** drop-cutter passes around the part axis (rotary raster),
+   gouge-checked in the rotated frame.
+6. **Viewer:** shows the rotary axis and index angles.
+Done when: property tests show indexing round-trips and unwrapping a wrap gives back the flat
+path, rotary finishing passes the gouge check, and every 4-axis post has golden files.
+Releases: v0.5.0 after indexing, wrapping and posts; continuous rotary and the viewer follow.
+
 ### Later (each its own milestone when we get there)
 - **2.5D extras:** thread milling, adaptive clearing.
 - **3-axis extras:** scallop finishing, rest machining, stock simulation.
-- **4/5-axis:** indexed (3+2) first, then continuous with tool-axis control and collision checks.
+- **5-axis:** indexed (3+2) first, then continuous with tool-axis control and collision checks.
 - **Turning:** XZ profiles, facing, roughing/finishing, grooving, threading, parting; then live
   tooling (C/Y) and sub-spindle.
 - **Multi-channel up to 13 axes:** mill-turn and multi-head machines, sync between channels.
@@ -198,3 +220,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   `campanion-mesh` crate.
 - 2026-10-22: Order after M7: controller posts (M8) for everything built so far, then 4th axis
   and beyond.
+- 2026-10-22: M8 done (v0.4.0). M9 is the 4th axis: indexing, wrapping, rotary posts, then
+  continuous rotary finishing and viewer support.
