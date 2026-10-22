@@ -12,5 +12,5 @@ fi
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo check -p campanion-geom -p campanion-mesh -p campanion-import -p campanion-path -p campanion-ir --target wasm32-unknown-unknown
+cargo check -p campanion-geom -p campanion-mesh -p campanion-import -p campanion-path -p campanion-ir -p campanion-post --target wasm32-unknown-unknown
 cargo deny check licenses

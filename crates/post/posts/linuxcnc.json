@@ -1,0 +1,37 @@
+{
+  "id": "linuxcnc",
+  "name": "LinuxCNC",
+  "description": "Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices.",
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 4, "feed": 4, "dwell": 3 },
+  "trailing_zeros": true,
+  "header": [
+    "({program_name})",
+    "G21",
+    "G90",
+    "G17",
+    "G40",
+    "G49",
+    "G64 P0.01"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "s" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M2"],
+  "max_line_length": 256,
+  "axis_letters": "XYZ"
+}
