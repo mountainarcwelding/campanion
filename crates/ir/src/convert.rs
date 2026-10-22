@@ -156,7 +156,7 @@ fn assemble(import: &Import, path: &Toolpath, compensation: CompensationMode, pi
     if let Some(tool) = import.tool.clone() {
         tools.push(tool);
     }
-    let program = Program::try_new(import.name.clone(), tools, None, vec![cl], Vec::new(), Vec::new())?;
+    let program = Program::try_new(import.name.clone(), tools, None, vec![cl], Vec::new(), Vec::new(), None)?;
     Document::new(program)
 }
 

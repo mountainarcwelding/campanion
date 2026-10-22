@@ -249,6 +249,7 @@ version = "0.4.0"
 dependencies = [
  "campanion-geom",
  "campanion-path",
+ "proptest",
  "schemars",
  "serde",
  "serde_json",

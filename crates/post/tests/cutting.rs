@@ -61,7 +61,8 @@ fn plasma_document() -> Result<Document, String> {
     let feeds = Feeds::try_new(1200.0, None, None, Some(300.0), None).map_err(|err| err.to_string())?;
     let path = ClPath::try_new(Some("plate".into()), Some(1), CompensationMode::Off, feeds, Some(at(10.0, 10.0, 3.0)?), Vec::new(), blocks)
         .map_err(|err| err.to_string())?;
-    let program = Program::try_new(Some("plasma".into()), vec![tool], None, vec![path], Vec::new(), Vec::new()).map_err(|err| err.to_string())?;
+    let program =
+        Program::try_new(Some("plasma".into()), vec![tool], None, vec![path], Vec::new(), Vec::new(), None).map_err(|err| err.to_string())?;
     Document::new(program).map_err(|err| err.to_string())
 }
 

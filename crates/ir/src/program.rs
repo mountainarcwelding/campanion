@@ -5,10 +5,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, optional_name};
+use crate::geom::{Pose, Vec3};
 use crate::machine::{Channel, Machine};
-use crate::motion::{ChannelProgram, ClPath};
-use crate::process::Tool;
+use crate::motion::{ChannelProgram, ClBlock, ClMotion, ClPath};
+use crate::process::{Event, Tool};
+use crate::rotary::{RotarySetup, machine_to_part};
 use crate::{FORMAT_TAG, Result, check_format};
+
+/// How close a pose tool axis must be to the part-frame image of machine +Z at that rotary angle.
+const ROTARY_AXIS_TOL: f64 = 1e-6;
 
 /// Channels that must arrive together. A sync event waits on this id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -62,6 +67,8 @@ pub struct Program {
     toolpaths: Vec<ClPath>,
     channel_programs: Vec<ChannelProgram>,
     syncs: Vec<SyncPoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rotary: Option<RotarySetup>,
 }
 
 impl Program {
@@ -72,8 +79,9 @@ impl Program {
         toolpaths: Vec<ClPath>,
         channel_programs: Vec<ChannelProgram>,
         syncs: Vec<SyncPoint>,
+        rotary: Option<RotarySetup>,
     ) -> Result<Self> {
-        let program = Self { name, tools, machine, toolpaths, channel_programs, syncs };
+        let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary };
         program.check()?;
         Ok(program)
     }
@@ -102,12 +110,28 @@ impl Program {
         &self.syncs
     }
 
+    /// Fourth-axis table setup, when this program uses A or B.
+    pub fn rotary(&self) -> Option<&RotarySetup> {
+        self.rotary.as_ref()
+    }
+
+    /// Set or clear the fourth-axis setup and re-validate the program.
+    pub fn with_rotary(self, rotary: Option<RotarySetup>) -> Result<Self> {
+        let program = Self { rotary, ..self };
+        program.check()?;
+        Ok(program)
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
         optional_name(&self.name, "program name")?;
         check_tools(&self.tools)?;
         if let Some(machine) = &self.machine {
             machine.check()?;
         }
+        if let Some(setup) = self.rotary {
+            setup.check()?;
+        }
+        check_rotary_poses(self.rotary.as_ref(), &self.toolpaths)?;
         if self.toolpaths.len() > check::MAX_TOOLPATHS {
             return Err(check::invalid(format!("too many toolpaths: {} > {}", self.toolpaths.len(), check::MAX_TOOLPATHS)));
         }
@@ -236,6 +260,52 @@ fn check_syncs(machine: &Option<Machine>, syncs: &[SyncPoint], programs: &[Chann
         }
     }
     Ok(())
+}
+
+fn check_rotary_poses(setup: Option<&RotarySetup>, toolpaths: &[ClPath]) -> Result<()> {
+    for (path_i, path) in toolpaths.iter().enumerate() {
+        for (block_i, block) in path.blocks().iter().enumerate() {
+            let Some(pose) = block_pose(block) else {
+                continue;
+            };
+            let Some(angle) = pose.rotary() else {
+                continue;
+            };
+            let Some(setup) = setup else {
+                return Err(check::invalid(format!("toolpath {path_i} block {block_i} rotary angle needs a rotary setup")));
+            };
+            if let Some(limits) = setup.limits()
+                && !limits.contains(angle)
+            {
+                return Err(check::invalid(format!(
+                    "toolpath {path_i} block {block_i} rotary angle {angle} is outside limits {}..{}",
+                    limits.min_deg(),
+                    limits.max_deg()
+                )));
+            }
+            let machine_z = Pose::from_parts(Vec3::ZERO, Vec3::Z, None);
+            let expected = machine_to_part(setup, machine_z, angle).axis();
+            if !vec_within(pose.axis(), expected, ROTARY_AXIS_TOL) {
+                return Err(check::invalid(format!("toolpath {path_i} block {block_i} tool axis does not match rotary angle")));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn block_pose(block: &ClBlock) -> Option<&Pose> {
+    match block {
+        ClBlock::Motion(ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. }) => Some(to),
+        ClBlock::Event(Event::Probe { toward, .. }) => toward.as_ref(),
+        ClBlock::Event(_) => None,
+    }
+}
+
+fn vec_within(left: Vec3, right: Vec3, tol: f64) -> bool {
+    let dx = left.x() - right.x();
+    let dy = left.y() - right.y();
+    let dz = left.z() - right.z();
+    (dx * dx + dy * dy + dz * dz).sqrt() <= tol
 }
 
 fn mentions_sync(programs: &[ChannelProgram], toolpaths: &[ClPath]) -> bool {
