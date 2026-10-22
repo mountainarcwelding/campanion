@@ -8,6 +8,9 @@
 //! The safe retract height is [`index_safe_z`]: the job safe height, or the swept radius plus
 //! the rapid clearance, whichever is higher. The swept radius is the largest distance from the
 //! rotary axis line to the stock-box corners, or to the mesh vertices when there is no stock box.
+//!
+//! A wrap operation is already in the part frame. [`frame_operations`] does not map it again.
+//! Its first and last rotary angles still take the same retract-and-rotate path as an index change.
 
 use campanion_ir::{
     ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Plane, Pose, RotarySetup, Vec3, machine_to_part, part_to_machine,
@@ -40,12 +43,17 @@ pub(crate) struct IndexChange {
     pub machine_tip: Vec3,
 }
 
-/// One operation's toolpaths, still in the indexed (machine) view.
+/// One operation's toolpaths.
+///
+/// Indexed work is still in the machine view, at one [`Self::angle_deg`]. A wrap is already in
+/// the part frame (`part_frame`): [`Self::angle_deg`] is the first motion's rotary angle, and
+/// the last motion may sit at a different angle.
 pub(crate) struct IndexedOp {
     pub angle_deg: f64,
     pub tool_id: Option<u32>,
     pub feeds: Feeds,
     pub paths: Vec<ClPath>,
+    pub part_frame: bool,
 }
 
 /// An arc or helix as the indexed view sees it.
@@ -181,28 +189,48 @@ pub(crate) fn arc_to_machine(
     })
 }
 
-/// Map every operation into the part frame and insert an index change where the angle differs
-/// from the previous one, including from [`PROGRAM_START_DEG`] before the first operation.
+/// Map every indexed operation into the part frame and insert an index change where the angle
+/// differs from the previous one, including from [`PROGRAM_START_DEG`] before the first operation.
+///
+/// A [`IndexedOp::part_frame`] operation is stored as given. Its machine tip, for the index
+/// change, is the unwrapped machine view of the pose at that pose's rotary angle.
 pub(crate) fn frame_operations(setup: &RotarySetup, ops: Vec<IndexedOp>, safe_z: f64, chord_mm: f64) -> Result<Vec<ClPath>, CliError> {
     let mut out = Vec::new();
     let mut prev_angle = PROGRAM_START_DEG;
     let mut prev_tip: Option<Vec3> = None;
     for op in ops {
-        let machine_end = last_motion_tip(&op.paths)?;
-        let mut mapped = map_op_paths(&op.paths, setup, op.angle_deg, chord_mm)?;
-        if angles_differ(prev_angle, op.angle_deg) {
+        let IndexedOp { angle_deg, tool_id, feeds, paths, part_frame } = op;
+        let (mut mapped, start_angle, end_angle, start_tip, end_tip) = if part_frame {
+            let first = first_motion_pose(&paths)?;
+            let last = last_motion_pose(&paths)?;
+            let start_angle = rotary_angle(first)?;
+            let end_angle = rotary_angle(last)?;
+            (paths, start_angle, end_angle, machine_tip(setup, first)?, machine_tip(setup, last)?)
+        } else {
+            let end_tip = last_motion_tip(&paths)?;
+            let start_tip = first_motion_tip(&paths)?;
+            let mapped = map_op_paths(&paths, setup, angle_deg, chord_mm)?;
+            (mapped, angle_deg, angle_deg, start_tip, end_tip)
+        };
+        if angles_differ(prev_angle, start_angle) {
             let from = match prev_tip {
                 Some(tip) => tip,
-                None => first_motion_tip(&op.paths)?,
+                None => start_tip,
             };
-            let change = index_change(setup, prev_angle, op.angle_deg, from, safe_z)?;
-            insert_index_change(&mut out, &mut mapped, &op, change)?;
+            let change = index_change(setup, prev_angle, start_angle, from, safe_z)?;
+            insert_index_change(&mut out, &mut mapped, tool_id, feeds, change)?;
         }
         out.extend(mapped);
-        prev_tip = Some(machine_end);
-        prev_angle = op.angle_deg;
+        prev_tip = Some(end_tip);
+        prev_angle = end_angle;
     }
     Ok(out)
+}
+
+/// A wrap toolpath: already in the part frame, entered at its first rotary angle.
+pub(crate) fn part_frame_op(tool_id: u32, feeds: Feeds, paths: Vec<ClPath>) -> Result<IndexedOp, CliError> {
+    let angle = rotary_angle(first_motion_pose(&paths)?)?;
+    Ok(IndexedOp { angle_deg: angle, tool_id: Some(tool_id), feeds, paths, part_frame: true })
 }
 
 fn map_op_paths(paths: &[ClPath], setup: &RotarySetup, angle_deg: f64, chord_mm: f64) -> Result<Vec<ClPath>, CliError> {
@@ -213,11 +241,17 @@ fn map_op_paths(paths: &[ClPath], setup: &RotarySetup, angle_deg: f64, chord_mm:
     Ok(mapped)
 }
 
-fn insert_index_change(out: &mut Vec<ClPath>, mapped: &mut [ClPath], op: &IndexedOp, change: IndexChange) -> Result<(), CliError> {
+fn insert_index_change(
+    out: &mut Vec<ClPath>,
+    mapped: &mut [ClPath],
+    tool_id: Option<u32>,
+    feeds: Feeds,
+    change: IndexChange,
+) -> Result<(), CliError> {
     if let Some(last) = out.last_mut() {
         *last = append_rapid(last, change.retract)?;
     } else {
-        out.push(rapid_path(op.tool_id, op.feeds, change.retract)?);
+        out.push(rapid_path(tool_id, feeds, change.retract)?);
     }
     let Some(first) = mapped.first_mut() else {
         return Err(CliError::run("index change needs a toolpath"));
@@ -449,25 +483,43 @@ fn rebuild(path: &ClPath, blocks: Vec<ClBlock>) -> Result<ClPath, CliError> {
 }
 
 fn first_motion_tip(paths: &[ClPath]) -> Result<Vec3, CliError> {
+    Ok(first_motion_pose(paths)?.tip())
+}
+
+fn last_motion_tip(paths: &[ClPath]) -> Result<Vec3, CliError> {
+    Ok(last_motion_pose(paths)?.tip())
+}
+
+fn first_motion_pose(paths: &[ClPath]) -> Result<Pose, CliError> {
     for path in paths {
         for block in path.blocks() {
             if let Some(pose) = block_pose(block) {
-                return Ok(pose.tip());
+                return Ok(pose);
             }
         }
     }
     Err(CliError::run("index change needs a tool position"))
 }
 
-fn last_motion_tip(paths: &[ClPath]) -> Result<Vec3, CliError> {
+fn last_motion_pose(paths: &[ClPath]) -> Result<Pose, CliError> {
     for path in paths.iter().rev() {
         for block in path.blocks().iter().rev() {
             if let Some(pose) = block_pose(block) {
-                return Ok(pose.tip());
+                return Ok(pose);
             }
         }
     }
     Err(CliError::run("index change needs a tool position"))
+}
+
+fn rotary_angle(pose: Pose) -> Result<f64, CliError> {
+    pose.rotary().ok_or_else(|| CliError::run("wrap pose has no rotary angle"))
+}
+
+/// Machine-view tip of a part-frame pose, using the angle stored on that pose.
+fn machine_tip(setup: &RotarySetup, pose: Pose) -> Result<Vec3, CliError> {
+    let angle = rotary_angle(pose)?;
+    Ok(part_to_machine(setup, pose, angle).tip())
 }
 
 fn block_pose(block: &ClBlock) -> Option<Pose> {
@@ -603,7 +655,7 @@ mod tests {
     }
 
     fn op(name: &str, angle: f64, tip: Vec3) -> IndexedOp {
-        IndexedOp { angle_deg: angle, tool_id: Some(1), feeds: feeds(), paths: vec![rapid(name, tip)] }
+        IndexedOp { angle_deg: angle, tool_id: Some(1), feeds: feeds(), paths: vec![rapid(name, tip)], part_frame: false }
     }
 
     #[test]
@@ -773,6 +825,65 @@ mod tests {
         }
         close(part_to_machine(&setup, first_pose(&paths[0]), 0.0).tip(), vec(4.0, 5.0, 12.0));
         close(part_to_machine(&setup, first_pose(&paths[1]), 90.0).tip(), vec(4.0, 5.0, 12.0));
+    }
+
+    fn wrapped(name: &str, poses: &[Pose]) -> IndexedOp {
+        let blocks = poses.iter().map(|pose| ClBlock::Motion(ClMotion::Linear { to: *pose, feed: 100.0, role: MoveRole::Cut })).collect();
+        let path = ClPath::try_new(Some(name.into()), Some(1), CompensationMode::Off, feeds(), None, Vec::new(), blocks).expect("path");
+        let angle = poses[0].rotary().expect("angle");
+        IndexedOp { angle_deg: angle, tool_id: Some(1), feeds: feeds(), paths: vec![path], part_frame: true }
+    }
+
+    #[test]
+    fn a_wrap_between_indexes_retracts_from_its_own_end_angle() {
+        let setup = a_pos();
+        let cylinder = campanion_ir::Cylinder::new(40.0).expect("cylinder");
+        let start = campanion_ir::wrap_point(&setup, cylinder, 1.0, 0.0, 5.0).expect("start");
+        let v90 = 0.25 * std::f64::consts::PI * 40.0;
+        let end = campanion_ir::wrap_point(&setup, cylinder, 4.0, v90, 5.0).expect("end");
+        let paths = must(
+            frame_operations(
+                &setup,
+                vec![op("face0", 0.0, vec(2.0, 3.0, 4.0)), wrapped("around", &[start, end]), op("face180", 180.0, vec(8.0, 1.0, 2.0))],
+                30.0,
+                0.01,
+            ),
+            "frame",
+        );
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0].blocks().len(), 1, "no retract while the angle stays 0");
+        close(part_to_machine(&setup, last_pose(&paths[0]), 0.0).tip(), vec(2.0, 3.0, 4.0));
+        assert_eq!(paths[1].blocks().len(), 3);
+        close(part_to_machine(&setup, first_pose(&paths[1]), 0.0).tip(), vec(1.0, 0.0, 25.0));
+        let wrap_end = block_pose(paths[1].blocks().get(1).expect("end")).expect("pose");
+        assert!((wrap_end.rotary().expect("angle") - 90.0).abs() < 1e-9);
+        close(part_to_machine(&setup, wrap_end, 90.0).tip(), vec(4.0, 0.0, 25.0));
+        let retract = last_pose(&paths[1]);
+        assert_eq!(retract.rotary(), Some(90.0));
+        close(part_to_machine(&setup, retract, 90.0).tip(), vec(4.0, 0.0, 30.0));
+        let indexed = first_pose(&paths[2]);
+        assert_eq!(indexed.rotary(), Some(180.0));
+        close(part_to_machine(&setup, indexed, 180.0).tip(), vec(4.0, 0.0, 30.0));
+        close(part_to_machine(&setup, last_pose(&paths[2]), 180.0).tip(), vec(8.0, 1.0, 2.0));
+    }
+
+    #[test]
+    fn a_wrap_that_starts_away_from_zero_gets_a_leading_retract() {
+        let setup = a_pos();
+        let cylinder = campanion_ir::Cylinder::new(40.0).expect("cylinder");
+        let v90 = 0.25 * std::f64::consts::PI * 40.0;
+        let pose = campanion_ir::wrap_point(&setup, cylinder, 4.0, v90, 5.0).expect("pose");
+        let paths = must(frame_operations(&setup, vec![wrapped("side", &[pose])], 30.0, 0.01), "frame");
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].name().is_none());
+        assert_eq!(first_pose(&paths[0]).rotary(), Some(0.0));
+        close(part_to_machine(&setup, first_pose(&paths[0]), 0.0).tip(), vec(4.0, 0.0, 30.0));
+        assert_eq!(paths[1].name(), Some("side"));
+        assert_eq!(first_pose(&paths[1]).rotary(), Some(90.0));
+        close(part_to_machine(&setup, first_pose(&paths[1]), 90.0).tip(), vec(4.0, 0.0, 30.0));
+        let cut = last_pose(&paths[1]);
+        assert!((cut.rotary().expect("angle") - 90.0).abs() < 1e-9);
+        close(part_to_machine(&setup, cut, 90.0).tip(), vec(4.0, 0.0, 25.0));
     }
 
     #[test]

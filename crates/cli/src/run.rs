@@ -53,12 +53,18 @@
 //! compared with the drop-cutter surface of the part. `stock_to_leave` is not added to that
 //! surface: the cuts sit above the surface plus the stock.
 //!
-//! A job with a rotary setup plans each operation in the indexed view at `index_deg` (0° when
-//! that field is omitted). Two-dimensional geometry is used as drawn. Mesh operations see the
-//! mesh turned by that angle. The resulting poses are mapped back into the part frame and tagged
-//! with the angle. When the index changes, a retract to the index safe height is appended to the
-//! operation being left and a rotary rapid at the new angle is prepended to the next one. Jobs
-//! without `rotary` stay 3-axis and are not mapped.
+//! A job with a rotary setup plans each indexed operation in the indexed view at `index_deg`
+//! (0° when that field is omitted). Two-dimensional geometry is used as drawn. Mesh operations
+//! see the mesh turned by that angle. The resulting poses are mapped back into the part frame
+//! and tagged with the angle. When the index changes, a retract to the index safe height is
+//! appended to the operation being left and a rotary rapid at the new angle is prepended to the
+//! next one. Jobs without `rotary` stay 3-axis and are not mapped.
+//!
+//! A wrap needs that rotary setup. Drawing X is the distance along the axis and drawing Y is
+//! the arc length around the cylinder, each plus the operation offset. The path is built in
+//! the part frame, so it is not mapped again. Rapids sit at the index safe radius, which uses
+//! the cylinder radius as well as the stock of the other operations. A wrap next to an indexed
+//! operation still takes the index-change retract and rotate. Feeds stay the tool's surface feeds.
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -69,7 +75,7 @@ use std::process::ExitCode;
 
 use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
-use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, Vec3};
+use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, RotarySetup, Vec3};
 use campanion_mesh::Mesh;
 use campanion_path::{
     ChamferOp, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
@@ -86,6 +92,7 @@ use crate::rough;
 use crate::step;
 use crate::surface;
 use crate::waterline;
+use crate::wrap;
 
 /// Matches the IR cap. A hostile drawing fails here instead of building an unbounded program.
 const MAX_TOOLPATHS: usize = 1_024;
@@ -287,8 +294,10 @@ fn starts_with_dash(arg: &OsStr) -> bool {
 
 fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
     // One nesting pass for the drawing. Operations then pick OUTER / INNER instead of layer "0".
+    // Contours are collected first so the swept radius, including every wrap cylinder, is known
+    // before a wrap path is built. A wrap's drawing is not stock: its X/Y are cylinder coordinates.
     let step_labels = if job.source().is_step() { Some(step_contour_labels(drawing, &job.tolerance())?) } else { None };
-    let mut groups = Vec::new();
+    let mut selected = Vec::new();
     let mut stock = StockBox::default();
     for op in job.operations() {
         let contours = select(drawing, op.layers(), step_labels.as_deref());
@@ -298,14 +307,20 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
         if contours.len() > MAX_CONTOURS {
             return Err(op_err(op, format!("too many contours: {} > {MAX_CONTOURS}", contours.len())));
         }
-        if job.rotary().is_some() {
+        if job.rotary().is_some() && !matches!(op.kind(), OperationKind::Wrap) {
             stock.include(op, &contours)?;
         }
+        selected.push((op, contours));
+    }
+    let corners = if job.rotary().is_some() { Some(stock.corners()?) } else { None };
+    let safe_z = job.rotary().map(|setup| swept_clearance(job, &setup, corners.as_deref(), &[]));
+    let mut groups = Vec::new();
+    for (op, contours) in &selected {
         let Some(tool) = job.tool(op.tool_id()) else {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
         };
         let import = import_for(op, tool)?;
-        let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours: &contours, job };
+        let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours, job };
         let mut paths = Vec::new();
         match op.kind() {
             OperationKind::Profile { side } => profile_paths(&mut paths, &cut, side)?,
@@ -317,10 +332,22 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Surface => return Err(op_err(op, "surface finishing needs an STL source")),
             OperationKind::Rough => return Err(op_err(op, "roughing needs an STL source")),
             OperationKind::Waterline => return Err(op_err(op, "waterline finishing needs an STL source")),
+            OperationKind::Wrap => {
+                let Some(setup) = job.rotary() else {
+                    return Err(op_err(op, "wrap needs a rotary setup"));
+                };
+                let Some(safe) = safe_z else {
+                    return Err(op_err(op, "wrap needs a rotary setup"));
+                };
+                wrap::cut(&mut paths, op, tool, contours, &setup, job.tolerance().chord(), safe)?;
+            }
         }
-        groups.push(indexed_op(op, paths));
+        if matches!(op.kind(), OperationKind::Wrap) {
+            groups.push(index::part_frame_op(op.tool_id(), op.feeds(), paths)?);
+        } else {
+            groups.push(indexed_op(op, paths));
+        }
     }
-    let corners = if job.rotary().is_some() { Some(stock.corners()?) } else { None };
     finish_program(job, groups, corners.as_deref(), &[])
 }
 
@@ -366,7 +393,7 @@ impl StockBox {
 }
 
 fn indexed_op(op: &Operation, paths: Vec<ClPath>) -> IndexedOp {
-    IndexedOp { angle_deg: op.index_deg().unwrap_or(0.0), tool_id: Some(op.tool_id()), feeds: op.feeds(), paths }
+    IndexedOp { angle_deg: op.index_deg().unwrap_or(0.0), tool_id: Some(op.tool_id()), feeds: op.feeds(), paths, part_frame: false }
 }
 
 /// Mesh the planner sees. Angle 0 and a job with no rotary setup keep the part mesh.
@@ -397,8 +424,7 @@ fn finish_program(job: &JobFile, groups: Vec<IndexedOp>, stock_corners: Option<&
     let (paths, rotary) = match job.rotary() {
         None => (groups.into_iter().flat_map(|group| group.paths).collect::<Vec<_>>(), None),
         Some(setup) => {
-            let radius = index::swept_radius(&setup, stock_corners, mesh_vertices);
-            let safe_z = index::index_safe_z(job.clearance(), radius, job.clearance());
+            let safe_z = swept_clearance(job, &setup, stock_corners, mesh_vertices);
             (index::frame_operations(&setup, groups, safe_z, job.tolerance().chord())?, Some(setup))
         }
     };
@@ -407,6 +433,18 @@ fn finish_program(job: &JobFile, groups: Vec<IndexedOp>, stock_corners: Option<&
     }
     let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), rotary)?;
     Ok(Document::new(program)?)
+}
+
+/// Index safe height. A wrap cylinder's radius joins the stock swept radius. With no wrap the
+/// radius is unchanged, so a job that does not wrap keeps the same retract.
+fn swept_clearance(job: &JobFile, setup: &RotarySetup, stock_corners: Option<&[Vec3]>, mesh_vertices: &[Vec3]) -> f64 {
+    let mut radius = index::swept_radius(setup, stock_corners, mesh_vertices);
+    for op in job.operations() {
+        if let Some(diameter) = op.cylinder_diameter() {
+            radius = radius.max(diameter * 0.5);
+        }
+    }
+    index::index_safe_z(job.clearance(), radius, job.clearance())
 }
 
 fn select(drawing: &Drawing, layers: &[String], labels: Option<&[String]>) -> Vec<Contour> {

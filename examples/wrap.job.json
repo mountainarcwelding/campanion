@@ -1,0 +1,41 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "wrap.svg",
+    "hash": "11b4c59c25222a43"
+  },
+  "units": "mm",
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  },
+  "rotary": {
+    "axis": "a",
+    "center": [0.0, 0.0, 0.0],
+    "direction": "positive"
+  },
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 3.0
+    }
+  ],
+  "operations": [
+    {
+      "name": "letters",
+      "type": "wrap",
+      "layers": ["LETTERS"],
+      "tool_id": 1,
+      "depth": 0.5,
+      "step_down": 0.25,
+      "diameter": 40.0,
+      "u_offset": 6.0,
+      "v_offset": 0.0,
+      "feeds": {
+        "cut": 800.0,
+        "plunge": 200.0
+      }
+    }
+  ]
+}
