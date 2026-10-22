@@ -216,6 +216,7 @@ dependencies = [
  "campanion-geom",
  "campanion-import",
  "campanion-ir",
+ "campanion-mesh",
  "campanion-path",
  "serde_json",
 ]

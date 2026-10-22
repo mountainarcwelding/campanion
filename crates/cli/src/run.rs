@@ -27,6 +27,12 @@
 //! expanded peck.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
 //! and retract height is the job retract. Issues are printed and the process exits 1.
+//!
+//! An STL source is read as bytes, not as text, and is not sent through the DXF or SVG importer.
+//! Each `surface` operation is a parallel finish: a rapid to clearance, a plunge to the first
+//! cutter location, cuts along the raster and along the drop-cutter link between lines, a retract
+//! to the job retract height, then a rapid back to clearance. Rapids stay at clearance, which is
+//! at or above the retract height.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -42,11 +48,12 @@ use campanion_path::{
     Tool as PathTool, Toolpath, apply_timing,
 };
 
-use crate::error::CliError;
+use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::job::read_text;
 use crate::jobfile::{self, Finish, JobFile, JobTool, Operation, OperationKind};
 use crate::report;
 use crate::step;
+use crate::surface;
 
 /// Matches the IR cap. A hostile drawing fails here instead of building an unbounded program.
 const MAX_TOOLPATHS: usize = 1_024;
@@ -72,15 +79,14 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
     let args = parse_run(args)?;
     let job = jobfile::load(&args.job).map_err(show)?;
     let source = jobfile::source_path(&job);
-    let text = read_text(&source)?;
-    if jobfile::source_changed(&job, text.as_bytes()) {
-        warn(&format!(
-            "source {} changed: stored hash {}, file hash {}",
-            job.source().path(),
-            job.source().hash(),
-            jobfile::hash_bytes(text.as_bytes()),
-        ))?;
+    if job.source().is_stl() {
+        let bytes = read_bytes(&source)?;
+        warn_if_changed(&job, &bytes)?;
+        let doc = build_surface(&job, &bytes)?;
+        return emit_program(&args, &job, doc);
     }
+    let text = read_text(&source)?;
+    warn_if_changed(&job, text.as_bytes())?;
     let is_svg = source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
     let is_step = job.source().is_step();
     let options = ImportOptions::new(job.tolerance());
@@ -110,6 +116,54 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         warn(&format!("skipped {format} entities: {kinds}"))?;
     }
     let doc = build(&job, &drawing)?;
+    emit_program(&args, &job, doc)
+}
+
+fn warn_if_changed(job: &JobFile, bytes: &[u8]) -> Result<(), CliError> {
+    if jobfile::source_changed(job, bytes) {
+        warn(&format!("source {} changed: stored hash {}, file hash {}", job.source().path(), job.source().hash(), jobfile::hash_bytes(bytes),))?;
+    }
+    Ok(())
+}
+
+/// STL is not text. The hash is these bytes, and the drawing importers are not used.
+fn read_bytes(path: &Path) -> Result<Vec<u8>, CliError> {
+    use std::io::Read;
+
+    let file = File::open(path).map_err(|err| CliError::run(format!("{}: {err}", path.display())))?;
+    if let Ok(meta) = file.metadata()
+        && meta.len() > MAX_JSON_BYTES as u64
+    {
+        return Err(CliError::invalid(format!("{} is larger than {MAX_JSON_BYTES} bytes", path.display())));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_JSON_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|err| CliError::run(format!("{}: {err}", path.display())))?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(CliError::invalid(format!("{} is larger than {MAX_JSON_BYTES} bytes", path.display())));
+    }
+    Ok(bytes)
+}
+
+fn build_surface(job: &JobFile, bytes: &[u8]) -> Result<Document, CliError> {
+    let mesh = campanion_mesh::parse_stl(bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
+    let mut paths = Vec::new();
+    for op in job.operations() {
+        let Some(tool) = job.tool(op.tool_id()) else {
+            return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
+        };
+        let import = import_for(op, tool)?;
+        let path = match op.kind() {
+            OperationKind::Surface => surface::finish(job, op, tool, &mesh)?,
+            _ => return Err(op_err(op, "an STL source only allows surface operations")),
+        };
+        push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
+    }
+    let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
+    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new())?;
+    Ok(Document::new(program)?)
+}
+
+fn emit_program(args: &RunArgs, job: &JobFile, doc: Document) -> Result<ExitCode, CliError> {
     let options = campanion_ir::VerifyOptions { safe_z: Some(job.clearance()), retract_z: Some(job.retract()) };
     let report = campanion_ir::verify_with(doc.program(), &options);
     if !report.issues().is_empty() {
@@ -196,6 +250,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Engrave => engrave_paths(&mut paths, &cut)?,
             OperationKind::Face => face_paths(&mut paths, &cut)?,
             OperationKind::Chamfer { side } => chamfer_paths(&mut paths, &cut, side)?,
+            OperationKind::Surface => return Err(op_err(op, "surface finishing needs an STL source")),
         }
     }
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();

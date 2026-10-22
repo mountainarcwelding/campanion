@@ -1,0 +1,32 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "dome.stl",
+    "hash": "63fcad5e5dca92dc"
+  },
+  "units": "mm",
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0,
+      "shape": "ball"
+    }
+  ],
+  "operations": [
+    {
+      "name": "dome",
+      "type": "surface",
+      "tool_id": 1,
+      "stepover": 1.0,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  }
+}

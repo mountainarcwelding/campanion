@@ -14,6 +14,7 @@ mod job;
 mod jobfile;
 mod report;
 mod run;
+mod surface;
 // STEP faces are exported by shelling out to SolidCraft. `run` does not call this yet.
 #[allow(dead_code)]
 mod step;
@@ -39,7 +40,7 @@ Usage:
 
 ir      Print IR JSON for the built-in sample 2D profile, or for a JSON job file.
 ngc     Print test-sink RS274/NGC for that job. This is not a post for a real machine.
-run     Import the DXF or SVG (by extension) named by a campanion-job/1 file and write one toolpath program.
+run     Import the DXF, SVG, STEP or STL (by extension) named by a campanion-job/1 file and write one toolpath program.
         JOB is the job file. -o is the RS274/NGC test sink. --ir also writes IR JSON.
         A changed source hash is a warning on stderr. The job file is not rewritten.
         Verify errors are printed and the status is 1. Warnings stay on stderr.
