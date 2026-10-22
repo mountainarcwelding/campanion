@@ -1,0 +1,35 @@
+{
+  "id": "haas",
+  "name": "Haas",
+  "description": "Millimetre Haas mill dialect. Percent-delimited program O00001, sequence numbers, incremental IJK arcs and helices, dwell P in milliseconds.",
+  "program_number": "00001",
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 3, "feed": 3, "dwell": 3 },
+  "trailing_zeros": false,
+  "header": [
+    "%",
+    "O{program_number}",
+    "({program_name})",
+    "G21 G90 G17 G40 G49 G80"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "ms" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6", "G43 H{tool}"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M30", "%"],
+  "max_line_length": 80,
+  "axis_letters": "XYZ"
+}

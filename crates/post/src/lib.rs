@@ -26,10 +26,13 @@ pub use error::{PostError, Result};
 
 const LINUXCNC_JSON: &str = include_str!("../posts/linuxcnc.json");
 const GRBL_JSON: &str = include_str!("../posts/grbl.json");
+const MACH3_JSON: &str = include_str!("../posts/mach3.json");
+const FANUC_JSON: &str = include_str!("../posts/fanuc.json");
+const HAAS_JSON: &str = include_str!("../posts/haas.json");
 
 /// Ids of the posts compiled into this crate, in a stable order.
 pub fn builtin_ids() -> &'static [&'static str] {
-    &["linuxcnc", "grbl"]
+    &["linuxcnc", "grbl", "mach3", "fanuc", "haas"]
 }
 
 /// A built-in post, or `None` when `id` is unknown or its JSON fails validation.
@@ -37,6 +40,9 @@ pub fn builtin(id: &str) -> Option<PostDef> {
     let json = match id {
         "linuxcnc" => LINUXCNC_JSON,
         "grbl" => GRBL_JSON,
+        "mach3" => MACH3_JSON,
+        "fanuc" => FANUC_JSON,
+        "haas" => HAAS_JSON,
         _ => return None,
     };
     load_post(json).ok()

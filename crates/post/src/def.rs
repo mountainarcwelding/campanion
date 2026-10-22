@@ -1,8 +1,10 @@
 //! Post definition loaded from JSON.
 //!
 //! [`PostDef`] is validated by [`crate::load_post`]. Unknown fields are rejected. Templates may
-//! use `{program_name}`, `{speed}`, `{power}`, `{tool}` and `{date-free!}`. `{date-free!}` expands
-//! to nothing. Date and time placeholders are rejected so output stays stable.
+//! use `{program_name}`, `{program_number}`, `{speed}`, `{power}`, `{tool}` and `{date-free!}`.
+//! `{program_number}` is the post's `program_number` digits (`O{program_number}` becomes `O0001`).
+//! `{tool}` is the tool id on a tool-change template. `{date-free!}` expands to nothing. Date and
+//! time placeholders are rejected so output stays stable.
 
 use std::collections::BTreeMap;
 
@@ -13,7 +15,7 @@ use crate::error::{PostError, Result, field};
 const MAX_POST_BYTES: usize = 256 * 1024;
 const MAX_LINES: usize = 64;
 const MAX_TEMPLATE_CHARS: usize = 400;
-const HEADER_KEYS: &[&str] = &["program_name", "date-free!"];
+const HEADER_KEYS: &[&str] = &["program_name", "program_number", "date-free!"];
 const PROCESS_KEYS: &[&str] = &["program_name", "date-free!", "speed", "power"];
 const TOOL_KEYS: &[&str] = &["program_name", "date-free!", "tool"];
 
@@ -38,6 +40,9 @@ pub struct PostDef {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) description: String,
+    /// Digits written for `{program_number}`, such as `0001`. Omit the field when no template uses it.
+    #[serde(default)]
+    pub(crate) program_number: Option<String>,
     pub(crate) units: String,
     pub(crate) line_numbers: LineNumbers,
     pub(crate) decimals: Decimals,
@@ -128,6 +133,7 @@ impl PostDef {
         check_decimals(&self.decimals)?;
         check_templates("header", &self.header, HEADER_KEYS)?;
         check_templates("footer", &self.footer, HEADER_KEYS)?;
+        check_program_number(&self)?;
         check_arcs(&self.arcs)?;
         self.dwell.word = one_letter("dwell.word", &self.dwell.word)?;
         if !matches!(self.dwell.unit.as_str(), "s" | "ms") {
@@ -284,6 +290,21 @@ fn check_process(map: &BTreeMap<String, ProcessWords>) -> Result<()> {
         check_token("process", key, 64).map_err(|_| field("process", format!("invalid key `{key}`")))?;
         check_templates(&format!("process.{key}.on"), &words.on, PROCESS_KEYS)?;
         check_templates(&format!("process.{key}.off"), &words.off, PROCESS_KEYS)?;
+    }
+    Ok(())
+}
+
+fn check_program_number(post: &PostDef) -> Result<()> {
+    let used = post.header.iter().chain(post.footer.iter()).chain(post.program_end.iter()).any(|line| line.contains("{program_number}"));
+    match &post.program_number {
+        Some(number) => {
+            let digits = (1..=8).contains(&number.len()) && number.bytes().all(|byte| byte.is_ascii_digit());
+            if !digits {
+                return Err(field("program_number", "must be 1..=8 digits"));
+            }
+        }
+        None if used => return Err(field("program_number", "required when a template uses {program_number}")),
+        None => {}
     }
     Ok(())
 }

@@ -39,14 +39,22 @@ fn linux() -> crate::PostDef {
 
 #[test]
 fn builtins_load_and_match_ids() {
-    assert_eq!(builtin_ids(), &["linuxcnc", "grbl"]);
+    assert_eq!(builtin_ids(), &["linuxcnc", "grbl", "mach3", "fanuc", "haas"]);
     for id in builtin_ids() {
         let post = builtin(id).expect(id);
         assert_eq!(post.id(), *id);
-        assert_eq!(post.linear_decimals(), 4);
-        assert_eq!(post.max_line_length(), Some(256));
+        assert!(!post.name().is_empty());
     }
-    assert!(builtin("fanuc").is_none());
+    assert_eq!(builtin("linuxcnc").expect("linuxcnc").linear_decimals(), 4);
+    assert_eq!(builtin("linuxcnc").expect("linuxcnc").max_line_length(), Some(256));
+    assert_eq!(builtin("grbl").expect("grbl").linear_decimals(), 4);
+    assert_eq!(builtin("mach3").expect("mach3").linear_decimals(), 4);
+    assert_eq!(builtin("mach3").expect("mach3").max_line_length(), Some(256));
+    assert_eq!(builtin("fanuc").expect("fanuc").linear_decimals(), 3);
+    assert_eq!(builtin("fanuc").expect("fanuc").max_line_length(), Some(80));
+    assert_eq!(builtin("haas").expect("haas").linear_decimals(), 3);
+    assert_eq!(builtin("haas").expect("haas").max_line_length(), Some(80));
+    assert!(builtin("centroid").is_none());
 }
 
 #[test]
@@ -71,6 +79,18 @@ fn validation_names_the_field() {
     raw["header"] = serde_json::json!(["{not_a_thing}"]);
     let err = load_post(&raw.to_string()).expect_err("placeholder");
     assert!(err.to_string().contains("header"), "{err}");
+    raw["header"] = serde_json::json!(["T{tool}"]);
+    let err = load_post(&raw.to_string()).expect_err("tool in header");
+    assert!(err.to_string().contains("tool"), "{err}");
+    raw["header"] = serde_json::json!(["O{program_number}"]);
+    let err = load_post(&raw.to_string()).expect_err("number missing");
+    assert!(err.to_string().contains("program_number"), "{err}");
+    raw["program_number"] = serde_json::json!("12A");
+    let err = load_post(&raw.to_string()).expect_err("number digits");
+    assert!(err.to_string().contains("program_number"), "{err}");
+    raw["program_number"] = serde_json::json!("0001");
+    raw["tool_change"] = serde_json::json!(["T{tool} M6", "G43 H{tool}"]);
+    load_post(&raw.to_string()).expect("tool and program number");
 }
 
 #[test]
@@ -95,13 +115,27 @@ fn linuxcnc_preamble_and_modal_lines() {
     assert!(text.contains("X12.0000 Y0.0000 Z5.0000\n") || text.contains("X12.0000 Y0.0000 Z5.0000 "), "{text}");
     assert!(!text.contains("G1 X12.0000"), "{text}");
     assert!(text.contains("G4 P0.500"), "{text}");
-    assert!(text.contains("M3 S0.0000"), "{text}");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "M3")), "{text}");
+    assert!(!text.contains("M3 S"), "{text}");
     assert!(text.contains("M5"), "{text}");
     let moves = read_back(&text, &linux()).expect("read");
     compare(&program, &moves, 1e-3).expect("compare");
     for line in text.lines() {
         assert!(line.chars().count() <= 256, "{line}");
     }
+}
+
+#[test]
+fn spindle_speed_is_an_integer() {
+    let params = ProcessParams::new().speed(Some(12_000.0)).expect("speed");
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
+    ];
+    let text = post_program(&program(blocks), &linux(), &options()).expect("post");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "S12000")), "{text}");
+    assert!(!text.contains("S12000."), "{text}");
 }
 
 #[test]
@@ -120,6 +154,235 @@ fn grbl_comments_tool_change_and_has_no_line_numbers() {
     assert!(text.contains("X1 Y2 Z3") || text.contains("X1.0 Y2.0 Z3.0") || text.contains("X1.0000"), "{text}");
     let moves = read_back(&text, &post).expect("read");
     compare(&program, &moves, 1e-3).expect("compare");
+}
+
+fn word_letters(line: &str) -> Vec<char> {
+    line.split_whitespace().filter_map(|word| word.chars().next()).collect()
+}
+
+#[test]
+fn arc_centre_words_stay_in_plane() {
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 0.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(0.0, 10.0, 0.0),
+            plane: Plane::Xy,
+            center: at(0.0, 0.0, 0.0),
+            sense: ArcSense::Ccw,
+            feed: 80.0,
+            role: MoveRole::Cut,
+        }),
+        ClBlock::Motion(ClMotion::Helix {
+            to: pose(0.0, 10.0, -2.0),
+            plane: Plane::Xy,
+            center: at(0.0, 0.0, 0.0),
+            sense: ArcSense::Ccw,
+            sweep: std::f64::consts::TAU,
+            feed: 40.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let text = post_program(&program(blocks), &linux(), &options()).expect("post");
+    let xy: Vec<_> = text.lines().filter(|line| line.split_whitespace().any(|word| word == "G2" || word == "G3")).collect();
+    assert!(xy.len() >= 2, "{text}");
+    for line in &xy {
+        let letters = word_letters(line);
+        assert!(letters.contains(&'I') && letters.contains(&'J'), "{line}");
+        assert!(!letters.contains(&'K'), "{line}");
+    }
+    let helix = xy.last().copied().expect("helix");
+    assert!(helix.contains("Z-2.0000"), "{helix}");
+
+    let zx_blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(1.0, 0.0, 0.0),
+            plane: Plane::Zx,
+            center: Vec3::ZERO,
+            sense: ArcSense::Ccw,
+            feed: 30.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let zx_program = program(zx_blocks);
+    let zx = post_program(&zx_program, &linux(), &options()).expect("post");
+    let zx_line = zx.lines().find(|line| line.contains("G3")).expect("arc");
+    let letters = word_letters(zx_line);
+    assert!(letters.contains(&'I') && letters.contains(&'K'), "{zx_line}");
+    assert!(!letters.contains(&'J'), "{zx_line}");
+    let moves = read_back(&zx, &linux()).expect("read");
+    compare(&zx_program, &moves, 1e-3).expect("compare");
+
+    let yz_blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 1.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(0.0, 0.0, 1.0),
+            plane: Plane::Yz,
+            center: Vec3::ZERO,
+            sense: ArcSense::Ccw,
+            feed: 20.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let yz_program = program(yz_blocks);
+    let yz = post_program(&yz_program, &linux(), &options()).expect("post");
+    let yz_line = yz.lines().find(|line| line.split_whitespace().any(|word| word == "G3")).expect("arc");
+    let letters = word_letters(yz_line);
+    assert!(letters.contains(&'J') && letters.contains(&'K'), "{yz_line}");
+    assert!(!letters.contains(&'I'), "{yz_line}");
+    compare(&yz_program, &read_back(&yz, &linux()).expect("read"), 1e-3).expect("compare");
+}
+
+fn sequence_numbers(text: &str) -> Vec<u32> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix('N')?;
+            let token = rest.split_whitespace().next()?;
+            token.parse().ok()
+        })
+        .collect()
+}
+
+fn arc_lines(text: &str) -> Vec<&str> {
+    text.lines().filter(|line| line.split_whitespace().any(|word| word == "G2" || word == "G3")).collect()
+}
+
+#[test]
+fn mach3_header_is_unnumbered_and_ends_with_m30() {
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 3.0), feed: None }),
+        ClBlock::Event(Event::ToolChange { tool_id: 7 }),
+        ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() }),
+    ];
+    let posted = Program::try_new(
+        Some("plate".into()),
+        vec![Tool::try_new(7, None, None, None).expect("tool")],
+        None,
+        vec![path(blocks)],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("program");
+    let post = builtin("mach3").expect("mach3");
+    let text = post_program(&posted, &post, &options()).expect("post");
+    for code in ["G21", "G90", "G17", "G40", "G49", "G80"] {
+        assert!(text.lines().any(|line| line == code), "{code} missing in {text}");
+    }
+    assert!(text.contains("T7 M6"), "{text}");
+    assert!(!text.contains("G43"), "{text}");
+    assert!(text.contains("G4 P0.5"), "{text}");
+    assert!(text.lines().any(|line| line == "M3"), "{text}");
+    assert!(!text.contains('%'), "{text}");
+    assert!(!text.lines().any(|line| line.starts_with('N') || line.starts_with('O')), "{text}");
+    assert!(text.trim_end().ends_with("M30"), "{text}");
+    let moves = read_back(&text, &post).expect("read");
+    compare(&program(vec![ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 3.0), feed: None })]), &moves, 1e-3).expect("compare");
+}
+
+#[test]
+fn fanuc_splits_full_circles_and_linearises_helices() {
+    let params = ProcessParams::new().speed(Some(8_000.0)).expect("speed");
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 0.0, 0.0), feed: None }),
+        ClBlock::Event(Event::ToolChange { tool_id: 2 }),
+        ClBlock::Event(Event::Dwell { seconds: 0.25 }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(10.0, 0.0, 0.0),
+            plane: Plane::Xy,
+            center: Vec3::ZERO,
+            sense: ArcSense::Ccw,
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+        ClBlock::Motion(ClMotion::Helix {
+            to: pose(10.0, 0.0, -1.0),
+            plane: Plane::Xy,
+            center: Vec3::ZERO,
+            sense: ArcSense::Ccw,
+            sweep: std::f64::consts::TAU,
+            feed: 80.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let posted = Program::try_new(
+        Some("plate".into()),
+        vec![Tool::try_new(2, None, None, None).expect("tool")],
+        None,
+        vec![path(blocks)],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("program");
+    let post = builtin("fanuc").expect("fanuc");
+    let text = post_program(&posted, &post, &options()).expect("post");
+    assert!(text.starts_with("%\nO0001\n"), "{text}");
+    assert!(text.trim_end().ends_with('%'), "{text}");
+    assert!(text.contains("G21 G90 G17 G40 G49 G80"), "{text}");
+    assert!(text.contains("T2 M6"), "{text}");
+    assert!(text.contains("G43 H2"), "{text}");
+    assert!(text.contains("G4 P250"), "{text}");
+    assert!(text.contains("M3 S8000"), "{text}");
+    assert!(text.contains("M30\n%"), "{text}");
+    let numbers = sequence_numbers(&text);
+    assert_eq!(numbers.first().copied(), Some(10), "{text}");
+    for pair in numbers.windows(2) {
+        assert_eq!(pair[1] - pair[0], 10, "{text}");
+    }
+    assert!(!text.lines().any(|line| line.starts_with('%') && line.contains('N')), "{text}");
+    assert!(text.lines().any(|line| line == "O0001"), "{text}");
+    let arcs = arc_lines(&text);
+    assert_eq!(arcs.len(), 2, "{text}");
+    for line in arcs {
+        assert!(line.split_whitespace().any(|word| word.starts_with('R') && word != "R"), "{line}");
+        assert!(!line.split_whitespace().any(|word| matches!(word.chars().next(), Some('I' | 'J' | 'K'))), "{line}");
+    }
+    assert!(text.contains("G1 "), "{text}");
+    assert!(text.contains("Z-1\n"), "{text}");
+    let moves = read_back(&text, &post).expect("read");
+    compare(&posted, &moves, 1e-3).expect("compare");
+}
+
+#[test]
+fn haas_keeps_ijk_helices_and_five_digit_program_number() {
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 0.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(10.0, 0.0, 0.0),
+            plane: Plane::Xy,
+            center: Vec3::ZERO,
+            sense: ArcSense::Cw,
+            feed: 50.0,
+            role: MoveRole::Cut,
+        }),
+        ClBlock::Motion(ClMotion::Helix {
+            to: pose(10.0, 0.0, -1.0),
+            plane: Plane::Xy,
+            center: Vec3::ZERO,
+            sense: ArcSense::Cw,
+            sweep: std::f64::consts::TAU,
+            feed: 40.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let posted = program(blocks);
+    let post = builtin("haas").expect("haas");
+    let text = post_program(&posted, &post, &options()).expect("post");
+    assert!(text.starts_with("%\nO00001\n"), "{text}");
+    assert!(text.trim_end().ends_with('%'), "{text}");
+    assert!(text.contains("M30\n%"), "{text}");
+    let arcs = arc_lines(&text);
+    assert_eq!(arcs.len(), 2, "{text}");
+    for line in &arcs {
+        let letters = word_letters(line);
+        assert!(letters.contains(&'I') && letters.contains(&'J'), "{line}");
+        assert!(!letters.contains(&'K'), "{line}");
+        assert!(!line.split_whitespace().any(|word| word.starts_with('R')), "{line}");
+    }
+    assert!(arcs[1].contains("Z-1"), "{text}");
+    let moves = read_back(&text, &post).expect("read");
+    compare(&posted, &moves, 1e-3).expect("compare");
 }
 
 fn round_trip(post_json: &str, blocks: Vec<ClBlock>, tol: f64) {

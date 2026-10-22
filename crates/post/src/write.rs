@@ -27,7 +27,8 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     }
     let mut writer = Writer::new(post, options);
     let name = sanitize(program.name().unwrap_or(""));
-    let header_vars = [("program_name", name.as_str()), ("date-free!", "")];
+    let number = post.program_number.clone().unwrap_or_default();
+    let header_vars = [("program_name", name.as_str()), ("program_number", number.as_str()), ("date-free!", "")];
     writer.templates("header", &post.header, &header_vars)?;
     for path in program.toolpaths() {
         writer.toolpath(path)?;
@@ -51,6 +52,9 @@ struct Writer<'a> {
     out: String,
     /// Last block's end, rounded to the digits that were written. The next `I` `J` `K` uses this.
     pos: Option<Xyz>,
+    /// Last programmed point before rounding. Split arcs are sampled from this so they stay on the
+    /// original curve; `pos` is only where the machine was told to be.
+    exact: Option<Xyz>,
     plane: Option<Plane>,
     /// Last `G0` or `G1`, cleared by an arc so the next line is not modal.
     linear: Option<&'static str>,
@@ -62,7 +66,22 @@ struct Writer<'a> {
 impl<'a> Writer<'a> {
     fn new(post: &'a PostDef, options: &'a PostOptions) -> Self {
         let plane = if post.planes { header_plane(&post.header) } else { header_plane(&post.header).or(Some(Plane::Xy)) };
-        Self { post, options, out: String::new(), pos: None, plane, linear: None, feed: None, line_no: post.line_numbers.start, on: Vec::new() }
+        Self {
+            post,
+            options,
+            out: String::new(),
+            pos: None,
+            exact: None,
+            plane,
+            linear: None,
+            feed: None,
+            line_no: post.line_numbers.start,
+            on: Vec::new(),
+        }
+    }
+
+    fn curve_start(&self) -> Result<Xyz> {
+        self.exact.or(self.pos).ok_or_else(|| invalid("arc needs a prior position"))
     }
 
     fn toolpath(&mut self, path: &ClPath) -> Result<()> {
@@ -90,14 +109,14 @@ impl<'a> Writer<'a> {
             ClMotion::Arc { to, plane, center, sense, feed, .. } => {
                 let end = tip(*to);
                 let center = xyz(*center);
-                let sweep = geom::arc_sweep(self.pos.ok_or_else(|| invalid("arc needs a prior position"))?, end, center, *plane, *sense)?;
+                let sweep = geom::arc_sweep(self.curve_start()?, end, center, *plane, *sense, 0.0)?;
                 self.circular(*sense, *plane, end, center, sweep, *feed, false)
             }
             ClMotion::Helix { to, plane, center, sense, sweep, feed, .. } => {
                 let end = tip(*to);
                 let center = xyz(*center);
-                let start = self.pos.ok_or_else(|| invalid("helix needs a prior position"))?;
-                geom::same_radius(start, end, center, *plane)?;
+                let start = self.curve_start()?;
+                geom::same_radius(start, end, center, *plane, 0.0)?;
                 if !(sweep.is_finite() && *sweep > 0.0) {
                     return Err(invalid("helix sweep must be positive"));
                 }
@@ -110,7 +129,7 @@ impl<'a> Writer<'a> {
     }
 
     fn circular(&mut self, sense: campanion_ir::ArcSense, plane: Plane, end: Xyz, center: Xyz, sweep: f64, feed: f64, helix: bool) -> Result<()> {
-        let start = self.pos.ok_or_else(|| invalid("arc needs a prior position"))?;
+        let start = self.curve_start()?;
         if !self.post.planes {
             let fixed = self.plane.unwrap_or(Plane::Xy);
             if plane != fixed {
@@ -171,12 +190,19 @@ impl<'a> Writer<'a> {
         match self.post.arc_mode() {
             ArcMode::R => {
                 let radius = geom::in_plane_len(plane, start, center);
-                let signed = if sweep > std::f64::consts::PI + 1e-8 { -radius } else { radius };
+                let chord = geom::in_plane_len(plane, start, rounded);
+                // Rounding can make the chord slightly longer than the diameter. Bump R so the
+                // block still fits; a semicircle then reads back with its centre on the midpoint.
+                let magnitude = if chord > 0.0 { radius.max(chord * 0.5) } else { radius };
+                let signed = if sweep > std::f64::consts::PI + 1e-8 { -magnitude } else { magnitude };
                 words.push(format!("R{}", format_fixed(signed, self.post.decimals.linear, self.post.trailing_zeros)?));
             }
             ArcMode::Ijk => {
                 let offsets = [center[0] - start[0], center[1] - start[1], center[2] - start[2]];
-                for (letter, value) in [("I", offsets[0]), ("J", offsets[1]), ("K", offsets[2])] {
+                for (letter, index) in plane_centre_words(plane) {
+                    let Some(value) = offsets.get(*index).copied() else {
+                        return Err(invalid("arc offset is missing"));
+                    };
                     words.push(format!("{letter}{}", format_fixed(value, self.post.decimals.linear, self.post.trailing_zeros)?));
                 }
             }
@@ -188,6 +214,7 @@ impl<'a> Writer<'a> {
         }
         self.linear = None;
         self.pos = Some(rounded);
+        self.exact = Some(end);
         self.emit_words(&words)
     }
 
@@ -200,6 +227,7 @@ impl<'a> Writer<'a> {
         self.push_feed(&mut words, feed)?;
         self.linear = Some(if code == "G0" { "G0" } else { "G1" });
         self.pos = Some(rounded);
+        self.exact = Some(end);
         self.emit_words(&words)
     }
 
@@ -237,7 +265,7 @@ impl<'a> Writer<'a> {
         match event {
             Event::ProcessOn { process, params } => {
                 let lines = self.process_words(process)?.on.clone();
-                let speed = format_fixed(format_param(params.speed_value())?, self.post.decimals.feed, self.post.trailing_zeros)?;
+                let speed = format_speed(params.speed_value())?;
                 let power = format_fixed(format_param(params.power_value())?, self.post.decimals.feed, self.post.trailing_zeros)?;
                 self.note_on(process, &speed, &power);
                 self.templates(
@@ -249,7 +277,7 @@ impl<'a> Writer<'a> {
             Event::ProcessOff { process } => {
                 let lines = self.process_words(process)?.off.clone();
                 let active = self.on.iter().find(|on| on.key == process_key(process)).cloned();
-                let speed = active.as_ref().map(|on| on.speed.clone()).unwrap_or_else(|| "0".to_string());
+                let speed = active.as_ref().map(|on| on.speed.clone()).unwrap_or_default();
                 let power = active.as_ref().map(|on| on.power.clone()).unwrap_or_else(|| "0".to_string());
                 self.note_off(process);
                 self.templates(
@@ -351,7 +379,8 @@ impl<'a> Writer<'a> {
 
     fn templates(&mut self, field_name: &str, lines: &[String], vars: &[(&str, &str)]) -> Result<()> {
         for line in lines {
-            let text = substitute(field_name, line, vars)?;
+            let prepared = omit_absent_speed(line, vars);
+            let text = substitute(field_name, &prepared, vars)?;
             if meaningless(&text) {
                 continue;
             }
@@ -366,7 +395,7 @@ impl<'a> Writer<'a> {
 
     fn emit_line(&mut self, body: &str) -> Result<()> {
         let mut line = String::new();
-        if self.post.line_numbers.enabled {
+        if self.post.line_numbers.enabled && !unnumbered_tape_line(body) {
             line.push_str(&self.post.line_numbers.prefix);
             line.push_str(&self.line_no.to_string());
             self.line_no = self.line_no.saturating_add(self.post.line_numbers.step);
@@ -391,6 +420,37 @@ impl<'a> Writer<'a> {
 fn format_param(value: Option<f64>) -> Result<f64> {
     let value = value.unwrap_or(0.0);
     if value.is_finite() && value >= 0.0 { Ok(value) } else { Err(invalid("process speed or power must be >= 0")) }
+}
+
+/// Spindle speed is a whole number of revolutions (`S12000`). An absent speed is an empty string
+/// so [`omit_absent_speed`] can drop the `S` word instead of writing `S0`.
+fn format_speed(value: Option<f64>) -> Result<String> {
+    let Some(value) = value else {
+        return Ok(String::new());
+    };
+    if !(value.is_finite() && value >= 0.0) {
+        return Err(invalid("process speed or power must be >= 0"));
+    }
+    format_fixed(value, 0, false)
+}
+
+/// `M3 S{speed}` becomes `M3` when the process has no speed. A present speed, including zero, stays.
+fn omit_absent_speed(line: &str, vars: &[(&str, &str)]) -> String {
+    let absent = vars.iter().any(|(key, value)| *key == "speed" && value.is_empty());
+    if !absent {
+        return line.to_string();
+    }
+    let mut out = String::new();
+    for word in line.split_whitespace() {
+        if word == "S{speed}" {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 fn process_key(kind: &ProcessKind) -> &str {
@@ -426,6 +486,28 @@ fn sense_word(sense: campanion_ir::ArcSense) -> &'static str {
         campanion_ir::ArcSense::Cw => "G2",
         campanion_ir::ArcSense::Ccw => "G3",
     }
+}
+
+/// In-plane centre offsets only: `I J` on G17, `I K` on G18, `J K` on G19.
+/// The helix still carries its axial endpoint (`Z` on G17) from the move itself.
+fn plane_centre_words(plane: Plane) -> &'static [(&'static str, usize)] {
+    match plane {
+        Plane::Xy => &[("I", 0), ("J", 1)],
+        Plane::Zx => &[("I", 0), ("K", 2)],
+        Plane::Yz => &[("J", 1), ("K", 2)],
+    }
+}
+
+/// `%` and `O0001` are tape framing, not sequence-numbered blocks.
+fn unnumbered_tape_line(body: &str) -> bool {
+    let body = body.trim();
+    if body == "%" {
+        return true;
+    }
+    let Some(digits) = body.strip_prefix('O') else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn header_plane(lines: &[String]) -> Option<Plane> {
