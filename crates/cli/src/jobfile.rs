@@ -20,6 +20,11 @@
 //!
 //! The source hash is FNV-1a 64 of the part file's bytes. It is a change-detection checksum,
 //! not a cryptographic hash. See `docs/job-file.md`.
+//!
+//! A face clears the bounding box of its layers. `angle_deg` is 0 or 90 and is stored as
+//! radians. `margin` grows that box on every side. `stepover` defaults to three quarters of
+//! the tool diameter. A kerf tool cannot face. `stock_to_leave` and `finish` stay on profiles
+//! and pockets.
 
 use std::fmt;
 use std::fs::File;
@@ -57,6 +62,8 @@ const MAX_MM: f64 = 1.0e6;
 const DEFAULT_CLEARANCE_MM: f64 = 5.0;
 /// Default retract height, in millimetres.
 const DEFAULT_RETRACT_MM: f64 = 2.0;
+/// Face stepover when the file omits it, as a fraction of the tool diameter.
+const FACE_STEPOVER_OF_DIAMETER: f64 = 0.75;
 const MAX_FEED_MM_PER_MIN: f64 = 1.0e9;
 const MAX_DELAY_S: f64 = 1.0e6;
 const MAX_TOOLS: usize = 256;
@@ -248,6 +255,8 @@ pub enum OperationKind {
     Drill,
     /// Follow the layers on the line.
     Engrave,
+    /// Clear a rectangle around the layers. No side.
+    Face,
 }
 
 /// Stock left by a roughing pass, in millimetres. Zero means cut to the contour and to `depth`.
@@ -295,6 +304,7 @@ impl Finish {
 /// [`Self::params`] are absolute Z. [`Self::entry`] is how each pass is entered.
 /// An omitted entry is a plunge. [`Self::stock_to_leave`] is millimetres of material
 /// left by roughing; an omitted [`Self::finish`] means no finishing pass.
+/// [`Self::face_angle`] and [`Self::margin`] describe a face. Other kinds store 0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -304,6 +314,8 @@ pub struct Operation {
     depth: f64,
     step_down: f64,
     stepover: Option<f64>,
+    face_angle: f64,
+    margin: f64,
     stock_to_leave: StockToLeave,
     finish: Option<Finish>,
     entry: DepthEntry,
@@ -339,9 +351,24 @@ impl Operation {
         self.step_down
     }
 
-    /// Pocket radial stepover in millimetres. `None` when the file omits it.
+    /// Radial stepover in millimetres.
+    ///
+    /// `None` when a pocket omits it. A face always has one: the file value, or three quarters
+    /// of the tool diameter when the file omits it.
     pub fn stepover(&self) -> Option<f64> {
         self.stepover
+    }
+
+    /// Facing direction in radians from +X. `0` or `π/2`. Other operations store `0`.
+    pub fn face_angle(&self) -> f64 {
+        self.face_angle
+    }
+
+    /// Extra material around the geometry bounding box, in millimetres, on every side.
+    ///
+    /// Only a face sets this. Other operations store `0`.
+    pub fn margin(&self) -> f64 {
+        self.margin
     }
 
     /// Stock left by roughing, in millimetres. Omitted fields are zero.
@@ -731,6 +758,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "depth",
             "step_down",
             "stepover",
+            "angle_deg",
+            "margin",
             "stock_to_leave",
             "finish",
             "entry",
@@ -752,20 +781,25 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let step_down = scale_f64(require(map, "step_down").map_err(from_cli)?, scale, "step_down")?;
     check_depth(depth, step_down)?;
     let stepover = parse_stepover(optional(map, "stepover"), kind, tool, scale)?;
+    let face_angle = parse_face_angle(optional(map, "angle_deg"), kind)?;
+    let margin = parse_margin(optional(map, "margin"), kind, scale)?;
     let stock_to_leave = parse_stock_to_leave(optional(map, "stock_to_leave"), kind, depth, scale)?;
     let finish = parse_finish(optional(map, "finish"), kind, depth, scale)?;
     let entry = parse_entry(optional(map, "entry"), scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale)?;
-    Ok(Operation { name, kind, layers, tool_id, depth, step_down, stepover, stock_to_leave, finish, entry, feeds, params })
+    Ok(Operation { name, kind, layers, tool_id, depth, step_down, stepover, face_angle, margin, stock_to_leave, finish, entry, feeds, params })
 }
 
 fn parse_stepover(value: Option<&Value>, kind: OperationKind, tool: &JobTool, scale: f64) -> Result<Option<f64>, JobFileError> {
+    if matches!(kind, OperationKind::Face) && tool.diameter().is_none() {
+        return Err(JobFileError::invalid("face is not valid with a kerf tool"));
+    }
     let Some(value) = value else {
-        return Ok(None);
+        return default_stepover(kind, tool);
     };
-    if kind != OperationKind::Pocket {
-        return Err(JobFileError::invalid("stepover is only valid on a pocket"));
+    if !matches!(kind, OperationKind::Pocket | OperationKind::Face) {
+        return Err(JobFileError::invalid("stepover is only valid on a pocket or a face"));
     }
     let Some(diameter) = tool.diameter() else {
         return Err(JobFileError::invalid("stepover is not valid with a kerf tool"));
@@ -778,6 +812,47 @@ fn parse_stepover(value: Option<&Value>, kind: OperationKind, tool: &JobTool, sc
         return Err(JobFileError::invalid("stepover is larger than the tool diameter"));
     }
     Ok(Some(stepover))
+}
+
+/// A face that omits `stepover` uses three quarters of the tool diameter. Any other kind stores none.
+fn default_stepover(kind: OperationKind, tool: &JobTool) -> Result<Option<f64>, JobFileError> {
+    if !matches!(kind, OperationKind::Face) {
+        return Ok(None);
+    }
+    let Some(diameter) = tool.diameter() else {
+        return Err(JobFileError::invalid("face is not valid with a kerf tool"));
+    };
+    Ok(Some(diameter * FACE_STEPOVER_OF_DIAMETER))
+}
+
+/// Facing direction. Only `0` and `90` degrees are accepted, and the value is stored as radians.
+fn parse_face_angle(value: Option<&Value>, kind: OperationKind) -> Result<f64, JobFileError> {
+    let Some(value) = value else {
+        return Ok(0.0);
+    };
+    if !matches!(kind, OperationKind::Face) {
+        return Err(JobFileError::invalid("angle_deg is only valid on a face"));
+    }
+    let degrees = as_f64(value, "angle_deg").map_err(from_cli)?;
+    if degrees == 0.0 {
+        Ok(0.0)
+    } else if degrees == 90.0 {
+        Ok(std::f64::consts::FRAC_PI_2)
+    } else {
+        Err(JobFileError::invalid("angle_deg must be 0 or 90"))
+    }
+}
+
+/// Extra stock around the faced bounding box. A length in file units, at least 0.
+fn parse_margin(value: Option<&Value>, kind: OperationKind, scale: f64) -> Result<f64, JobFileError> {
+    let Some(value) = value else {
+        return Ok(0.0);
+    };
+    if !matches!(kind, OperationKind::Face) {
+        return Err(JobFileError::invalid("margin is only valid on a face"));
+    }
+    let margin = non_negative_length(value, scale, "margin")?;
+    cap_under(margin, MAX_MM, "margin")
 }
 
 fn parse_stock_to_leave(value: Option<&Value>, kind: OperationKind, depth: f64, scale: f64) -> Result<StockToLeave, JobFileError> {
@@ -919,6 +994,10 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
         "engrave" => {
             reject_side(side)?;
             Ok(OperationKind::Engrave)
+        }
+        "face" => {
+            reject_side(side)?;
+            Ok(OperationKind::Face)
         }
         other => Err(JobFileError::invalid(format!("unknown operation type `{other}`"))),
     }
@@ -1878,6 +1957,170 @@ mod tests {
         ];
         for (index, (text, needle)) in cases.iter().enumerate() {
             let path = write_job(&format!("stl-bad-{index}"), text);
+            let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+            assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn parses_face_angle_margin_and_stepover_in_mm_and_inches() {
+        let diameter = r#"[{"id":1,"diameter":6}]"#;
+        let explicit = load(&write_job(
+            "face-mm",
+            &op_job(
+                "mm",
+                diameter,
+                r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":0.5,"step_down":0.25,"feeds":{"cut":1},"stepover":4,"angle_deg":90,"margin":2}"#,
+            ),
+        ))
+        .expect("mm face");
+        let op = &explicit.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Face);
+        near(op.stepover().expect("stepover"), 4.0);
+        assert_eq!(op.face_angle(), std::f64::consts::FRAC_PI_2);
+        near(op.margin(), 2.0);
+        let equal = load(&write_job(
+            "face-stepover-eq",
+            &op_job(
+                "mm",
+                diameter,
+                r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"stepover":6}"#,
+            ),
+        ))
+        .expect("stepover equal to diameter");
+        near(equal.operations()[0].stepover().expect("stepover"), 6.0);
+        assert_eq!(op.stock_to_leave(), StockToLeave::default());
+        assert_eq!(op.finish(), None);
+
+        let along_x = load(&write_job(
+            "face-angle-0",
+            &op_job(
+                "mm",
+                diameter,
+                r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":0.5,"step_down":0.25,"feeds":{"cut":1},"angle_deg":0,"margin":0}"#,
+            ),
+        ))
+        .expect("angle 0");
+        let op = &along_x.operations()[0];
+        assert_eq!(op.face_angle(), 0.0);
+        assert_eq!(op.margin(), 0.0);
+        near(op.stepover().expect("default stepover"), 6.0 * FACE_STEPOVER_OF_DIAMETER);
+
+        let omitted = load(&write_job(
+            "face-defaults",
+            &op_job("mm", diameter, r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":0.5,"step_down":0.5,"feeds":{"cut":1}}"#),
+        ))
+        .expect("defaults");
+        let op = &omitted.operations()[0];
+        assert_eq!(op.face_angle(), 0.0);
+        assert_eq!(op.margin(), 0.0);
+        near(op.stepover().expect("default stepover"), 6.0 * 0.75);
+
+        let inch_tool = r#"[{"id":1,"diameter":0.25}]"#;
+        let inch = load(&write_job(
+            "face-inch",
+            &op_job(
+                "inch",
+                inch_tool,
+                r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":0.1,"step_down":0.05,"feeds":{"cut":1},"stepover":0.2,"angle_deg":90,"margin":0.05}"#,
+            ),
+        ))
+        .expect("inch face");
+        let op = &inch.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Face);
+        assert_eq!(op.face_angle(), std::f64::consts::FRAC_PI_2);
+        near(op.stepover().expect("stepover"), 0.2 * 25.4);
+        near(op.margin(), 0.05 * 25.4);
+        near(op.depth(), 0.1 * 25.4);
+
+        let inch_default = load(&write_job(
+            "face-inch-default",
+            &op_job("inch", inch_tool, r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":0.1,"step_down":0.1,"feeds":{"cut":1}}"#),
+        ))
+        .expect("inch defaults");
+        let op = &inch_default.operations()[0];
+        let diameter_mm = 0.25 * 25.4;
+        near(inch_default.tool(1).expect("tool").diameter().expect("diameter"), diameter_mm);
+        near(op.stepover().expect("default stepover"), diameter_mm * FACE_STEPOVER_OF_DIAMETER);
+        assert_eq!(op.face_angle(), 0.0);
+        assert_eq!(op.margin(), 0.0);
+
+        // A pocket that omits stepover still stores none. Facing defaults do not leak.
+        let pocket = load(&write_job(
+            "face-pocket-untouched",
+            &op_job("mm", diameter, r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}"#),
+        ))
+        .expect("pocket");
+        let op = &pocket.operations()[0];
+        assert_eq!(op.stepover(), None);
+        assert_eq!(op.face_angle(), 0.0);
+        assert_eq!(op.margin(), 0.0);
+    }
+
+    #[test]
+    fn rejects_face_fields_on_the_wrong_kind_and_bad_face_values() {
+        let diameter = r#"[{"id":1,"diameter":6}]"#;
+        let kerf = r#"[{"id":1,"kerf":1.2}]"#;
+        let face = r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}"#;
+        let cases = [
+            (op_job("mm", diameter, &format!("{face},\"side\":\"outside\"}}")), "side is only valid on a profile"),
+            (op_job("mm", kerf, &format!("{face}}}")), "face is not valid with a kerf tool"),
+            (op_job("mm", kerf, &format!("{face},\"stepover\":0.5}}")), "face is not valid with a kerf tool"),
+            (op_job("mm", diameter, &format!("{face},\"stepover\":0}}")), "stepover must be greater than 0"),
+            (op_job("mm", diameter, &format!("{face},\"stepover\":6.1}}")), "stepover is larger than the tool diameter"),
+            (op_job("mm", diameter, &format!("{face},\"angle_deg\":45}}")), "angle_deg must be 0 or 90"),
+            (op_job("mm", diameter, &format!("{face},\"angle_deg\":180}}")), "angle_deg must be 0 or 90"),
+            (op_job("mm", diameter, &format!("{face},\"angle_deg\":-90}}")), "angle_deg must be 0 or 90"),
+            (op_job("mm", diameter, &format!("{face},\"angle_deg\":90.1}}")), "angle_deg must be 0 or 90"),
+            (op_job("mm", diameter, &format!("{face},\"margin\":-0.1}}")), "margin must be at least 0"),
+            (op_job("inch", r#"[{"id":1,"diameter":0.25}]"#, &format!("{face},\"margin\":-0.01}}")), "margin must be at least 0"),
+            (op_job("mm", diameter, &format!("{face},\"margin\":1000001}}")), "margin is larger than"),
+            (op_job("mm", diameter, &format!("{face},\"stock_to_leave\":{{\"wall\":0.1}}}}")), "stock_to_leave is only valid on a profile or pocket"),
+            (op_job("mm", diameter, &format!("{face},\"finish\":{{}}}}")), "finish is only valid on a profile or pocket"),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"angle_deg":0}"#,
+                ),
+                "angle_deg is only valid on a face",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"angle_deg":90}"#,
+                ),
+                "angle_deg is only valid on a face",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"margin":1}"#,
+                ),
+                "margin is only valid on a face",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"drill","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"margin":0}"#,
+                ),
+                "margin is only valid on a face",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"on","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"stepover":1}"#,
+                ),
+                "stepover is only valid on a pocket or a face",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let path = write_job(&format!("face-bad-{index}"), text);
             let err = load(&path).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
             assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");

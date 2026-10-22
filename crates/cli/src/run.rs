@@ -3,7 +3,7 @@
 //! The source path is relative to the job file. A hash mismatch is a warning on stderr; the
 //! bytes just read are imported and the job file is not rewritten. Each operation keeps the
 //! contours on its layers. Profile sides use the same `inside` / `outside` / `on` values as the
-//! profile job. Compensation is computed here, and travel is climb. Pocket and drill use the
+//! profile job. Compensation is computed here, and travel is climb. Pocket, drill and face use the
 //! matching `campanion-path` operations. Profile and engrave are depth passes linked per operation.
 //! Each pocket region, at each depth, is linked the same way, and every region at one depth is
 //! linked before the next depth. A finish pass, when the job asks for one, is linked after the
@@ -14,9 +14,12 @@
 //! the plunge or ramp. Those link rapids stay at or above the retract height. After linking, the
 //! operation's process timing is applied: process on and the pierce dwell at the pierce height
 //! before the plunge, and process off and the post delay before the rapid retract to clearance.
-//! A pocket uses `stepover` when the job sets it, and otherwise the tool radius. Roughing leaves
-//! `stock_to_leave` on the walls and above the floor. When `finish` is set, that stock is cut
-//! afterwards: a profile at the tool radius, then a pocket floor pass and wall contours.
+//! A pocket uses `stepover` when the job sets it, and otherwise the tool radius. A face clears
+//! the union of the selected contours' bounding boxes, grown by `margin` on every side. Its
+//! stepover is the job value or three quarters of the tool diameter, and its rapids stay at the
+//! job retract height. Roughing leaves `stock_to_leave` on the walls and above the floor. When
+//! `finish` is set, that stock is cut afterwards: a profile at the tool radius, then a pocket
+//! floor pass and wall contours.
 //! Drill cycles are not in this job version: each hole is a rapid to the final depth, not an
 //! expanded peck.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
@@ -28,12 +31,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use campanion_geom::{Containment, Contour, Orientation, Point, Region, Tolerance};
+use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program};
 use campanion_path::{
-    DepthPlan, DrillCycle, DrillOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide, Tool as PathTool,
-    Toolpath, apply_timing,
+    DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
+    Tool as PathTool, Toolpath, apply_timing,
 };
 
 use crate::error::CliError;
@@ -188,6 +191,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Pocket => pocket_paths(&mut paths, &cut)?,
             OperationKind::Drill => drill_paths(&mut paths, &cut)?,
             OperationKind::Engrave => engrave_paths(&mut paths, &cut)?,
+            OperationKind::Face => face_paths(&mut paths, &cut)?,
         }
     }
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
@@ -360,6 +364,51 @@ fn push_wall_contour(cut: &Cut<'_>, contour: &Contour, side: ProfileSide, finish
     let toolpath = depth_with(cut, &shaped, cut.op.depth(), finish.step_down())?;
     features.push(Feature::new(shaped, toolpath));
     Ok(())
+}
+
+/// Clear the contours' bounding box, grown by the face margin.
+///
+/// `FaceOp` rapids at the job retract height, including the move from one depth to the next.
+/// Those rapids share one Z, so `campanion verify` (safe height inferred from the rapids)
+/// accepts them. The document is built the same way a drill is.
+fn face_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
+    let PathTool::Diameter { diameter } = cut.tool.path_tool() else {
+        return Err(op_err(cut.op, "face is not valid with a kerf tool"));
+    };
+    let Some(stepover) = cut.op.stepover() else {
+        return Err(op_err(cut.op, "face needs a stepover"));
+    };
+    let area = face_area(cut)?;
+    let face = FaceOp::new(diameter, stepover)
+        .angle(cut.op.face_angle())
+        .stock_z(0.0)
+        .depth(cut.op.depth())
+        .step_down(cut.op.step_down())
+        .retract_z(retract_z(cut.job))
+        .generate(&area)
+        .map_err(|err| op_err(cut.op, err))?;
+    push_doc(paths, Document::from_toolpath(face.toolpath(), cut.import)?)
+}
+
+/// Union of the selected contours' bounding boxes, expanded by `margin` on every side.
+fn face_area(cut: &Cut<'_>) -> Result<BoundingBox, CliError> {
+    let mut area: Option<BoundingBox> = None;
+    for contour in cut.contours {
+        let bounds = contour.bounding_box().map_err(|err| op_err(cut.op, err))?;
+        area = Some(match area {
+            Some(current) => current.union(bounds),
+            None => bounds,
+        });
+    }
+    let Some(area) = area else {
+        return Err(op_err(cut.op, "face has no geometry"));
+    };
+    let margin = cut.op.margin();
+    let min = area.min();
+    let max = area.max();
+    let low = Point::new(min.x() - margin, min.y() - margin).map_err(|err| op_err(cut.op, err))?;
+    let high = Point::new(max.x() + margin, max.y() + margin).map_err(|err| op_err(cut.op, err))?;
+    Ok(BoundingBox::from_points(low, high))
 }
 
 fn drill_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {

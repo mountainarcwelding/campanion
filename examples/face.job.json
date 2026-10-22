@@ -1,0 +1,36 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "curves.svg",
+    "hash": "b08567055ae99432"
+  },
+  "units": "mm",
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 20.0
+    }
+  ],
+  "operations": [
+    {
+      "name": "face",
+      "type": "face",
+      "layers": [
+        "OUTER"
+      ],
+      "tool_id": 1,
+      "depth": 0.5,
+      "step_down": 0.25,
+      "margin": 2.0,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  }
+}
