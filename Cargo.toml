@@ -19,6 +19,7 @@ schemars = "1.2.3"
 # Pinned in Cargo.lock. Default features are empty; do not enable `unsafe_optimizations`.
 cavalier_contours = { version = "0.9.0", default-features = false }
 campanion-geom = { path = "crates/geom" }
+campanion-mesh = { path = "crates/mesh" }
 campanion-import = { path = "crates/import" }
 campanion-path = { path = "crates/path" }
 campanion-ir = { path = "crates/ir" }
