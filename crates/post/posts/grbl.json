@@ -1,7 +1,7 @@
 {
   "id": "grbl",
   "name": "Grbl",
-  "description": "Millimetre dialect for Grbl. Absolute moves, IJK arcs and helices, no line numbers, tool changes as comments.",
+  "description": "Millimetre dialect for Grbl. Absolute moves, IJK arcs and helices, no line numbers, tool changes as comments. No rotary axis.",
   "units": "mm",
   "line_numbers": { "enabled": false, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 4, "feed": 3, "dwell": 3 },

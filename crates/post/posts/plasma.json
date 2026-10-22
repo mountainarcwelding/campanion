@@ -1,7 +1,7 @@
 {
   "id": "plasma",
   "name": "LinuxCNC plasma",
-  "description": "LinuxCNC-style plasma in millimetres. Absolute moves, cutter compensation and tool length cancelled, path blend G64 P0.05. Torch on is M3 S1 and torch off is M5. The pierce delay is the dwell already on the path (G4 P in seconds). Arcs use IJK and helices are written as lines. thc.on is emitted on the first feed move after process on and the pierce dwell; thc.off is emitted before process off. Both lists are empty until a shop fills in that controller's torch-height codes.",
+  "description": "LinuxCNC-style plasma in millimetres. Absolute moves, cutter compensation and tool length cancelled, path blend G64 P0.05. Torch on is M3 S1 and torch off is M5. The pierce delay is the dwell already on the path (G4 P in seconds). Arcs use IJK and helices are written as lines. thc.on is emitted on the first feed move after process on and the pierce dwell; thc.off is emitted before process off. Both lists are empty until a shop fills in that controller's torch-height codes. No rotary axis.",
   "units": "mm",
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 4, "feed": 4, "dwell": 3 },

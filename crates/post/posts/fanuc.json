@@ -1,7 +1,7 @@
 {
   "id": "fanuc",
   "name": "Fanuc",
-  "description": "Millimetre Fanuc mill dialect. Percent-delimited program O0001, sequence numbers, one safe block, R arcs of at most 180 degrees, helices as lines, dwell P in milliseconds.",
+  "description": "Millimetre Fanuc mill dialect. Percent-delimited program O0001, sequence numbers, one safe block, R arcs of at most 180 degrees, helices as lines, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes.",
   "program_number": "0001",
   "units": "mm",
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
@@ -31,5 +31,12 @@
   "comments": { "style": "paren" },
   "program_end": ["M30", "%"],
   "max_line_length": 80,
-  "axis_letters": "XYZ"
+  "axis_letters": "XYZ",
+  "rotary": {
+    "axes": ["a"],
+    "decimals": 3,
+    "feed_mode": "inverse_time",
+    "inverse_time_on": "G93",
+    "inverse_time_off": "G94"
+  }
 }

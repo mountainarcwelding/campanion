@@ -59,15 +59,15 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 
 `campanion posts` lists the built-in posts:
 
-| id | name | description |
-| --- | --- | --- |
-| `linuxcnc` | LinuxCNC | Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed when the angle changes. |
-| `grbl` | Grbl | Millimetre dialect for Grbl. Absolute moves, IJK arcs and helices, no line numbers, tool changes as comments. |
-| `mach3` | Mach3 | Millimetre dialect for Mach3. Incremental IJK arcs and helices, dwell P in seconds, no line numbers. |
-| `fanuc` | Fanuc | Millimetre Fanuc mill dialect. Program O0001, sequence numbers, R arcs, helices as lines, dwell P in milliseconds. |
-| `haas` | Haas | Millimetre Haas mill dialect. Program O00001, sequence numbers, IJK arcs and helices, dwell P in milliseconds. |
-| `plasma` | LinuxCNC plasma | Millimetre plasma. Torch on M3 S1 / off M5, pierce dwell from the path, optional THC codes, helices as lines. |
-| `grbl_laser` | Grbl laser | Grbl laser mode. Dynamic power M4 S{power} (0..1 scaled to S0..S1000), Z words and Z-only rapids omitted. |
+| id | name | Rotary | description |
+| --- | --- | --- | --- |
+| `linuxcnc` | LinuxCNC | A, inverse time | Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |
+| `grbl` | Grbl | - | Millimetre dialect for Grbl. Absolute moves, IJK arcs and helices, no line numbers, tool changes as comments. No rotary axis. |
+| `mach3` | Mach3 | A, degrees per minute | Millimetre dialect for Mach3. Incremental IJK arcs and helices, dwell P in seconds, no line numbers. A axis with degrees-per-minute feed when the angle changes. |
+| `fanuc` | Fanuc | A, inverse time | Millimetre Fanuc mill dialect. Program O0001, sequence numbers, R arcs, helices as lines, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |
+| `haas` | Haas | A, inverse time | Millimetre Haas mill dialect. Program O00001, sequence numbers, IJK arcs and helices, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |
+| `plasma` | LinuxCNC plasma | - | Millimetre plasma. Torch on M3 S1 / off M5, pierce dwell from the path, optional THC codes, helices as lines. No rotary axis. |
+| `grbl_laser` | Grbl laser | - | Grbl laser mode. Dynamic power M4 S{power} (0..1 scaled to S0..S1000), Z words and Z-only rapids omitted. No rotary axis. |
 
 ```sh
 campanion run examples/sample.job.json -o out.ngc --post linuxcnc
@@ -102,7 +102,7 @@ placeholders, so the same program and post always produce the same bytes. Start 
 - `program_end` — at least one line, such as `M2` or `M30`.
 - `max_line_length` — optional limit from 1 to 4096 characters.
 - `axis_letters` — optional three distinct letters. The default is `XYZ`.
-- `rotary` — optional. `axes` is `a`, `b`, or both. `decimals` is the degree word. `feed_mode` is `inverse_time`, `degrees_per_minute`, or `surface`. Inverse time also needs `inverse_time_on` and `inverse_time_off` (`G93` and `G94` on LinuxCNC). The feed length rule is in `crates/post/README.md`.
+- `rotary` — optional. `axes` is `a`, `b`, or both. `decimals` is the degree word. `feed_mode` is `inverse_time`, `degrees_per_minute`, or `surface`. Inverse time also needs `inverse_time_on` and `inverse_time_off` (`G93` and `G94` on LinuxCNC, Fanuc and Haas). Mach3 uses `degrees_per_minute`. The feed length rule is in `crates/post/README.md`.
 
 Check the posted program on the machine before cutting: dry run, then a single block. Read-back
 only checks that the motion matches the toolpath.

@@ -1,7 +1,7 @@
 {
   "id": "linuxcnc",
   "name": "LinuxCNC",
-  "description": "Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed when the angle changes.",
+  "description": "Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes.",
   "units": "mm",
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 4, "feed": 4, "dwell": 3 },
