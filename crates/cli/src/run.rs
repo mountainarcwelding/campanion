@@ -36,6 +36,7 @@ use crate::error::CliError;
 use crate::job::read_text;
 use crate::jobfile::{self, JobFile, JobTool, Operation, OperationKind};
 use crate::report;
+use crate::step;
 
 /// Matches the IR cap. A hostile drawing fails here instead of building an unbounded program.
 const MAX_TOOLPATHS: usize = 1_024;
@@ -71,9 +72,29 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         ))?;
     }
     let is_svg = source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
+    let is_step = job.source().is_step();
     let options = ImportOptions::new(job.tolerance());
-    let drawing = if is_svg { import_svg(&text, &options) } else { import_dxf(&text, &options) }.map_err(show)?;
-    let format = if is_svg { "SVG" } else { "DXF" };
+    let drawing = if is_step {
+        // A loaded STEP source always names a face. The bytes above were only for the hash.
+        let Some(face) = job.source().face() else {
+            return Err(CliError::run("STEP source has no face"));
+        };
+        let cli = step::find_cli().ok_or_else(step::missing_cli_error)?;
+        let dxf = step::face_to_dxf(&cli, &source, face)?;
+        import_dxf(&dxf, &options)
+    } else if is_svg {
+        import_svg(&text, &options)
+    } else {
+        import_dxf(&text, &options)
+    }
+    .map_err(show)?;
+    let format = if is_step {
+        "STEP"
+    } else if is_svg {
+        "SVG"
+    } else {
+        "DXF"
+    };
     if drawing.skipped_entities() > 0 {
         let kinds = drawing.skipped_types().iter().map(|(name, count)| format!("{name} x{count}")).collect::<Vec<_>>().join(", ");
         warn(&format!("skipped {format} entities: {kinds}"))?;
@@ -142,9 +163,11 @@ fn starts_with_dash(arg: &OsStr) -> bool {
 }
 
 fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
+    // One nesting pass for the drawing. Operations then pick OUTER / INNER instead of layer "0".
+    let step_labels = if job.source().is_step() { Some(step_contour_labels(drawing, &job.tolerance())?) } else { None };
     let mut paths = Vec::new();
     for op in job.operations() {
-        let contours = select(drawing, op.layers());
+        let contours = select(drawing, op.layers(), step_labels.as_deref());
         if contours.is_empty() {
             return Err(op_err(op, "no geometry on the selected layers"));
         }
@@ -168,14 +191,53 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
     Ok(Document::new(program)?)
 }
 
-fn select(drawing: &Drawing, layers: &[String]) -> Vec<Contour> {
+fn select(drawing: &Drawing, layers: &[String], labels: Option<&[String]>) -> Vec<Contour> {
     let mut contours = Vec::new();
-    for item in drawing.contours() {
-        if layers.iter().any(|layer| layer == item.layer()) {
+    for (index, item) in drawing.contours().iter().enumerate() {
+        // `labels`, when present, replaces the DXF layer for that contour.
+        let matches = match labels.and_then(|names| names.get(index)) {
+            Some(label) => layers.iter().any(|layer| layer == label),
+            None => layers.iter().any(|layer| layer == item.layer()),
+        };
+        if matches {
             contours.push(item.contour().clone());
         }
     }
     contours
+}
+
+/// STEP face export puts every contour on DXF layer "0". Depth is how many other contours
+/// strictly contain this one: even is "OUTER" (outline and islands), odd is "INNER" (holes).
+fn step_contour_labels(drawing: &Drawing, tolerance: &Tolerance) -> Result<Vec<String>, CliError> {
+    let mut contours = Vec::new();
+    for item in drawing.contours() {
+        contours.push(item.contour().clone());
+    }
+    let n = contours.len();
+    if n > MAX_CONTOURS {
+        return Err(CliError::run(format!("too many contours: {n} > {MAX_CONTOURS}")));
+    }
+    let mut labels = Vec::with_capacity(n);
+    for i in 0..n {
+        let Some(inner) = contours.get(i) else {
+            labels.push("OUTER".to_string());
+            continue;
+        };
+        let mut depth = 0usize;
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let Some(outer) = contours.get(j) else {
+                continue;
+            };
+            if strictly_inside(inner, outer, tolerance).map_err(show)? {
+                depth = depth.saturating_add(1);
+            }
+        }
+        labels.push(if depth.is_multiple_of(2) { "OUTER".to_string() } else { "INNER".to_string() });
+    }
+    Ok(labels)
 }
 
 fn import_for(op: &Operation, tool: &JobTool) -> Result<Import, CliError> {
