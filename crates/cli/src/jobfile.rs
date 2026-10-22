@@ -66,6 +66,14 @@
 //! A rough requires `step_down` and rejects `depth`. Every other kind requires both.
 //! The chamfer keys are rejected on every other kind. A kerf tool cannot chamfer.
 //!
+//! A wrap lays the selected layer contours onto a cylinder about the job rotary axis.
+//! `diameter` is the cylinder surface diameter. `depth` is a positive distance below that
+//! surface and `step_down` is the maximum pass thickness. Drawing X is `u` along the axis,
+//! plus optional `u_offset`. Drawing Y is `v`, the arc length around the surface, plus
+//! optional `v_offset`. Both offsets default to 0 and may be negative. `index_deg` is
+//! rejected: the angle follows `v`. A wrap without `rotary` is an error that names the
+//! operation. See `docs/job-file.md`.
+//!
 //! An optional top-level `rotary` object is a 4th-axis table: `axis` `"a"` or `"b"`, `center`
 //! `[x, y, z]` (scaled by `units`), `direction` `"positive"` or `"negative"`, and optional
 //! `limits` `{min_deg, max_deg}` in degrees (not scaled). An operation may set `index_deg`,
@@ -360,6 +368,16 @@ pub enum OperationKind {
     Rough,
     /// Waterline finish of steep walls on an STL mesh. No layers and no side. Entry is a plunge.
     Waterline,
+    /// Wrap the layer contours onto a cylinder about the job rotary axis. No side.
+    Wrap,
+}
+
+/// Cylinder and flat-frame offsets for a [`OperationKind::Wrap`]. Lengths are millimetres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WrapGeom {
+    diameter: f64,
+    u_offset: f64,
+    v_offset: f64,
 }
 
 /// Stock left by a roughing pass, in millimetres. Zero means cut to the contour and to `depth`.
@@ -416,7 +434,9 @@ impl Finish {
 /// [`Self::top_z`] and [`Self::grid`] describe a rough or a waterline. Other kinds store `None`.
 /// [`Self::min_slope_deg`] describes a waterline. Other kinds store 0.
 /// [`Self::index_deg`] is the machine A/B angle for this operation, in degrees. `None` means the
-/// file omitted it. A job with a rotary setup then runs the operation at 0°.
+/// file omitted it. A job with a rotary setup then runs the operation at 0°. A wrap rejects
+/// `index_deg`. [`Self::cylinder_diameter`] is set only on a wrap. [`Self::u_offset`] and
+/// [`Self::v_offset`] are 0 on every other kind.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -455,6 +475,8 @@ pub struct Operation {
     params: ProcessParams,
     /// Machine A/B index in degrees. `None` when the file omits `index_deg`.
     index_deg: Option<f64>,
+    /// Cylinder diameter and flat-frame offsets. `None` except on a wrap.
+    wrap_geom: Option<WrapGeom>,
 }
 
 impl Operation {
@@ -601,6 +623,27 @@ impl Operation {
     /// The number is not scaled by `units`. A job with a rotary setup and no index runs at 0°.
     pub fn index_deg(&self) -> Option<f64> {
         self.index_deg
+    }
+
+    /// Cylinder surface diameter in millimetres. `Some` only on a wrap.
+    pub fn cylinder_diameter(&self) -> Option<f64> {
+        self.wrap_geom.map(|geom| geom.diameter)
+    }
+
+    /// Added to drawing X to make the flat-frame `u`, in millimetres. `0` except on a wrap.
+    pub fn u_offset(&self) -> f64 {
+        match self.wrap_geom {
+            Some(geom) => geom.u_offset,
+            None => 0.0,
+        }
+    }
+
+    /// Added to drawing Y to make the flat-frame `v`, in millimetres. `0` except on a wrap.
+    pub fn v_offset(&self) -> f64 {
+        match self.wrap_geom {
+            Some(geom) => geom.v_offset,
+            None => 0.0,
+        }
     }
 }
 
@@ -778,6 +821,11 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
         && let Some(operation) = operations.iter().find(|operation| operation.index_deg().is_some())
     {
         return Err(JobFileError::invalid(format!("operation `{}`: index_deg needs a rotary setup", operation.name())));
+    }
+    if rotary.is_none()
+        && let Some(operation) = operations.iter().find(|operation| matches!(operation.kind(), OperationKind::Wrap))
+    {
+        return Err(JobFileError::invalid(format!("operation `{}`: wrap needs a rotary setup", operation.name())));
     }
     check_mesh_source(&source, &operations, &tools)?;
     Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary })
@@ -1069,6 +1117,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "pierce_height",
             "timing",
             "index_deg",
+            "diameter",
+            "u_offset",
+            "v_offset",
         ],
         "operation",
     )
@@ -1085,6 +1136,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     }
     if matches!(kind, OperationKind::Waterline) {
         return Ok(with_index(finish_waterline(name, map, scale, tools)?, index_deg));
+    }
+    if matches!(kind, OperationKind::Wrap) {
+        return finish_wrap(name, map, scale, tools);
     }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
@@ -1103,6 +1157,15 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     }
     if optional(map, "min_slope_deg").is_some() {
         return Err(JobFileError::invalid("min_slope_deg is only valid on a waterline"));
+    }
+    if optional(map, "diameter").is_some() {
+        return Err(JobFileError::invalid("diameter is only valid on a wrap"));
+    }
+    if optional(map, "u_offset").is_some() {
+        return Err(JobFileError::invalid("u_offset is only valid on a wrap"));
+    }
+    if optional(map, "v_offset").is_some() {
+        return Err(JobFileError::invalid("v_offset is only valid on a wrap"));
     }
     reject_chamfer_cut_keys(map, kind)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
@@ -1144,6 +1207,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         feeds,
         params,
         index_deg,
+        wrap_geom: None,
     })
 }
 
@@ -1165,6 +1229,9 @@ fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileEr
         "cut_height",
         "pierce_height",
         "timing",
+        "diameter",
+        "u_offset",
+        "v_offset",
     ] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is not valid on a surface")));
@@ -1247,6 +1314,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         feeds,
         params,
         index_deg: None,
+        wrap_geom: None,
     })
 }
 
@@ -1267,6 +1335,9 @@ fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErro
         "cut_height",
         "pierce_height",
         "timing",
+        "diameter",
+        "u_offset",
+        "v_offset",
     ] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is not valid on a rough")));
@@ -1357,6 +1428,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         feeds,
         params,
         index_deg: None,
+        wrap_geom: None,
     })
 }
 
@@ -1378,6 +1450,9 @@ fn reject_waterline_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFile
         "cut_height",
         "pierce_height",
         "timing",
+        "diameter",
+        "u_offset",
+        "v_offset",
     ] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is not valid on a waterline")));
@@ -1466,6 +1541,91 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         feeds,
         params,
         index_deg: None,
+        wrap_geom: None,
+    })
+}
+
+/// Keys a wrap does not accept. `side` is already rejected by [`parse_kind`].
+fn reject_wrap_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError> {
+    for key in [
+        "stepover",
+        "scallop_height",
+        "sample_step",
+        "angle_deg",
+        "margin",
+        "floor_z",
+        "top_z",
+        "grid",
+        "min_slope_deg",
+        "width",
+        "v_angle_deg",
+        "tip_diameter",
+        "tip_clearance",
+        "stock_to_leave",
+        "finish",
+        "entry",
+        "cut_height",
+        "pierce_height",
+        "timing",
+        "index_deg",
+    ] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is not valid on a wrap")));
+        }
+    }
+    Ok(())
+}
+
+/// Wrap onto a cylinder. `depth` is below the surface. Offsets default to 0 and may be negative.
+fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
+    reject_wrap_foreign_keys(map)?;
+    let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
+    let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
+    if !tools.iter().any(|tool| tool.id() == tool_id) {
+        return Err(JobFileError::invalid(format!("unknown tool {tool_id}")));
+    }
+    let (depth, step_down) = parse_depth_and_step(map, OperationKind::Wrap, scale, None)?;
+    let Some(diameter_value) = optional(map, "diameter") else {
+        return Err(JobFileError::invalid("wrap needs a diameter"));
+    };
+    let diameter = positive_length(diameter_value, scale, "diameter")?;
+    let u_offset = match optional(map, "u_offset") {
+        Some(value) => finite_height(scale_f64(value, scale, "u_offset")?, "u_offset")?,
+        None => 0.0,
+    };
+    let v_offset = match optional(map, "v_offset") {
+        Some(value) => finite_height(scale_f64(value, scale, "v_offset")?, "v_offset")?,
+        None => 0.0,
+    };
+    let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
+    let params = parse_params(None).map_err(from_cli)?;
+    Ok(Operation {
+        name,
+        kind: OperationKind::Wrap,
+        layers,
+        tool_id,
+        depth,
+        step_down,
+        stepover: None,
+        scallop_height: None,
+        sample_step: None,
+        floor_z: None,
+        top_z: None,
+        grid: None,
+        min_slope_deg: 0.0,
+        face_angle: 0.0,
+        margin: 0.0,
+        width: 0.0,
+        v_angle: 0.0,
+        tip_diameter: 0.0,
+        tip_clearance: 0.0,
+        stock_to_leave: StockToLeave::default(),
+        finish: None,
+        entry: DepthEntry::Plunge,
+        feeds,
+        params,
+        index_deg: None,
+        wrap_geom: Some(WrapGeom { diameter, u_offset, v_offset }),
     })
 }
 
@@ -1870,6 +2030,10 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
         "waterline" => {
             reject_side(side)?;
             Ok(OperationKind::Waterline)
+        }
+        "wrap" => {
+            reject_side(side)?;
+            Ok(OperationKind::Wrap)
         }
         "chamfer" => {
             let Some(side) = side else {
@@ -3957,6 +4121,145 @@ mod tests {
         ];
         for (index, (text, needle)) in cases.iter().enumerate() {
             let err = load(&write_job(&format!("rotary-bad-{index}"), text)).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
+    }
+
+    fn rotary_job(units: &str, tools: &str, ops: &str) -> String {
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"{units}","rotary":{{"axis":"a","center":[0,0,0],"direction":"positive"}},"tools":{tools},"operations":{ops}}}"#
+        )
+    }
+
+    #[test]
+    fn wrap_loads_offsets_and_rejects_a_missing_rotary_or_a_bad_diameter() {
+        let letters = r#"{"name":"letters","type":"wrap","layers":["LETTERS"],"tool_id":1,"depth":0.5,"step_down":0.25,"diameter":40,"feeds":{"cut":800,"plunge":200}}"#;
+        let missing = envelope("plate.dxf", r#"[{"id":1,"diameter":3}]"#, &format!("[{letters}]"));
+        let err = load(&write_job("wrap-no-rotary", &missing)).expect_err("rotary");
+        assert!(err.to_string().contains("operation `letters`"), "{err}");
+        assert!(err.to_string().contains("wrap needs a rotary setup"), "{err}");
+
+        let loaded = load(&write_job("wrap-mm", &rotary_job("mm", r#"[{"id":1,"diameter":3}]"#, &format!("[{letters}]")))).expect("wrap");
+        let op = &loaded.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Wrap);
+        assert_eq!(op.cylinder_diameter(), Some(40.0));
+        near(op.u_offset(), 0.0);
+        near(op.v_offset(), 0.0);
+        near(op.depth(), 0.5);
+        near(op.step_down(), 0.25);
+        assert!(op.index_deg().is_none());
+
+        let inches = r#"{"name":"letters","type":"wrap","layers":["LETTERS"],"tool_id":1,"depth":0.1,"step_down":0.05,"diameter":1,"u_offset":0.5,"v_offset":-0.25,"feeds":{"cut":10,"plunge":4}}"#;
+        let scaled = load(&write_job("wrap-inch", &rotary_job("inch", r#"[{"id":1,"diameter":0.125}]"#, &format!("[{inches}]")))).expect("inch wrap");
+        let op = &scaled.operations()[0];
+        near(op.cylinder_diameter().expect("diameter"), 25.4);
+        near(op.u_offset(), 12.7);
+        near(op.v_offset(), -6.35);
+        near(op.depth(), 2.54);
+        near(op.feeds().cut(), 254.0);
+
+        let kerf = r#"{"name":"letters","type":"wrap","layers":["L"],"tool_id":2,"depth":1,"step_down":1,"diameter":40,"feeds":{"cut":1}}"#;
+        let kerf_job = load(&write_job("wrap-kerf", &rotary_job("mm", r#"[{"id":2,"kerf":0.2}]"#, &format!("[{kerf}]")))).expect("kerf");
+        assert_eq!(kerf_job.operations()[0].kind(), OperationKind::Wrap);
+
+        let cases = [
+            (
+                envelope(
+                    "plate.dxf",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}]"#,
+                ),
+                "wrap needs a diameter",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":0,"feeds":{"cut":1}}]"#,
+                ),
+                "diameter must be greater than 0",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":-2,"feeds":{"cut":1}}]"#,
+                ),
+                "diameter must be greater than 0",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":"40","feeds":{"cut":1}}]"#,
+                ),
+                "diameter must be a number",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":1000001,"feeds":{"cut":1}}]"#,
+                ),
+                "diameter is larger than",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":40,"index_deg":90,"feeds":{"cut":1}}]"#,
+                ),
+                "index_deg is not valid on a wrap",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"mark","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":40,"feeds":{"cut":1}}]"#,
+                ),
+                "diameter is only valid on a wrap",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"mark","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"u_offset":1,"feeds":{"cut":1}}]"#,
+                ),
+                "u_offset is only valid on a wrap",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3}]"#,
+                    r#"[{"name":"mark","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"v_offset":1,"feeds":{"cut":1}}]"#,
+                ),
+                "v_offset is only valid on a wrap",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":6,"shape":"ball"}]"#,
+                    r#"[{"name":"face","type":"surface","tool_id":1,"stepover":1,"diameter":40,"feeds":{"cut":1}}]"#,
+                ),
+                "diameter is not valid on a surface",
+            ),
+            (
+                rotary_job(
+                    "mm",
+                    r#"[{"id":1,"diameter":3,"shape":"ball"}]"#,
+                    r#"[{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":40,"feeds":{"cut":1}}]"#,
+                ),
+                "shape is only valid on a surface",
+            ),
+            (
+                format!(
+                    r#"{{"format":"campanion-job/1","source":{{"path":"part.stl","hash":"{EMPTY_HASH}"}},"units":"mm","rotary":{{"axis":"a","center":[0,0,0],"direction":"positive"}},"tools":[{{"id":1,"diameter":6}}],"operations":[{{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":40,"feeds":{{"cut":1}}}}]}}"#
+                ),
+                "an STL source only allows surface, rough or waterline",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("wrap-bad-{index}"), text)).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
     }

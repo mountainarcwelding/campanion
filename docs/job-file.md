@@ -22,7 +22,7 @@ lengths are millimetres and feeds are millimetres per minute.
 | `tolerance` | no | Linear, angular and chord tolerances. Omitted fields default to 1e-6 mm (linear), 1e-6 rad (angular) and 0.01 mm (chord). Defaults are not scaled when `units` is `inch`. |
 | `tools` | yes | Array of tools. May be empty when `operations` is empty. |
 | `operations` | yes | Array of operations, in cut order. May be empty. |
-| `rotary` | no | Fourth-axis table for indexed 3+1. See below. |
+| `rotary` | no | Fourth-axis table for indexed 3+1 and for wrapping. See below. |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
 
@@ -77,7 +77,7 @@ of that value.
 `shape` is optional and only meaningful on a diameter tool. `"flat"` is the default. `"ball"` is a
 ball nose whose sphere radius is half the diameter. `{"bull": corner_radius}` is a bull nose;
 `corner_radius` is a length in `units`, greater than 0 and strictly less than the tool radius.
-A shape other than flat is rejected when a profile, pocket, drill, engrave, face or chamfer uses
+A shape other than flat is rejected when a profile, pocket, drill, engrave, face, chamfer or wrap uses
 that tool. Those operations keep the flat diameter offset and do not read `shape`. A surface, a
 rough or a waterline reads `shape`.
 
@@ -89,12 +89,12 @@ unique within that operation. The same layer may appear on two operations.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | Short unique name. |
-| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer`, `surface`, `rough` or `waterline`. |
+| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer`, `surface`, `rough`, `waterline` or `wrap`. |
 | `layers` | yes, except surface, rough and waterline | One or more layer names. A surface, a rough or a waterline rejects `layers`. |
-| `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface, rough and waterline. |
+| `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface, rough, waterline and wrap. |
 | `tool_id` | yes | `id` of a tool in this file. |
-| `depth` | yes, except chamfer, surface, rough and waterline | Positive distance downward from the stock surface, in `units`. Not an absolute Z. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface, a rough or a waterline rejects `depth`. |
-| `step_down` | yes, except chamfer and surface | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. |
+| `depth` | yes, except chamfer, surface, rough and waterline | Positive distance downward, in `units`. Not an absolute Z. On a profile, pocket, drill, engrave or face this is below the stock surface. On a wrap it is below the cylinder surface. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface, a rough or a waterline rejects `depth`. |
+| `step_down` | yes, except chamfer and surface | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. |
 | `stepover` | pocket, face, surface and rough | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. A rough that omits it uses 0.4 times the tool diameter. A waterline rejects `stepover`. |
 | `scallop_height` | surface only | Positive length in `units`. Flat-floor cusp height used instead of `stepover`. See below. Rejected on every other kind. |
 | `sample_step` | surface only | Positive length in `units`. Default is half of the stepover that is used (after a scallop height is resolved and capped). Maximum gap between the regular drop-cutter samples on a raster line, and between the samples on the link from one line to the next. |
@@ -110,12 +110,15 @@ unique within that operation. The same layer may appear on two operations.
 | `tip_clearance` | chamfer | Length in `units`, at least 0, default 0. How far the tip sits below the bottom of the bevel. Rejected on every other kind. |
 | `stock_to_leave` | profile, pocket, surface, rough and waterline | On a profile or pocket, an object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. On a surface, a rough or a waterline, a single length in `units`, at least 0. A surface or a waterline defaults to 0 and adds that length to every cutter-location Z. That is an axial offset approximation, not a true 3D rest-material offset along the surface normal. A rough defaults to 0.5 mm (a millimetre length, not scaled again when `units` is `inch`) and keeps the tool where the drop-cutter tip plus that stock is at or below the level. Rejected on a face. |
 | `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). Rejected on a face. |
-| `entry` | no | How a pass is entered. Omitted, a plunge. `{"type":"plunge"}`, `{"type":"ramp","angle_deg"}`, or `{"type":"helix","radius","angle_deg"}`. `angle_deg` is from the XY plane, greater than 0 and at most 90, and is not scaled by `units`. A helix `radius` is a length in `units`. One turn drops `2π r tan(angle_deg)`. A rough uses the same object. A surface rejects `entry`. |
+| `entry` | no | How a pass is entered. Omitted, a plunge. `{"type":"plunge"}`, `{"type":"ramp","angle_deg"}`, or `{"type":"helix","radius","angle_deg"}`. `angle_deg` is from the XY plane, greater than 0 and at most 90, and is not scaled by `units`. A helix `radius` is a length in `units`. One turn drops `2π r tan(angle_deg)`. A rough uses the same object. A surface or a wrap rejects `entry`. A wrap plunges. |
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
 | `cut_height` | no | Absolute Z to feed to after the pierce, before the cut. |
-| `timing` | no | Delays and the two process-on toggles. See below. |
-| `index_deg` | no | Machine A or B angle in degrees. Not scaled by `units`. Requires a job-level `rotary`. Omitted on a rotary job, the operation runs at 0° and its poses carry rotary 0. |
+| `timing` | no | Delays and the two process-on toggles. See below. Rejected on a wrap. |
+| `index_deg` | no | Machine A or B angle in degrees. Not scaled by `units`. Requires a job-level `rotary`. Omitted on a rotary job, the operation runs at 0° and its poses carry rotary 0. Rejected on a wrap: the angle follows the drawing. |
+| `diameter` | wrap | Cylinder surface diameter, in `units`. Positive, at most 1e6 mm after conversion. This is not the tool diameter. Rejected on every other kind. |
+| `u_offset` | wrap | Length in `units`, default 0, added to drawing X to make flat-frame `u`. May be negative. At most 1e6 mm in absolute value. Rejected on every other kind. |
+| `v_offset` | wrap | Length in `units`, default 0, added to drawing Y to make flat-frame `v`. May be negative. At most 1e6 mm in absolute value. Rejected on every other kind. |
 
 `depth` and `step_down` must be a legal `campanion-path` depth plan: positive, at most 1e6 mm,
 and at most 1024 passes. Five millimetres at a two millimetre step is three passes (2, 4, 5).
@@ -152,6 +155,41 @@ The tool `diameter` is the largest cutting diameter of the V-bit. `tip_diameter`
 `examples/chamfer.job.json` chamfers `examples/curves.svg` with a 90° 6 mm V-bit: the `OUTER`
 outline outside, 0.5 mm wide, and the `POCKET` hole inside, 0.3 mm wide. With no tip clearance
 the tips are at −0.5 mm and −0.3 mm.
+
+### Wrapping
+
+`type` `wrap` lays the selected layer contours onto a cylinder about the job `rotary` axis. The source is a DXF or SVG. Geometry is the contours on `layers`, the same selection an engrave uses, and arcs are flattened at the job chord tolerance before they are wrapped. A kerf tool is allowed and the path stays on the drawing. A non-flat tool shape is rejected. An STL source is rejected.
+
+`wrap` without `rotary` fails the load with `operation `<name>`: wrap needs a rotary setup`. `index_deg` is rejected. The rotary angle comes from the drawing.
+
+`diameter` is the cylinder surface diameter, not the tool diameter.
+
+`depth` is a positive distance below that surface. `step_down` is the maximum thickness of one pass, the same plan as a profile. A depth of 0.5 mm at a step of 0.25 mm is two passes.
+
+Flat frame, in millimetres after `load`:
+
+- `u` is drawing X plus `u_offset`: distance along the rotary axis from `rotary.center`. `u_offset` defaults to 0 and may be negative.
+- `v` is drawing Y plus `v_offset`: arc length around the cylinder surface. `v_offset` defaults to 0 and may be negative.
+- `w` is the radial offset from the surface. `0` is on the surface. A cut is into the material at `w = -level`.
+
+The machine angle is `v / (π · diameter) · 360` degrees. It is not folded into one turn, so a long drawing keeps turning.
+
+For each contour, and for each depth level from the first step down to `depth`:
+
+1. Rapid at the safe radius to the start of the contour. The move is subdivided so each rotary step stays inside the chord tolerance.
+2. Plunge to `w = -level`.
+3. Follow the contour.
+4. Rapid back to the safe radius.
+
+Feeds are the tool's surface feeds. The distance is the flat-frame length `sqrt(Δu² + Δv² + Δw²)`, not the shorter chord between part-frame tips. `plunge` is the plunge feed. An omitted plunge uses `cut`.
+
+The safe radius is the index safe height: the greater of `heights.clearance` and the swept radius plus that clearance. The swept radius is the larger of the cylinder radius (`diameter / 2`) and the stock swept radius of the other operations. A wrap's drawing is not part of that stock box, because its X and Y are `u` and `v`, not part coordinates. With the axis centre at the origin, a rapid at the safe radius has machine Z equal to that safe height.
+
+A wrap followed or preceded by an indexed operation uses the same index change as any other angle change: retract above the swept radius in the angle being left, then rotate while holding that machine tip. The program still starts at 0°. See below.
+
+`side`, `entry`, `stepover`, `timing`, mesh keys and chamfer keys are rejected.
+
+`examples/wrap.job.json` wraps `examples/wrap.svg` onto a 40 mm cylinder about A through the origin, 0.5 mm deep in two steps of 0.25 mm. Drawing X is shifted by `u_offset` 6 mm. The strokes stay inside drawing Y 0..120 mm, and the first stroke starts at Y 0 so the wrap begins at angle 0.
 
 ### Surface
 
@@ -338,7 +376,7 @@ When two consecutive operations have different index angles, and before the firs
 
 The retract is part of the operation being left, at the old angle. The rotary rapid is the first move of the operation being entered, at the new angle. When the program starts away from 0° there is no previous operation, so the retract is its own toolpath at 0° and the rotary rapid is prepended to the first operation.
 
-Zs is the greater of the job safe height and the swept radius plus the rapid clearance. Both of those heights are `heights.clearance` (default 5 mm). The swept radius is the largest distance from the rotary axis line to the stock. A 2D job uses the corners of a box around the selected contours: XY from those bounds, Z from `-depth` up to the stock surface at 0. An STL job has no stock box, so the radius is measured to the mesh vertices.
+Zs is the greater of the job safe height and the swept radius plus the rapid clearance. Both of those heights are `heights.clearance` (default 5 mm). The swept radius is the largest distance from the rotary axis line to the stock. A 2D job uses the corners of a box around the selected contours: XY from those bounds, Z from `-depth` up to the stock surface at 0. A wrap is not part of that box. Its cylinder radius is included in the swept radius on its own, because the drawing's X and Y are cylinder coordinates. An STL job has no stock box, so the radius is measured to the mesh vertices.
 
 `examples/indexed.job.json` finishes `examples/dome.stl` with a 6 mm ball at index 0° and 90° about A through the origin.
 
@@ -351,7 +389,7 @@ Hostile numbers and sizes fail the load instead of being passed on:
 - JSON file at most 32 MiB, UTF-8.
 - 256 tools, 1024 operations, 64 layers on one operation.
 - Names at most 256 bytes. Source path at most 4096 bytes.
-- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, grid, floor Z, top Z, surface, rough and waterline stock, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source.
+- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, grid, floor Z, top Z, wrap diameter and offsets, surface, rough and waterline stock, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source.
 - Feeds at most 1e9 mm/min. Delays at most 1e6 s.
 - At most 1024 depth passes.
 
