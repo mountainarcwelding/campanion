@@ -32,6 +32,9 @@ const LEN_EPS_MM: f64 = 1e-9;
 /// Plan labels closer than this (millimetres) share one callout.
 const LABEL_MERGE_MM: f64 = 0.5;
 
+/// Flat cut colour, the same blue the preview uses for an unshaded cut stroke: `(90, 200, 250)`.
+const FLAT_CUT_RGB: [u8; 3] = [90, 200, 250];
+
 /// Kind of motion drawn in the plan preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrokeKind {
@@ -45,8 +48,8 @@ pub enum StrokeKind {
 
 /// One continuous polyline in the plan view, produced from a single motion.
 ///
-/// `length` is the 3D length of `points` in millimetres, with Z interpolated uniformly along the
-/// polyline. Playback cuts this same polyline, so the stored length and the drawn path agree.
+/// `length` is the 3D length of `points` in millimetres, using [`Stroke::zs`] as the height of
+/// each vertex. Playback cuts this same polyline, so the stored length and the drawn path agree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
     /// Rapid, cut, or vertical plunge.
@@ -55,6 +58,11 @@ pub struct Stroke {
     pub toolpath: usize,
     /// Plan-view polyline, including the start and the exact end. Y is up.
     pub points: Vec<[f64; 2]>,
+    /// Z of each point in [`Stroke::points`], in millimetres. Always the same length as `points`.
+    ///
+    /// A line stores the exact endpoint heights. An arc or helix stores heights interpolated by
+    /// XY arc length from `z_start` to `z_end`.
+    pub zs: Vec<f64>,
     /// Z of the first point, in millimetres.
     pub z_start: f64,
     /// Z of the last point, in millimetres.
@@ -95,6 +103,9 @@ pub struct Scene {
     /// Axis-aligned bounds of every stroke point, rapids included. `None` when nothing was drawn.
     /// The pair is `(min_xy, max_xy)`.
     pub bounds: Option<([f64; 2], [f64; 2])>,
+    /// Min and max Z of every cut and plunge point, in millimetres. Rapids are left out.
+    /// `None` when the program never cuts or plunges.
+    pub z_range: Option<(f64, f64)>,
     /// Sum of [`Stroke::length`], in millimetres.
     pub total_length: f64,
     /// Toolpath names in program order. Missing names are empty strings.
@@ -133,6 +144,7 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     let tol = sanitize_tol(arc_tol);
     let mut scene = empty_scene();
     let mut bounds = BoundsAcc::new();
+    let mut z_range = ZRangeAcc::new();
     let mut cursor: Option<[f64; 3]> = None;
 
     for (toolpath, path) in doc.program().toolpaths().iter().enumerate() {
@@ -148,7 +160,7 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
                         cursor = Some(end);
                         continue;
                     };
-                    push_stroke(&mut scene, &mut bounds, &mut labeled, toolpath, motion, start, end, tol);
+                    push_stroke(&mut scene, &mut bounds, &mut z_range, &mut labeled, toolpath, motion, start, end, tol);
                     cursor = Some(end);
                 }
                 ClBlock::Event(event) => record_event(&mut scene, toolpath, event, cursor),
@@ -157,6 +169,7 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     }
 
     scene.bounds = bounds.finish();
+    scene.z_range = z_range.finish();
     scene.labels = merge_labels(std::mem::take(&mut scene.labels), LABEL_MERGE_MM);
     scene
 }
@@ -309,6 +322,89 @@ pub fn tool_position(scene: &Scene, position: f64) -> Option<[f64; 2]> {
     last_point
 }
 
+/// How a tool point is drawn.
+///
+/// [`Projection::Top`] is the plan view. [`Projection::Iso`] is a standard isometric view with Y up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Projection {
+    /// Plan view. The point is returned unchanged and Z is ignored.
+    Top,
+    /// Isometric view: `x' = (x − y) · cos(30°)`, `y' = (x + y) · sin(30°) + z`.
+    Iso,
+}
+
+/// Project one tool point into the preview plane.
+///
+/// [`Projection::Top`] returns `p`. [`Projection::Iso`] uses
+/// `x' = (x − y) · cos(30°)` and `y' = (x + y) · sin(30°) + z`. Y stays up.
+pub fn project(p: [f64; 2], z: f64, projection: Projection) -> [f64; 2] {
+    match projection {
+        Projection::Top => p,
+        Projection::Iso => {
+            let cos30 = std::f64::consts::FRAC_PI_6.cos();
+            let sin30 = std::f64::consts::FRAC_PI_6.sin();
+            [(p[0] - p[1]) * cos30, (p[0] + p[1]) * sin30 + z]
+        }
+    }
+}
+
+/// Axis-aligned bounds of every stroke point after [`project`].
+///
+/// Rapids are included, matching [`Scene::bounds`]. `None` when the scene has no finite projected point.
+pub fn projected_bounds(scene: &Scene, projection: Projection) -> Option<([f64; 2], [f64; 2])> {
+    let mut bounds = BoundsAcc::new();
+    for stroke in &scene.strokes {
+        for (index, point) in stroke.points.iter().enumerate() {
+            let z = stroke.zs.get(index).copied().filter(|value| value.is_finite()).unwrap_or(stroke.z_start);
+            bounds.include(project(*point, z, projection));
+        }
+    }
+    bounds.finish()
+}
+
+/// Blue (low) through green and yellow to red (high), clamped to `range`.
+///
+/// `range` is `(low, high)` in millimetres. A zero-width or non-finite range returns the flat cut
+/// colour `(90, 200, 250)`.
+pub fn height_color(z: f64, range: (f64, f64)) -> [u8; 3] {
+    let (low, high) = if range.0 <= range.1 { (range.0, range.1) } else { (range.1, range.0) };
+    if !z.is_finite() || !low.is_finite() || !high.is_finite() {
+        return FLAT_CUT_RGB;
+    }
+    let span = high - low;
+    if !(span > 0.0) {
+        return FLAT_CUT_RGB;
+    }
+    let t = ((z - low) / span).clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return [0, 0, 255];
+    }
+    if t >= 1.0 {
+        return [255, 0, 0];
+    }
+    let (red, green, blue) = if t < (1.0 / 3.0) {
+        let along = t / (1.0 / 3.0);
+        (0.0, 255.0 * along, 255.0 * (1.0 - along))
+    } else if t < (2.0 / 3.0) {
+        let along = (t - 1.0 / 3.0) / (1.0 / 3.0);
+        (255.0 * along, 255.0, 0.0)
+    } else {
+        let along = ((t - 2.0 / 3.0) / (1.0 / 3.0)).clamp(0.0, 1.0);
+        (255.0, 255.0 * (1.0 - along), 0.0)
+    };
+    [colour_byte(red), colour_byte(green), colour_byte(blue)]
+}
+
+fn colour_byte(value: f64) -> u8 {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else if value >= 255.0 {
+        255
+    } else {
+        value.round() as u8
+    }
+}
+
 /// World-to-screen transform for the plan view.
 ///
 /// `center` is the world point (millimetres, Y up) mapped to the middle of the viewport.
@@ -445,6 +541,36 @@ struct XyArc {
     tol: f64,
 }
 
+struct ZRangeAcc {
+    min: f64,
+    max: f64,
+    any: bool,
+}
+
+impl ZRangeAcc {
+    fn new() -> Self {
+        Self { min: 0.0, max: 0.0, any: false }
+    }
+
+    fn include(&mut self, z: f64) {
+        if !z.is_finite() {
+            return;
+        }
+        if !self.any {
+            self.min = z;
+            self.max = z;
+            self.any = true;
+            return;
+        }
+        self.min = self.min.min(z);
+        self.max = self.max.max(z);
+    }
+
+    fn finish(self) -> Option<(f64, f64)> {
+        if self.any { Some((self.min, self.max)) } else { None }
+    }
+}
+
 struct BoundsAcc {
     min_x: f64,
     min_y: f64,
@@ -482,12 +608,13 @@ impl BoundsAcc {
 }
 
 fn empty_scene() -> Scene {
-    Scene { strokes: Vec::new(), pierces: Vec::new(), labels: Vec::new(), bounds: None, total_length: 0.0, names: Vec::new() }
+    Scene { strokes: Vec::new(), pierces: Vec::new(), labels: Vec::new(), bounds: None, z_range: None, total_length: 0.0, names: Vec::new() }
 }
 
 fn push_stroke(
     scene: &mut Scene,
     bounds: &mut BoundsAcc,
+    z_range: &mut ZRangeAcc,
     labeled: &mut bool,
     toolpath: usize,
     motion: &ClMotion,
@@ -508,6 +635,16 @@ fn push_stroke(
     }
     for point in &stroke.points {
         bounds.include(*point);
+    }
+    if stroke.kind != StrokeKind::Rapid {
+        if stroke.zs.is_empty() {
+            z_range.include(stroke.z_start);
+            z_range.include(stroke.z_end);
+        } else {
+            for z in &stroke.zs {
+                z_range.include(*z);
+            }
+        }
     }
     if stroke.length.is_finite() {
         scene.total_length += stroke.length;
@@ -556,8 +693,62 @@ fn stroke_from_motion(toolpath: usize, motion: &ClMotion, start: [f64; 3], end: 
             (points, false)
         }
     };
-    let length = polyline_length_3d(&points, start[2], end[2]);
-    Stroke { kind: stroke_kind(rapid, &points), toolpath, points, z_start: start[2], z_end: end[2], length }
+    let zs = heights_for(motion, &points, start[2], end[2]);
+    let length = polyline_length_zs(&points, &zs);
+    Stroke { kind: stroke_kind(rapid, &points), toolpath, points, zs, z_start: start[2], z_end: end[2], length }
+}
+
+/// Heights for every plan point. Lines keep the real endpoint Z. Arcs and helices follow XY arc length.
+fn heights_for(motion: &ClMotion, points: &[[f64; 2]], z_start: f64, z_end: f64) -> Vec<f64> {
+    match motion {
+        ClMotion::Rapid { .. } | ClMotion::Linear { .. } => endpoint_heights(points, z_start, z_end),
+        ClMotion::Arc { .. } | ClMotion::Helix { .. } => arc_length_heights(points, z_start, z_end),
+    }
+}
+
+/// Exact endpoint Z. A two-point line is `[z_start, z_end]`. A lone point keeps the start height.
+fn endpoint_heights(points: &[[f64; 2]], z_start: f64, z_end: f64) -> Vec<f64> {
+    let z_start = finite_z(z_start, 0.0);
+    let z_end = finite_z(z_end, z_start);
+    match points.len() {
+        0 => Vec::new(),
+        1 => vec![z_start],
+        2 => vec![z_start, z_end],
+        _ => arc_length_heights(points, z_start, z_end),
+    }
+}
+
+/// Interpolate Z by cumulative XY length, which is arc length for a uniformly sampled circle or helix.
+///
+/// A path with no XY travel (a degenerate arc) falls back to an even split so Z still reaches `z_end`.
+fn arc_length_heights(points: &[[f64; 2]], z_start: f64, z_end: f64) -> Vec<f64> {
+    let count = points.len();
+    let z_start = finite_z(z_start, 0.0);
+    let z_end = finite_z(z_end, z_start);
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![z_start];
+    }
+    let mut cumulative = Vec::with_capacity(count);
+    cumulative.push(0.0);
+    let mut total = 0.0;
+    for index in 1..count {
+        let (Some(prev), Some(point)) = (points.get(index - 1), points.get(index)) else {
+            break;
+        };
+        let step = (point[0] - prev[0]).hypot(point[1] - prev[1]);
+        if step.is_finite() {
+            total += step;
+        }
+        cumulative.push(total);
+    }
+    if cumulative.len() != count || total <= LEN_EPS_MM {
+        let steps = (count - 1) as f64;
+        return (0..count).map(|index| lerp(z_start, z_end, index as f64 / steps)).collect();
+    }
+    cumulative.into_iter().map(|distance| lerp(z_start, z_end, distance / total)).collect()
 }
 
 fn plan_curve(
@@ -690,6 +881,7 @@ fn max_segment_angle(radius: f64, tol: f64) -> f64 {
     if theta.is_finite() && theta > 0.0 { theta } else { std::f64::consts::FRAC_PI_8 }
 }
 
+#[cfg(test)]
 fn polyline_length_3d(points: &[[f64; 2]], z_start: f64, z_end: f64) -> f64 {
     let segments = points.len().saturating_sub(1);
     if segments == 0 || !z_start.is_finite() || !z_end.is_finite() {
@@ -711,45 +903,84 @@ fn polyline_length_3d(points: &[[f64; 2]], z_start: f64, z_end: f64) -> f64 {
     if length.is_finite() { length } else { 0.0 }
 }
 
+/// 3D length using the stored height of each vertex.
+fn polyline_length_zs(points: &[[f64; 2]], zs: &[f64]) -> f64 {
+    let segments = points.len().saturating_sub(1);
+    if segments == 0 {
+        return 0.0;
+    }
+    let mut length = 0.0;
+    for index in 0..segments {
+        let (Some(start), Some(end)) = (points.get(index), points.get(index + 1)) else {
+            break;
+        };
+        let z0 = zs.get(index).copied().filter(|z| z.is_finite()).unwrap_or(0.0);
+        let z1 = zs.get(index + 1).copied().filter(|z| z.is_finite()).unwrap_or(z0);
+        let segment = (end[0] - start[0]).hypot(end[1] - start[1]).hypot(z1 - z0);
+        if segment.is_finite() {
+            length += segment;
+        }
+    }
+    if length.is_finite() { length } else { 0.0 }
+}
+
 fn cut_stroke(stroke: &Stroke, dist: f64) -> Stroke {
     let dist = finite_nonneg(dist);
-    let z_start = if stroke.z_start.is_finite() { stroke.z_start } else { 0.0 };
-    let z_end = if stroke.z_end.is_finite() { stroke.z_end } else { z_start };
+    let z_start = finite_z(stroke.z_start, 0.0);
+    let z_end = finite_z(stroke.z_end, z_start);
     let segments = stroke.points.len().saturating_sub(1);
     let Some(&first) = stroke.points.first() else {
-        return Stroke { kind: stroke.kind, toolpath: stroke.toolpath, points: Vec::new(), z_start, z_end: z_start, length: 0.0 };
+        return cut_piece(stroke, Vec::new(), Vec::new(), z_start, z_start, 0.0);
     };
+    let z_first = stored_z(stroke, 0, segments, z_start, z_end);
     if segments == 0 || dist <= 0.0 {
-        return Stroke { kind: stroke.kind, toolpath: stroke.toolpath, points: vec![first], z_start, z_end: z_start, length: 0.0 };
+        return cut_piece(stroke, vec![first], vec![z_first], z_start, z_start, 0.0);
     }
     let mut traveled = 0.0;
     let mut points = vec![first];
-    let steps = segments as f64;
+    let mut zs = vec![z_first];
     for index in 0..segments {
         let (Some(start), Some(end)) = (stroke.points.get(index), stroke.points.get(index + 1)) else {
             break;
         };
-        let z0 = lerp(z_start, z_end, index as f64 / steps);
-        let z1 = lerp(z_start, z_end, (index + 1) as f64 / steps);
+        let z0 = stored_z(stroke, index, segments, z_start, z_end);
+        let z1 = stored_z(stroke, index + 1, segments, z_start, z_end);
         let delta_x = end[0] - start[0];
         let delta_y = end[1] - start[1];
         let delta_z = z1 - z0;
         let segment = delta_x.hypot(delta_y).hypot(delta_z);
         if !segment.is_finite() || segment <= 0.0 {
             points.push(*end);
+            zs.push(z1);
             continue;
         }
         if traveled + segment + LEN_EPS_MM >= dist {
             let t = ((dist - traveled) / segment).clamp(0.0, 1.0);
             if t > LEN_EPS_MM {
                 points.push([start[0] + delta_x * t, start[1] + delta_y * t]);
+                zs.push(z0 + delta_z * t);
             }
-            return Stroke { kind: stroke.kind, toolpath: stroke.toolpath, points, z_start, z_end: z0 + delta_z * t, length: dist };
+            return cut_piece(stroke, points, zs, z_start, z0 + delta_z * t, dist);
         }
         traveled += segment;
         points.push(*end);
+        zs.push(z1);
     }
-    Stroke { kind: stroke.kind, toolpath: stroke.toolpath, points, z_start, z_end, length: traveled }
+    cut_piece(stroke, points, zs, z_start, z_end, traveled)
+}
+
+fn cut_piece(stroke: &Stroke, points: Vec<[f64; 2]>, zs: Vec<f64>, z_start: f64, z_end: f64, length: f64) -> Stroke {
+    Stroke { kind: stroke.kind, toolpath: stroke.toolpath, points, zs, z_start, z_end, length }
+}
+
+/// Stored height at `index`, or the same uniform split `cut_stroke` used before `zs` existed.
+fn stored_z(stroke: &Stroke, index: usize, segments: usize, z_start: f64, z_end: f64) -> f64 {
+    if let Some(z) = stroke.zs.get(index).copied()
+        && z.is_finite()
+    {
+        return z;
+    }
+    if segments == 0 { z_start } else { lerp(z_start, z_end, index as f64 / segments as f64) }
 }
 
 fn lerp(start: f64, end: f64, t: f64) -> f64 {
@@ -762,6 +993,10 @@ fn sanitize_tol(tol: f64) -> f64 {
 
 fn finite_nonneg(value: f64) -> f64 {
     if value.is_finite() && value > 0.0 { value } else { 0.0 }
+}
+
+fn finite_z(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() { value } else { fallback }
 }
 
 fn positive_len(length: f64) -> f64 {
@@ -800,8 +1035,8 @@ fn shortest_angle(start: f64, end: f64) -> f64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::{
-        Label, Playback, Stroke, StrokeKind, View, find_system_font, load_scene, merge_labels, polyline_length_3d, stroke_kind, tessellate_arc,
-        tool_position, visible,
+        Label, Playback, Projection, Stroke, StrokeKind, View, build_scene, find_system_font, height_color, load_scene, merge_labels,
+        polyline_length_3d, project, projected_bounds, stroke_kind, tessellate_arc, tool_position, visible,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -937,12 +1172,29 @@ mod tests {
     fn line_scene() -> super::Scene {
         super::Scene {
             strokes: vec![
-                Stroke { kind: StrokeKind::Cut, toolpath: 0, points: vec![[0.0, 0.0], [10.0, 0.0]], z_start: 0.0, z_end: 0.0, length: 10.0 },
-                Stroke { kind: StrokeKind::Cut, toolpath: 0, points: vec![[10.0, 0.0], [10.0, 10.0]], z_start: 0.0, z_end: 0.0, length: 10.0 },
+                Stroke {
+                    kind: StrokeKind::Cut,
+                    toolpath: 0,
+                    points: vec![[0.0, 0.0], [10.0, 0.0]],
+                    zs: vec![0.0, 0.0],
+                    z_start: 0.0,
+                    z_end: 0.0,
+                    length: 10.0,
+                },
+                Stroke {
+                    kind: StrokeKind::Cut,
+                    toolpath: 0,
+                    points: vec![[10.0, 0.0], [10.0, 10.0]],
+                    zs: vec![0.0, 0.0],
+                    z_start: 0.0,
+                    z_end: 0.0,
+                    length: 10.0,
+                },
             ],
             pierces: Vec::new(),
             labels: Vec::new(),
             bounds: Some(([0.0, 0.0], [10.0, 10.0])),
+            z_range: Some((0.0, 0.0)),
             total_length: 20.0,
             names: vec!["path".to_string()],
         }
@@ -981,6 +1233,7 @@ mod tests {
                 kind: StrokeKind::Cut,
                 toolpath: 1,
                 points: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+                zs: vec![0.0, 0.0, 0.0],
                 z_start: 0.0,
                 z_end: 0.0,
                 length: 20.0,
@@ -988,6 +1241,7 @@ mod tests {
             pierces: Vec::new(),
             labels: Vec::new(),
             bounds: None,
+            z_range: Some((0.0, 0.0)),
             total_length: 20.0,
             names: Vec::new(),
         };
@@ -1002,10 +1256,19 @@ mod tests {
 
         let length = 10.0_f64.hypot(10.0);
         let ramp = super::Scene {
-            strokes: vec![Stroke { kind: StrokeKind::Plunge, toolpath: 0, points: vec![[0.0, 0.0], [10.0, 0.0]], z_start: 0.0, z_end: 10.0, length }],
+            strokes: vec![Stroke {
+                kind: StrokeKind::Plunge,
+                toolpath: 0,
+                points: vec![[0.0, 0.0], [10.0, 0.0]],
+                zs: vec![0.0, 10.0],
+                z_start: 0.0,
+                z_end: 10.0,
+                length,
+            }],
             pierces: Vec::new(),
             labels: Vec::new(),
             bounds: None,
+            z_range: Some((0.0, 10.0)),
             total_length: length,
             names: Vec::new(),
         };
@@ -1014,6 +1277,9 @@ mod tests {
         assert_close(half[0].length, length * 0.5);
         assert_pt(*half[0].points.last().unwrap(), [5.0, 0.0]);
         assert_close(half[0].z_end, 5.0);
+        assert_eq!(half[0].zs.len(), half[0].points.len());
+        assert_close(half[0].zs[0], 0.0);
+        assert_close(*half[0].zs.last().unwrap(), 5.0);
         assert_pt(tool_position(&ramp, length * 0.5).unwrap(), [5.0, 0.0]);
     }
 
@@ -1112,5 +1378,174 @@ mod tests {
         if let Some(path) = find_system_font() {
             assert!(path.is_file(), "{}", path.display());
         }
+    }
+
+    fn pose(x: f64, y: f64, z: f64) -> campanion_ir::Pose {
+        let tip = campanion_ir::Vec3::new(x, y, z).expect("tip");
+        campanion_ir::Pose::new(tip, campanion_ir::Vec3::Z).expect("pose")
+    }
+
+    /// Rapid, line, quarter-circle arc, quarter-turn helix, then a plunge.
+    fn curve_scene() -> super::Scene {
+        use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Document, Feeds, MoveRole, Plane, Program, Vec3};
+        let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
+        let center = Vec3::new(0.0, 0.0, 0.0).expect("centre");
+        let blocks = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 20.0), feed: None }),
+            ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 2.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: pose(0.0, 10.0, 4.0),
+                plane: Plane::Xy,
+                center,
+                sense: ArcSense::Ccw,
+                feed: 100.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Helix {
+                to: pose(10.0, 0.0, 8.0),
+                plane: Plane::Xy,
+                center,
+                sense: ArcSense::Cw,
+                sweep: std::f64::consts::FRAC_PI_2,
+                feed: 100.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 5.0), feed: 100.0, role: MoveRole::Plunge }),
+        ];
+        let path = ClPath::try_new(Some("curves".to_string()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new()).expect("program");
+        let doc = Document::new(program).expect("document");
+        build_scene(&doc, 0.05)
+    }
+
+    fn assert_heights_follow_arc_length(stroke: &Stroke) {
+        assert_eq!(stroke.zs.len(), stroke.points.len());
+        assert!(stroke.points.len() >= 2, "expected a tessellated arc, got {} points", stroke.points.len());
+        let mut cumulative = vec![0.0];
+        let mut total = 0.0;
+        for window in stroke.points.windows(2) {
+            total += (window[1][0] - window[0][0]).hypot(window[1][1] - window[0][1]);
+            cumulative.push(total);
+        }
+        assert!(total > 1.0, "arc length {total}");
+        for (index, z) in stroke.zs.iter().enumerate() {
+            let fraction = cumulative[index] / total;
+            assert_close(*z, stroke.z_start + (stroke.z_end - stroke.z_start) * fraction);
+        }
+    }
+
+    #[test]
+    fn line_arc_and_helix_store_a_z_per_point() {
+        let scene = curve_scene();
+        assert_eq!(scene.strokes.len(), 5);
+        for stroke in &scene.strokes {
+            assert_eq!(stroke.zs.len(), stroke.points.len(), "{:?} zs {}", stroke.kind, stroke.zs.len());
+        }
+
+        let rapid = &scene.strokes[0];
+        assert_eq!(rapid.kind, StrokeKind::Rapid);
+        assert_eq!(rapid.points.len(), 2);
+        assert_close(rapid.zs[0], 20.0);
+        assert_close(rapid.zs[1], 0.0);
+
+        let line = &scene.strokes[1];
+        assert_eq!(line.kind, StrokeKind::Cut);
+        assert_eq!(line.points, vec![[0.0, 0.0], [10.0, 0.0]]);
+        assert_eq!(line.zs.len(), 2);
+        assert_close(line.zs[0], 0.0);
+        assert_close(line.zs[1], 2.0);
+        assert_close(line.z_start, 0.0);
+        assert_close(line.z_end, 2.0);
+
+        let arc = &scene.strokes[2];
+        assert_eq!(arc.kind, StrokeKind::Cut);
+        assert_close(arc.z_start, 2.0);
+        assert_close(arc.z_end, 4.0);
+        assert_heights_follow_arc_length(arc);
+
+        let helix = &scene.strokes[3];
+        assert_eq!(helix.kind, StrokeKind::Cut);
+        assert_close(helix.z_start, 4.0);
+        assert_close(helix.z_end, 8.0);
+        assert_heights_follow_arc_length(helix);
+
+        let plunge = &scene.strokes[4];
+        assert_eq!(plunge.kind, StrokeKind::Plunge);
+        assert_eq!(plunge.zs.len(), plunge.points.len());
+        assert_close(plunge.zs[0], 8.0);
+        assert_close(*plunge.zs.last().unwrap(), 5.0);
+
+        let (low, high) = scene.z_range.expect("cut range");
+        assert_close(low, 0.0);
+        assert_close(high, 8.0);
+
+        let partial = visible(&scene, rapid.length + line.length * 0.5);
+        assert_eq!(partial.last().expect("cut").zs.len(), partial.last().expect("cut").points.len());
+    }
+
+    #[test]
+    fn iso_projection_matches_the_axis_vectors() {
+        let cos30 = 3.0_f64.sqrt() / 2.0;
+        assert_pt(project([1.0, 0.0], 0.0, Projection::Iso), [cos30, 0.5]);
+        assert_pt(project([0.0, 1.0], 0.0, Projection::Iso), [-cos30, 0.5]);
+        assert_pt(project([0.0, 0.0], 1.0, Projection::Iso), [0.0, 1.0]);
+        assert_pt(project([4.0, -2.0], 9.0, Projection::Top), [4.0, -2.0]);
+    }
+
+    #[test]
+    fn height_color_runs_blue_to_red_and_clamps() {
+        assert_eq!(height_color(0.0, (0.0, 4.0)), [0, 0, 255]);
+        assert_eq!(height_color(4.0, (0.0, 4.0)), [255, 0, 0]);
+        assert_eq!(height_color(-2.0, (0.0, 4.0)), [0, 0, 255]);
+        assert_eq!(height_color(9.0, (0.0, 4.0)), [255, 0, 0]);
+        assert_eq!(height_color(-5.0, (-5.0, -1.0)), [0, 0, 255]);
+        assert_eq!(height_color(-1.0, (-5.0, -1.0)), [255, 0, 0]);
+        assert_eq!(height_color(1.0, (2.0, 2.0)), [90, 200, 250]);
+        assert_eq!(height_color(f64::NAN, (0.0, 1.0)), [90, 200, 250]);
+        let mid = height_color(2.0, (0.0, 4.0));
+        assert!(mid[1] > mid[0] && mid[1] > mid[2], "middle of the ramp should be green, got {mid:?}");
+    }
+
+    #[test]
+    fn projected_bounds_contain_every_projected_point() {
+        let scene = curve_scene();
+        assert_bounds_cover(&scene, Projection::Top);
+        assert_bounds_cover(&scene, Projection::Iso);
+        let empty = super::Scene {
+            strokes: Vec::new(),
+            pierces: Vec::new(),
+            labels: Vec::new(),
+            bounds: None,
+            z_range: None,
+            total_length: 0.0,
+            names: Vec::new(),
+        };
+        assert!(projected_bounds(&empty, Projection::Top).is_none());
+        assert!(projected_bounds(&empty, Projection::Iso).is_none());
+    }
+
+    fn assert_bounds_cover(scene: &super::Scene, projection: Projection) {
+        let (min, max) = projected_bounds(scene, projection).expect("bounds");
+        let mut hit_min_x = false;
+        let mut hit_min_y = false;
+        let mut hit_max_x = false;
+        let mut hit_max_y = false;
+        let mut any = false;
+        for stroke in &scene.strokes {
+            for (index, point) in stroke.points.iter().enumerate() {
+                let z = stroke.zs[index];
+                let projected = project(*point, z, projection);
+                assert!(projected[0] + 1e-9 >= min[0] && projected[0] - 1e-9 <= max[0], "{projected:?} x outside {min:?} {max:?}");
+                assert!(projected[1] + 1e-9 >= min[1] && projected[1] - 1e-9 <= max[1], "{projected:?} y outside {min:?} {max:?}");
+                hit_min_x |= (projected[0] - min[0]).abs() <= 1e-6;
+                hit_min_y |= (projected[1] - min[1]).abs() <= 1e-6;
+                hit_max_x |= (projected[0] - max[0]).abs() <= 1e-6;
+                hit_max_y |= (projected[1] - max[1]).abs() <= 1e-6;
+                any = true;
+            }
+        }
+        assert!(any);
+        assert!(hit_min_x && hit_min_y && hit_max_x && hit_max_y, "bounds are loose for {projection:?}: {min:?} {max:?}");
     }
 }
