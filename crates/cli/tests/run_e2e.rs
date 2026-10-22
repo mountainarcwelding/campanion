@@ -49,12 +49,55 @@ fn stem(job: &str) -> String {
 fn sample_jobs_write_ngc_and_clean_ir() -> Result<(), String> {
     let root = workspace_root()?;
     let mut failures = Vec::new();
-    for (job, delays) in [("examples/sample.job.json", false), ("examples/sample_delays.job.json", true), ("examples/sample_svg.job.json", false)] {
+    for (job, delays) in [
+        ("examples/sample.job.json", false),
+        ("examples/sample_delays.job.json", true),
+        ("examples/sample_svg.job.json", false),
+        ("examples/curves.job.json", false),
+    ] {
         if let Err(err) = check_job(&root, job, delays) {
             failures.push(err);
         }
     }
     if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+}
+
+/// Fitted cubics stay circular through an outside profile and a pocket.
+#[test]
+fn fitted_curves_survive_offset_and_pocket() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = "examples/curves.job.json";
+    let name = stem(job);
+    let ngc_path = temp_path(&format!("campanion-run-e2e-{name}-arcs.ngc"));
+    let ir_path = temp_path(&format!("campanion-run-e2e-{name}-arcs.json"));
+    run_job(&root, job, &ngc_path, &ir_path)?;
+    let ngc = std::fs::read_to_string(&ngc_path).map_err(|err| format!("{job}: read ngc: {err}"))?;
+    let mut failures = Vec::new();
+    let line_count = ngc.lines().count();
+    if line_count >= 2000 {
+        failures.push(format!("{job}: ngc has {line_count} lines, expected fewer than 2000"));
+    }
+    let lines: Vec<&str> = ngc.lines().collect();
+    if !lines_have_arc(&lines) {
+        failures.push(format!("{job}: ngc has no G2 or G3 move"));
+    }
+    if let Err(err) = assert_ngc(job, &ngc, false) {
+        failures.push(err);
+    }
+    if let Err(err) = assert_verify_clean(&root, job, &ir_path) {
+        failures.push(err);
+    }
+    if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+}
+
+fn lines_have_arc(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let code = strip_comments(line.trim());
+        if code.is_empty() {
+            return false;
+        }
+        matches!(parse_words(&code).ok().and_then(|words| words.motion), Some(2 | 3))
+    })
 }
 
 fn check_job(root: &Path, job: &str, delays: bool) -> Result<(), String> {

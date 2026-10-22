@@ -1,0 +1,50 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "curves.svg",
+    "hash": "b08567055ae99432"
+  },
+  "units": "mm",
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0
+    }
+  ],
+  "operations": [
+    {
+      "name": "outer",
+      "type": "profile",
+      "layers": [
+        "OUTER"
+      ],
+      "side": "outside",
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 3.0,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    },
+    {
+      "name": "pocket",
+      "type": "pocket",
+      "layers": [
+        "POCKET"
+      ],
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 1.5,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  }
+}
