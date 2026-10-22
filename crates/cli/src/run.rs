@@ -38,6 +38,11 @@
 //! plunges to the level, cuts the ring, and feeds back to the retract height. Entry is a plunge;
 //! ramp entry is future work. The process turns on once before the first plunge and off after the
 //! last retract, then the tool rapids to clearance.
+//! After the document is built, each cutting move is checked against the mesh with that
+//! operation's cutter. The sample step is `min(0.25, chord * 10)` millimetres and the allowance
+//! is the job chord tolerance. A gouge is a verify error. Roughing is compared with the
+//! drop-cutter surface of the part. `stock_to_leave` is not added to that surface: the cuts sit
+//! above the surface plus the stock.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -48,6 +53,7 @@ use std::process::ExitCode;
 use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program};
+use campanion_mesh::Mesh;
 use campanion_path::{
     ChamferOp, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
     Tool as PathTool, Toolpath, apply_timing,
@@ -88,8 +94,10 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
     if job.source().is_stl() {
         let bytes = read_bytes(&source)?;
         warn_if_changed(&job, &bytes)?;
-        let doc = build_surface(&job, &bytes)?;
-        return emit_program(&args, &job, doc);
+        let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
+        let doc = build_surface(&job, &mesh)?;
+        let gouges = crate::gouge::check_job(&job, &mesh, doc.program())?;
+        return emit_program(&args, &job, doc, &gouges);
     }
     let text = read_text(&source)?;
     warn_if_changed(&job, text.as_bytes())?;
@@ -122,7 +130,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         warn(&format!("skipped {format} entities: {kinds}"))?;
     }
     let doc = build(&job, &drawing)?;
-    emit_program(&args, &job, doc)
+    emit_program(&args, &job, doc, &[])
 }
 
 fn warn_if_changed(job: &JobFile, bytes: &[u8]) -> Result<(), CliError> {
@@ -133,7 +141,7 @@ fn warn_if_changed(job: &JobFile, bytes: &[u8]) -> Result<(), CliError> {
 }
 
 /// STL is not text. The hash is these bytes, and the drawing importers are not used.
-fn read_bytes(path: &Path) -> Result<Vec<u8>, CliError> {
+pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>, CliError> {
     use std::io::Read;
 
     let file = File::open(path).map_err(|err| CliError::run(format!("{}: {err}", path.display())))?;
@@ -150,8 +158,7 @@ fn read_bytes(path: &Path) -> Result<Vec<u8>, CliError> {
     Ok(bytes)
 }
 
-fn build_surface(job: &JobFile, bytes: &[u8]) -> Result<Document, CliError> {
-    let mesh = campanion_mesh::parse_stl(bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
+fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
     let mut paths = Vec::new();
     for op in job.operations() {
         let Some(tool) = job.tool(op.tool_id()) else {
@@ -159,8 +166,8 @@ fn build_surface(job: &JobFile, bytes: &[u8]) -> Result<Document, CliError> {
         };
         let import = import_for(op, tool)?;
         let path = match op.kind() {
-            OperationKind::Surface => surface::finish(job, op, tool, &mesh)?,
-            OperationKind::Rough => rough::rough(job, op, tool, &mesh)?,
+            OperationKind::Surface => surface::finish(job, op, tool, mesh)?,
+            OperationKind::Rough => rough::rough(job, op, tool, mesh)?,
             _ => return Err(op_err(op, "an STL source only allows surface or rough operations")),
         };
         push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
@@ -170,12 +177,12 @@ fn build_surface(job: &JobFile, bytes: &[u8]) -> Result<Document, CliError> {
     Ok(Document::new(program)?)
 }
 
-fn emit_program(args: &RunArgs, job: &JobFile, doc: Document) -> Result<ExitCode, CliError> {
+fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::GougeNote]) -> Result<ExitCode, CliError> {
     let options = campanion_ir::VerifyOptions { safe_z: Some(job.clearance()), retract_z: Some(job.retract()) };
     let report = campanion_ir::verify_with(doc.program(), &options);
-    if !report.issues().is_empty() {
+    if !report.issues().is_empty() || !gouges.is_empty() {
         let mut err_out = io::stderr().lock();
-        write_all(&mut err_out, &report::format_report(&report))?;
+        write_all(&mut err_out, &report::format_report_and_gouges(&report, gouges))?;
         return Ok(ExitCode::from(1));
     }
     write_output(&args.output, &campanion_ir::write_ngc(doc.program())?)?;
