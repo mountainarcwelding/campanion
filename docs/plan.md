@@ -135,6 +135,20 @@ finishing pass, facing, chamfer and deburr).
 Done when: analytic tests pass (a ball on a plane, a sphere and a cylinder at known Z), and
 property tests on random meshes show no gouge and stay within the scallop height.
 
+### M8: Machine and manufacturer posts (after M7, before 4-axis)
+Get the basics solid on real controllers before adding axes. Posts consume only the
+machine-neutral IR and cover everything built so far (2D, 2.5D, 3-axis):
+- LinuxCNC, GRBL, Mach3 and Fanuc/Haas-style mill posts, plus one plasma/laser controller
+  (process on/off, pierce delay, torch height and kerf from the IR's generic process events).
+- A post is a data file (dialect, codes, number formats, header and footer templates, supported
+  cycles, arc rules, limits) with a small documented hook interface for what data cannot
+  express. A contributor adds a controller by writing one post file plus golden tests, without
+  touching operations. Machine files (axes, limits, kinematics, process heads) pair with posts.
+- Written from public controller manuals only.
+Done when: every example job posts to each controller, read-back of each program matches the
+IR within tolerance, and golden files cover each post.
+4th axis and beyond start only after this milestone.
+
 ### Later (each its own milestone when we get there)
 - **2.5D extras:** thread milling, adaptive clearing.
 - **3-axis extras:** scallop finishing, rest machining, stock simulation.
@@ -142,15 +156,6 @@ property tests on random meshes show no gouge and stay within the scallop height
 - **Turning:** XZ profiles, facing, roughing/finishing, grooving, threading, parting; then live
   tooling (C/Y) and sub-spindle.
 - **Multi-channel up to 13 axes:** mill-turn and multi-head machines, sync between channels.
-- **Machine and manufacturer posts (future milestone, after 3-axis):** controller-specific post
-  processors built only on the machine-neutral IR: LinuxCNC, GRBL, Mach3, Fanuc and Haas for
-  mills and routers, and plasma and laser controllers (process on/off, pierce, torch height and
-  kerf handling from the IR's generic process events). A post is a data file (dialect, codes,
-  number formats, header and footer templates, supported cycles, arc rules, limits) with a small,
-  documented hook interface for what data cannot express. A contributor adds a controller by
-  writing one post file plus golden tests, without touching operations. Machine files (axes,
-  limits, kinematics, process heads) pair with posts. Everything is written from public
-  controller manuals.
 - **Additive:** a slicer-style process on the same IR (later; only if it still makes sense then).
 
 ## SolidCraft integration path
@@ -186,3 +191,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   (hard cap 16).
 - 2026-10-22: 2.5D milestone done; 3-axis surfacing (M7) started on triangle meshes in a new
   `campanion-mesh` crate.
+- 2026-10-22: Order after M7: controller posts (M8) for everything built so far, then 4th axis
+  and beyond.
