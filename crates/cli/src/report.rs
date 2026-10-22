@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn gouge_lines_count_as_verify_errors() {
-        let program = Program::try_new(None, Vec::new(), None, Vec::new(), Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, Vec::new(), Vec::new(), Vec::new(), None).expect("program");
         let doc = Document::new(program).expect("document");
         let report = verify(doc.program());
         assert_eq!(format_report(&report), format_report_and_gouges(&report, &[]));

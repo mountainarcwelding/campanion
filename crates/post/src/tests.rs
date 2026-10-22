@@ -26,7 +26,7 @@ fn path(blocks: Vec<ClBlock>) -> ClPath {
 }
 
 fn program(blocks: Vec<ClBlock>) -> Program {
-    Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new()).expect("program")
+    Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new(), None).expect("program")
 }
 
 fn options() -> PostOptions {
@@ -143,7 +143,7 @@ fn grbl_comments_tool_change_and_has_no_line_numbers() {
     let tool = Tool::try_new(4, None, None, None).expect("tool");
     let blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 3.0), feed: None }), ClBlock::Event(Event::ToolChange { tool_id: 4 })];
     let path = path(blocks.clone());
-    let program = Program::try_new(None, vec![tool], None, vec![path], Vec::new(), Vec::new()).expect("program");
+    let program = Program::try_new(None, vec![tool], None, vec![path], Vec::new(), Vec::new(), None).expect("program");
     let post = builtin("grbl").expect("grbl");
     let text = post_program(&program, &post, &options()).expect("post");
     assert!(text.starts_with("G21\n"), "{text}");
@@ -262,6 +262,7 @@ fn mach3_header_is_unnumbered_and_ends_with_m30() {
         vec![path(blocks)],
         Vec::new(),
         Vec::new(),
+        None,
     )
     .expect("program");
     let post = builtin("mach3").expect("mach3");
@@ -313,6 +314,7 @@ fn fanuc_splits_full_circles_and_linearises_helices() {
         vec![path(blocks)],
         Vec::new(),
         Vec::new(),
+        None,
     )
     .expect("program");
     let post = builtin("fanuc").expect("fanuc");
@@ -499,7 +501,7 @@ fn channel_programs_and_controller_compensation_are_rejected() {
         blocks,
     )
     .expect("path");
-    let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new()).expect("program");
+    let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
     let err = post_program(&program, &linux(), &options()).expect_err("comp");
     assert!(err.to_string().contains("not supported"), "{err}");
 }

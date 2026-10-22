@@ -1414,7 +1414,7 @@ mod tests {
             ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 5.0), feed: 100.0, role: MoveRole::Plunge }),
         ];
         let path = ClPath::try_new(Some("curves".to_string()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
-        let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
         let doc = Document::new(program).expect("document");
         build_scene(&doc, 0.05)
     }

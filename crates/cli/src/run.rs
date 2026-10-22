@@ -190,7 +190,7 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
         push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
     }
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
-    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new())?;
+    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), None)?;
     Ok(Document::new(program)?)
 }
 
@@ -304,7 +304,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
         }
     }
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
-    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new())?;
+    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), None)?;
     Ok(Document::new(program)?)
 }
 
@@ -703,6 +703,7 @@ fn restore_process_params(doc: Document, params: &ProcessParams) -> Result<Docum
         toolpaths,
         program.channel_programs().to_vec(),
         program.syncs().to_vec(),
+        program.rotary().copied(),
     )?;
     Ok(Document::new(rebuilt)?)
 }

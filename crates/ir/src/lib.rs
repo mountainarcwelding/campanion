@@ -9,6 +9,15 @@
 //! parameters and, when a path is converted, expanded into process events and dwells in that order.
 //! [`write_ngc`] prints a program as generic RS274/NGC text for tests. It is not a machine post.
 //! The text ends with `M30`, or with `M2` when [`NgcOptions`] says so.
+//!
+//! # Rotary axis
+//!
+//! A program may name a 4th-axis setup ([`RotarySetup`]): A about part X or B about part Y, a
+//! point on that axis, a direction sign, and optional travel limits in degrees. A [`Pose`] may
+//! then carry a machine A/B angle in degrees (the value may exceed 360 for multi-turn motion).
+//! Poses without an angle stay 3-axis. Helpers rotate part-frame geometry into the machine frame
+//! and recover an index angle that turns a tool axis onto machine +Z. The IR does not encode a
+//! particular controller.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -20,6 +29,7 @@ mod motion;
 mod ngc;
 mod process;
 mod program;
+mod rotary;
 mod schema;
 mod verify;
 
@@ -30,6 +40,10 @@ pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClM
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};
 pub use process::{CoolantMode, Event, ParamValue, ProcessKind, ProcessParams, Tool};
 pub use program::{Document, Program, SyncPoint};
+pub use rotary::{
+    RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, index_angle_for_axis, machine_to_part, part_to_machine, rotate_point, rotate_vector,
+    unwrap_angle,
+};
 pub use schema::json_schema;
 pub use verify::{Bounds, Issue, RefKind, VerifyOptions, VerifyReport, verify, verify_with};
 

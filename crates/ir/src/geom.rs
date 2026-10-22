@@ -43,6 +43,11 @@ impl Vec3 {
         self.z
     }
 
+    /// Components as given. The caller must pass finite values when they will be checked later.
+    pub(crate) fn from_xyz(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
+
     pub(crate) fn check(self, what: &str) -> Result<()> {
         finite(self.x, what)?;
         finite(self.y, what)?;
@@ -64,16 +69,21 @@ impl Vec3 {
 ///
 /// `tip` is the tool tip. `axis` points from the tip toward the spindle (or along the process
 /// direction). It is stored as given; a unit vector is the convention.
+///
+/// `rotary` is the machine A/B angle in degrees when the program has a [`crate::RotarySetup`].
+/// It may exceed 360 for multi-turn motion. A pose with no rotary angle is a 3-axis pose.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Pose {
     tip: Vec3,
     axis: Vec3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rotary: Option<f64>,
 }
 
 impl Pose {
     pub fn new(tip: Vec3, axis: Vec3) -> Result<Self> {
-        let pose = Self { tip, axis };
+        let pose = Self { tip, axis, rotary: None };
         pose.check()?;
         Ok(pose)
     }
@@ -88,9 +98,28 @@ impl Pose {
         self.axis
     }
 
+    /// Machine A/B angle in degrees, when this pose is indexed or continuously rotated.
+    pub fn rotary(self) -> Option<f64> {
+        self.rotary
+    }
+
+    /// Set the machine A/B angle in degrees. The value must be finite.
+    pub fn with_rotary(self, deg: f64) -> Result<Self> {
+        let pose = Self { rotary: Some(deg), ..self };
+        pose.check()?;
+        Ok(pose)
+    }
+
+    pub(crate) fn from_parts(tip: Vec3, axis: Vec3, rotary: Option<f64>) -> Self {
+        Self { tip, axis, rotary }
+    }
+
     pub(crate) fn check(self) -> Result<()> {
         self.tip.check("tool tip")?;
         self.axis.check_non_zero("tool axis")?;
+        if let Some(deg) = self.rotary {
+            finite(deg, "rotary angle")?;
+        }
         Ok(())
     }
 }

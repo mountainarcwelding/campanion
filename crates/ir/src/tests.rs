@@ -12,6 +12,7 @@ use crate::machine::{Axis, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, 
 use crate::motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 use crate::process::{CoolantMode, Event, ParamValue, ProcessKind, ProcessParams, Tool};
 use crate::program::{Document, Program, SyncPoint};
+use crate::rotary::{RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, machine_to_part};
 use crate::{FORMAT_MAJOR, FORMAT_TAG, IrError, MAX_AXES, check_format, json_schema};
 
 #[test]
@@ -183,7 +184,7 @@ fn too_many_axes_are_rejected() {
     let ids: Vec<u8> = (0..MAX_AXES).map(|ordinal| u8::try_from(ordinal).expect("id")).collect();
     let channel = Channel::try_new(0, "all", ids).expect("channel");
     let machine = Machine::try_new(axes, vec![channel]).expect("16 axes");
-    let program = Program::try_new(None, Vec::new(), Some(machine), Vec::new(), Vec::new(), Vec::new()).expect("program");
+    let program = Program::try_new(None, Vec::new(), Some(machine), Vec::new(), Vec::new(), Vec::new(), None).expect("program");
     let doc = Document::new(program).expect("document");
     assert_eq!(doc.program().machine().expect("machine").axes().len(), MAX_AXES);
 
@@ -292,15 +293,127 @@ fn profile_converts_to_ir() {
 fn committed_schema_matches_generated_schema() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/schema/campanion-ir-1.schema.json");
     let generated = json_schema().expect("schema");
+    let mut pretty = serde_json::to_string_pretty(&generated).expect("pretty");
+    pretty.push('\n');
+    if std::env::var("UPDATE_IR_SCHEMA").ok().as_deref() == Some("1") {
+        std::fs::write(&path, &pretty).expect("write schema");
+    }
     let committed_text = std::fs::read_to_string(&path).expect("docs/schema/campanion-ir-1.schema.json");
     let committed: serde_json::Value = serde_json::from_str(&committed_text).unwrap_or(serde_json::Value::Null);
     if committed != generated {
-        let mut pretty = serde_json::to_string_pretty(&generated).expect("pretty");
-        pretty.push('\n');
         panic!("schema mismatch for {}. generated schema follows\n{pretty}", path.display());
     }
     assert!(generated.get("$schema").is_some());
     assert!(generated.get("properties").and_then(|props| props.get("format")).is_some());
+}
+
+#[test]
+fn program_with_rotary_data_round_trips() {
+    let doc = rotary_sample();
+    round_trip(&doc);
+    let json = doc.to_json().expect("json");
+    assert!(json.contains("\"rotary\":{"));
+    assert!(json.contains("\"axis\":\"a\""));
+    assert!(json.contains("\"direction\":\"positive\""));
+    let pose_json = json.split("\"to\":").nth(1).expect("pose");
+    assert!(pose_json.contains("\"rotary\":90.0") || pose_json.contains("\"rotary\":90"));
+}
+
+#[test]
+fn old_ir_files_load_and_reserialize_byte_identically() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let files = [
+        "crates/post/tests/data/sample.ir.json",
+        "crates/post/tests/data/curves.ir.json",
+        "crates/post/tests/data/dome.ir.json",
+        "crates/post/tests/data/plasma.ir.json",
+        "crates/cli/tests/golden/sample.ir.json",
+        "crates/cli/tests/golden/dome_rough.ir.json",
+    ];
+    for rel in files {
+        let path = root.join(rel);
+        let original = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        let doc = Document::from_json(&original).unwrap_or_else(|err| panic!("{rel}: {err}"));
+        assert!(doc.program().rotary().is_none(), "{rel} should have no rotary setup");
+        let json = doc.to_json().expect("json");
+        assert!(!json.contains("\"rotary\""), "{rel} gained a rotary field");
+        let original_value: serde_json::Value = serde_json::from_str(&original).expect("original value");
+        let written_value: serde_json::Value = serde_json::from_str(&json).expect("written value");
+        assert_eq!(written_value, original_value, "{rel}");
+        assert_eq!(Document::from_json(&json).expect("reload").to_json().expect("again"), json, "{rel}");
+    }
+}
+
+#[test]
+fn rotary_pose_without_setup_is_rejected() {
+    let pose = Pose::new(Vec3::ZERO, Vec3::Z).expect("pose").with_rotary(0.0).expect("angle");
+    let err = Program::try_new(None, Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), None).expect_err("setup");
+    assert!(err.to_string().contains("block 0"), "{err}");
+    assert!(err.to_string().contains("rotary setup"), "{err}");
+}
+
+#[test]
+fn rotary_angle_outside_limits_is_rejected() {
+    let setup = RotarySetup::new(RotaryAxisKind::A, Vec3::ZERO, RotaryDirection::Positive, Some(RotaryLimits::new(-90.0, 90.0).expect("limits")))
+        .expect("setup");
+    let pose = indexed_pose(Vec3::ZERO, &setup, 120.0);
+    let err = Program::try_new(None, Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), Some(setup)).expect_err("limits");
+    assert!(err.to_string().contains("block 0"), "{err}");
+    assert!(err.to_string().contains("outside limits"), "{err}");
+}
+
+#[test]
+fn rotary_pose_with_inconsistent_tool_axis_is_rejected() {
+    let setup = RotarySetup::new(RotaryAxisKind::A, Vec3::ZERO, RotaryDirection::Positive, None).expect("setup");
+    let pose = Pose::new(Vec3::ZERO, Vec3::Z).expect("pose").with_rotary(90.0).expect("angle");
+    let err = Program::try_new(None, Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), Some(setup)).expect_err("axis");
+    assert!(err.to_string().contains("block 0"), "{err}");
+    assert!(err.to_string().contains("tool axis"), "{err}");
+}
+
+#[test]
+fn three_axis_poses_are_unchanged_when_a_setup_is_present() {
+    let setup = RotarySetup::new(RotaryAxisKind::B, Vec3::ZERO, RotaryDirection::Negative, None).expect("setup");
+    let pose = Pose::new(Vec3::new(1.0, 2.0, 3.0).expect("tip"), Vec3::Z).expect("pose");
+    let program = Program::try_new(None, Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), Some(setup)).expect("program");
+    assert!(program.toolpaths()[0].blocks().iter().any(|block| match block {
+        ClBlock::Motion(ClMotion::Rapid { to, .. }) => to.rotary().is_none() && to.axis() == Vec3::Z,
+        _ => false,
+    }));
+}
+
+fn indexed_pose(tip: Vec3, setup: &RotarySetup, angle: f64) -> Pose {
+    let expected = machine_to_part(setup, Pose::new(Vec3::ZERO, Vec3::Z).expect("z"), angle).axis();
+    Pose::new(tip, expected).expect("pose").with_rotary(angle).expect("rotary")
+}
+
+fn rapid_path(pose: Pose) -> ClPath {
+    ClPath::try_new(
+        None,
+        None,
+        CompensationMode::Off,
+        Feeds::try_new(100.0, None, None, None, None).expect("feeds"),
+        None,
+        Vec::new(),
+        vec![ClBlock::Motion(ClMotion::Rapid { to: pose, feed: None })],
+    )
+    .expect("path")
+}
+
+fn rotary_sample() -> Document {
+    let setup = RotarySetup::new(
+        RotaryAxisKind::A,
+        Vec3::new(0.0, 0.0, 0.0).expect("centre"),
+        RotaryDirection::Positive,
+        Some(RotaryLimits::new(-180.0, 180.0).expect("limits")),
+    )
+    .expect("setup");
+    let pose = indexed_pose(Vec3::new(1.0, 2.0, 3.0).expect("tip"), &setup, 90.0);
+    let program = Program::try_new(Some("indexed".into()), Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), Some(setup))
+        .expect("program")
+        .with_rotary(Some(setup))
+        .expect("with rotary");
+    Document::new(program).expect("document")
 }
 
 fn round_trip(doc: &Document) {
@@ -446,6 +559,7 @@ fn thirteen_axis_sample() -> Document {
         vec![toolpath],
         vec![primary, secondary],
         vec![SyncPoint::try_new(1, vec![0, 1]).expect("sync")],
+        None,
     )
     .expect("program");
     Document::new(program).expect("document")

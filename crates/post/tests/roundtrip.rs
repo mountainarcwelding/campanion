@@ -65,7 +65,7 @@ fn program_from(steps: &[Step]) -> Option<Program> {
     }
     let feeds = Feeds::try_new(100.0, None, None, None, None).ok()?;
     let path = ClPath::try_new(Some("prop".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).ok()?;
-    Program::try_new(Some("prop".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new()).ok()
+    Program::try_new(Some("prop".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).ok()
 }
 
 fn steps_strategy() -> impl Strategy<Value = Vec<Step>> {

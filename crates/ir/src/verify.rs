@@ -869,12 +869,12 @@ mod tests {
     }
 
     fn program_with_path(blocks: Vec<ClBlock>) -> Program {
-        Program::try_new(None, Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new()).expect("program")
+        Program::try_new(None, Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new(), None).expect("program")
     }
 
     fn program_with_paths(paths: Vec<Vec<ClBlock>>) -> Program {
         let paths = paths.into_iter().map(path).collect();
-        Program::try_new(None, Vec::new(), None, paths, Vec::new(), Vec::new()).expect("program")
+        Program::try_new(None, Vec::new(), None, paths, Vec::new(), Vec::new(), None).expect("program")
     }
 
     fn axis_machine(limits: Option<(f64, f64)>) -> Machine {
@@ -936,8 +936,8 @@ mod tests {
     fn axis_limit_is_reported() {
         let motion = AxisMotion::Linear { targets: vec![AxisTarget::try_new(0, 25.0).expect("target")], feed: 100.0 };
         let channel = ChannelProgram::try_new(0, vec![AxisBlock::Motion(motion)]).expect("channel");
-        let program =
-            Program::try_new(None, Vec::new(), Some(axis_machine(Some((-10.0, 10.0)))), Vec::new(), vec![channel], Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), Some(axis_machine(Some((-10.0, 10.0)))), Vec::new(), vec![channel], Vec::new(), None)
+            .expect("program");
         let report = verify(&program);
         assert_eq!(report.issues().len(), 1, "{:?}", report.issues());
         assert!(matches!(
@@ -1014,7 +1014,7 @@ mod tests {
     fn unknown_axis_is_reported() {
         let motion = AxisMotion::Linear { targets: vec![AxisTarget::try_new(0, 1.0).expect("target")], feed: 100.0 };
         let channel = ChannelProgram::try_new(0, vec![AxisBlock::Motion(motion)]).expect("channel");
-        let program = Program::try_new(None, Vec::new(), Some(axis_machine(None)), Vec::new(), vec![channel], Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), Some(axis_machine(None)), Vec::new(), vec![channel], Vec::new(), None).expect("program");
         let program = patched(&program, |value| {
             let Some(axis) = value.pointer_mut("/channel_programs/0/blocks/0/targets/0/axis") else {
                 panic!("axis");
@@ -1050,7 +1050,7 @@ mod tests {
 
     fn axis_program(blocks: Vec<AxisBlock>) -> Program {
         let channel = ChannelProgram::try_new(7, blocks).expect("channel");
-        Program::try_new(None, Vec::new(), Some(xyz_machine()), Vec::new(), vec![channel], Vec::new()).expect("program")
+        Program::try_new(None, Vec::new(), Some(xyz_machine()), Vec::new(), vec![channel], Vec::new(), None).expect("program")
     }
 
     #[test]

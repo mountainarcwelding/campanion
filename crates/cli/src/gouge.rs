@@ -358,7 +358,7 @@ mod tests {
         let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
         let path = ClPath::try_new(Some(name.into()), Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
         let tool = Tool::try_new(1, None, Some(2.0), None).expect("tool");
-        Program::try_new(None, vec![tool], None, vec![path], Vec::new(), Vec::new()).expect("program")
+        Program::try_new(None, vec![tool], None, vec![path], Vec::new(), Vec::new(), None).expect("program")
     }
 
     #[test]

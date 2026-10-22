@@ -1078,10 +1078,17 @@
     },
     "Pose": {
       "additionalProperties": false,
-      "description": "Tool pose in the part frame.\n\n`tip` is the tool tip. `axis` points from the tip toward the spindle (or along the process\ndirection). It is stored as given; a unit vector is the convention.",
+      "description": "Tool pose in the part frame.\n\n`tip` is the tool tip. `axis` points from the tip toward the spindle (or along the process\ndirection). It is stored as given; a unit vector is the convention.\n\n`rotary` is the machine A/B angle in degrees when the program has a [`crate::RotarySetup`].\nIt may exceed 360 for multi-turn motion. A pose with no rotary angle is a 3-axis pose.",
       "properties": {
         "axis": {
           "$ref": "#/$defs/Vec3"
+        },
+        "rotary": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "tip": {
           "$ref": "#/$defs/Vec3"
@@ -1259,6 +1266,16 @@
             "null"
           ]
         },
+        "rotary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RotarySetup"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "syncs": {
           "items": {
             "$ref": "#/$defs/SyncPoint"
@@ -1283,6 +1300,86 @@
         "toolpaths",
         "channel_programs",
         "syncs"
+      ],
+      "type": "object"
+    },
+    "RotaryAxisKind": {
+      "description": "A or B table axis, named in the part frame.",
+      "oneOf": [
+        {
+          "const": "a",
+          "description": "Rotation about the part X axis.",
+          "type": "string"
+        },
+        {
+          "const": "b",
+          "description": "Rotation about the part Y axis.",
+          "type": "string"
+        }
+      ]
+    },
+    "RotaryDirection": {
+      "description": "Sign applied to the machine A/B angle before a right-hand rotation about the axis.",
+      "oneOf": [
+        {
+          "const": "positive",
+          "description": "The machine angle is used as the right-hand rotation angle.",
+          "type": "string"
+        },
+        {
+          "const": "negative",
+          "description": "The machine angle is negated before the right-hand rotation.",
+          "type": "string"
+        }
+      ]
+    },
+    "RotaryLimits": {
+      "additionalProperties": false,
+      "description": "Inclusive travel limits for a machine A/B angle, in degrees. `min_deg` is strictly less than\n`max_deg`. Stored angles may exceed 360; the limits apply to that stored value.",
+      "properties": {
+        "max_deg": {
+          "format": "double",
+          "type": "number"
+        },
+        "min_deg": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "min_deg",
+        "max_deg"
+      ],
+      "type": "object"
+    },
+    "RotarySetup": {
+      "additionalProperties": false,
+      "description": "Fourth-axis table setup in the part frame.\n\n`center` is a point on the rotary axis line, in millimetres. The axis direction is part +X for\n[`RotaryAxisKind::A`] and part +Y for [`RotaryAxisKind::B`]. [`RotaryDirection`] is the sign\napplied to the machine angle before a right-hand rotation about that direction.",
+      "properties": {
+        "axis": {
+          "$ref": "#/$defs/RotaryAxisKind"
+        },
+        "center": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "direction": {
+          "$ref": "#/$defs/RotaryDirection"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RotaryLimits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "axis",
+        "center",
+        "direction"
       ],
       "type": "object"
     },

@@ -621,8 +621,8 @@ mod tests {
 
     #[test]
     fn default_ends_with_m30() {
-        let program =
-            Program::try_new(None, Vec::new(), None, vec![path(None, vec![rapid(1.0, 2.0, 3.0, None)])], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, vec![path(None, vec![rapid(1.0, 2.0, 3.0, None)])], Vec::new(), Vec::new(), None)
+            .expect("program");
         assert_eq!(
             write_ngc(&program).expect("ngc"),
             "\
@@ -636,8 +636,8 @@ M30
 
     #[test]
     fn m2_option_ends_with_m2() {
-        let program =
-            Program::try_new(None, Vec::new(), None, vec![path(None, vec![rapid(1.0, 2.0, 3.0, None)])], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, vec![path(None, vec![rapid(1.0, 2.0, 3.0, None)])], Vec::new(), Vec::new(), None)
+            .expect("program");
         let options = NgcOptions { program_end: ProgramEnd::M2 };
         assert_eq!(
             write_ngc_with(&program, options).expect("ngc"),
@@ -658,7 +658,7 @@ M2
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Laser }),
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() }),
         ];
-        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new(), None).expect("program");
         assert_eq!(
             write_ngc(&program).expect("ngc"),
             "\
@@ -726,7 +726,7 @@ M30
         );
         let hole = path(Some("hole"), vec![rapid(-1.5, 0.0, 0.0, None), linear(-1.5, 2.0, 0.0, 80.0)]);
         let tools = vec![Tool::try_new(4, None, None, None).expect("tool")];
-        let program = Program::try_new(Some("plate (rev 1)".into()), tools, None, vec![outer, hole], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(Some("plate (rev 1)".into()), tools, None, vec![outer, hole], Vec::new(), Vec::new(), None).expect("program");
 
         let text = write_ngc(&program).expect("ngc");
         assert_eq!(
@@ -805,7 +805,7 @@ M30
                 role: MoveRole::Cut,
             }),
         ];
-        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new(), None).expect("program");
         let text = write_ngc(&program).expect("ngc");
         assert_eq!(
             text,
@@ -860,9 +860,16 @@ M30
         )
         .expect("head");
         let aux = ChannelProgram::try_new(1, vec![AxisBlock::Event(Event::Sync { id: 3 })]).expect("aux");
-        let program =
-            Program::try_new(None, Vec::new(), Some(machine), Vec::new(), vec![head, aux], vec![SyncPoint::try_new(3, vec![0, 1]).expect("sync")])
-                .expect("program");
+        let program = Program::try_new(
+            None,
+            Vec::new(),
+            Some(machine),
+            Vec::new(),
+            vec![head, aux],
+            vec![SyncPoint::try_new(3, vec![0, 1]).expect("sync")],
+            None,
+        )
+        .expect("program");
         let text = write_ngc(&program).expect("ngc");
         assert_eq!(
             text,
@@ -887,14 +894,14 @@ M30
     fn arc_without_a_position_is_rejected() {
         let arc =
             ClMotion::Arc { to: pose(1.0, 0.0, 0.0), plane: Plane::Xy, center: Vec3::ZERO, sense: ArcSense::Ccw, feed: 10.0, role: MoveRole::Cut };
-        let only =
-            Program::try_new(None, Vec::new(), None, vec![path(None, vec![ClBlock::Motion(arc.clone())])], Vec::new(), Vec::new()).expect("program");
+        let only = Program::try_new(None, Vec::new(), None, vec![path(None, vec![ClBlock::Motion(arc.clone())])], Vec::new(), Vec::new(), None)
+            .expect("program");
         let err = write_ngc(&only).expect_err("arc");
         assert!(err.to_string().contains("prior X"), "{err}");
 
         let moved = path(None, vec![rapid(0.0, 0.0, 0.0, None)]);
         let again = path(None, vec![ClBlock::Motion(arc)]);
-        let split = Program::try_new(None, Vec::new(), None, vec![moved, again], Vec::new(), Vec::new()).expect("program");
+        let split = Program::try_new(None, Vec::new(), None, vec![moved, again], Vec::new(), Vec::new(), None).expect("program");
         let err = write_ngc(&split).expect_err("reset");
         assert!(err.to_string().contains("prior X"), "{err}");
     }
@@ -921,7 +928,7 @@ M30
             ],
         )
         .expect("channel");
-        let program = Program::try_new(None, Vec::new(), Some(machine), Vec::new(), vec![channel], Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), Some(machine), Vec::new(), vec![channel], Vec::new(), None).expect("program");
         let err = write_ngc(&program).expect_err("z");
         assert!(err.to_string().contains("prior Z"), "{err}");
     }
@@ -939,7 +946,7 @@ M30
         let machine = Machine::try_new(vec![axis], vec![Channel::try_new(0, "extra", vec![0]).expect("channel")]).expect("machine");
         let motion = AxisMotion::Linear { targets: vec![AxisTarget::try_new(0, 1.0).expect("target")], feed: 10.0 };
         let channel = ChannelProgram::try_new(0, vec![AxisBlock::Motion(motion)]).expect("channel");
-        let program = Program::try_new(None, Vec::new(), Some(machine), Vec::new(), vec![channel], Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), Some(machine), Vec::new(), vec![channel], Vec::new(), None).expect("program");
         let err = write_ngc(&program).expect_err("index");
         assert_eq!(err, IrError::NotSupported("indexed axis in the ngc test sink".into()));
     }
@@ -958,7 +965,7 @@ M30
                 role: MoveRole::Cut,
             }),
         ];
-        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new(), None).expect("program");
         let err = write_ngc(&program).expect_err("turns");
         assert!(err.to_string().contains("10000"), "{err}");
     }
@@ -971,7 +978,7 @@ M30
             linear(-1.0, 0.0, 0.0, 8.0),
             arc((-1.0, 1.0, -1.0e-16), Plane::Xy, (-1.0, -4.440892098500626e-16, 0.0), ArcSense::Ccw, 8.0),
         ];
-        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new()).expect("program");
+        let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new(), None).expect("program");
         let text = write_ngc(&program).expect("ngc");
         assert_eq!(
             text,
