@@ -1,8 +1,8 @@
 //! SVG import into millimetre contours.
 //!
 //! The root `viewBox` and `width`/`height` become one affine, then Y is flipped into the same
-//! plane as DXF import. Element `transform` attributes compose inside that map. Curves flatten
-//! to lines. A circle whose full affine is a similarity stays one exact arc.
+//! plane as DXF import. Element `transform` attributes compose inside that map. Curves are fitted
+//! with lines and arcs within tolerance. A circle whose full affine is a similarity stays one exact arc.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -214,7 +214,7 @@ impl Import {
             return Ok(());
         }
         path.apply_affine(full);
-        let subpaths = flatten_path(&path, self.flatten_tol, self.budget())?;
+        let subpaths = fit_path(&path, self.flatten_tol, self.budget())?;
         self.add_subpaths(layer, subpaths)
     }
 
@@ -545,32 +545,72 @@ struct Pen {
     current: Vec<Segment>,
 }
 
-fn flatten_path(path: &kurbo::BezPath, tolerance: f64, budget: usize) -> Result<Vec<Vec<Segment>>> {
+fn fit_path(path: &kurbo::BezPath, tolerance: f64, budget: usize) -> Result<Vec<Vec<Segment>>> {
     let mut subpaths = Vec::new();
     let mut pen = Pen { start: None, last: None, current: Vec::new() };
     let mut produced = 0usize;
-    let mut failure: Option<crate::ImportError> = None;
-    kurbo::flatten(path.elements().iter().copied(), tolerance, |element| {
-        if failure.is_some() {
-            return;
+    let opts = crate::arcfit::FitOptions::new(tolerance);
+    for element in path.elements() {
+        match *element {
+            kurbo::PathEl::MoveTo(point) => move_pen(&mut pen, &mut subpaths, point)?,
+            kurbo::PathEl::LineTo(point) => line_pen(&mut pen, point, &mut produced, budget)?,
+            kurbo::PathEl::QuadTo(p1, p2) => fit_quad(&mut pen, p1, p2, &opts, &mut produced, budget)?,
+            kurbo::PathEl::CurveTo(p1, p2, p3) => fit_cubic(&mut pen, p1, p2, p3, &opts, &mut produced, budget)?,
+            kurbo::PathEl::ClosePath => close_pen(&mut pen, &mut subpaths, &mut produced, budget)?,
         }
-        let step = match element {
-            kurbo::PathEl::MoveTo(point) => move_pen(&mut pen, &mut subpaths, point),
-            kurbo::PathEl::LineTo(point) => line_pen(&mut pen, point, &mut produced, budget),
-            kurbo::PathEl::ClosePath => close_pen(&mut pen, &mut subpaths, &mut produced, budget),
-            kurbo::PathEl::QuadTo(_, _) | kurbo::PathEl::CurveTo(_, _, _) => Err(invalid("curve survived flattening")),
-        };
-        if let Err(err) = step {
-            failure = Some(err);
-        }
-    });
-    if let Some(err) = failure {
-        return Err(err);
     }
     if !pen.current.is_empty() {
         subpaths.push(pen.current);
     }
     Ok(subpaths)
+}
+
+fn fit_quad(pen: &mut Pen, p1: kurbo::Point, p2: kurbo::Point, opts: &crate::arcfit::FitOptions, produced: &mut usize, budget: usize) -> Result<()> {
+    let Some(start) = pen.last else {
+        return start_pen(pen, p2);
+    };
+    let segments = crate::arcfit::fit_quad((start.x(), start.y()), (p1.x, p1.y), (p2.x, p2.y), opts)?;
+    push_fitted(pen, segments, produced, budget)?;
+    pen.last = Some(geom_point(p2)?);
+    Ok(())
+}
+
+fn fit_cubic(
+    pen: &mut Pen,
+    p1: kurbo::Point,
+    p2: kurbo::Point,
+    p3: kurbo::Point,
+    opts: &crate::arcfit::FitOptions,
+    produced: &mut usize,
+    budget: usize,
+) -> Result<()> {
+    let Some(start) = pen.last else {
+        return start_pen(pen, p3);
+    };
+    let segments = crate::arcfit::fit_cubic((start.x(), start.y()), (p1.x, p1.y), (p2.x, p2.y), (p3.x, p3.y), opts)?;
+    push_fitted(pen, segments, produced, budget)?;
+    pen.last = Some(geom_point(p3)?);
+    Ok(())
+}
+
+/// No current point: adopt the curve end and emit nothing, as `line_pen` does.
+fn start_pen(pen: &mut Pen, point: kurbo::Point) -> Result<()> {
+    let point = geom_point(point)?;
+    pen.start = Some(point);
+    pen.last = Some(point);
+    Ok(())
+}
+
+fn push_fitted(pen: &mut Pen, segments: Vec<Segment>, produced: &mut usize, budget: usize) -> Result<()> {
+    for segment in segments {
+        in_range(segment)?;
+        *produced = produced.checked_add(1).ok_or_else(too_many)?;
+        if *produced > budget {
+            return Err(too_many());
+        }
+        pen.current.push(segment);
+    }
+    Ok(())
 }
 
 fn move_pen(pen: &mut Pen, subpaths: &mut Vec<Vec<Segment>>, point: kurbo::Point) -> Result<()> {

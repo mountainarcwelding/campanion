@@ -62,18 +62,19 @@ fn relative_path_is_closed_with_bbox() {
 }
 
 #[test]
-fn elliptical_arc_flattens_to_closed_bbox() {
+fn elliptical_arc_fits_to_closed_bbox() {
     // Two semicircles make a full ellipse centred at (50, 30), rx=30, ry=15.
     // User bbox x=20..80, y=15..45. Y flip in a 100mm page moves y to 55..85.
-    // Extrema of the minor axis are chorded, so the box matches within tolerance.
+    // The arc fit stays on that box within tolerance.
     let svg = r#"<svg width="100mm" height="100mm" viewBox="0 0 100 100"><path d="M20 30 A30 15 0 0 0 80 30 A30 15 0 0 0 20 30 Z"/></svg>"#;
     let drawing = drawing(svg);
     assert_eq!(drawing.contours().len(), 1);
     let contour = drawing.contours()[0].contour();
     assert!(contour.is_closed(), "Z closes the contour");
     let segments = contour.segments();
-    assert!(segments.len() > 1, "an elliptical arc flattens");
-    assert!(segments.iter().all(|segment| matches!(segment, Segment::Line(_))), "flattened to lines");
+    assert!(segments.len() > 1, "an elliptical arc is fitted");
+    assert!(segments.iter().any(|segment| matches!(segment, Segment::Arc(_))), "fitted with arcs");
+    assert!(segments.iter().all(|segment| matches!(segment, Segment::Line(_) | Segment::Arc(_))), "fitted with lines and arcs");
     let bounds = contour.bounding_box().expect("bounds");
     let min = bounds.min();
     let max = bounds.max();
