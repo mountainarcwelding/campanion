@@ -3,11 +3,18 @@
 //! Straight cuts are sampled directly. An arc or helix in the XY plane is sampled along the
 //! circle, with Z interpolated from the start to the end. An arc in another plane is rejected:
 //! surface operations emit lines, roughing emits XY arcs, and only the XY case has a defined sample.
+//!
+//! A program with a rotary setup is checked in the indexed view. The mesh is turned by the same
+//! angle the operation was planned at, and each pose is mapped back to that view before sampling.
+//! An arc stored on a cardinal plane is turned back into machine XY. A 3-axis program is unchanged.
 
-use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, MoveRole, Plane, Program, Vec3 as IrVec};
+use std::borrow::Cow;
+
+use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, MoveRole, Plane, Pose, Program, RotarySetup, Vec3 as IrVec, part_to_machine};
 use campanion_mesh::{Cutter, DropCutter, Mesh, Vec3 as MeshVec, check_gouges};
 
 use crate::error::CliError;
+use crate::index;
 use crate::jobfile::{JobFile, JobTool, Operation, OperationKind};
 use crate::report::GougeNote;
 use crate::rough;
@@ -64,18 +71,17 @@ pub(crate) fn check_job(job: &JobFile, mesh: &Mesh, program: &Program) -> Result
     let tolerance = job.tolerance().chord();
     let sample_step = sample_step_for(tolerance)?;
     let paths = program.toolpaths();
-    if paths.len() != job.operations().len() {
-        return Err(CliError::run("gouge check: toolpath count does not match the job"));
-    }
+    let setup = job.rotary();
     let mut notes = Vec::new();
-    for (index, op) in job.operations().iter().enumerate() {
-        let Some(path) = paths.get(index) else {
-            return Err(CliError::run("gouge check: missing toolpath"));
+    for op in job.operations() {
+        let Some(path) = paths.iter().find(|path| path.name() == Some(op.name())) else {
+            return Err(CliError::run(format!("gouge check: missing toolpath for operation {}", op.name())));
         };
         let Some(tool) = job.tool(op.tool_id()) else {
             return Err(CliError::run(format!("operation {}: unknown tool {}", op.name(), op.tool_id())));
         };
-        notes.extend(check_one(op.name(), path, mesh, tool, sample_step, tolerance, op)?);
+        let angle = op.index_deg().unwrap_or(0.0);
+        notes.extend(check_one(op.name(), path, mesh, tool, sample_step, tolerance, op, setup.as_ref(), angle)?);
     }
     Ok(notes)
 }
@@ -83,17 +89,33 @@ pub(crate) fn check_job(job: &JobFile, mesh: &Mesh, program: &Program) -> Result
 /// Check every toolpath in `program` with one cutter. Used by `verify --mesh`.
 pub(crate) fn check_program(program: &Program, mesh: &Mesh, cutter: Cutter, tolerance: f64) -> Result<Vec<GougeNote>, CliError> {
     let sample_step = sample_step_for(tolerance)?;
+    if let Some(setup) = program.rotary() {
+        let mut notes = Vec::new();
+        for (index, path) in program.toolpaths().iter().enumerate() {
+            let name = path_label(path, index);
+            let angle = path_angle(path);
+            let view = indexed_mesh(mesh, Some(setup), angle)?;
+            let dc = DropCutter::new(view.as_ref(), cutter).map_err(|err| CliError::run(format!("mesh: {err}")))?;
+            let segments = cutting_segments(path, sample_step, Some(setup))?;
+            notes.extend(notes_for(&name, &dc, &segments, sample_step, tolerance)?);
+        }
+        return Ok(notes);
+    }
     let dc = DropCutter::new(mesh, cutter).map_err(|err| CliError::run(format!("mesh: {err}")))?;
     let mut notes = Vec::new();
     for (index, path) in program.toolpaths().iter().enumerate() {
-        let name = match path.name() {
-            Some(name) if !name.is_empty() => name.to_string(),
-            _ => format!("toolpath {index}"),
-        };
-        let segments = cutting_segments(path, sample_step)?;
+        let name = path_label(path, index);
+        let segments = cutting_segments(path, sample_step, None)?;
         notes.extend(notes_for(&name, &dc, &segments, sample_step, tolerance)?);
     }
     Ok(notes)
+}
+
+fn path_label(path: &ClPath, index: usize) -> String {
+    match path.name() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => format!("toolpath {index}"),
+    }
 }
 
 fn check_one(
@@ -104,11 +126,25 @@ fn check_one(
     sample_step: f64,
     tolerance: f64,
     op: &Operation,
+    setup: Option<&RotarySetup>,
+    angle: f64,
 ) -> Result<Vec<GougeNote>, CliError> {
     let cutter = cutter_for(op, tool)?;
-    let dc = DropCutter::new(mesh, cutter).map_err(|err| CliError::run(format!("operation {name}: {err}")))?;
-    let segments = cutting_segments(path, sample_step)?;
+    let view = indexed_mesh(mesh, setup, angle)?;
+    let dc = DropCutter::new(view.as_ref(), cutter).map_err(|err| CliError::run(format!("operation {name}: {err}")))?;
+    let segments = cutting_segments(path, sample_step, setup)?;
     notes_for(name, &dc, &segments, sample_step, tolerance)
+}
+
+/// Part mesh, or that mesh turned into the indexed view when `angle` is not zero.
+fn indexed_mesh<'a>(mesh: &'a Mesh, setup: Option<&RotarySetup>, angle: f64) -> Result<Cow<'a, Mesh>, CliError> {
+    let Some(setup) = setup else {
+        return Ok(Cow::Borrowed(mesh));
+    };
+    if !index::angles_differ(angle, 0.0) {
+        return Ok(Cow::Borrowed(mesh));
+    }
+    Ok(Cow::Owned(index::rotate_mesh(mesh, setup, angle)?))
 }
 
 /// Flat, ball or bull nose taken from the job tool. Roughing and waterline use the same shapes.
@@ -148,46 +184,91 @@ fn mesh_vec(point: IrVec) -> MeshVec {
     MeshVec::new(point.x(), point.y(), point.z())
 }
 
-fn cutting_segments(path: &ClPath, sample_step: f64) -> Result<Vec<(MeshVec, MeshVec)>, CliError> {
-    let mut cursor: Option<IrVec> = None;
+fn cutting_segments(path: &ClPath, sample_step: f64, setup: Option<&RotarySetup>) -> Result<Vec<(MeshVec, MeshVec)>, CliError> {
+    let mut cursor: Option<Pose> = None;
     let mut segments = Vec::new();
     for block in path.blocks() {
         let ClBlock::Motion(motion) = block else {
             continue;
         };
         match motion {
-            ClMotion::Rapid { to, .. } => cursor = Some(to.tip()),
+            ClMotion::Rapid { to, .. } => cursor = Some(*to),
             ClMotion::Linear { to, role, .. } => {
-                let end = to.tip();
                 if cutting(*role) {
-                    let start = cursor.unwrap_or(end);
-                    push_segment(&mut segments, mesh_vec(start), mesh_vec(end))?;
+                    let start = cursor.unwrap_or(*to);
+                    push_segment(&mut segments, mesh_vec(machine_tip(setup, start)), mesh_vec(machine_tip(setup, *to)))?;
                 }
-                cursor = Some(end);
+                cursor = Some(*to);
             }
             ClMotion::Arc { to, plane, center, sense, role, .. } => {
-                let end = to.tip();
                 if cutting(*role) {
                     let Some(start) = cursor else {
                         return Err(CliError::run("gouge check: arc needs a start position"));
                     };
-                    append_arc(&mut segments, start, end, *center, *plane, *sense, None, sample_step)?;
+                    append_curve(&mut segments, setup, start, *to, *center, *plane, *sense, None, sample_step)?;
                 }
-                cursor = Some(end);
+                cursor = Some(*to);
             }
             ClMotion::Helix { to, plane, center, sense, sweep, role, .. } => {
-                let end = to.tip();
                 if cutting(*role) {
                     let Some(start) = cursor else {
                         return Err(CliError::run("gouge check: arc needs a start position"));
                     };
-                    append_arc(&mut segments, start, end, *center, *plane, *sense, Some(*sweep), sample_step)?;
+                    append_curve(&mut segments, setup, start, *to, *center, *plane, *sense, Some(*sweep), sample_step)?;
                 }
-                cursor = Some(end);
+                cursor = Some(*to);
             }
         }
     }
     Ok(segments)
+}
+
+/// Tip in the frame the drop cutter uses. A rotary pose is turned back into the indexed view.
+fn machine_tip(setup: Option<&RotarySetup>, pose: Pose) -> IrVec {
+    match setup {
+        Some(setup) => part_to_machine(setup, pose, pose.rotary().unwrap_or(0.0)).tip(),
+        None => pose.tip(),
+    }
+}
+
+fn append_curve(
+    segments: &mut Vec<(MeshVec, MeshVec)>,
+    setup: Option<&RotarySetup>,
+    start: Pose,
+    end: Pose,
+    center: IrVec,
+    plane: Plane,
+    sense: ArcSense,
+    sweep: Option<f64>,
+    sample_step: f64,
+) -> Result<(), CliError> {
+    let Some(setup) = setup else {
+        return append_arc(segments, start.tip(), end.tip(), center, plane, sense, sweep, sample_step);
+    };
+    let angle = end.rotary().unwrap_or(0.0);
+    let view = index::arc_to_machine(setup, angle, start.tip(), end, center, plane, sense)?;
+    if view.plane != Plane::Xy {
+        return Err(non_xy(view.plane));
+    }
+    append_arc(segments, view.start, view.end, view.center, view.plane, view.sense, sweep, sample_step)
+}
+
+fn path_angle(path: &ClPath) -> f64 {
+    for block in path.blocks() {
+        let ClBlock::Motion(motion) = block else {
+            continue;
+        };
+        if let Some(angle) = motion_pose(motion).rotary() {
+            return angle;
+        }
+    }
+    0.0
+}
+
+fn motion_pose(motion: &ClMotion) -> Pose {
+    match motion {
+        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => *to,
+    }
 }
 
 fn push_segment(segments: &mut Vec<(MeshVec, MeshVec)>, start: MeshVec, end: MeshVec) -> Result<(), CliError> {
@@ -196,6 +277,10 @@ fn push_segment(segments: &mut Vec<(MeshVec, MeshVec)>, start: MeshVec, end: Mes
     }
     segments.push((start, end));
     Ok(())
+}
+
+fn non_xy(plane: Plane) -> CliError {
+    CliError::run(format!("gouge check cannot sample a {} arc; only XY arcs are sampled, and surface operations emit lines", plane_name(plane)))
 }
 
 fn plane_name(plane: Plane) -> &'static str {
@@ -218,10 +303,7 @@ fn append_arc(
     sample_step: f64,
 ) -> Result<(), CliError> {
     if plane != Plane::Xy {
-        return Err(CliError::run(format!(
-            "gouge check cannot sample a {} arc; only XY arcs are sampled, and surface operations emit lines",
-            plane_name(plane)
-        )));
+        return Err(non_xy(plane));
     }
     let (sx, sy, sz) = (start.x(), start.y(), start.z());
     let (ex, ey, ez) = (end.x(), end.y(), end.z());

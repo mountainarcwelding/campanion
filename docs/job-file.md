@@ -22,6 +22,7 @@ lengths are millimetres and feeds are millimetres per minute.
 | `tolerance` | no | Linear, angular and chord tolerances. Omitted fields default to 1e-6 mm (linear), 1e-6 rad (angular) and 0.01 mm (chord). Defaults are not scaled when `units` is `inch`. |
 | `tools` | yes | Array of tools. May be empty when `operations` is empty. |
 | `operations` | yes | Array of operations, in cut order. May be empty. |
+| `rotary` | no | Fourth-axis table for indexed 3+1. See below. |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
 
@@ -114,6 +115,7 @@ unique within that operation. The same layer may appear on two operations.
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
 | `cut_height` | no | Absolute Z to feed to after the pierce, before the cut. |
 | `timing` | no | Delays and the two process-on toggles. See below. |
+| `index_deg` | no | Machine A or B angle in degrees. Not scaled by `units`. Requires a job-level `rotary`. Omitted on a rotary job, the operation runs at 0° and its poses carry rotary 0. |
 
 `depth` and `step_down` must be a legal `campanion-path` depth plan: positive, at most 1e6 mm,
 and at most 1024 passes. Five millimetres at a two millimetre step is three passes (2, 4, 5).
@@ -187,6 +189,8 @@ a rapid is still at clearance, and the retract feeds to the job retract height.
 The toolpath rapids to clearance above the first point, turns the process on, plunges to the
 first cutter location, cuts each polyline, cuts the drop-cutter samples that join one line to
 the next, retracts to the retract height, turns the process off, and rapids back to clearance.
+A chord that would pass more than the chord tolerance below the drop-cutter tip is not cut.
+The tool retracts, rapids at clearance, and plunges onto the next point.
 
 `examples/dome.job.json` finishes `examples/dome.stl` with a 6 mm ball nose, a 1 mm stepover and
 a 0.01 mm chord tolerance. The mesh is a 40 mm square plate at Z = 0 with a dome of radius 15 mm
@@ -297,6 +301,48 @@ A delay of zero adds no dwell when a path is later timed. The toggles are the tw
 
 The loader stores delays, toggles and heights on the same process-parameter object the profile
 job builds, so both files share one mapping.
+
+## Indexed 3+1
+
+`rotary` turns the part about one table axis while the tool stays on machine +Z. The IR stays in the part frame: every pose is mapped back with the inverse rotation and tagged with the index angle.
+
+```json
+"rotary": {
+  "axis": "a",
+  "center": [0, 0, 0],
+  "direction": "positive",
+  "limits": { "min_deg": -120, "max_deg": 120 }
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `axis` | yes | `"a"` rotates about part +X. `"b"` rotates about part +Y. |
+| `center` | yes | `[x, y, z]`, a point on the axis line. A length in `units`, at most 1e6 mm after conversion. |
+| `direction` | yes | `"positive"` uses the machine angle as a right-hand rotation about the axis. `"negative"` negates the angle first. |
+| `limits` | no | `{min_deg, max_deg}` in degrees. Not scaled. `min_deg` is strictly less than `max_deg`. A stored angle must lie inside the inclusive range. |
+
+`index_deg` is the angle θ for that operation. It is a finite number of degrees and is not scaled. `index_deg` without `rotary` fails the load with `operation `<name>`: index_deg needs a rotary setup`. An operation that omits `index_deg` on a rotary job runs at θ = 0, and its poses carry rotary 0. A job with no `rotary` stays 3-axis: poses have no rotary angle, and existing files produce the same toolpath bytes.
+
+With index angle θ the machine turns the part by θ.
+
+- A profile, pocket, drill, engrave, face or chamfer reads its DXF or SVG geometry as drawn in the indexed view (machine XY, Z up). That geometry is not rotated.
+- A surface, rough or waterline, and the gouge check for those operations, runs on the mesh turned by θ about the rotary axis. The turn is the same rotation `rotate_point` applies. On a surface, a chord that would gouge that turned mesh retracts and plunges instead of cutting through the silhouette.
+- Each planned pose is mapped back into the part frame and tagged with θ. The tool axis on that pose is machine +Z turned by the same inverse rotation.
+
+When two consecutive operations have different index angles, and before the first operation when its index is not 0° (the program starts at 0°), the run inserts an index change:
+
+1. A rapid retract to a safe height Zs in the current indexed view.
+2. A rapid that keeps the tip at that machine position and changes the rotary angle. The pose is mapped with the new angle.
+3. The next operation continues from there.
+
+The retract is part of the operation being left, at the old angle. The rotary rapid is the first move of the operation being entered, at the new angle. When the program starts away from 0° there is no previous operation, so the retract is its own toolpath at 0° and the rotary rapid is prepended to the first operation.
+
+Zs is the greater of the job safe height and the swept radius plus the rapid clearance. Both of those heights are `heights.clearance` (default 5 mm). The swept radius is the largest distance from the rotary axis line to the stock. A 2D job uses the corners of a box around the selected contours: XY from those bounds, Z from `-depth` up to the stock surface at 0. An STL job has no stock box, so the radius is measured to the mesh vertices.
+
+`examples/indexed.job.json` finishes `examples/dome.stl` with a 6 mm ball at index 0° and 90° about A through the origin.
+
+Posts do not write a rotary axis yet. A program that contains any rotary angle is rejected before output, with `post `<id>` does not support a rotary axis`. A setup whose poses carry no angle still posts.
 
 ## Limits
 

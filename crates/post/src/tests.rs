@@ -1,5 +1,6 @@
 use campanion_ir::{
-    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program, Tool, Vec3,
+    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind,
+    RotaryDirection, RotarySetup, Tool, Vec3,
 };
 
 use crate::{PostOptions, builtin, builtin_ids, compare, load_post, post_program, read_back};
@@ -35,6 +36,39 @@ fn options() -> PostOptions {
 
 fn linux() -> crate::PostDef {
     builtin("linuxcnc").expect("linuxcnc")
+}
+
+#[test]
+fn rotary_angles_are_rejected_by_every_post() {
+    let blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(1.0, 2.0, 5.0), feed: None })];
+    let plain = program(blocks.clone());
+    let posted = post_program(&plain, &linux(), &options()).expect("plain");
+
+    let setup = RotarySetup::new(RotaryAxisKind::A, Vec3::ZERO, RotaryDirection::Positive, None).expect("setup");
+    let with_setup =
+        Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new(), Some(setup)).expect("setup");
+    assert_eq!(post_program(&with_setup, &linux(), &options()).expect("no angles"), posted);
+
+    let angled = pose(0.0, 0.0, 5.0).with_rotary(90.0).expect("angle");
+    // A-positive 90° turns machine +Z into part +Y.
+    let axis = Vec3::Y;
+    let turned = Pose::new(angled.tip(), axis).expect("pose").with_rotary(90.0).expect("tag");
+    let rotary_blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: turned, feed: None })];
+    let rotary =
+        Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(rotary_blocks)], Vec::new(), Vec::new(), Some(setup)).expect("rotary");
+    for id in builtin_ids() {
+        let post = builtin(id).expect(id);
+        let err = post_program(&rotary, &post, &options()).expect_err(id);
+        let text = err.to_string();
+        assert!(text.contains(&format!("post `{id}` does not support a rotary axis")), "{id}: {text}");
+    }
+
+    let zero = pose(1.0, 2.0, 5.0).with_rotary(0.0).expect("zero");
+    let zero_blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: zero, feed: None })];
+    let zero_program =
+        Program::try_new(Some("plate".into()), Vec::new(), None, vec![path(zero_blocks)], Vec::new(), Vec::new(), Some(setup)).expect("zero program");
+    let err = post_program(&zero_program, &linux(), &options()).expect_err("zero angle");
+    assert!(err.to_string().contains("post `linuxcnc` does not support a rotary axis"), "{err}");
 }
 
 #[test]
