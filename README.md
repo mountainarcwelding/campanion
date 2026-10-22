@@ -62,6 +62,8 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 | `mach3` | Mach3 | Millimetre dialect for Mach3. Incremental IJK arcs and helices, dwell P in seconds, no line numbers. |
 | `fanuc` | Fanuc | Millimetre Fanuc mill dialect. Program O0001, sequence numbers, R arcs, helices as lines, dwell P in milliseconds. |
 | `haas` | Haas | Millimetre Haas mill dialect. Program O00001, sequence numbers, IJK arcs and helices, dwell P in milliseconds. |
+| `plasma` | LinuxCNC plasma | Millimetre plasma. Torch on M3 S1 / off M5, pierce dwell from the path, optional THC codes, helices as lines. |
+| `grbl_laser` | Grbl laser | Grbl laser mode. Dynamic power M4 S{power} (0..1 scaled to S0..S1000), Z words and Z-only rapids omitted. |
 
 ```sh
 campanion run examples/sample.job.json -o out.ngc --post linuxcnc
