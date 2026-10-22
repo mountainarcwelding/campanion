@@ -1,7 +1,7 @@
 {
   "id": "mach3",
   "name": "Mach3",
-  "description": "Millimetre dialect for Mach3. Absolute moves, cutter compensation and tool length cancelled, incremental IJK arcs and helices, dwell P in seconds, no line numbers.",
+  "description": "Millimetre dialect for Mach3. Absolute moves, cutter compensation and tool length cancelled, incremental IJK arcs and helices, dwell P in seconds, no line numbers. A axis with degrees-per-minute feed when the angle changes.",
   "units": "mm",
   "line_numbers": { "enabled": false, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 4, "feed": 3, "dwell": 3 },
@@ -33,5 +33,10 @@
   "comments": { "style": "paren" },
   "program_end": ["M30"],
   "max_line_length": 256,
-  "axis_letters": "XYZ"
+  "axis_letters": "XYZ",
+  "rotary": {
+    "axes": ["a"],
+    "decimals": 3,
+    "feed_mode": "degrees_per_minute"
+  }
 }

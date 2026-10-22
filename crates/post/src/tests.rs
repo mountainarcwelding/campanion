@@ -86,8 +86,15 @@ fn rotary_angles_need_a_post_that_names_the_axis() {
         let post = builtin(id).expect(id);
         if post.rotary_axes().contains(&RotaryAxisKind::A) {
             let text = post_program(&rotary, &post, &options()).expect(id);
-            assert!(text.contains("A90.000"), "{id}: {text}");
-            assert!(text.contains("X0.0000 Y-5.0000 Z0.0000"), "{id}: {text}");
+            let angle = g_word('A', 90.0, post.rotary.as_ref().expect("rotary").decimals, post.trailing_zeros);
+            let coords = format!(
+                "{} {} {}",
+                g_word('X', 0.0, post.linear_decimals(), post.trailing_zeros),
+                g_word('Y', -5.0, post.linear_decimals(), post.trailing_zeros),
+                g_word('Z', 0.0, post.linear_decimals(), post.trailing_zeros),
+            );
+            assert!(text.split_whitespace().any(|token| token == angle), "{id}: {text}");
+            assert!(text.contains(&coords), "{id}: {text}");
             compare(&rotary, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
         } else {
             let err = post_program(&rotary, &post, &options()).expect_err(id);
@@ -122,6 +129,11 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").max_line_length(), Some(256));
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").rotary_axes(), vec![RotaryAxisKind::A]);
     assert!(builtin("grbl").expect("grbl").rotary_axes().is_empty());
+    assert_eq!(builtin("mach3").expect("mach3").rotary_axes(), vec![RotaryAxisKind::A]);
+    assert_eq!(builtin("fanuc").expect("fanuc").rotary_axes(), vec![RotaryAxisKind::A]);
+    assert_eq!(builtin("haas").expect("haas").rotary_axes(), vec![RotaryAxisKind::A]);
+    assert!(builtin("plasma").expect("plasma").rotary_axes().is_empty());
+    assert!(builtin("grbl_laser").expect("grbl_laser").rotary_axes().is_empty());
     assert_eq!(builtin("grbl").expect("grbl").linear_decimals(), 4);
     assert_eq!(builtin("mach3").expect("mach3").linear_decimals(), 4);
     assert_eq!(builtin("mach3").expect("mach3").max_line_length(), Some(256));
@@ -636,6 +648,10 @@ fn torch_cut(power: Option<f64>) -> Program {
     program(blocks)
 }
 
+fn g_word(letter: char, value: f64, decimals: u8, trailing_zeros: bool) -> String {
+    format!("{letter}{}", crate::fmt::format_fixed(value, decimals, trailing_zeros).expect("number"))
+}
+
 fn line_with_word(text: &str, word: &str) -> usize {
     text.lines()
         .position(|line| without_comments(line).split_whitespace().any(|token| token == word))
@@ -870,6 +886,36 @@ fn rotary_feed_modes_write_the_documented_f_word() {
             assert!(!text.contains("F2.0000"), "{mode}: {text}");
         }
         compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).unwrap_or_else(|err| panic!("{mode}: {err}"));
+    }
+}
+
+/// Mach3 keeps the IR feed. Fanuc and Haas switch to inverse time with G93 and back with G94.
+#[test]
+fn mach3_fanuc_and_haas_write_their_rotary_feed_modes() {
+    let program = angled_travel();
+    let mach3 = builtin("mach3").expect("mach3");
+    let mach3_rotary = mach3.rotary.as_ref().expect("mach3 rotary");
+    assert_eq!(mach3_rotary.feed_mode, "degrees_per_minute");
+    assert!(mach3_rotary.inverse_time_on.is_none() && mach3_rotary.inverse_time_off.is_none());
+    let mach3_text = post_program(&program, &mach3, &options()).expect("mach3");
+    assert!(!mach3_text.contains("G93") && !mach3_text.contains("G94"), "{mach3_text}");
+    assert!(mach3_text.split_whitespace().any(|word| word == "F100"), "{mach3_text}");
+    assert!(!mach3_text.split_whitespace().any(|word| word == "F2" || word.starts_with("F2.")), "{mach3_text}");
+    compare(&program, &read_back(&mach3_text, &mach3).expect("read"), 1e-3, &mach3).expect("mach3 compare");
+
+    for id in ["fanuc", "haas"] {
+        let post = builtin(id).expect(id);
+        let rotary = post.rotary.as_ref().expect("rotary");
+        assert_eq!(rotary.feed_mode, "inverse_time");
+        assert_eq!(rotary.inverse_time_on.as_deref(), Some("G93"));
+        assert_eq!(rotary.inverse_time_off.as_deref(), Some("G94"));
+        let text = post_program(&program, &post, &options()).expect(id);
+        let on = line_with_word(&text, "G93");
+        let rotating = line_with_words(&text, &["A90", "F2"]);
+        let off = line_with_word(&text, "G94");
+        let held = line_with_words(&text, &["A90", "F100"]);
+        assert!(on < rotating && rotating < off && off < held, "{id}: {text}");
+        compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).unwrap_or_else(|err| panic!("{id}: {err}"));
     }
 }
 
