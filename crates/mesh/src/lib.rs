@@ -9,10 +9,12 @@
 mod dropcutter;
 mod raster;
 mod stl;
+mod zlevel;
 
 pub use dropcutter::{Cutter, DropCutter, drop_cutter_triangle};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};
 pub use stl::{parse_stl, write_stl_binary};
+pub use zlevel::{ZLevel, ZLevelParams, zlevel_rough};
 
 /// Crate version from the package manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
