@@ -117,7 +117,10 @@ cargo run -p campanion-view -- out.json      # or: campanion view out.json
 
 Cutting moves are solid, rapids dashed (toggle), pierces are dots, and numbers give the cut order.
 Wheel zooms at the cursor, drag pans, F or double-click fits. Space plays or pauses; the sliders set
-the playback speed and position. Labels need a system font (DejaVu, Liberation or Noto are found
+the playback speed and position. A rotary program draws its A or B axis across the toolpath and
+lists the index angles (`Index: 0°, 90°`) or the continuous angle range. `--angle` colours cuts by
+that angle instead of height (A toggles it); a program with no rotary axis ignores the option.
+Labels need a system font (DejaVu, Liberation or Noto are found
 automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
 
 ## Roadmap and contributing

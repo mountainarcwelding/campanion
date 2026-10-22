@@ -1,8 +1,10 @@
 //! Plan-view window for a CAMpanion IR file.
 //!
-//! `campanion-view <ir.json> [--arc-tol MM] [--iso]` loads a program and draws its toolpath.
-//! Distances are millimetres. The window fits the path; the wheel zooms, drag pans, and F or a
-//! double-click fits again. `--iso` opens the isometric view.
+//! `campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]` loads a program and draws its
+//! toolpath. Distances are millimetres. The window fits the path; the wheel zooms, drag pans, and
+//! F or a double-click fits again. `--iso` opens the isometric view. `--angle` colours cuts by
+//! rotary angle instead of height; a program with no rotary axis ignores it. A toggles that
+//! colouring. A rotary setup also draws its axis and lists index angles or the angle range.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -13,8 +15,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use campanion_view::{
-    Playback, Projection, Scene, Stroke, StrokeKind, View, find_system_font, height_color, load_scene, project, projected_bounds, tool_position,
-    visible,
+    Playback, Projection, RotaryPreview, Scene, Stroke, StrokeKind, View, angle_color, angle_legend, find_system_font, height_color, load_scene,
+    project, projected_bounds, tool_position, visible,
 };
 use eframe::egui;
 
@@ -36,13 +38,15 @@ const RAPID_COLOR: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
 const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 150, 40);
 const TOOL_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
 const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(236, 236, 236);
+/// Rotary axis, distinct from the red X axis, the green Y axis, and the cyan cut colour.
+const ROTARY_AXIS: egui::Color32 = egui::Color32::from_rgb(220, 70, 200);
 
 fn main() -> ExitCode {
     match try_main() {
         Ok(()) => ExitCode::SUCCESS,
         Err(AppError::Usage(message)) => {
             eprintln!("campanion-view: {message}");
-            eprintln!("usage: campanion-view <ir.json> [--arc-tol MM] [--iso]");
+            eprintln!("usage: campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]");
             ExitCode::from(2)
         }
         Err(AppError::Run(message)) => {
@@ -57,10 +61,10 @@ fn try_main() -> Result<(), AppError> {
     match parse_args(&args)? {
         Command::Help => write_stdout(&help_text()),
         Command::Version => write_stdout(&version_text()),
-        Command::Preview { path, arc_tol, iso } => {
+        Command::Preview { path, arc_tol, iso, angle } => {
             let json = read_ir(&path)?;
             let scene = load_scene(&json, arc_tol).map_err(|err| AppError::run(format!("{}: {err}", path.display())))?;
-            open_preview(preview_title(&path), scene, iso)
+            open_preview(preview_title(&path), scene, iso, angle)
         }
     }
 }
@@ -68,7 +72,7 @@ fn try_main() -> Result<(), AppError> {
 enum Command {
     Help,
     Version,
-    Preview { path: PathBuf, arc_tol: f64, iso: bool },
+    Preview { path: PathBuf, arc_tol: f64, iso: bool, angle: bool },
 }
 
 #[derive(Debug)]
@@ -93,18 +97,22 @@ fn help_text() -> String {
 campanion-view {version}
 
 Usage:
-  campanion-view <ir.json> [--arc-tol MM] [--iso]
+  campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]
   campanion-view --help
   campanion-view --version
 
 Open a plan-view preview of a CAMpanion IR file.
 Distances are millimetres. Scroll zooms at the cursor, drag pans, and F or a
 double-click fits the path in the window. Space toggles playback.
+A rotary program draws its A or B axis and shows index angles or the angle range.
 
 --arc-tol MM
         Maximum chord error when drawing arcs, in millimetres (default 0.01).
 --iso
         Open the preview in the isometric view.
+--angle
+        Colour cutting moves by rotary angle instead of height.
+        Ignored when the program has no rotary axis. A toggles this in the window.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -128,10 +136,16 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
     let mut path: Option<PathBuf> = None;
     let mut arc_tol = DEFAULT_ARC_TOL_MM;
     let mut iso = false;
+    let mut angle = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         if arg.as_os_str() == "--iso" {
             iso = true;
+            index += 1;
+            continue;
+        }
+        if arg.as_os_str() == "--angle" {
+            angle = true;
             index += 1;
             continue;
         }
@@ -165,7 +179,7 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
     let Some(path) = path else {
         return Err(AppError::usage("missing IR json file"));
     };
-    Ok(Command::Preview { path, arc_tol, iso })
+    Ok(Command::Preview { path, arc_tol, iso, angle })
 }
 
 fn is_help(arg: &OsString) -> bool {
@@ -231,7 +245,7 @@ fn preview_title(path: &Path) -> String {
     format!("CAMpanion preview — {name}")
 }
 
-fn open_preview(title: String, scene: Scene, iso: bool) -> Result<(), AppError> {
+fn open_preview(title: String, scene: Scene, iso: bool, angle: bool) -> Result<(), AppError> {
     let native_options =
         eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_title(title), ..Default::default() };
     eframe::run_native(
@@ -242,7 +256,7 @@ fn open_preview(title: String, scene: Scene, iso: bool) -> Result<(), AppError> 
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let has_font = install_font(&cc.egui_ctx);
             let projection = if iso { Projection::Iso } else { Projection::Top };
-            Ok(Box::new(ViewerApp::new(scene, has_font, projection)))
+            Ok(Box::new(ViewerApp::new(scene, has_font, projection, angle)))
         }),
     )
     .map_err(|err| AppError::run(err.to_string()))
@@ -282,6 +296,8 @@ struct ViewerApp {
     show_order: bool,
     projection: Projection,
     height_colours: bool,
+    /// Colour cuts by rotary angle. Ignored when the scene has no rotary setup.
+    angle_colours: bool,
     has_font: bool,
     toolpaths: usize,
     cut_length: f64,
@@ -289,11 +305,13 @@ struct ViewerApp {
 }
 
 impl ViewerApp {
-    fn new(scene: Scene, has_font: bool, projection: Projection) -> Self {
+    fn new(scene: Scene, has_font: bool, projection: Projection, angle_colours: bool) -> Self {
         let (cut_length, rapid_length) = path_lengths(&scene);
         let toolpaths = scene.names.len();
         let playback = Playback::new(scene.total_length);
         let height_colours = scene.z_range.is_some_and(|(low, high)| high - low > 1.0);
+        // A program with no rotary axis ignores the flag, so the window stays on height colours.
+        let angle_colours = angle_colours && scene.rotary.is_some();
         Self {
             scene,
             playback,
@@ -303,6 +321,7 @@ impl ViewerApp {
             show_order: true,
             projection,
             height_colours,
+            angle_colours,
             has_font,
             toolpaths,
             cut_length,
@@ -351,6 +370,9 @@ impl ViewerApp {
                 ui.checkbox(&mut self.show_rapids, "Rapids");
                 ui.checkbox(&mut self.show_order, "Order");
                 ui.checkbox(&mut self.height_colours, "Height colours");
+                if self.scene.rotary.is_some() {
+                    ui.checkbox(&mut self.angle_colours, "Angle colours");
+                }
                 ui.label(self.status_text());
             });
         });
@@ -358,7 +380,12 @@ impl ViewerApp {
 
     fn status_text(&self) -> String {
         let paths = if self.toolpaths == 1 { "1 toolpath".to_string() } else { format!("{} toolpaths", self.toolpaths) };
-        format!("{paths}   cut {:.1} mm   rapid {:.1} mm", self.cut_length, self.rapid_length)
+        let mut text = format!("{paths}   cut {:.1} mm   rapid {:.1} mm", self.cut_length, self.rapid_length);
+        if let Some(overlay) = self.scene.rotary.as_ref().and_then(RotaryPreview::overlay) {
+            text.push_str("   ");
+            text.push_str(&overlay);
+        }
+        text
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui, input: &FrameInput) {
@@ -417,14 +444,33 @@ impl ViewerApp {
         let projection = self.projection;
         draw_grid(painter, &self.view, rect, projection);
         draw_axes(painter, &self.view, rect, projection);
+        if let Some(rotary) = &self.scene.rotary {
+            draw_rotary_axis(painter, &self.view, rect, rotary, projection, self.has_font);
+        }
+        let angle_range = self.scene.rotary.as_ref().and_then(RotaryPreview::angle_range);
+        let colour_by_angle = self.angle_colours && angle_range.is_some();
         let shown = visible(&self.scene, self.playback.position);
         for stroke in &shown {
-            draw_stroke(painter, &self.view, rect, stroke, self.show_rapids, self.height_colours, self.scene.z_range, projection);
+            draw_stroke(
+                painter,
+                &self.view,
+                rect,
+                stroke,
+                self.show_rapids,
+                self.height_colours,
+                self.scene.z_range,
+                colour_by_angle,
+                angle_range,
+                projection,
+            );
         }
         draw_pierces(painter, &self.scene, shown.len(), &self.view, rect, projection);
         draw_tool(painter, &self.scene, &shown, self.playback.position, &self.view, rect, projection);
         if self.has_font && self.show_order {
             draw_labels(painter, &self.scene, &self.view, rect, projection);
+        }
+        if colour_by_angle && let Some(range) = angle_range {
+            draw_angle_legend(painter, rect, range, self.has_font);
         }
     }
 }
@@ -434,6 +480,9 @@ impl eframe::App for ViewerApp {
         let input = read_input(ui);
         if input.space {
             self.toggle_play();
+        }
+        if input.angle && self.scene.rotary.is_some() {
+            self.angle_colours = !self.angle_colours;
         }
         let total = finite_total(self.scene.total_length);
         self.playback.step(f64::from(input.dt), total);
@@ -451,6 +500,7 @@ struct FrameInput {
     dt: f32,
     space: bool,
     fit: bool,
+    angle: bool,
 }
 
 fn read_input(ui: &egui::Ui) -> FrameInput {
@@ -460,6 +510,7 @@ fn read_input(ui: &egui::Ui) -> FrameInput {
         dt: input.stable_dt,
         space: input.consume_key(egui::Modifiers::NONE, egui::Key::Space),
         fit: input.key_pressed(egui::Key::F),
+        angle: input.consume_key(egui::Modifiers::NONE, egui::Key::A),
     })
 }
 
@@ -557,6 +608,8 @@ fn draw_stroke(
     show_rapids: bool,
     height_colours: bool,
     z_range: Option<(f64, f64)>,
+    colour_by_angle: bool,
+    angle_range: Option<(f64, f64)>,
     projection: Projection,
 ) {
     match stroke.kind {
@@ -570,17 +623,104 @@ fn draw_stroke(
             }
         }
         StrokeKind::Cut => {
+            if colour_by_angle && let Some(range) = angle_range {
+                if stroke.angles.len() >= 2 && stroke.angles.len() == stroke.points.len() {
+                    draw_cut_angles(painter, view, rect, stroke, range, projection);
+                } else {
+                    draw_flat_cut(painter, view, rect, stroke, projection);
+                }
+                return;
+            }
             if height_colours && let Some(range) = z_range {
                 draw_cut_heights(painter, view, rect, stroke, range, projection);
                 return;
             }
-            let points = screen_points(view, rect, stroke, projection);
-            if points.len() >= 2 {
-                let _ = painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, CUT_COLOR)));
-            }
+            draw_flat_cut(painter, view, rect, stroke, projection);
         }
         StrokeKind::Plunge => draw_plunge(painter, view, rect, stroke, projection),
     }
+}
+
+fn draw_flat_cut(painter: &egui::Painter, view: &View, rect: egui::Rect, stroke: &Stroke, projection: Projection) {
+    let points = screen_points(view, rect, stroke, projection);
+    if points.len() >= 2 {
+        let _ = painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, CUT_COLOR)));
+    }
+}
+
+/// The rotary axis through the setup centre, across the toolpath, labelled A or B.
+fn draw_rotary_axis(painter: &egui::Painter, view: &View, rect: egui::Rect, rotary: &RotaryPreview, projection: Projection, has_font: bool) {
+    let Some((start, end)) = rotary.line else {
+        return;
+    };
+    draw_segment(painter, view, rect, [start[0], start[1]], start[2], [end[0], end[1]], end[2], projection, egui::Stroke::new(2.0, ROTARY_AXIS));
+    if !has_font {
+        return;
+    }
+    let Some(pos) = to_screen_pos(view, rect, [end[0], end[1]], end[2], projection) else {
+        return;
+    };
+    let _ = painter.text(pos + egui::vec2(6.0, -4.0), egui::Align2::LEFT_BOTTOM, rotary.label, egui::FontId::proportional(14.0), ROTARY_AXIS);
+}
+
+/// Colour each cut segment by the mean rotary angle of its endpoints.
+fn draw_cut_angles(painter: &egui::Painter, view: &View, rect: egui::Rect, stroke: &Stroke, range: (f64, f64), projection: Projection) {
+    let segments = stroke.points.len().saturating_sub(1);
+    for index in 0..segments {
+        let (Some(start), Some(end)) = (stroke.points.get(index), stroke.points.get(index + 1)) else {
+            break;
+        };
+        let (Some(a0), Some(a1)) = (stroke.angles.get(index).copied(), stroke.angles.get(index + 1).copied()) else {
+            break;
+        };
+        let rgb = angle_color((a0 + a1) * 0.5, range);
+        let color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        draw_segment(
+            painter,
+            view,
+            rect,
+            *start,
+            point_z(stroke, index),
+            *end,
+            point_z(stroke, index + 1),
+            projection,
+            egui::Stroke::new(1.5, color),
+        );
+    }
+}
+
+/// Swatches from the low angle (blue) to the high angle (red), with the end labels.
+fn draw_angle_legend(painter: &egui::Painter, rect: egui::Rect, range: (f64, f64), has_font: bool) {
+    let Some(legend) = angle_legend(range, 8) else {
+        return;
+    };
+    let swatch = 12.0_f32;
+    let gap = 2.0_f32;
+    let count = legend.colours.len() as f32;
+    if count < 1.0 {
+        return;
+    }
+    let bar_w = count * swatch + (count - 1.0) * gap;
+    let text_h = if has_font { 16.0 } else { 0.0 };
+    let pad = 6.0;
+    let width = bar_w + pad * 2.0;
+    let height = swatch + text_h + pad * 2.0;
+    let origin = egui::pos2(rect.left() + 12.0, rect.bottom() - 12.0 - height);
+    let plate = egui::Rect::from_min_size(origin, egui::vec2(width, height));
+    painter.rect_filled(plate, 4.0, egui::Color32::from_rgb(16, 18, 22));
+    let bar_y = origin.y + pad + text_h;
+    for (index, rgb) in legend.colours.iter().enumerate() {
+        let x = origin.x + pad + index as f32 * (swatch + gap);
+        let swatch_rect = egui::Rect::from_min_size(egui::pos2(x, bar_y), egui::vec2(swatch, swatch));
+        painter.rect_filled(swatch_rect, 1.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+    }
+    if !has_font {
+        return;
+    }
+    let low_pos = egui::pos2(origin.x + pad, bar_y - 2.0);
+    let _ = painter.text(low_pos, egui::Align2::LEFT_BOTTOM, legend.low_label.as_str(), egui::FontId::proportional(12.0), LABEL_COLOR);
+    let high_pos = egui::pos2(origin.x + pad + bar_w, bar_y - 2.0);
+    let _ = painter.text(high_pos, egui::Align2::RIGHT_BOTTOM, legend.high_label.as_str(), egui::FontId::proportional(12.0), LABEL_COLOR);
 }
 
 /// Colour each cut segment by the mean Z of its endpoints.
@@ -834,12 +974,81 @@ mod tests {
     #[test]
     fn help_documents_iso_and_keeps_arc_tol() {
         let help = help_text();
-        assert!(help.contains("campanion-view <ir.json> [--arc-tol MM] [--iso]"), "{help}");
+        assert!(help.contains("campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]"), "{help}");
         assert!(help.contains("--arc-tol MM"), "{help}");
         assert!(help.contains("Maximum chord error when drawing arcs"), "{help}");
         assert!(help.contains("--iso"), "{help}");
         assert!(help.contains("isometric view"), "{help}");
+        assert!(help.contains("--angle"), "{help}");
+        assert!(help.contains("rotary angle instead of height"), "{help}");
+        assert!(help.contains("A toggles this in the window"), "{help}");
         assert!(help.contains("Scroll zooms at the cursor"), "{help}");
+    }
+
+    #[test]
+    fn angle_flag_follows_the_iso_flag() {
+        let with_angle = parse_args(&[OsString::from("part.json"), OsString::from("--angle")]).expect("parse");
+        let Command::Preview { angle, iso, path, .. } = with_angle else {
+            panic!("expected a preview command");
+        };
+        assert!(angle);
+        assert!(!iso);
+        assert_eq!(path, std::path::PathBuf::from("part.json"));
+
+        let plain = parse_args(&[OsString::from("--iso"), OsString::from("part.json")]).expect("parse");
+        let Command::Preview { angle, iso, .. } = plain else {
+            panic!("expected a preview command");
+        };
+        assert!(!angle);
+        assert!(iso);
+    }
+
+    fn empty_scene(names: Vec<String>, rotary: Option<campanion_view::RotaryPreview>) -> campanion_view::Scene {
+        campanion_view::Scene {
+            strokes: Vec::new(),
+            pierces: Vec::new(),
+            labels: Vec::new(),
+            bounds: None,
+            z_range: None,
+            total_length: 0.0,
+            names,
+            rotary,
+        }
+    }
+
+    #[test]
+    fn indexed_overlay_is_listed_and_a_plain_program_ignores_angle_colours() {
+        use campanion_view::{RotaryPreview, RotarySpan};
+
+        let plain = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true);
+        assert!(!plain.angle_colours, "a program with no rotary axis ignores --angle");
+        assert_eq!(plain.status_text(), "1 toolpath   cut 0.0 mm   rapid 0.0 mm");
+
+        let indexed = empty_scene(
+            vec!["face0".into(), "face90".into()],
+            Some(RotaryPreview {
+                label: "A",
+                center: [0.0, 0.0, 0.0],
+                line: Some(([0.0, 0.0, 0.0], [20.0, 0.0, 0.0])),
+                span: Some(RotarySpan::Indexed(vec![0.0, 90.0])),
+            }),
+        );
+        let indexed = super::ViewerApp::new(indexed, false, super::Projection::Top, true);
+        assert!(indexed.angle_colours);
+        assert_eq!(indexed.status_text(), "2 toolpaths   cut 0.0 mm   rapid 0.0 mm   Index: 0°, 90°");
+
+        let continuous = empty_scene(
+            vec!["wrap".into()],
+            Some(RotaryPreview {
+                label: "B",
+                center: [1.0, 2.0, 3.0],
+                line: None,
+                span: Some(RotarySpan::Continuous { min_deg: 0.0, max_deg: 360.0 }),
+            }),
+        );
+        let continuous = super::ViewerApp::new(continuous, false, super::Projection::Top, false);
+        assert!(!continuous.angle_colours);
+        assert_eq!(continuous.status_text(), "1 toolpath   cut 0.0 mm   rapid 0.0 mm   Angle: 0°..360°");
     }
 
     #[test]
