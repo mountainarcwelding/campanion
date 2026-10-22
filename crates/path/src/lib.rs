@@ -1,13 +1,14 @@
 //! Machine-neutral 2D toolpaths.
 //!
 //! Moves carry geometry and a feed class. They are not G-code and they do not name a controller.
-//! Profiles, pockets, facing, drilling and engraving build those moves. A profile either offsets the
+//! Profiles, pockets, facing, drilling, engraving and chamfers build those moves. A profile either offsets the
 //! contour here (computed compensation, through [`campanion_geom`]) or leaves the path on the
 //! contour and records a left/right flag for a later IR. Ordering links those features.
 //! Depth passes repeat a closed contour downward.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod chamfer;
 mod check;
 mod curve;
 mod depth;
@@ -21,6 +22,7 @@ mod timing;
 mod tool;
 mod toolpath;
 
+pub use chamfer::{Chamfer, ChamferOp};
 pub use depth::{DepthEntry, DepthPlan, depth_toolpath, pass_depths};
 pub use drill::{DrillCycle, DrillHit, DrillOp, Drilling};
 pub use engrave::{Engrave, EngraveOp};

@@ -1,0 +1,51 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "curves.svg",
+    "hash": "b08567055ae99432"
+  },
+  "units": "mm",
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0
+    }
+  ],
+  "operations": [
+    {
+      "name": "outer",
+      "type": "chamfer",
+      "layers": [
+        "OUTER"
+      ],
+      "side": "outside",
+      "tool_id": 1,
+      "width": 0.5,
+      "v_angle_deg": 90.0,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    },
+    {
+      "name": "holes",
+      "type": "chamfer",
+      "layers": [
+        "POCKET"
+      ],
+      "side": "inside",
+      "tool_id": 1,
+      "width": 0.3,
+      "v_angle_deg": 90.0,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.01
+  }
+}

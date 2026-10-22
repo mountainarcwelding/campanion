@@ -20,6 +20,9 @@
 //! job retract height. Roughing leaves `stock_to_leave` on the walls and above the floor. When
 //! `finish` is set, that stock is cut afterwards: a profile at the tool radius, then a pocket
 //! floor pass and wall contours.
+//! A chamfer plunges once to the tip along each selected closed contour. An open contour is an
+//! error. The V-bit's largest cutting diameter is the tool diameter, stock Z is 0, and the job
+//! tolerance is used. The pass is linked the same way as an engrave.
 //! Drill cycles are not in this job version: each hole is a rapid to the final depth, not an
 //! expanded peck.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
@@ -35,7 +38,7 @@ use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Regi
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program};
 use campanion_path::{
-    DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
+    ChamferOp, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
     Tool as PathTool, Toolpath, apply_timing,
 };
 
@@ -192,6 +195,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             OperationKind::Drill => drill_paths(&mut paths, &cut)?,
             OperationKind::Engrave => engrave_paths(&mut paths, &cut)?,
             OperationKind::Face => face_paths(&mut paths, &cut)?,
+            OperationKind::Chamfer { side } => chamfer_paths(&mut paths, &cut, side)?,
         }
     }
     let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
@@ -422,6 +426,29 @@ fn drill_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
         return Err(op_err(cut.op, "drill produced no holes"));
     }
     push_doc(paths, Document::from_toolpath(drilling.toolpath(), cut.import)?)
+}
+
+/// One V-bit plunge per closed contour, then the same clearance link an engrave uses.
+fn chamfer_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide) -> Result<(), CliError> {
+    let PathTool::Diameter { diameter } = cut.tool.path_tool() else {
+        return Err(op_err(cut.op, "chamfer is not valid with a kerf tool"));
+    };
+    let mut features = Vec::with_capacity(cut.contours.len());
+    for contour in cut.contours {
+        if !contour.is_closed() {
+            return Err(op_err(cut.op, "chamfer contour is open"));
+        }
+        let chamfer = ChamferOp::new(cut.op.v_angle(), cut.op.tip_diameter(), cut.op.width())
+            .side(side)
+            .tip_clearance(cut.op.tip_clearance())
+            .stock_z(0.0)
+            .max_diameter(diameter)
+            .tolerance(cut.tolerance)
+            .generate(contour)
+            .map_err(|err| op_err(cut.op, err))?;
+        features.push(Feature::new(contour.clone(), clearance_retracts(cut, chamfer.toolpath().moves())?));
+    }
+    link_operation(paths, cut, &features)
 }
 
 fn engrave_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
