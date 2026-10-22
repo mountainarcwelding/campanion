@@ -25,6 +25,14 @@
 //! radians. `margin` grows that box on every side. `stepover` defaults to three quarters of
 //! the tool diameter. A kerf tool cannot face. `stock_to_leave` and `finish` stay on profiles
 //! and pockets.
+//!
+//! A chamfer follows each closed contour with a V-bit. `side` is `outside` or `inside`
+//! (`on` is rejected). `width` and `v_angle_deg` are required. `v_angle_deg` is the included
+//! angle in degrees and is stored as radians. `tip_diameter` and `tip_clearance` default to 0.
+//! `tip_diameter` is strictly less than the tool diameter. The tip depth is
+//! `width / tan(v_angle / 2) + tip_clearance`; `depth()` and `step_down()` return that value.
+//! `depth` and `step_down` in the file are rejected on a chamfer and required on every other
+//! kind. The chamfer keys are rejected on every other kind. A kerf tool cannot chamfer.
 
 use std::fmt;
 use std::fs::File;
@@ -257,6 +265,11 @@ pub enum OperationKind {
     Engrave,
     /// Clear a rectangle around the layers. No side.
     Face,
+    /// Chamfer a closed contour with a V-bit. `side` is outside or inside. `On` is rejected.
+    Chamfer {
+        /// Inside or outside the contour.
+        side: ProfileSide,
+    },
 }
 
 /// Stock left by a roughing pass, in millimetres. Zero means cut to the contour and to `depth`.
@@ -300,11 +313,15 @@ impl Finish {
 /// One layer operation. Depths, heights and feeds are millimetres after loading.
 ///
 /// `depth` and `step_down` are a positive distance downward. They must form a legal
-/// `campanion-path` depth plan (at most 1024 passes, each within 1e6 mm). Heights on
-/// [`Self::params`] are absolute Z. [`Self::entry`] is how each pass is entered.
+/// `campanion-path` depth plan (at most 1024 passes, each within 1e6 mm). A chamfer omits
+/// both in the file. The stored values are then the tip depth
+/// `width / tan(v_angle / 2) + tip_clearance`, and both accessors return that distance.
+/// Heights on [`Self::params`] are absolute Z. [`Self::entry`] is how each pass is entered.
 /// An omitted entry is a plunge. [`Self::stock_to_leave`] is millimetres of material
 /// left by roughing; an omitted [`Self::finish`] means no finishing pass.
 /// [`Self::face_angle`] and [`Self::margin`] describe a face. Other kinds store 0.
+/// [`Self::width`], [`Self::v_angle`], [`Self::tip_diameter`] and [`Self::tip_clearance`]
+/// describe a chamfer. Other kinds store 0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -316,6 +333,10 @@ pub struct Operation {
     stepover: Option<f64>,
     face_angle: f64,
     margin: f64,
+    width: f64,
+    v_angle: f64,
+    tip_diameter: f64,
+    tip_clearance: f64,
     stock_to_leave: StockToLeave,
     finish: Option<Finish>,
     entry: DepthEntry,
@@ -342,13 +363,38 @@ impl Operation {
     }
 
     /// Total depth downward from the stock surface, in millimetres.
+    ///
+    /// A chamfer has no file `depth`. This is the tip depth
+    /// `width / tan(v_angle / 2) + tip_clearance`.
     pub fn depth(&self) -> f64 {
         self.depth
     }
 
     /// Maximum thickness of one depth pass, in millimetres.
+    ///
+    /// A chamfer cuts the tip depth in one pass, so this matches [`Self::depth`].
     pub fn step_down(&self) -> f64 {
         self.step_down
+    }
+
+    /// Chamfer width, in millimetres. The horizontal leg of the bevel. Other operations store `0`.
+    pub fn width(&self) -> f64 {
+        self.width
+    }
+
+    /// Included angle of the V-bit, in radians. Other operations store `0`.
+    pub fn v_angle(&self) -> f64 {
+        self.v_angle
+    }
+
+    /// Flat tip diameter of the V-bit, in millimetres. Other operations store `0`.
+    pub fn tip_diameter(&self) -> f64 {
+        self.tip_diameter
+    }
+
+    /// How far the V-bit tip sits below the bevel, in millimetres. Other operations store `0`.
+    pub fn tip_clearance(&self) -> f64 {
+        self.tip_clearance
     }
 
     /// Radial stepover in millimetres.
@@ -760,6 +806,10 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "stepover",
             "angle_deg",
             "margin",
+            "width",
+            "v_angle_deg",
+            "tip_diameter",
+            "tip_clearance",
             "stock_to_leave",
             "finish",
             "entry",
@@ -774,12 +824,12 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let name_value = require(map, "name").map_err(from_cli)?;
     let name = required_name(as_str(name_value, "operation name").map_err(from_cli)?, "operation name").map_err(from_cli)?;
     let kind = parse_kind(map)?;
+    reject_chamfer_cut_keys(map, kind)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
     let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
     let tool = tools.iter().find(|tool| tool.id() == tool_id).ok_or_else(|| JobFileError::invalid(format!("unknown tool {tool_id}")))?;
-    let depth = scale_f64(require(map, "depth").map_err(from_cli)?, scale, "depth")?;
-    let step_down = scale_f64(require(map, "step_down").map_err(from_cli)?, scale, "step_down")?;
-    check_depth(depth, step_down)?;
+    let chamfer = parse_chamfer(map, kind, tool, scale)?;
+    let (depth, step_down) = parse_depth_and_step(map, kind, scale, chamfer.tip_depth)?;
     let stepover = parse_stepover(optional(map, "stepover"), kind, tool, scale)?;
     let face_angle = parse_face_angle(optional(map, "angle_deg"), kind)?;
     let margin = parse_margin(optional(map, "margin"), kind, scale)?;
@@ -788,7 +838,140 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let entry = parse_entry(optional(map, "entry"), scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale)?;
-    Ok(Operation { name, kind, layers, tool_id, depth, step_down, stepover, face_angle, margin, stock_to_leave, finish, entry, feeds, params })
+    Ok(Operation {
+        name,
+        kind,
+        layers,
+        tool_id,
+        depth,
+        step_down,
+        stepover,
+        face_angle,
+        margin,
+        width: chamfer.width,
+        v_angle: chamfer.v_angle,
+        tip_diameter: chamfer.tip_diameter,
+        tip_clearance: chamfer.tip_clearance,
+        stock_to_leave,
+        finish,
+        entry,
+        feeds,
+        params,
+    })
+}
+
+/// Chamfer numbers after scaling. `tip_depth` is `width / tan(v_angle / 2) + tip_clearance`.
+/// Other kinds store zeros and a `tip_depth` of `None`.
+struct ChamferFields {
+    width: f64,
+    v_angle: f64,
+    tip_diameter: f64,
+    tip_clearance: f64,
+    tip_depth: Option<f64>,
+}
+
+fn parse_chamfer(map: &Map<String, Value>, kind: OperationKind, tool: &JobTool, scale: f64) -> Result<ChamferFields, JobFileError> {
+    let width = optional(map, "width");
+    let angle = optional(map, "v_angle_deg");
+    let tip = optional(map, "tip_diameter");
+    let clearance = optional(map, "tip_clearance");
+    if !matches!(kind, OperationKind::Chamfer { .. }) {
+        if width.is_some() {
+            return Err(JobFileError::invalid("width is only valid on a chamfer"));
+        }
+        if angle.is_some() {
+            return Err(JobFileError::invalid("v_angle_deg is only valid on a chamfer"));
+        }
+        if tip.is_some() {
+            return Err(JobFileError::invalid("tip_diameter is only valid on a chamfer"));
+        }
+        if clearance.is_some() {
+            return Err(JobFileError::invalid("tip_clearance is only valid on a chamfer"));
+        }
+        return Ok(ChamferFields { width: 0.0, v_angle: 0.0, tip_diameter: 0.0, tip_clearance: 0.0, tip_depth: None });
+    }
+    let Some(width_value) = width else {
+        return Err(JobFileError::invalid("chamfer needs a width"));
+    };
+    let width = positive_length(width_value, scale, "width")?;
+    let Some(angle_value) = angle else {
+        return Err(JobFileError::invalid("chamfer needs a v_angle_deg"));
+    };
+    let degrees = as_f64(angle_value, "v_angle_deg").map_err(from_cli)?;
+    if !(degrees > 0.0 && degrees < 180.0) {
+        return Err(JobFileError::invalid("v_angle_deg must be greater than 0 and less than 180"));
+    }
+    let v_angle = degrees.to_radians();
+    let tip_diameter = match tip {
+        Some(value) => non_negative_length(value, scale, "tip_diameter")?,
+        None => 0.0,
+    };
+    let tip_diameter = cap_under(tip_diameter, MAX_MM, "tip_diameter")?;
+    let tip_clearance = match clearance {
+        Some(value) => non_negative_length(value, scale, "tip_clearance")?,
+        None => 0.0,
+    };
+    let tip_clearance = cap_under(tip_clearance, MAX_MM, "tip_clearance")?;
+    let Some(diameter) = tool.diameter() else {
+        return Err(JobFileError::invalid("chamfer is not valid with a kerf tool"));
+    };
+    if tip_diameter >= diameter {
+        return Err(JobFileError::invalid("tip_diameter must be less than the tool diameter"));
+    }
+    let tip_depth = chamfer_tip_depth(width, v_angle, tip_clearance)?;
+    Ok(ChamferFields { width, v_angle, tip_diameter, tip_clearance, tip_depth: Some(tip_depth) })
+}
+
+/// `width / tan(a / 2) + clearance`, in millimetres. `angle_rad` is the included angle.
+fn chamfer_tip_depth(width: f64, angle_rad: f64, clearance: f64) -> Result<f64, JobFileError> {
+    let tan_half = (angle_rad * 0.5).tan();
+    if !tan_half.is_finite() || tan_half <= 0.0 {
+        return Err(JobFileError::invalid("v_angle_deg does not produce a finite tip depth"));
+    }
+    let depth = width / tan_half + clearance;
+    if !depth.is_finite() || !(depth > 0.0) {
+        return Err(JobFileError::invalid("chamfer tip depth must be finite and positive"));
+    }
+    cap_under(depth, MAX_MM, "chamfer tip depth")
+}
+
+/// A chamfer takes its depth from the V-bit geometry, so a file `depth` or `step_down` is an error.
+fn reject_chamfer_cut_keys(map: &Map<String, Value>, kind: OperationKind) -> Result<(), JobFileError> {
+    if !matches!(kind, OperationKind::Chamfer { .. }) {
+        return Ok(());
+    }
+    if optional(map, "depth").is_some() {
+        return Err(JobFileError::invalid("depth is not valid on a chamfer; the depth follows from the geometry"));
+    }
+    if optional(map, "step_down").is_some() {
+        return Err(JobFileError::invalid("step_down is not valid on a chamfer; the depth follows from the geometry"));
+    }
+    Ok(())
+}
+
+/// File `depth` and `step_down` for every kind except chamfer. A chamfer stores the derived
+/// tip depth as a single pass. [`reject_chamfer_cut_keys`] has already rejected those keys.
+fn parse_depth_and_step(map: &Map<String, Value>, kind: OperationKind, scale: f64, tip_depth: Option<f64>) -> Result<(f64, f64), JobFileError> {
+    if matches!(kind, OperationKind::Chamfer { .. }) {
+        reject_chamfer_cut_keys(map, kind)?;
+        let Some(depth) = tip_depth else {
+            return Err(JobFileError::invalid("chamfer tip depth is missing"));
+        };
+        check_depth(depth, depth)?;
+        return Ok((depth, depth));
+    }
+    let depth = scale_f64(require(map, "depth").map_err(from_cli)?, scale, "depth")?;
+    let step_down = scale_f64(require(map, "step_down").map_err(from_cli)?, scale, "step_down")?;
+    check_depth(depth, step_down)?;
+    Ok((depth, step_down))
+}
+
+fn positive_length(value: &Value, scale: f64, what: &str) -> Result<f64, JobFileError> {
+    let length = scale_f64(value, scale, what)?;
+    if !(length > 0.0) {
+        return Err(JobFileError::invalid(format!("{what} must be greater than 0")));
+    }
+    cap_under(length, MAX_MM, what)
 }
 
 fn parse_stepover(value: Option<&Value>, kind: OperationKind, tool: &JobTool, scale: f64) -> Result<Option<f64>, JobFileError> {
@@ -999,12 +1182,22 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
             reject_side(side)?;
             Ok(OperationKind::Face)
         }
+        "chamfer" => {
+            let Some(side) = side else {
+                return Err(JobFileError::invalid("chamfer needs a side"));
+            };
+            let side = parse_side(as_str(side, "side").map_err(from_cli)?).map_err(from_cli)?;
+            if matches!(side, ProfileSide::On) {
+                return Err(JobFileError::invalid("chamfer side must be outside or inside"));
+            }
+            Ok(OperationKind::Chamfer { side })
+        }
         other => Err(JobFileError::invalid(format!("unknown operation type `{other}`"))),
     }
 }
 
 fn reject_side(side: Option<&Value>) -> Result<(), JobFileError> {
-    if side.is_some() { Err(JobFileError::invalid("side is only valid on a profile")) } else { Ok(()) }
+    if side.is_some() { Err(JobFileError::invalid("side is only valid on a profile or a chamfer")) } else { Ok(()) }
 }
 
 fn parse_layers(value: &Value) -> Result<Vec<String>, JobFileError> {
@@ -2121,6 +2314,324 @@ mod tests {
         ];
         for (index, (text, needle)) in cases.iter().enumerate() {
             let path = write_job(&format!("face-bad-{index}"), text);
+            let err = load(&path).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+            assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn parses_chamfer_in_mm_and_inches() {
+        let diameter = r#"[{"id":1,"diameter":6}]"#;
+        let explicit = load(&write_job(
+            "chamfer-mm",
+            &op_job(
+                "mm",
+                diameter,
+                r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"tip_diameter":0.4,"tip_clearance":0.1,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("mm chamfer");
+        let op = &explicit.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Chamfer { side: ProfileSide::Outside });
+        near(op.width(), 0.5);
+        near(op.v_angle(), 90.0_f64.to_radians());
+        near(op.tip_diameter(), 0.4);
+        near(op.tip_clearance(), 0.1);
+        // 90°: tan(a/2) is 1, so the tip depth is width + clearance.
+        near(op.depth(), 0.6);
+        near(op.step_down(), 0.6);
+        assert_eq!(op.stepover(), None);
+        assert_eq!(op.face_angle(), 0.0);
+        assert_eq!(op.margin(), 0.0);
+        assert_eq!(op.stock_to_leave(), StockToLeave::default());
+        assert_eq!(op.finish(), None);
+        assert_eq!(op.entry(), DepthEntry::Plunge);
+
+        let sharp = load(&write_job(
+            "chamfer-60",
+            &op_job(
+                "mm",
+                diameter,
+                r#"{"name":"a","type":"chamfer","layers":["L"],"side":"inside","tool_id":1,"width":1.2,"v_angle_deg":60,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("60 degree");
+        let op = &sharp.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Chamfer { side: ProfileSide::Inside });
+        near(op.width(), 1.2);
+        near(op.v_angle(), 60.0_f64.to_radians());
+        assert_eq!(op.tip_diameter(), 0.0);
+        assert_eq!(op.tip_clearance(), 0.0);
+        let expected = 1.2 / (60.0_f64.to_radians() * 0.5).tan();
+        near(op.depth(), expected);
+        near(op.step_down(), expected);
+
+        let under = load(&write_job(
+            "chamfer-tip-under",
+            &op_job(
+                "mm",
+                diameter,
+                r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.2,"v_angle_deg":90,"tip_diameter":5.999,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("tip just under the diameter");
+        near(under.operations()[0].tip_diameter(), 5.999);
+
+        let inch_tool = r#"[{"id":1,"diameter":0.25}]"#;
+        let inch = load(&write_job(
+            "chamfer-inch",
+            &op_job(
+                "inch",
+                inch_tool,
+                r#"{"name":"a","type":"chamfer","layers":["L"],"side":"inside","tool_id":1,"width":0.02,"v_angle_deg":90,"tip_diameter":0.01,"tip_clearance":0.004,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("inch chamfer");
+        let op = &inch.operations()[0];
+        assert_eq!(op.kind(), OperationKind::Chamfer { side: ProfileSide::Inside });
+        near(op.width(), 0.02 * 25.4);
+        near(op.v_angle(), 90.0_f64.to_radians());
+        near(op.tip_diameter(), 0.01 * 25.4);
+        near(op.tip_clearance(), 0.004 * 25.4);
+        near(op.depth(), (0.02 + 0.004) * 25.4);
+        near(op.step_down(), op.depth());
+
+        let plain = load(&write_job(
+            "chamfer-profile-zeros",
+            &op_job(
+                "mm",
+                diameter,
+                r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("profile");
+        let op = &plain.operations()[0];
+        assert_eq!(op.width(), 0.0);
+        assert_eq!(op.v_angle(), 0.0);
+        assert_eq!(op.tip_diameter(), 0.0);
+        assert_eq!(op.tip_clearance(), 0.0);
+        near(op.depth(), 1.0);
+        near(op.step_down(), 1.0);
+    }
+
+    #[test]
+    fn rejects_bad_chamfer_fields() {
+        let diameter = r#"[{"id":1,"diameter":6}]"#;
+        let kerf = r#"[{"id":1,"kerf":1.2}]"#;
+        let inch_tool = r#"[{"id":1,"diameter":0.25}]"#;
+        let cases = [
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"v_angle_deg":90,"feeds":{"cut":1}}"#,
+                ),
+                "chamfer needs a width",
+            ),
+            (
+                op_job("mm", diameter, r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"feeds":{"cut":1}}"#),
+                "chamfer needs a v_angle_deg",
+            ),
+            (
+                op_job("mm", diameter, r#"{"name":"a","type":"chamfer","layers":["L"],"tool_id":1,"width":0.5,"v_angle_deg":90,"feeds":{"cut":1}}"#),
+                "chamfer needs a side",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"on","tool_id":1,"width":0.5,"v_angle_deg":90,"feeds":{"cut":1}}"#,
+                ),
+                "chamfer side must be outside or inside",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0,"v_angle_deg":90,"feeds":{"cut":1}}"#,
+                ),
+                "width must be greater than 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":-0.2,"v_angle_deg":90,"feeds":{"cut":1}}"#,
+                ),
+                "width must be greater than 0",
+            ),
+            (
+                op_job(
+                    "inch",
+                    inch_tool,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":-0.01,"v_angle_deg":90,"feeds":{"cut":1}}"#,
+                ),
+                "width must be greater than 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":0,"feeds":{"cut":1}}"#,
+                ),
+                "v_angle_deg must be greater than 0 and less than 180",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":180,"feeds":{"cut":1}}"#,
+                ),
+                "v_angle_deg must be greater than 0 and less than 180",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":-10,"feeds":{"cut":1}}"#,
+                ),
+                "v_angle_deg must be greater than 0 and less than 180",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":180.1,"feeds":{"cut":1}}"#,
+                ),
+                "v_angle_deg must be greater than 0 and less than 180",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"tip_diameter":-0.1,"feeds":{"cut":1}}"#,
+                ),
+                "tip_diameter must be at least 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"tip_diameter":6,"feeds":{"cut":1}}"#,
+                ),
+                "tip_diameter must be less than the tool diameter",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"tip_diameter":6.1,"feeds":{"cut":1}}"#,
+                ),
+                "tip_diameter must be less than the tool diameter",
+            ),
+            (
+                op_job(
+                    "inch",
+                    inch_tool,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.02,"v_angle_deg":90,"tip_diameter":0.25,"feeds":{"cut":1}}"#,
+                ),
+                "tip_diameter must be less than the tool diameter",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"tip_clearance":-0.2,"feeds":{"cut":1}}"#,
+                ),
+                "tip_clearance must be at least 0",
+            ),
+            (
+                op_job(
+                    "inch",
+                    inch_tool,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"inside","tool_id":1,"width":0.02,"v_angle_deg":90,"tip_clearance":-0.001,"feeds":{"cut":1}}"#,
+                ),
+                "tip_clearance must be at least 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"depth":1,"feeds":{"cut":1}}"#,
+                ),
+                "depth is not valid on a chamfer; the depth follows from the geometry",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"step_down":0.5,"feeds":{"cut":1}}"#,
+                ),
+                "step_down is not valid on a chamfer; the depth follows from the geometry",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}"#,
+                ),
+                "depth is not valid on a chamfer; the depth follows from the geometry",
+            ),
+            (
+                op_job(
+                    "mm",
+                    kerf,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"feeds":{"cut":1}}"#,
+                ),
+                "chamfer is not valid with a kerf tool",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"width":0.5}"#,
+                ),
+                "width is only valid on a chamfer",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"v_angle_deg":90}"#,
+                ),
+                "v_angle_deg is only valid on a chamfer",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"tip_diameter":0}"#,
+                ),
+                "tip_diameter is only valid on a chamfer",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"drill","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"tip_clearance":0}"#,
+                ),
+                "tip_clearance is only valid on a chamfer",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"face","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1},"width":1}"#,
+                ),
+                "width is only valid on a chamfer",
+            ),
+            (
+                op_job(
+                    "mm",
+                    diameter,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":1000001,"v_angle_deg":90,"feeds":{"cut":1}}"#,
+                ),
+                "width is larger than",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let path = write_job(&format!("chamfer-bad-{index}"), text);
             let err = load(&path).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
             assert!(matches!(err, JobFileError::Invalid { .. }), "{needle}: {err:?}");

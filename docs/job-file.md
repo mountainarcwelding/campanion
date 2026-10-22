@@ -7,7 +7,7 @@ and builds paths from the operations recorded here.
 This is not the profile document read by `campanion ir --job` and `campanion ngc --job`. That
 document has no `format` tag. `campanion-job/1` rejects it.
 
-The loader is `crates/cli/src/jobfile.rs`. No command calls it yet.
+The loader is `crates/cli/src/jobfile.rs`. `campanion run` loads it.
 
 ## Top level
 
@@ -81,15 +81,19 @@ unique within that operation. The same layer may appear on two operations.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | Short unique name. |
-| `type` | yes | `profile`, `pocket`, `drill`, `engrave` or `face`. |
+| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face` or `chamfer`. |
 | `layers` | yes | One or more layer names. |
-| `side` | profile only | `inside`, `outside` or `on`. Rejected on pocket, drill, engrave and face. Same mapping as the profile job. |
+| `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave and face. |
 | `tool_id` | yes | `id` of a tool in this file. |
-| `depth` | yes | Positive distance downward from the stock surface, in `units`. Not an absolute Z. |
-| `step_down` | yes | Positive maximum thickness of one pass, in `units`. The last pass stops at `depth` and is not deeper. |
+| `depth` | yes, except chamfer | Positive distance downward from the stock surface, in `units`. Not an absolute Z. A chamfer rejects `depth`; the tip depth follows from the geometry. |
+| `step_down` | yes, except chamfer | Positive maximum thickness of one pass, in `units`. The last pass stops at `depth` and is not deeper. A chamfer rejects `step_down`. |
 | `stepover` | pocket and face | Positive step between passes, in `units`. At most the tool diameter. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). |
 | `angle_deg` | face only | `0` (along +X) or `90` (along +Y). Default `0`. Stored as radians. Rejected on every other kind. |
 | `margin` | face only | Length in `units`, at least 0, at most 1e6 mm. Default 0. Grows the faced rectangle past the geometry bounding box on every side. Rejected on every other kind. |
+| `width` | chamfer | Positive length in `units`, at most 1e6 mm. Horizontal width of the bevel. Rejected on every other kind. |
+| `v_angle_deg` | chamfer | Included angle of the V-bit, in degrees, greater than 0 and less than 180. Stored as radians. Not scaled by `units`. Rejected on every other kind. |
+| `tip_diameter` | chamfer | Length in `units`, at least 0, default 0. Must be less than the tool diameter. Rejected on every other kind. |
+| `tip_clearance` | chamfer | Length in `units`, at least 0, default 0. How far the tip sits below the bottom of the bevel. Rejected on every other kind. |
 | `stock_to_leave` | profile and pocket | Object with optional `wall` and `floor` lengths, in `units`. Each omitted field is 0. `floor` must be less than `depth`. Rejected on a face. |
 | `finish` | profile and pocket | Object with optional `step_down` (positive length in `units`; omitted, equal to `depth`) and optional `floor` (bool, default true, pocket only). Rejected on a face. |
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
@@ -113,6 +117,25 @@ rejected too.
 
 `examples/face.job.json` faces the outline layer of `examples/curves.svg` 0.5 mm deep in two
 passes with a 20 mm tool and a 2 mm margin.
+
+### Chamfer
+
+`type` `chamfer` cuts a closed contour with a V-bit. `side` `outside` keeps the tool outside the
+contour. `side` `inside` keeps it in a hole. `on` is rejected, and an open contour is an error
+when the job runs. A kerf tool is rejected.
+
+`width` is the horizontal width of the bevel. `v_angle_deg` is the included angle of the cone.
+`tip_diameter` is the flat at the point, and `tip_clearance` is how far that point sits below
+the bottom of the bevel. The tip depth, downward from the stock surface, is
+`width / tan(a / 2) + tip_clearance`, where `a` is `v_angle_deg` in radians. After `load`,
+`depth()` and `step_down()` both return that distance, so one pass reaches the tip. The file
+must not set `depth` or `step_down`.
+
+The tool `diameter` is the largest cutting diameter of the V-bit. `tip_diameter` must be smaller.
+
+`examples/chamfer.job.json` chamfers `examples/curves.svg` with a 90° 6 mm V-bit: the `OUTER`
+outline outside, 0.5 mm wide, and the `POCKET` hole inside, 0.3 mm wide. With no tip clearance
+the tips are at −0.5 mm and −0.3 mm.
 
 Pocket strategy, leads, tabs and drill-cycle fields are not part of this version.
 
@@ -148,7 +171,7 @@ Hostile numbers and sizes fail the load instead of being passed on:
 - JSON file at most 32 MiB, UTF-8.
 - 256 tools, 1024 operations, 64 layers on one operation.
 - Names at most 256 bytes. Source path at most 4096 bytes.
-- Tool size, depth, step-down, margin, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad).
+- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, margin, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad).
 - Feeds at most 1e9 mm/min. Delays at most 1e6 s.
 - At most 1024 depth passes.
 
