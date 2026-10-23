@@ -26,14 +26,20 @@
 //! already centred on the spindle. An internal bore is not recovered. STEP solids
 //! are not read here: section them with `solidcraft-cli` and import the DXF it writes.
 //!
+//! Facing, longitudinal roughing, and finishing are in [`ops`]. Those paths are
+//! coordinates of the programmed point with the nose radius applied here, so they
+//! do not depend on cutter compensation (G41/G42).
+//!
 //! This crate is clean-room. It does not use OCCT, FreeCAD, planegcs, or OpenCAMLib.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod mesh;
+mod ops;
 mod profile;
 
 pub use mesh::MeshAxis;
+pub use ops::{FaceParams, FinishParams, RoughParams, Side, TipPoint, TurnMove, TurnPath, TurnTool, compensated_profile, face, finish, rough};
 pub use profile::TurnProfile;
 
 /// Crate version from the package manifest.
