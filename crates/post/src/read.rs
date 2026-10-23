@@ -458,3 +458,18 @@ fn annotate(line: usize, err: crate::PostError) -> crate::PostError {
         other => other,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::tokenize;
+
+    #[test]
+    fn trailing_decimal_point_stays_with_the_number() {
+        let words = tokenize("X52. Z0. Y0.").expect("words");
+        assert_eq!(words, vec![('X', 52.0), ('Z', 0.0), ('Y', 0.0)]);
+        assert_eq!(tokenize("X0.").expect("zero"), vec![('X', 0.0)]);
+        assert_eq!(tokenize("A90.").expect("angle"), vec![('A', 90.0)]);
+        assert_eq!(tokenize("G1 X52.Y0.Z0.").expect("glued"), vec![('G', 1.0), ('X', 52.0), ('Y', 0.0), ('Z', 0.0)]);
+        assert_eq!(tokenize("I0. K-5.").expect("offsets"), vec![('I', 0.0), ('K', -5.0)]);
+    }
+}

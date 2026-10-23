@@ -95,6 +95,7 @@ placeholders, so the same program and post always produce the same bytes. Start 
 - `line_numbers` — `enabled`, `start`, `step`, and a one-letter `prefix`.
 - `decimals` — digits for `linear`, `feed`, and `dwell` moves (0 through 8).
 - `trailing_zeros` — keep trailing zeros when true.
+- `decimal_point` — when true, dimensional words always include a decimal point (`52.`, `0.`). Fanuc and Haas read a missing point as least-input increments (`X52` is 0.052 mm). Feed, spindle, dwell, line numbers, and tool and program numbers are unchanged.
 - `header`, `footer` — lines around the toolpaths. Placeholders: `{program_name}` and `{date-free!}` (expands to nothing).
 - `modal_motion` — when true, a repeated `G0` or `G1` is left off the next line.
 - `arcs` — `mode` is `ijk` (centre offsets `I` `J` `K`), `r` (signed radius), or `lines` (chords within the chord tolerance). `max_sweep_deg` splits a longer arc (greater than 0, at most 360). `helix` writes a helix as arcs when true, and as chords when false.

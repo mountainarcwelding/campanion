@@ -15,7 +15,7 @@ use campanion_ir::{
 
 use crate::def::{ArcMode, PostDef, ProcessWords, RotaryFeedMode};
 use crate::error::{Result, invalid, unsupported};
-use crate::fmt::{format_fixed, xy_text_eq};
+use crate::fmt::{format_dim, format_fixed, xy_text_eq};
 use crate::geom::{self, Xyz};
 use crate::rotary::{self, angles_equal};
 
@@ -417,7 +417,7 @@ impl<'a> Writer<'a> {
                 // block still fits; a semicircle then reads back with its centre on the midpoint.
                 let magnitude = if chord > 0.0 { radius.max(chord * 0.5) } else { radius };
                 let signed = if sweep > std::f64::consts::PI + 1e-8 { -magnitude } else { magnitude };
-                words.push(format!("R{}", format_fixed(signed, self.post.decimals.linear, self.post.trailing_zeros)?));
+                words.push(format!("R{}", self.format_axis(signed, self.post.decimals.linear)?));
             }
             ArcMode::Ijk => {
                 let offsets = [center[0] - start[0], center[1] - start[1], center[2] - start[2]];
@@ -425,7 +425,7 @@ impl<'a> Writer<'a> {
                     let Some(value) = offsets.get(*index).copied() else {
                         return Err(invalid("arc offset is missing"));
                     };
-                    words.push(format!("{letter}{}", format_fixed(value, self.post.decimals.linear, self.post.trailing_zeros)?));
+                    words.push(format!("{letter}{}", self.format_axis(value, self.post.decimals.linear)?));
                 }
             }
             ArcMode::Lines => return Err(invalid("line mode reached an arc block")),
@@ -534,7 +534,7 @@ impl<'a> Writer<'a> {
             Some(RotaryAxisKind::B) => 'B',
             None => return Err(invalid("rotary angle needs a rotary setup")),
         };
-        let text = format_fixed(angle, rotary.decimals, self.post.trailing_zeros)?;
+        let text = self.format_axis(angle, rotary.decimals)?;
         words.push(format!("{letter}{text}"));
         Ok(())
     }
@@ -545,11 +545,18 @@ impl<'a> Writer<'a> {
         let Some(pos) = self.pos else {
             return Ok(false);
         };
-        if !xy_text_eq(pos, end, self.post.decimals.linear, self.post.trailing_zeros)? {
+        if !xy_text_eq(pos, end, self.post.decimals.linear, self.post.trailing_zeros, self.post.decimal_point)? {
             return Ok(false);
         }
         let drop_rapid = code == "G0" && !self.post.process_feeds.rapid_z;
         Ok(drop_rapid || self.post.drop_z())
+    }
+
+    /// `X` `Y` `Z` `I` `J` `K` `R`, rotary `A`/`B`, and lathe `X`/`Z`.
+    ///
+    /// Feed, spindle, dwell, and sequence numbers stay on [`format_fixed`].
+    fn format_axis(&self, value: f64, decimals: u8) -> Result<String> {
+        format_dim(value, decimals, self.post.trailing_zeros, self.post.decimal_point)
     }
 
     fn round_xyz(&self, end: Xyz) -> Result<Xyz> {
@@ -558,7 +565,7 @@ impl<'a> Writer<'a> {
             let Some(value) = end.get(index).copied() else {
                 return Err(invalid("axis value is missing"));
             };
-            let text = format_fixed(value, self.post.decimals.linear, self.post.trailing_zeros)?;
+            let text = self.format_axis(value, self.post.decimals.linear)?;
             *slot = text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
         }
         Ok(rounded)
@@ -577,7 +584,7 @@ impl<'a> Writer<'a> {
             let Some(value) = rounded.get(index).copied() else {
                 return Err(invalid("axis value is missing"));
             };
-            let text = format_fixed(value, self.post.decimals.linear, self.post.trailing_zeros)?;
+            let text = self.format_axis(value, self.post.decimals.linear)?;
             words.push(format!("{letter}{text}"));
         }
         Ok(rounded)
@@ -591,8 +598,8 @@ impl<'a> Writer<'a> {
         let x_letter = letters.first().copied().ok_or_else(|| invalid("axis value is missing"))?;
         let z_letter = letters.get(2).copied().ok_or_else(|| invalid("axis value is missing"))?;
         let x_out = if lathe.diameter_mode { end[0] * 2.0 } else { end[0] };
-        let x_text = format_fixed(x_out, self.post.decimals.linear, self.post.trailing_zeros)?;
-        let z_text = format_fixed(end[2], self.post.decimals.linear, self.post.trailing_zeros)?;
+        let x_text = self.format_axis(x_out, self.post.decimals.linear)?;
+        let z_text = self.format_axis(end[2], self.post.decimals.linear)?;
         words.push(format!("{x_letter}{x_text}"));
         words.push(format!("{z_letter}{z_text}"));
         let written_x = x_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;

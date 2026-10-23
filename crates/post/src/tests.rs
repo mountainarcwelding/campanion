@@ -89,12 +89,12 @@ fn rotary_angles_need_a_post_that_names_the_axis() {
         }
         if post.rotary_axes().contains(&RotaryAxisKind::A) {
             let text = post_program(&rotary, &post, &options()).expect(id);
-            let angle = g_word('A', 90.0, post.rotary.as_ref().expect("rotary").decimals, post.trailing_zeros);
+            let angle = g_word('A', 90.0, post.rotary.as_ref().expect("rotary").decimals, post.trailing_zeros, post.decimal_point);
             let coords = format!(
                 "{} {} {}",
-                g_word('X', 0.0, post.linear_decimals(), post.trailing_zeros),
-                g_word('Y', -5.0, post.linear_decimals(), post.trailing_zeros),
-                g_word('Z', 0.0, post.linear_decimals(), post.trailing_zeros),
+                g_word('X', 0.0, post.linear_decimals(), post.trailing_zeros, post.decimal_point),
+                g_word('Y', -5.0, post.linear_decimals(), post.trailing_zeros, post.decimal_point),
+                g_word('Z', 0.0, post.linear_decimals(), post.trailing_zeros, post.decimal_point),
             );
             assert!(text.split_whitespace().any(|token| token == angle), "{id}: {text}");
             assert!(text.contains(&coords), "{id}: {text}");
@@ -165,6 +165,12 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("fanuc").expect("fanuc").max_line_length(), Some(80));
     assert_eq!(builtin("haas").expect("haas").linear_decimals(), 3);
     assert_eq!(builtin("haas").expect("haas").max_line_length(), Some(80));
+    for id in ["fanuc", "haas", "fanuc_lathe", "haas_lathe"] {
+        assert!(builtin(id).expect(id).decimal_point, "{id}");
+    }
+    for id in ["linuxcnc", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"] {
+        assert!(!builtin(id).expect(id).decimal_point, "{id}");
+    }
     assert!(builtin("centroid").is_none());
 }
 
@@ -452,7 +458,7 @@ fn fanuc_splits_full_circles_and_linearises_helices() {
         assert!(!line.split_whitespace().any(|word| matches!(word.chars().next(), Some('I' | 'J' | 'K'))), "{line}");
     }
     assert!(text.contains("G1 "), "{text}");
-    assert!(text.contains("Z-1\n"), "{text}");
+    assert!(text.split_whitespace().any(|word| word == "Z-1."), "{text}");
     let moves = read_back(&text, &post).expect("read");
     compare(&posted, &moves, 1e-3, &post).expect("compare");
 }
@@ -493,9 +499,77 @@ fn haas_keeps_ijk_helices_and_five_digit_program_number() {
         assert!(!letters.contains(&'K'), "{line}");
         assert!(!line.split_whitespace().any(|word| word.starts_with('R')), "{line}");
     }
-    assert!(arcs[1].contains("Z-1"), "{text}");
+    assert!(arcs[1].split_whitespace().any(|word| word == "Z-1."), "{text}");
     let moves = read_back(&text, &post).expect("read");
     compare(&posted, &moves, 1e-3, &post).expect("compare");
+}
+
+/// Fanuc and Haas read a word with no decimal point as least-input increments.
+/// `X52.` and `Z0.` and `I0.` stay pointed; `F100` and `P500` do not.
+#[test]
+fn fanuc_and_haas_keep_a_decimal_point_on_dimensional_words() {
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(52.0, 0.0, 5.0), feed: None }),
+        ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(52.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(47.0, 5.0, 0.0),
+            plane: Plane::Xy,
+            center: at(52.0, 5.0, 0.0),
+            sense: ArcSense::Cw,
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let posted = program(blocks);
+
+    let fanuc = builtin("fanuc").expect("fanuc");
+    let fanuc_text = post_program(&posted, &fanuc, &options()).expect("fanuc");
+    assert_pointed_axes(&fanuc_text);
+    assert!(has_word(&fanuc_text, "R5."), "{fanuc_text}");
+    assert!(!has_word(&fanuc_text, "R5"), "{fanuc_text}");
+    compare(&posted, &read_back(&fanuc_text, &fanuc).expect("read"), 1e-3, &fanuc).expect("fanuc compare");
+
+    let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/fanuc.json")).expect("json");
+    raw["arcs"]["mode"] = serde_json::json!("ijk");
+    let fanuc_ijk = load_post(&raw.to_string()).expect("fanuc ijk");
+    let ijk_text = post_program(&posted, &fanuc_ijk, &options()).expect("ijk");
+    assert_pointed_axes(&ijk_text);
+    assert!(has_word(&ijk_text, "I0."), "{ijk_text}");
+    assert!(!has_word(&ijk_text, "I0"), "{ijk_text}");
+    compare(&posted, &read_back(&ijk_text, &fanuc_ijk).expect("read"), 1e-3, &fanuc_ijk).expect("ijk compare");
+
+    let haas = builtin("haas").expect("haas");
+    let haas_text = post_program(&posted, &haas, &options()).expect("haas");
+    assert_pointed_axes(&haas_text);
+    assert!(has_word(&haas_text, "I0."), "{haas_text}");
+    assert!(!has_word(&haas_text, "I0"), "{haas_text}");
+    compare(&posted, &read_back(&haas_text, &haas).expect("read"), 1e-3, &haas).expect("haas compare");
+
+    let parsed = read_back("G0 X52. Y0. Z0.\nG0 X0.\n", &fanuc).expect("trailing point");
+    match parsed.first() {
+        Some(crate::ReadMove::Rapid { end, .. }) => {
+            assert_eq!(end[0], 52.0);
+            assert_eq!(end[1], 0.0);
+            assert_eq!(end[2], 0.0);
+        }
+        other => panic!("expected a rapid, got {other:?}"),
+    }
+    match parsed.get(1) {
+        Some(crate::ReadMove::Rapid { end, .. }) => assert_eq!(end[0], 0.0),
+        other => panic!("expected a second rapid, got {other:?}"),
+    }
+}
+
+fn assert_pointed_axes(text: &str) {
+    assert!(has_word(text, "X52."), "{text}");
+    assert!(has_word(text, "Z0."), "{text}");
+    assert!(has_word(text, "F100"), "{text}");
+    assert!(has_word(text, "P500"), "{text}");
+    assert!(!has_word(text, "X52"), "{text}");
+    assert!(!has_word(text, "Z0"), "{text}");
+    assert!(!has_word(text, "F100."), "{text}");
+    assert!(!has_word(text, "P500."), "{text}");
 }
 
 fn round_trip(post_json: &str, blocks: Vec<ClBlock>, tol: f64) {
@@ -672,8 +746,12 @@ fn torch_cut(power: Option<f64>) -> Program {
     program(blocks)
 }
 
-fn g_word(letter: char, value: f64, decimals: u8, trailing_zeros: bool) -> String {
-    format!("{letter}{}", crate::fmt::format_fixed(value, decimals, trailing_zeros).expect("number"))
+fn g_word(letter: char, value: f64, decimals: u8, trailing_zeros: bool, decimal_point: bool) -> String {
+    format!("{letter}{}", crate::fmt::format_dim(value, decimals, trailing_zeros, decimal_point).expect("number"))
+}
+
+fn has_word(text: &str, word: &str) -> bool {
+    text.split_whitespace().any(|token| token == word)
 }
 
 fn line_with_word(text: &str, word: &str) -> usize {
@@ -925,6 +1003,8 @@ fn mach3_fanuc_and_haas_write_their_rotary_feed_modes() {
     assert!(!mach3_text.contains("G93") && !mach3_text.contains("G94"), "{mach3_text}");
     assert!(mach3_text.split_whitespace().any(|word| word == "F100"), "{mach3_text}");
     assert!(!mach3_text.split_whitespace().any(|word| word == "F2" || word.starts_with("F2.")), "{mach3_text}");
+    assert!(has_word(&mach3_text, "A90"), "{mach3_text}");
+    assert!(!has_word(&mach3_text, "A90."), "{mach3_text}");
     compare(&program, &read_back(&mach3_text, &mach3).expect("read"), 1e-3, &mach3).expect("mach3 compare");
 
     for id in ["fanuc", "haas"] {
@@ -935,10 +1015,14 @@ fn mach3_fanuc_and_haas_write_their_rotary_feed_modes() {
         assert_eq!(rotary.inverse_time_off.as_deref(), Some("G94"));
         let text = post_program(&program, &post, &options()).expect(id);
         let on = line_with_word(&text, "G93");
-        let rotating = line_with_words(&text, &["A90", "F2"]);
+        let rotating = line_with_words(&text, &["A90.", "F2"]);
         let off = line_with_word(&text, "G94");
-        let held = line_with_words(&text, &["A90", "F100"]);
+        let held = line_with_words(&text, &["A90.", "F100"]);
         assert!(on < rotating && rotating < off && off < held, "{id}: {text}");
+        assert!(has_word(&text, "A90."), "{id}: {text}");
+        assert!(!has_word(&text, "A90"), "{id}: {text}");
+        assert!(has_word(&text, "F100") && has_word(&text, "F2"), "{id}: {text}");
+        assert!(!has_word(&text, "F100.") && !has_word(&text, "F2."), "{id}: {text}");
         compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).unwrap_or_else(|err| panic!("{id}: {err}"));
     }
 }
