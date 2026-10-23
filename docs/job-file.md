@@ -472,6 +472,21 @@ A STEP part is cut from one planar face. `face` is a point on that face, in mill
 part's model coordinates (never scaled by `units`). `campanion run` hands the part to SolidCraft's
 command-line tool, which exports the face's outline and holes as DXF, and imports that DXF.
 
+`campanion run` accepts `--up-axis z|y|auto`. The default is `auto`. DXF, SVG and STL jobs ignore it.
+
+- `auto` trusts the exporter named in the STEP header (`exporter` and `exporter_up`, as SolidCraft
+  reports them). SolidWorks means Y up: the part is turned a quarter turn about +X so Z is up.
+  That guess follows the header, not a measurement, so a SolidWorks file saved Z up is still
+  reported as Y up. Pass `--up-axis z` to keep the file's axes. Any other `exporter_up`, a missing
+  field, and an older SolidCraft that sends no exporter fields all leave the file as Z up. When
+  `auto` does turn a file it prints one note on stderr naming the exporter.
+- `z` keeps the file's axes and does not ask about the header.
+- `y` turns the part the same way without asking. File Y becomes Z and file Z becomes -Y, so a
+  file point `(x, y, z)` is `(x, -z, y)` afterwards.
+
+`face` is in the resulting frame. After a Y-up turn, give the point in that turned frame:
+file `(x, y, z)` is `(x, -z, y)`.
+
 - The tool is found through the `CAMPANION_SOLIDCRAFT_CLI` environment variable (path to the
   `solidcraft-cli` executable) or, failing that, `solidcraft-cli` on `PATH`. Without it, a STEP job
   stops with an error that says so; DXF and SVG jobs don't need it.

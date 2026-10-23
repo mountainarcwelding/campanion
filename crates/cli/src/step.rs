@@ -2,9 +2,12 @@
 //!
 //! SolidCraft stays a separate program. This module runs its documented
 //! `solidcraft-cli run` command and does not link or copy SolidCraft.
+//! [`UpAxis::Auto`] probes the exporter header. A Y-up file is opened with
+//! `doc.open` `"up": "y"` so the face point is in a Z-up frame. Z up keeps
+//! `run <script> --in <step> --quiet`.
 
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -24,6 +27,38 @@ const MAX_DXF_BYTES: usize = 32 * 1024 * 1024;
 const MAX_LOG_BYTES: usize = 256 * 1024;
 const MAX_LOG_LINES: usize = 20;
 const TEMP_ATTEMPTS: usize = 64;
+/// Header replies are a few kilobytes. Anything larger is an unusable probe, same as bad JSON.
+const MAX_PROBE_BYTES: usize = 1024 * 1024;
+/// Exporter names in the stderr note. A longer or multi-line value is not printed.
+const NOTE_EXPORTER_MAX: usize = 200;
+
+/// Which STEP axis is up when a face is exported.
+///
+/// SolidCraft does not turn a file on its own. [`Self::Z`] keeps the file's axes.
+/// [`Self::Y`] turns the part +90° about +X (file Y becomes Z, file Z becomes -Y).
+/// [`Self::Auto`] uses Y only when the exporter header says `y`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpAxis {
+    /// Keep the file's axes. The `up` parameter is omitted (`"z"` is the default, and older
+    /// SolidCraft builds reject the parameter).
+    Z,
+    /// Turn Y up onto Z up.
+    Y,
+    /// Header `exporter_up == "y"` selects [`Self::Y`]. Anything else selects [`Self::Z`].
+    Auto,
+}
+
+impl UpAxis {
+    /// `z`, `y` or `auto`, case-sensitive.
+    pub fn parse(text: &str) -> Result<Self, CliError> {
+        match text {
+            "z" => Ok(Self::Z),
+            "y" => Ok(Self::Y),
+            "auto" => Ok(Self::Auto),
+            _ => Err(CliError::usage(format!("--up-axis must be z, y or auto (got {text})"))),
+        }
+    }
+}
 
 /// Finds solidcraft-cli: [`CLI_ENV`] if set and non-empty (must be an existing file), else
 /// `solidcraft-cli` searched on `PATH` ([`std::env::split_paths`]). `None` when not found.
@@ -50,18 +85,35 @@ fn search_path() -> Option<PathBuf> {
 }
 
 /// Exports the planar face of `step` that contains `face` (mm) as DXF text.
+///
+/// `face` is in the frame after `up` is applied. [`UpAxis::Y`], and [`UpAxis::Auto`] when the
+/// header says Y, turn the part inside SolidCraft and then use `face` in that Z-up frame.
+/// [`UpAxis::Z`] keeps `solidcraft-cli run <script> --in <step> --quiet`. [`UpAxis::Auto`] probes
+/// first. A probe that exits non-zero is an error. A probe that exits zero but does not return a
+/// usable reply is treated as Z up, and nothing is printed.
 #[allow(dead_code)]
-pub fn face_to_dxf(cli: &Path, step: &Path, face: [f64; 3]) -> Result<String, CliError> {
+pub fn face_to_dxf(cli: &Path, step: &Path, face: [f64; 3], up: UpAxis) -> Result<String, CliError> {
     let [x, y, z] = face;
     if ![x, y, z].iter().all(|coord| coord.is_finite()) {
         return Err(CliError::invalid("face point must be three finite millimetre coordinates"));
     }
 
     let temp = TempDir::create()?;
+    let turn = match up {
+        UpAxis::Z => false,
+        UpAxis::Y => true,
+        UpAxis::Auto => probe_needs_turn(cli, step, temp.path())?,
+    };
     let script = temp.path.join("script.json");
     let dxf = temp.path.join("face.dxf");
-    write_script(&script, &dxf, x, y, z)?;
-    run_cli(cli, &script, step, temp.path())?;
+    if turn {
+        let absolute = absolute_utf8(step)?;
+        write_script(&script, &dxf, x, y, z, Some(absolute.as_str()))?;
+        run_cli(cli, &script, step, temp.path(), CliMode::Script)?;
+    } else {
+        write_script(&script, &dxf, x, y, z, None)?;
+        run_cli(cli, &script, step, temp.path(), CliMode::Import { step })?;
+    }
     read_dxf(&dxf)
 }
 
@@ -109,29 +161,138 @@ impl Drop for TempDir {
     }
 }
 
-fn write_script(script: &Path, dxf: &Path, x: f64, y: f64, z: f64) -> Result<(), CliError> {
+/// How `solidcraft-cli run` is invoked. Z up passes the part with `--in`. A turned part opens
+/// itself in the script. The header probe asks for a JSON reply and does not pass `--in`.
+enum CliMode<'a> {
+    Import { step: &'a Path },
+    Script,
+    Probe { json_out: &'a Path },
+}
+
+struct ProbeReply {
+    y_up: bool,
+    exporter: Option<String>,
+}
+
+impl ProbeReply {
+    fn keep() -> Self {
+        Self { y_up: false, exporter: None }
+    }
+}
+
+fn absolute_utf8(path: &Path) -> Result<String, CliError> {
+    let absolute = std::path::absolute(path).map_err(|err| CliError::run(format!("cannot resolve {}: {err}", path.display())))?;
+    match absolute.to_str() {
+        Some(text) => Ok(text.to_string()),
+        None => Err(CliError::run(format!("path {} is not utf-8", path.display()))),
+    }
+}
+
+/// Header probe in `dir`. A non-zero exit is an error. Odd output selects Z and prints nothing.
+fn probe_needs_turn(cli: &Path, step: &Path, dir: &Path) -> Result<bool, CliError> {
+    let absolute = absolute_utf8(step)?;
+    let script = dir.join("probe-script.json");
+    let results = dir.join("probe.json");
+    write_probe_script(&script, &absolute)?;
+    run_cli(cli, &script, step, dir, CliMode::Probe { json_out: &results })?;
+    let reply = read_probe_reply(&results);
+    if reply.y_up {
+        print_y_up_note(reply.exporter.as_deref())?;
+    }
+    Ok(reply.y_up)
+}
+
+fn write_probe_script(script: &Path, step_path: &str) -> Result<(), CliError> {
+    // No `up` parameter. `"z"` is the default, and older SolidCraft builds reject the key.
+    let value = serde_json::json!([
+        { "command": "doc.open", "params": { "path": step_path } }
+    ]);
+    write_json(script, &value)
+}
+
+fn write_script(script: &Path, dxf: &Path, x: f64, y: f64, z: f64, open_step: Option<&str>) -> Result<(), CliError> {
     let Some(dxf_path) = dxf.to_str() else {
         return Err(CliError::run(format!("temp path {} is not utf-8", dxf.display())));
     };
-    let value = serde_json::json!([
-        {
-            "command": "sketch.create",
-            "params": {
-                "plane": { "face": [x, y, z] },
-                "name": "campanion_face",
-                "project_edges": true
-            }
-        },
-        {
-            "command": "sketch.export_dxf",
-            "params": {
-                "sketch": "campanion_face",
-                "path": dxf_path
-            }
+    let mut commands = Vec::new();
+    if let Some(step_path) = open_step {
+        commands.push(serde_json::json!({
+            "command": "doc.open",
+            "params": { "path": step_path, "up": "y" }
+        }));
+    }
+    commands.push(serde_json::json!({
+        "command": "sketch.create",
+        "params": {
+            "plane": { "face": [x, y, z] },
+            "name": "campanion_face",
+            "project_edges": true
         }
-    ]);
-    let text = serde_json::to_string(&value).map_err(|err| CliError::run(format!("script json: {err}")))?;
-    fs::write(script, text).map_err(|err| CliError::run(format!("{}: {err}", script.display())))
+    }));
+    commands.push(serde_json::json!({
+        "command": "sketch.export_dxf",
+        "params": {
+            "sketch": "campanion_face",
+            "path": dxf_path
+        }
+    }));
+    write_json(script, &serde_json::Value::Array(commands))
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), CliError> {
+    let text = serde_json::to_string(value).map_err(|err| CliError::run(format!("script json: {err}")))?;
+    fs::write(path, text).map_err(|err| CliError::run(format!("{}: {err}", path.display())))
+}
+
+/// First reply object only. Unknown fields are ignored. Anything that is not an array whose first
+/// element is an object, or that is not JSON, keeps the file's axes.
+fn probe_reply(text: &str) -> ProbeReply {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return ProbeReply::keep();
+    };
+    let Some(first) = value.as_array().and_then(|items| items.first()) else {
+        return ProbeReply::keep();
+    };
+    let Some(object) = first.as_object() else {
+        return ProbeReply::keep();
+    };
+    let exporter = object.get("exporter").and_then(serde_json::Value::as_str).map(str::to_string);
+    let y_up = object.get("exporter_up").and_then(serde_json::Value::as_str) == Some("y");
+    ProbeReply { y_up, exporter }
+}
+
+fn read_probe_reply(path: &Path) -> ProbeReply {
+    let Ok(file) = File::open(path) else {
+        return ProbeReply::keep();
+    };
+    let mut bytes = Vec::new();
+    let limit = (MAX_PROBE_BYTES as u64).saturating_add(1);
+    if file.take(limit).read_to_end(&mut bytes).is_err() || bytes.len() > MAX_PROBE_BYTES {
+        return ProbeReply::keep();
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return ProbeReply::keep();
+    };
+    probe_reply(&text)
+}
+
+fn y_up_note(exporter: Option<&str>) -> String {
+    let name = match exporter {
+        Some(text) if exporter_name_ok(text) => text,
+        _ => "unknown",
+    };
+    format!("note: STEP exported by {name} (Y up); turned Y up to Z up. Use --up-axis z to keep the file's axes.")
+}
+
+fn exporter_name_ok(text: &str) -> bool {
+    !text.is_empty() && text.chars().count() <= NOTE_EXPORTER_MAX && !text.chars().any(char::is_control)
+}
+
+fn print_y_up_note(exporter: Option<&str>) -> Result<(), CliError> {
+    let mut out = io::stderr().lock();
+    writeln!(out, "{}", y_up_note(exporter))?;
+    out.flush()?;
+    Ok(())
 }
 
 struct Running {
@@ -141,16 +302,23 @@ struct Running {
 }
 
 impl Running {
-    fn spawn(cli: &Path, script: &Path, step: &Path, dir: &Path) -> Result<Self, CliError> {
+    fn spawn(cli: &Path, script: &Path, dir: &Path, mode: CliMode<'_>) -> Result<Self, CliError> {
         let stdout_path = dir.join("stdout.txt");
         let stderr_path = dir.join("stderr.txt");
         let stdout = File::create(&stdout_path).map_err(|err| CliError::run(format!("{}: {err}", stdout_path.display())))?;
         let stderr = File::create(&stderr_path).map_err(|err| CliError::run(format!("{}: {err}", stderr_path.display())))?;
-        let child = Command::new(cli)
-            .arg("run")
-            .arg(script)
-            .arg("--in")
-            .arg(step)
+        let mut command = Command::new(cli);
+        command.arg("run").arg(script);
+        match mode {
+            CliMode::Import { step } => {
+                command.arg("--in").arg(step);
+            }
+            CliMode::Script => {}
+            CliMode::Probe { json_out } => {
+                command.arg("--results").arg("--json-out").arg(json_out);
+            }
+        }
+        let child = command
             .arg("--quiet")
             .stdin(Stdio::null())
             .stdout(stdout)
@@ -191,8 +359,8 @@ impl Drop for Running {
     }
 }
 
-fn run_cli(cli: &Path, script: &Path, step: &Path, dir: &Path) -> Result<(), CliError> {
-    let mut running = Running::spawn(cli, script, step, dir)?;
+fn run_cli(cli: &Path, script: &Path, step: &Path, dir: &Path, mode: CliMode<'_>) -> Result<(), CliError> {
+    let mut running = Running::spawn(cli, script, dir, mode)?;
     let status = running.wait_timeout()?;
     if status.success() {
         return Ok(());
@@ -345,8 +513,65 @@ mod tests {
 
     #[test]
     fn face_to_dxf_rejects_non_finite() {
-        let err = face_to_dxf(Path::new("solidcraft-cli"), Path::new("part.step"), [f64::NAN, 0.0, 1.0]).expect_err("nan");
+        let err = face_to_dxf(Path::new("solidcraft-cli"), Path::new("part.step"), [f64::NAN, 0.0, 1.0], UpAxis::Auto).expect_err("nan");
         assert!(err.to_string().contains("finite"), "{err}");
+    }
+
+    #[test]
+    fn up_axis_parse_is_case_sensitive() {
+        assert_eq!(UpAxis::parse("z").unwrap_or_else(|err| panic!("{err}")), UpAxis::Z);
+        assert_eq!(UpAxis::parse("y").unwrap_or_else(|err| panic!("{err}")), UpAxis::Y);
+        assert_eq!(UpAxis::parse("auto").unwrap_or_else(|err| panic!("{err}")), UpAxis::Auto);
+        for bad in ["Z", "Y", "Auto", "AUTO", "", "x", "yz", " z", "y ", "auto\n"] {
+            let err = UpAxis::parse(bad).expect_err(bad);
+            match err {
+                CliError::Usage(message) => assert!(message.contains("z, y or auto"), "{message}"),
+                CliError::Run(message) => panic!("expected usage, got {message}"),
+            }
+        }
+    }
+
+    #[test]
+    fn y_up_note_names_the_exporter() {
+        let note = y_up_note(Some("SolidWorks"));
+        assert_eq!(note, "note: STEP exported by SolidWorks (Y up); turned Y up to Z up. Use --up-axis z to keep the file's axes.");
+        assert_eq!(y_up_note(None), "note: STEP exported by unknown (Y up); turned Y up to Z up. Use --up-axis z to keep the file's axes.");
+        assert!(y_up_note(Some("has\nnewline")).contains("unknown"));
+    }
+
+    #[test]
+    fn probe_reply_tolerates_unknown_fields_and_uses_the_first_object() {
+        let text = r#"[{"bodies":["plate"],"component":1,"exporter":"SolidWorks","exporter_up":"y","system":"SolidWorks 2024","warnings":[],"stand_up":2,"future":{"keep":true}},{"exporter_up":"z"}]"#;
+        let reply = probe_reply(text);
+        assert!(reply.y_up);
+        assert_eq!(reply.exporter.as_deref(), Some("SolidWorks"));
+    }
+
+    #[test]
+    fn probe_reply_keeps_z_for_odd_output() {
+        let z_cases = [
+            r#"[{"exporter":"SolidCraft","exporter_up":"z","system":"SolidCraft","new_field":1}]"#,
+            r#"[{"bodies":["plate"],"warnings":[]}]"#,
+            r#"[{}]"#,
+            r#"[{"exporter_up":"Y"}]"#,
+            r#"[{"exporter_up":1,"exporter":"SolidWorks"}]"#,
+            r#"["nope",{"exporter_up":"y","exporter":"SolidWorks"}]"#,
+            r#"[null]"#,
+            r#"[]"#,
+            r#"{"exporter":"SolidWorks","exporter_up":"y"}"#,
+            "not json",
+            "",
+            "   ",
+            "null",
+            "[] trailing",
+        ];
+        for text in z_cases {
+            let reply = probe_reply(text);
+            assert!(!reply.y_up, "{text}");
+        }
+        let named = probe_reply(r#"[{"exporter_up":"y","exporter":1,"extra":true}]"#);
+        assert!(named.y_up);
+        assert_eq!(named.exporter, None);
     }
 
     #[cfg(unix)]
@@ -402,7 +627,7 @@ mod tests {
         let step = scratch.0.join("part.step");
         fs::write(&step, b"ISO-10303-21;\n").expect("step");
 
-        let text = face_to_dxf(&cli, &step, [1.5, -2.0, 3.25]).unwrap_or_else(|err| panic!("{err}"));
+        let text = face_to_dxf(&cli, &step, [1.5, -2.0, 3.25], UpAxis::Z).unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(text, DXF_TEXT);
         assert_temp_removed(&sentinel);
     }
@@ -416,10 +641,290 @@ mod tests {
         let step = scratch.0.join("part.step");
         fs::write(&step, b"ISO-10303-21;\n").expect("step");
 
-        let err = face_to_dxf(&cli, &step, [0.0, 0.0, 0.0]).expect_err("status");
+        let err = face_to_dxf(&cli, &step, [0.0, 0.0, 0.0], UpAxis::Z).expect_err("status");
         let message = err.to_string();
         assert!(message.contains("boom"), "{message}");
         assert!(message.contains("solidcraft-cli failed on"), "{message}");
         assert_temp_removed(&sentinel);
+    }
+
+    #[cfg(unix)]
+    fn shell_single(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+
+    /// `probe_body` is written to `--json-out`. `probe_error` is the probe's stderr and a non-zero
+    /// exit. Neither means a probe invocation is a failure, so an explicit axis must not probe.
+    #[cfg(unix)]
+    fn recording_cli(log: &Path, probe_body: Option<&str>, probe_error: Option<&str>) -> String {
+        let on_probe = if let Some(body) = probe_body {
+            format!("cat > \"$json_out\" << 'ENDJSON'\n{body}\nENDJSON\nexit 0")
+        } else if let Some(message) = probe_error {
+            format!("printf '%s\\n' {} >&2\nexit 4", shell_single(message))
+        } else {
+            "printf '%s\\n' 'probe was not expected' >&2\nexit 9".to_string()
+        };
+        let template = r#"#!/bin/sh
+set -eu
+log=__LOG__
+{
+  printf '%s\n' 'CALL'
+  printf '%s\n' "$@"
+  printf '%s\n' 'ENDARGS'
+  printf '%s\n' 'SCRIPT'
+  cat -- "$2"
+  printf '\n%s\n' 'ENDSCRIPT'
+} >> "$log"
+json_out=
+prev=
+for arg in "$@"; do
+  if [ "$prev" = "--json-out" ]; then
+    json_out=$arg
+  fi
+  prev=$arg
+done
+if [ -n "$json_out" ]; then
+__ON_PROBE__
+fi
+dxf=$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' "$2" | tail -n 1)
+test -n "$dxf"
+printf '%s\n' '0' 'SECTION' '2' 'ENTITIES' '0' 'ENDSEC' '0' 'EOF' > "$dxf"
+"#;
+        template.replace("__LOG__", &shell_quote(log)).replace("__ON_PROBE__", &on_probe)
+    }
+
+    #[cfg(unix)]
+    fn parse_calls(text: &str) -> Vec<(Vec<String>, String)> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut calls = Vec::new();
+        let mut index = 0usize;
+        while index < lines.len() {
+            assert_eq!(lines.get(index).copied(), Some("CALL"), "{text}");
+            index += 1;
+            let mut args = Vec::new();
+            while let Some(line) = lines.get(index).copied() {
+                if line == "ENDARGS" {
+                    break;
+                }
+                args.push(line.to_string());
+                index += 1;
+            }
+            assert_eq!(lines.get(index).copied(), Some("ENDARGS"), "{text}");
+            index += 1;
+            assert_eq!(lines.get(index).copied(), Some("SCRIPT"), "{text}");
+            index += 1;
+            let mut script = Vec::new();
+            while let Some(line) = lines.get(index).copied() {
+                if line == "ENDSCRIPT" {
+                    break;
+                }
+                script.push(line);
+                index += 1;
+            }
+            assert_eq!(lines.get(index).copied(), Some("ENDSCRIPT"), "{text}");
+            index += 1;
+            calls.push((args, script.join("\n")));
+        }
+        calls
+    }
+
+    #[cfg(unix)]
+    fn run_recorded(
+        name: &str,
+        up: UpAxis,
+        probe_body: Option<&str>,
+        probe_error: Option<&str>,
+    ) -> (Result<String, CliError>, Vec<(Vec<String>, String)>) {
+        let scratch = Scratch::new(name);
+        let log = scratch.0.join("calls.log");
+        let cli = write_cli(&scratch.0, &recording_cli(&log, probe_body, probe_error));
+        let step = scratch.0.join("part.step");
+        fs::write(&step, b"ISO-10303-21;\n").expect("step");
+        let result = face_to_dxf(&cli, &step, [10.0, -3.5, 1.25], up);
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        let calls = parse_calls(&text);
+        // The private temp directory is gone, whichever way the run ended.
+        if let Some((args, _)) = calls.first() {
+            let script = PathBuf::from(args.get(1).map(String::as_str).unwrap_or(""));
+            if let Some(temp) = script.parent() {
+                assert!(!temp.exists(), "temp dir was not removed: {}", temp.display());
+            }
+        }
+        (result, calls)
+    }
+
+    #[cfg(unix)]
+    fn assert_probe_call(args: &[String]) {
+        assert_eq!(args.first().map(String::as_str), Some("run"), "{args:?}");
+        assert_eq!(args.get(2).map(String::as_str), Some("--results"), "{args:?}");
+        assert_eq!(args.get(3).map(String::as_str), Some("--json-out"), "{args:?}");
+        let out = args.get(4).map(String::as_str).unwrap_or("");
+        assert!(out.ends_with("/probe.json"), "{out}");
+        assert_eq!(args.get(5).map(String::as_str), Some("--quiet"), "{args:?}");
+        assert_eq!(args.len(), 6, "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "--in"), "{args:?}");
+    }
+
+    #[cfg(unix)]
+    fn assert_probe_script(script: &str, step_parent_marker: &str) {
+        let value: serde_json::Value = serde_json::from_str(script).unwrap_or_else(|err| panic!("{err}\n{script}"));
+        let commands = value.as_array().expect("probe array");
+        assert_eq!(commands.len(), 1, "{script}");
+        let open = commands.first().expect("doc.open");
+        assert_eq!(open.get("command").and_then(|item| item.as_str()), Some("doc.open"));
+        let params = open.get("params").and_then(|item| item.as_object()).expect("params");
+        assert!(params.get("up").is_none(), "{params:?}");
+        let path = params.get("path").and_then(|item| item.as_str()).expect("path");
+        assert!(path.starts_with('/'), "{path}");
+        assert!(path.ends_with("/part.step"), "{path}");
+        assert!(path.contains(step_parent_marker), "{path}");
+    }
+
+    #[cfg(unix)]
+    fn assert_in_call(args: &[String]) {
+        assert_eq!(args.len(), 5, "{args:?}");
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        let script = args.get(1).map(String::as_str).unwrap_or("");
+        assert!(script.ends_with("/script.json"), "{script}");
+        assert_eq!(args.get(2).map(String::as_str), Some("--in"));
+        let step = args.get(3).map(String::as_str).unwrap_or("");
+        assert!(step.ends_with("/part.step"), "{step}");
+        assert_eq!(args.get(4).map(String::as_str), Some("--quiet"));
+    }
+
+    #[cfg(unix)]
+    fn assert_turn_call(args: &[String]) {
+        assert_eq!(args.len(), 3, "{args:?}");
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        let script = args.get(1).map(String::as_str).unwrap_or("");
+        assert!(script.ends_with("/script.json"), "{script}");
+        assert_eq!(args.get(2).map(String::as_str), Some("--quiet"));
+    }
+
+    #[cfg(unix)]
+    fn assert_turn_script(script: &str) {
+        let value: serde_json::Value = serde_json::from_str(script).unwrap_or_else(|err| panic!("{err}\n{script}"));
+        let commands = value.as_array().expect("script array");
+        assert_eq!(commands.len(), 3, "{script}");
+        let open = commands.first().expect("doc.open");
+        assert_eq!(open.get("command").and_then(|item| item.as_str()), Some("doc.open"));
+        assert_eq!(open.pointer("/params/up").and_then(|item| item.as_str()), Some("y"));
+        let path = open.pointer("/params/path").and_then(|item| item.as_str()).expect("path");
+        assert!(path.starts_with('/'), "{path}");
+        assert!(path.ends_with("/part.step"), "{path}");
+        assert_eq!(commands.get(1).and_then(|item| item.get("command")).and_then(|item| item.as_str()), Some("sketch.create"));
+        let face = commands.get(1).and_then(|item| item.pointer("/params/plane/face")).and_then(|item| item.as_array()).expect("face");
+        let coords: Vec<f64> = face.iter().map(|item| item.as_f64().expect("coord")).collect();
+        assert_eq!(coords, vec![10.0, -3.5, 1.25]);
+        assert_eq!(commands.get(2).and_then(|item| item.get("command")).and_then(|item| item.as_str()), Some("sketch.export_dxf"));
+    }
+
+    #[cfg(unix)]
+    fn assert_plain_script(script: &str) {
+        let value: serde_json::Value = serde_json::from_str(script).unwrap_or_else(|err| panic!("{err}\n{script}"));
+        let commands = value.as_array().expect("script array");
+        assert_eq!(commands.len(), 2, "{script}");
+        assert_eq!(commands.first().and_then(|item| item.get("command")).and_then(|item| item.as_str()), Some("sketch.create"));
+        assert!(!script.contains("doc.open"), "{script}");
+        assert!(!script.contains("\"up\""), "{script}");
+    }
+
+    #[cfg(unix)]
+    fn same_temp(calls: &[(Vec<String>, String)]) {
+        let probe = PathBuf::from(calls.first().and_then(|(args, _)| args.get(1)).map(String::as_str).unwrap_or(""));
+        let main = PathBuf::from(calls.get(1).and_then(|(args, _)| args.get(1)).map(String::as_str).unwrap_or(""));
+        assert_eq!(probe.parent(), main.parent());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn face_to_dxf_auto_y_opens_with_up_and_skips_in() {
+        let reply = r#"[{"bodies":["plate"],"exporter":"SolidWorks","exporter_up":"y","system":"SolidWorks 2024","warnings":[],"future":{"n":1}},{"ignored":true}]"#;
+        let (result, calls) = run_recorded("auto-y", UpAxis::Auto, Some(reply), None);
+        let text = result.unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(text, DXF_TEXT);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_probe_call(&calls[0].0);
+        assert_probe_script(&calls[0].1, "auto-y");
+        assert_turn_call(&calls[1].0);
+        assert_turn_script(&calls[1].1);
+        same_temp(&calls);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn face_to_dxf_auto_non_y_uses_in() {
+        let replies = [
+            r#"[{"exporter":"SolidCraft","exporter_up":"z","system":"SolidCraft","new_field":true}]"#,
+            r#"[{"bodies":["plate"],"warnings":[]}]"#,
+            r#"["nope",{"exporter_up":"y"}]"#,
+            "[]",
+            "this is not json",
+        ];
+        for (index, reply) in replies.iter().enumerate() {
+            let (result, calls) = run_recorded(&format!("auto-z-{index}"), UpAxis::Auto, Some(reply), None);
+            let text = result.unwrap_or_else(|err| panic!("{reply}: {err}"));
+            assert_eq!(text, DXF_TEXT, "{reply}");
+            assert_eq!(calls.len(), 2, "{reply} {calls:?}");
+            assert_probe_call(&calls[0].0);
+            assert_probe_script(&calls[0].1, &format!("auto-z-{index}"));
+            assert_in_call(&calls[1].0);
+            assert_plain_script(&calls[1].1);
+            same_temp(&calls);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn face_to_dxf_auto_missing_probe_file_uses_in() {
+        let scratch = Scratch::new("auto-missing");
+        let log = scratch.0.join("calls.log");
+        let body = recording_cli(&log, None, None).replace("printf '%s\\n' 'probe was not expected' >&2\nexit 9", "exit 0");
+        let cli = write_cli(&scratch.0, &body);
+        let step = scratch.0.join("part.step");
+        fs::write(&step, b"ISO-10303-21;\n").expect("step");
+        let text = face_to_dxf(&cli, &step, [10.0, -3.5, 1.25], UpAxis::Auto).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(text, DXF_TEXT);
+        let calls = parse_calls(&fs::read_to_string(&log).expect("log"));
+        assert_eq!(calls.len(), 2);
+        assert_in_call(&calls[1].0);
+        assert_plain_script(&calls[1].1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn face_to_dxf_explicit_z_does_not_probe() {
+        let (result, calls) = run_recorded("explicit-z", UpAxis::Z, None, None);
+        let text = result.unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(text, DXF_TEXT);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_in_call(&calls[0].0);
+        assert_plain_script(&calls[0].1);
+        assert!(!calls[0].0.iter().any(|arg| arg == "--results"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn face_to_dxf_explicit_y_does_not_probe() {
+        let (result, calls) = run_recorded("explicit-y", UpAxis::Y, None, None);
+        let text = result.unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(text, DXF_TEXT);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_turn_call(&calls[0].0);
+        assert_turn_script(&calls[0].1);
+        assert!(!calls[0].0.iter().any(|arg| arg == "--results" || arg == "--in"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn face_to_dxf_probe_failure_includes_stderr() {
+        let (result, calls) = run_recorded("probe-fail", UpAxis::Auto, None, Some("probe broke"));
+        let err = result.expect_err("probe status");
+        let message = err.to_string();
+        assert!(message.contains("probe broke"), "{message}");
+        assert!(message.contains("solidcraft-cli failed on"), "{message}");
+        assert!(message.contains("part.step"), "{message}");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_probe_call(&calls[0].0);
     }
 }
