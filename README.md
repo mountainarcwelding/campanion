@@ -31,6 +31,13 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - `examples/indexed.job.json` finishes `examples/dome.stl` at two rotary indexes. See [Indexed 3+1](docs/job-file.md#indexed-31) in the job-file docs.
 - `examples/wrap.job.json` wraps `examples/wrap.svg` onto a 40 mm cylinder about A. Drawing X is the distance along the axis and drawing Y is the arc length around the surface. See [Wrapping](docs/job-file.md#wrapping).
 - `examples/rotary.job.json` finishes `examples/rotary.stl` with a 3 mm ball, zigzag. The mesh is a vase revolved about X. See [Rotary finishing](docs/job-file.md#rotary-finishing).
+- `examples/shaft.lathe.json` faces, roughs and finishes the stepped shaft in `examples/shaft.dxf`. See [Lathe jobs](docs/job-file.md#lathe-jobs).
+
+```sh
+cargo run -p campanion-cli -- lathe examples/shaft.lathe.json -o out.ngc --ir out.json --post linuxcnc_lathe
+```
+
+`campanion lathe` loads a `campanion-lathe/1` file. Without `--post`, `-o` is the RS274/NGC test sink and ZX arcs are `G18`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`). Posted text is read back at the job chord tolerance. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1.
 
 ## Usage
 

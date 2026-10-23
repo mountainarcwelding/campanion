@@ -21,9 +21,11 @@ campanion-ir.workspace = true
 campanion-mesh.workspace = true
 campanion-path.workspace = true
 campanion-post.workspace = true
+campanion-turn.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+campanion-ir.workspace = true
 campanion-mesh.workspace = true
 proptest = { version = "1.12", default-features = false, features = ["std"] }
 serde_json.workspace = true
