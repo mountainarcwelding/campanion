@@ -7,6 +7,8 @@ and builds paths from the operations recorded here.
 This is not the profile document read by `campanion ir --job` and `campanion ngc --job`. That
 document has no `format` tag. `campanion-job/1` rejects it.
 
+Lathe work uses a different file, `campanion-lathe/1`, loaded by `campanion lathe`. See [Lathe jobs](#lathe-jobs).
+
 The loader is `crates/cli/src/jobfile.rs`. `campanion run` loads it.
 
 ## Top level
@@ -478,3 +480,71 @@ command-line tool, which exports the face's outline and holes as DXF, and import
 - The DXF is written to a private temporary directory that is removed afterwards.
 
 `examples/step.job.json` cuts `examples/plate.step` (generated with `solidcraft-cli`).
+
+## Lathe jobs
+
+`campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]` loads a `campanion-lathe/1`
+file. It is not a `campanion-job/1` file: the fields below are the whole schema, and unknown
+fields are rejected with a message that names the key. Every number must be finite. Lengths are
+millimetres. Feeds are millimetres per minute. Constant surface speed is metres per minute.
+Direct spindle speed is revolutions per minute.
+
+`examples/shaft.lathe.json` faces, roughs and finishes the half-profile in `examples/shaft.dxf`.
+
+```json
+{
+  "format": "campanion-lathe/1",
+  "source": { "path": "shaft.dxf", "layer": "PROFILE" },
+  "units": "mm",
+  "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
+  "spindle": { "max_rpm": 3000 },
+  "tools": [
+    { "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.8, "orientation_deg": 135, "hand": "right", "tip": "centre" }
+  ],
+  "operations": [
+    { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 150, "speed": { "css": 200 } },
+    { "name": "rough", "type": "rough", "tool_id": 1, "side": "outside", "depth_of_cut": 2.0, "leave_x": 0.3, "leave_z": 0.1, "feed": 250, "speed": { "css": 180 } },
+    { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "rpm": 1500 } }
+  ],
+  "tolerance": { "linear": 0.001, "chord": 0.01 },
+  "clearance": 2.0
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `format` | yes | Exactly `campanion-lathe/1`. `campanion-lathe/2` is an unsupported major. Anything else is an unknown tag. |
+| `source` | yes | Half-profile. `path` is relative to the job file, the same rules as a mill job (no absolute path, 1 to 4096 bytes). |
+| `units` | yes | Only `mm`. |
+| `stock` | yes | Bar or tube, plus `front_allowance`. |
+| `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. |
+| `tools` | yes | Inserts, at most 256. May be empty when `operations` is empty. |
+| `operations` | yes | Face, rough and finish, in order, at most 1024. |
+| `tolerance` | no | `linear` (default 1e-6, must be positive) is the profile and finish tolerance. `chord` (default 0.01) is the post read-back tolerance. `angular` is accepted, must be `>= 0`, and is not used. |
+| `clearance` | yes | Approach gap, millimetres, `>= 0`. Roughing retracts by the same distance. |
+
+`source` chooses the reader by extension:
+
+- `.dxf` — [`TurnProfile::from_dxf`](../crates/turn/src/profile.rs). Optional `layer`. `axis` and `step` are rejected.
+- `.svg` — `from_svg` when `layer` is omitted. A layer uses the SVG importer and `TurnProfile::from_drawing`. The SVG fit uses `linear` as its chord; the job `chord` is only the post read-back.
+- `.stl` — `from_mesh`. Requires `axis` (`x`, `y` or `z`) and a positive `step`. A `layer` is rejected.
+
+Drawing X is Z and drawing Y is the radius. Z = 0 is the finished front face and the part extends toward −Z. A closed drawing is opened by dropping the spindle-axis run.
+
+`stock.kind` is `bar` (`diameter`, `length`, `front_allowance`) or `tube` (`outer_diameter`, `inner_diameter`, `length`, `front_allowance`). Diameters and `length` are positive. `front_allowance` is `>= 0`. The IR stock still occupies Z in `[-length, 0]`; the allowance is only the facing depth, from `+front_allowance` down to 0. A tube's inner diameter must be below its outer diameter.
+
+Each tool is one insert on head `turret1` (12 stations, no live tooling). `id` is the tool-table id. `station` is 1 to 12, and ids and stations are unique. `shape` is `c80`, `d55`, `v35`, `w80`, `t60`, `s90`, `r`, `groove` or `thread`. A groove needs a positive `width`; other shapes may set it. `nose_radius` is positive. `orientation_deg` is the bisector from +Z toward +X, in −360 to 360. `hand` is `left`, `right` or `neutral`. `tip` is `centre` or `imaginary`. The tool table stores no milling diameter.
+
+`tip: "imaginary"` programs the theoretical sharp corner. The IR insert offset is `(dx, dz)` in `(X, Z)`, from [`Insert::tip_offset`](../crates/ir/src/turning.rs): `(-r·sign(sin o), -r·sign(cos o))`, with `sign(0) = 0`. The turning path stores that pair as `dz`, `dx`. At 45° both components are `−nose_radius`. At 135° `dx` is `−nose_radius` and `dz` is `+nose_radius`. `tip: "centre"` programs the nose centre.
+
+`speed` is either `{ "css": metres_per_minute }` or `{ "rpm": revolutions_per_minute }`, not both. CSS uses the spindle `max_rpm` as its cap. The speed is stored on the toolpath binding (spindle `main`, head `turret1`, channel 0), not on the process-on parameters.
+
+Operations, in cut order. Names are unique and non-empty.
+
+- `face` — `step_z` and `feed`. Passes run from the stock front (`+front_allowance`) to Z = 0. The radial feed starts at the stock outer radius plus `clearance` and ends at `−nose_radius` (one nose past the spindle axis). A centre tip is given a target radius of 0 because facing already shifts that end by `−nose_radius`. An imaginary tip is given `−nose_radius` directly.
+- `rough` — `side` (`outside` or `inside`), `depth_of_cut`, `leave_x`, `leave_z`, `feed`. The stock outer and inner radii are the bar or tube radii (a bar's inner radius is 0). Retract equals `clearance`. Longitudinal roughing stops at the first boundary it cannot pass.
+- `finish` — `side` and `feed`. `leave_x` and `leave_z` default to 0. The offset tolerance is `tolerance.linear`.
+
+Each operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`).
+
+Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ.

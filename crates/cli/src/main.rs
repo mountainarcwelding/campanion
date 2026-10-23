@@ -2,6 +2,7 @@
 //!
 //! `ir` and `ngc` turn a 2D profile job into IR JSON or test-sink RS274/NGC.
 //! `run` loads a `campanion-job/1` file, imports its source, and writes toolpaths.
+//! `lathe` loads a `campanion-lathe/1` file and writes turning toolpaths.
 //! `post` writes a dialect for an IR file. `posts` lists the built-in posts.
 //! `verify` reports motion and process problems in an IR file, and can check an STL mesh for
 //! gouges. `view` opens the toolpath preview
@@ -13,6 +14,7 @@ mod error;
 mod gouge;
 mod index;
 mod job;
+mod lathe;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
 mod jobfile;
@@ -41,6 +43,7 @@ Usage:
   campanion ir [--job FILE]
   campanion ngc [--job FILE]
   campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]
+  campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]
   campanion post IR.json --post ID|FILE.json [-o OUT]
   campanion posts
   campanion verify FILE [--mesh PART.stl --tool ball:3|flat:3|bull:3,1]
@@ -60,6 +63,12 @@ run     Import the DXF, SVG, STEP or STL (by extension) named by a campanion-job
         Verify errors are printed and the status is 1. Warnings stay on stderr.
         An STL job checks each cutting move against the mesh with that operation's cutter.
         A gouge is a verify error and the status is 1.
+lathe   Import a campanion-lathe/1 job and write turning toolpaths. Units are millimetres.
+        JOB is the job file. Without --post, -o is the RS274/NGC test sink. ZX arcs are G18.
+        --ir also writes IR JSON. --post is an id or a file ending in .json, same as run.
+        Posted text is read back and compared at the job chord tolerance.
+        A mismatch exits 1 and nothing is written.
+        Verify errors are printed and the status is 1. See docs/job-file.md.
 post    Post an IR JSON file. --post is an id or a file ending in .json, same as run.
         -o writes a file. Omit -o to print the G-code.
         Read-back uses the default job chord tolerance, 0.01 mm. A mismatch exits 1.
@@ -121,6 +130,7 @@ fn try_main() -> Result<ExitCode, CliError> {
         name if name == "ir" => emit(rest, false),
         name if name == "ngc" => emit(rest, true),
         name if name == "run" => run::run(rest),
+        name if name == "lathe" => lathe::lathe(rest),
         name if name == "post" => post::post_command(rest),
         name if name == "posts" => post::posts_command(rest),
         name if name == "verify" => verify(rest),

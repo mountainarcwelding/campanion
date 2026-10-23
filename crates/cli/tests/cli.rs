@@ -60,6 +60,7 @@ fn help_lists_commands() {
         assert!(stdout.contains(word), "help missing {word}: {stdout}");
     }
     assert!(stdout.contains("campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]"), "{stdout}");
+    assert!(stdout.contains("campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]"), "{stdout}");
     assert!(stdout.contains("campanion post IR.json --post ID|FILE.json [-o OUT]"), "{stdout}");
     assert!(stdout.contains("campanion posts"), "{stdout}");
 }
@@ -77,6 +78,8 @@ fn usage_errors_exit_two() {
         vec!["post"],
         vec!["posts", "extra"],
         vec!["run", "job.json", "-o", "out.ngc", "--post"],
+        vec!["lathe"],
+        vec!["lathe", "job.json"],
     ] {
         let output = campanion(&args).expect("run");
         let stderr = text(&output.stderr).expect("utf-8");

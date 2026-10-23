@@ -1,0 +1,35 @@
+{
+  "format": "campanion-lathe/1",
+  "source": { "path": "shaft.dxf", "layer": "PROFILE" },
+  "units": "mm",
+  "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
+  "spindle": { "max_rpm": 3000 },
+  "tools": [
+    {
+      "id": 1,
+      "station": 1,
+      "shape": "c80",
+      "nose_radius": 0.8,
+      "orientation_deg": 135,
+      "hand": "right",
+      "tip": "centre"
+    }
+  ],
+  "operations": [
+    { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 150, "speed": { "css": 200 } },
+    {
+      "name": "rough",
+      "type": "rough",
+      "tool_id": 1,
+      "side": "outside",
+      "depth_of_cut": 2.0,
+      "leave_x": 0.3,
+      "leave_z": 0.1,
+      "feed": 250,
+      "speed": { "css": 180 }
+    },
+    { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "rpm": 1500 } }
+  ],
+  "tolerance": { "linear": 0.001, "chord": 0.01 },
+  "clearance": 2.0
+}

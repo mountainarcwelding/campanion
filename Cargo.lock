@@ -219,6 +219,7 @@ dependencies = [
  "campanion-mesh",
  "campanion-path",
  "campanion-post",
+ "campanion-turn",
  "proptest",
  "serde_json",
 ]
@@ -292,6 +293,7 @@ version = "0.5.1"
 dependencies = [
  "campanion-geom",
  "campanion-import",
+ "campanion-ir",
  "campanion-mesh",
  "proptest",
  "thiserror 2.0.21",
