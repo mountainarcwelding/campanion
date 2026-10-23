@@ -134,6 +134,10 @@ Wheel zooms at the cursor, drag pans, F or double-click fits. Space plays or pau
 the playback speed and position. A rotary program draws its A or B axis across the toolpath and
 lists the index angles (`Index: 0°, 90°`) or the continuous angle range. `--angle` colours cuts by
 that angle instead of height (A toggles it); a program with no rotary axis ignores the option.
+A turning program is an XZ half-section: radius upward, Z to the right. The view fills the removed
+material, outlines the stock in grey, and fills the finished section in steel blue, then draws the
+spindle centre line and the toolpath. It stays in that flat view, so the isometric control and the
+rotary legend are hidden. There is no screenshot of the half-section; the window is the preview.
 Labels need a system font (DejaVu, Liberation or Noto are found
 automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
 

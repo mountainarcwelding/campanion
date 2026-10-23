@@ -5,6 +5,8 @@
 //! F or a double-click fits again. `--iso` opens the isometric view. `--angle` colours cuts by
 //! rotary angle instead of height; a program with no rotary axis ignores it. A toggles that
 //! colouring. A rotary setup also draws its axis and lists index angles or the angle range.
+//! A turning program is an XZ half-section (radius up, Z right): removed material, stock outline,
+//! finished section, then the spindle line and the toolpath. `--iso` is ignored for that view.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -15,8 +17,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use campanion_view::{
-    Playback, Projection, RotaryPreview, Scene, Stroke, StrokeKind, View, angle_color, angle_legend, find_system_font, height_color, load_scene,
-    project, projected_bounds, tool_position, visible,
+    LathePreview, Playback, Projection, RotaryPreview, Scene, Stroke, StrokeKind, View, angle_color, angle_legend, find_system_font, height_color,
+    load_scene, project, projected_bounds, tool_position, visible,
 };
 use eframe::egui;
 
@@ -40,6 +42,18 @@ const TOOL_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
 const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(236, 236, 236);
 /// Rotary axis, distinct from the red X axis, the green Y axis, and the cyan cut colour.
 const ROTARY_AXIS: egui::Color32 = egui::Color32::from_rgb(220, 70, 200);
+/// Material still to come off the blank, warm and translucent so the section shows through.
+fn removed_fill() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(214, 132, 64, 110)
+}
+/// Stock outline.
+const STOCK_OUTLINE: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
+/// Finished section, steel blue.
+const PART_FILL: egui::Color32 = egui::Color32::from_rgb(70, 130, 180);
+/// Outline of the finished section, lighter than the fill.
+const PART_OUTLINE: egui::Color32 = egui::Color32::from_rgb(186, 214, 232);
+/// Spindle centre line, drawn on top of the section.
+const LATHE_AXIS: egui::Color32 = egui::Color32::from_rgb(236, 236, 236);
 
 fn main() -> ExitCode {
     match try_main() {
@@ -105,6 +119,7 @@ Open a plan-view preview of a CAMpanion IR file.
 Distances are millimetres. Scroll zooms at the cursor, drag pans, and F or a
 double-click fits the path in the window. Space toggles playback.
 A rotary program draws its A or B axis and shows index angles or the angle range.
+A turning program is an XZ half-section (radius up, Z right). --iso is ignored then.
 
 --arc-tol MM
         Maximum chord error when drawing arcs, in millimetres (default 0.01).
@@ -309,9 +324,13 @@ impl ViewerApp {
         let (cut_length, rapid_length) = path_lengths(&scene);
         let toolpaths = scene.names.len();
         let playback = Playback::new(scene.total_length);
-        let height_colours = scene.z_range.is_some_and(|(low, high)| high - low > 1.0);
+        // A lathe scene is the flat XZ half-section. Height colour and isometric are mill views.
+        let lathe = scene.lathe.is_some();
+        let projection = if lathe { Projection::Top } else { projection };
+        let height_colours = !lathe && scene.z_range.is_some_and(|(low, high)| high - low > 1.0);
         // A program with no rotary axis ignores the flag, so the window stays on height colours.
-        let angle_colours = angle_colours && scene.rotary.is_some();
+        // A turning program has no rotary legend either.
+        let angle_colours = angle_colours && scene.rotary.is_some() && !lathe;
         Self {
             scene,
             playback,
@@ -361,16 +380,22 @@ impl ViewerApp {
                 ui.label("Position");
                 ui.spacing_mut().slider_width = 200.0;
                 ui.add(egui::Slider::new(&mut self.playback.position, 0.0..=total).text("mm"));
-                ui.label("View");
-                let top = ui.selectable_value(&mut self.projection, Projection::Top, "Top");
-                let iso = ui.selectable_value(&mut self.projection, Projection::Iso, "Iso");
-                if top.clicked() || iso.clicked() {
-                    self.fitted = false;
+                if self.scene.lathe.is_some() {
+                    ui.label("XZ half-section (radius up, Z right)");
+                } else {
+                    ui.label("View");
+                    let top = ui.selectable_value(&mut self.projection, Projection::Top, "Top");
+                    let iso = ui.selectable_value(&mut self.projection, Projection::Iso, "Iso");
+                    if top.clicked() || iso.clicked() {
+                        self.fitted = false;
+                    }
                 }
                 ui.checkbox(&mut self.show_rapids, "Rapids");
                 ui.checkbox(&mut self.show_order, "Order");
-                ui.checkbox(&mut self.height_colours, "Height colours");
-                if self.scene.rotary.is_some() {
+                if self.scene.lathe.is_none() {
+                    ui.checkbox(&mut self.height_colours, "Height colours");
+                }
+                if self.scene.rotary.is_some() && self.scene.lathe.is_none() {
                     ui.checkbox(&mut self.angle_colours, "Angle colours");
                 }
                 ui.label(self.status_text());
@@ -444,7 +469,9 @@ impl ViewerApp {
         let projection = self.projection;
         draw_grid(painter, &self.view, rect, projection);
         draw_axes(painter, &self.view, rect, projection);
-        if let Some(rotary) = &self.scene.rotary {
+        if let Some(lathe) = &self.scene.lathe {
+            draw_lathe(painter, &self.view, rect, lathe, self.has_font);
+        } else if let Some(rotary) = &self.scene.rotary {
             draw_rotary_axis(painter, &self.view, rect, rotary, projection, self.has_font);
         }
         let angle_range = self.scene.rotary.as_ref().and_then(RotaryPreview::angle_range);
@@ -469,7 +496,10 @@ impl ViewerApp {
         if self.has_font && self.show_order {
             draw_labels(painter, &self.scene, &self.view, rect, projection);
         }
-        if colour_by_angle && let Some(range) = angle_range {
+        if self.scene.lathe.is_none()
+            && colour_by_angle
+            && let Some(range) = angle_range
+        {
             draw_angle_legend(painter, rect, range, self.has_font);
         }
     }
@@ -646,6 +676,66 @@ fn draw_flat_cut(painter: &egui::Painter, view: &View, rect: egui::Rect, stroke:
     if points.len() >= 2 {
         let _ = painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, CUT_COLOR)));
     }
+}
+
+/// Removed material, stock outline, finished section, then the spindle centre line.
+///
+/// Toolpaths are drawn by the caller after this, so the cuts sit on top of the blank.
+fn draw_lathe(painter: &egui::Painter, view: &View, rect: egui::Rect, lathe: &LathePreview, has_font: bool) {
+    for polygon in &lathe.removed {
+        fill_lathe_polygon(painter, view, rect, polygon, removed_fill());
+    }
+    stroke_lathe_polygon(painter, view, rect, &lathe.stock, egui::Stroke::new(1.25, STOCK_OUTLINE));
+    for polygon in lathe.part_fill() {
+        fill_lathe_polygon(painter, view, rect, &polygon, PART_FILL);
+    }
+    stroke_lathe_polygon(painter, view, rect, &lathe.part, egui::Stroke::new(1.5, PART_OUTLINE));
+    let axis = lathe_screen(view, rect, &[lathe.axis.0, lathe.axis.1]);
+    if axis.len() == 2 {
+        painter.extend(egui::Shape::dashed_line(&axis, egui::Stroke::new(1.0, LATHE_AXIS), 8.0, 5.0));
+    }
+    if !has_font {
+        return;
+    }
+    let _ = painter.text(
+        rect.left_top() + egui::vec2(12.0, 10.0),
+        egui::Align2::LEFT_TOP,
+        "XZ half-section (radius up, Z right)",
+        egui::FontId::proportional(14.0),
+        LABEL_COLOR,
+    );
+}
+
+fn fill_lathe_polygon(painter: &egui::Painter, view: &View, rect: egui::Rect, polygon: &[[f64; 2]], fill: egui::Color32) {
+    let points = lathe_screen(view, rect, polygon);
+    if points.len() >= 3 && points.len() == polygon.len() {
+        let _ = painter.add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(0.0, egui::Color32::TRANSPARENT)));
+    }
+}
+
+fn stroke_lathe_polygon(painter: &egui::Painter, view: &View, rect: egui::Rect, polygon: &[[f64; 2]], stroke: egui::Stroke) {
+    if polygon.len() < 2 {
+        return;
+    }
+    let mut points = lathe_screen(view, rect, polygon);
+    if points.len() != polygon.len() || points.len() < 2 {
+        return;
+    }
+    if let Some(first) = points.first().copied() {
+        points.push(first);
+    }
+    let _ = painter.add(egui::Shape::line(points, stroke));
+}
+
+fn lathe_screen(view: &View, rect: egui::Rect, polygon: &[[f64; 2]]) -> Vec<egui::Pos2> {
+    let mut screen = Vec::with_capacity(polygon.len());
+    for point in polygon {
+        let Some(pos) = to_screen_pos(view, rect, *point, 0.0, Projection::Top) else {
+            continue;
+        };
+        screen.push(pos);
+    }
+    screen
 }
 
 /// The rotary axis through the setup centre, across the toolpath, labelled A or B.
@@ -983,6 +1073,8 @@ mod tests {
         assert!(help.contains("rotary angle instead of height"), "{help}");
         assert!(help.contains("A toggles this in the window"), "{help}");
         assert!(help.contains("Scroll zooms at the cursor"), "{help}");
+        assert!(help.contains("XZ half-section (radius up, Z right)"), "{help}");
+        assert!(help.contains("--iso is ignored then"), "{help}");
     }
 
     #[test]
@@ -1013,6 +1105,7 @@ mod tests {
             total_length: 0.0,
             names,
             rotary,
+            lathe: None,
         }
     }
 
@@ -1049,6 +1142,27 @@ mod tests {
         let continuous = super::ViewerApp::new(continuous, false, super::Projection::Top, false);
         assert!(!continuous.angle_colours);
         assert_eq!(continuous.status_text(), "1 toolpath   cut 0.0 mm   rapid 0.0 mm   Angle: 0°..360°");
+    }
+
+    #[test]
+    fn lathe_preview_forces_the_flat_half_section() {
+        use campanion_view::{LathePreview, RotaryPreview, RotarySpan};
+
+        let mut scene = empty_scene(
+            vec!["finish".into()],
+            Some(RotaryPreview { label: "A", center: [0.0, 0.0, 0.0], line: None, span: Some(RotarySpan::Indexed(vec![0.0, 90.0])) }),
+        );
+        scene.z_range = Some((0.0, 30.0));
+        scene.lathe = Some(LathePreview {
+            stock: vec![[-10.0, 0.0], [0.0, 0.0], [0.0, 5.0], [-10.0, 5.0]],
+            part: Vec::new(),
+            removed: Vec::new(),
+            axis: ([-10.0, 0.0], [0.0, 0.0]),
+        });
+        let app = super::ViewerApp::new(scene, false, super::Projection::Iso, true);
+        assert_eq!(app.projection, super::Projection::Top, "a lathe scene has no isometric view");
+        assert!(!app.height_colours, "a lathe scene has no height view");
+        assert!(!app.angle_colours, "a lathe scene hides the rotary legend");
     }
 
     #[test]
