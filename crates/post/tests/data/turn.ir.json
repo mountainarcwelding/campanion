@@ -1,0 +1,271 @@
+{
+  "format": "campanion-ir/1",
+  "program": {
+    "name": "turn",
+    "tools": [
+      {
+        "id": 1,
+        "name": "cnmg",
+        "diameter": null,
+        "kerf": null
+      }
+    ],
+    "machine": null,
+    "toolpaths": [
+      {
+        "name": "finish",
+        "tool_id": 1,
+        "compensation": "off",
+        "feeds": {
+          "cut": 100.0,
+          "lead_in": null,
+          "lead_out": null,
+          "plunge": null,
+          "retract": null
+        },
+        "pierce": null,
+        "tabs": [],
+        "blocks": [
+          {
+            "type": "process_on",
+            "process": "spindle",
+            "params": {
+              "speed": null,
+              "power": null,
+              "pierce_delay_s": 0.0,
+              "pierce_process_on_during_delay": true,
+              "post_delay_s": 0.0,
+              "post_process_on_during_delay": false,
+              "pierce_height": null,
+              "cut_height": null,
+              "extra": {}
+            }
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 26.0,
+                "y": 0.0,
+                "z": 2.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": -0.8,
+                "y": 0.0,
+                "z": 0.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 100.0,
+            "role": "cut"
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 30.0,
+                "y": 0.0,
+                "z": 2.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 20.0,
+                "y": 0.0,
+                "z": 1.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 20.0,
+                "y": 0.0,
+                "z": -8.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 80.0,
+            "role": "cut"
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 23.0,
+                "y": 0.0,
+                "z": -11.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": 80.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": 26.0,
+                "y": 0.0,
+                "z": -14.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "plane": "zx",
+            "center": {
+              "x": 23.0,
+              "y": 0.0,
+              "z": -14.0
+            },
+            "sense": "ccw",
+            "feed": 80.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": 28.0,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "plane": "zx",
+            "center": {
+              "x": 28.0,
+              "y": 0.0,
+              "z": -14.0
+            },
+            "sense": "cw",
+            "feed": 80.0,
+            "role": "cut"
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 32.0,
+                "y": 0.0,
+                "z": 5.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "process_off",
+            "process": "spindle"
+          }
+        ]
+      }
+    ],
+    "channel_programs": [],
+    "syncs": [],
+    "turning": {
+      "spindles": [
+        {
+          "name": "main",
+          "work_zero_z": 0.0,
+          "max_rpm": 3000.0,
+          "reversed": false
+        }
+      ],
+      "heads": [
+        {
+          "name": "turret1",
+          "axes": [
+            "x",
+            "z"
+          ],
+          "stations": 12,
+          "live_tooling": false
+        }
+      ],
+      "stock": {
+        "kind": "bar",
+        "diameter": 50.0,
+        "length": 60.0
+      },
+      "inserts": [
+        {
+          "tool_id": 1,
+          "head": "turret1",
+          "station": 1,
+          "insert": {
+            "shape": "c80",
+            "nose_radius": 0.8,
+            "hand": "right",
+            "orientation_deg": 45.0
+          },
+          "live": false
+        }
+      ],
+      "bindings": [
+        {
+          "toolpath": 0,
+          "spindle": "main",
+          "head": "turret1",
+          "channel": 0,
+          "speed": {
+            "mode": "css",
+            "surface_m_per_min": 200.0,
+            "max_rpm": 2500.0
+          }
+        }
+      ],
+      "diameter_mode": true
+    }
+  }
+}

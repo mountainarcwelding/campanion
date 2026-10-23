@@ -69,6 +69,7 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 | `haas` | Haas | A, inverse time | Millimetre Haas mill dialect. Program O00001, sequence numbers, IJK arcs and helices, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |
 | `plasma` | LinuxCNC plasma | - | Millimetre plasma. Torch on M3 S1 / off M5, pierce dwell from the path, optional THC codes, helices as lines. No rotary axis. |
 | `grbl_laser` | Grbl laser | - | Grbl laser mode. Dynamic power M4 S{power} (0..1 scaled to S0..S1000), Z words and Z-only rapids omitted. No rotary axis. |
+| `linuxcnc_lathe` | LinuxCNC lathe | - | Millimetre LinuxCNC lathe. Diameter mode (G7), ZX plane (G18), constant surface speed (G96) and direct rpm (G97). No rotary axis. |
 
 ```sh
 campanion run examples/sample.job.json -o out.ngc --post linuxcnc

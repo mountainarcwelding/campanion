@@ -1595,6 +1595,57 @@
       ],
       "type": "object"
     },
+    "SpindleSpeed": {
+      "description": "Spindle speed for a turning pass: constant surface speed, or a direct rpm.\n\nStored on [`TurnBinding`] when that toolpath names a speed. A binding with no speed leaves\nthe number to the process-on parameter.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Constant surface speed. `surface_m_per_min` is metres per minute. `max_rpm` caps the speed.",
+          "properties": {
+            "max_rpm": {
+              "description": "Spindle cap for this pass, revolutions per minute.",
+              "format": "double",
+              "type": "number"
+            },
+            "mode": {
+              "const": "css",
+              "type": "string"
+            },
+            "surface_m_per_min": {
+              "description": "Cutting speed, metres per minute.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "mode",
+            "surface_m_per_min",
+            "max_rpm"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Direct spindle speed, revolutions per minute.",
+          "properties": {
+            "mode": {
+              "const": "rpm",
+              "type": "string"
+            },
+            "rpm": {
+              "description": "Revolutions per minute.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "mode",
+            "rpm"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SyncPoint": {
       "additionalProperties": false,
       "description": "Channels that must arrive together. A sync event waits on this id.",
@@ -1662,7 +1713,7 @@
     },
     "TurnBinding": {
       "additionalProperties": false,
-      "description": "Binds one toolpath to a spindle, a head and a channel.\n\n`toolpath` is an index into [`crate::Program::toolpaths`]. `channel` is a [`crate::Channel`]\nid. An M10 binding uses spindle `main`, head `turret1` and channel 0.",
+      "description": "Binds one toolpath to a spindle, a head and a channel.\n\n`toolpath` is an index into [`crate::Program::toolpaths`]. `channel` is a [`crate::Channel`]\nid. An M10 binding uses spindle `main`, head `turret1` and channel 0. `speed` is the spindle\nspeed for that toolpath. Absent means the post uses the process-on speed parameter.",
       "properties": {
         "channel": {
           "format": "uint16",
@@ -1672,6 +1723,17 @@
         },
         "head": {
           "type": "string"
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpindleSpeed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Constant surface speed or direct rpm for this toolpath."
         },
         "spindle": {
           "type": "string"

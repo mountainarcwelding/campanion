@@ -3,6 +3,10 @@
 //! Every rapid and line must end at the programmed point. An arc or helix may be split or
 //! replaced by chords. Split arcs share the centre. Chord vertices must lie on the original
 //! curve, and the last vertex must be the programmed end.
+//!
+//! A lathe post's read-back is already in the part frame: diameter-mode X was divided by two,
+//! Y is 0, and G2/G3 were mapped back to the IR sense. Arcs are then checked in the ZX plane
+//! with the same centre and curve rules as a mill arc.
 
 use campanion_ir::{ArcSense, ClBlock, ClMotion, Plane, Pose, Program, RotarySetup, Vec3};
 

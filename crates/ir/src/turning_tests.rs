@@ -431,7 +431,8 @@ fn turning_poses_stay_on_the_radius_plane() {
 
     assert_err(program_with(vec![], vec![path_with(None, vec![rapid(10.0, 2e-6, 0.0)])], bind(0), None), "turning pose Y");
     assert_err(program_with(vec![], vec![path_with(None, vec![linear(10.0, -2e-6, 0.0)])], bind(0), None), "turning pose Y");
-    assert_err(program_with(vec![], vec![path_with(None, vec![rapid(-2e-6, 0.0, 0.0)])], bind(0), None), "X radius is negative");
+    // A face may cross the spindle axis. The tip radius is then negative by about the nose radius.
+    assert!(program_with(vec![], vec![path_with(None, vec![rapid(-0.8, 0.0, 0.0)])], bind(0), None).is_ok());
     assert!(program_with(vec![], vec![path_with(None, vec![rapid(0.0, 1e-6, -1.0)])], bind(0), None).is_ok());
     assert!(program_with(vec![], vec![path_with(None, vec![rapid(0.0, -1e-6, -1.0)])], bind(0), None).is_ok());
     assert!(program_with(vec![], vec![path_with(None, vec![rapid(-1e-6, 0.0, -1.0)])], bind(0), None).is_ok());
@@ -470,7 +471,7 @@ fn turning_poses_stay_on_the_radius_plane() {
     let bound_good = path_with(None, vec![linear(5.0, 0.0, -2e-6)]);
     assert!(program_with(vec![], vec![unbound_bad, bound_good], bind(1), None).is_ok());
     let unbound_good = path_with(None, vec![rapid(5.0, 3.0, 0.0)]);
-    let bound_bad = path_with(None, vec![linear(-1.0, 0.0, -2.0)]);
+    let bound_bad = path_with(None, vec![linear(1.0, 1.0, -2.0)]);
     assert_err(program_with(vec![], vec![unbound_good, bound_bad], bind(1), None), "toolpath 1");
 }
 
@@ -549,6 +550,46 @@ fn deserialized_turning_is_rechecked_and_hostile_input_does_not_panic() {
             assert!(dx.is_finite() && dz.is_finite());
         }
     }
+}
+
+#[test]
+fn binding_speed_round_trips_and_css_respects_the_spindle_cap() {
+    let css = SpindleSpeed::css(200.0, 2500.0).expect("css");
+    let binding = TurnBinding::try_new(0, "main", "turret1", 0).expect("binding").with_speed(Some(css)).expect("speed");
+    assert_eq!(binding.speed(), Some(css));
+    let cleared = binding.clone().with_speed(None).expect("clear");
+    assert!(cleared.speed().is_none());
+
+    let setup = m10(None).with_binding(binding).expect("binding");
+    assert_eq!(setup.binding_for(0).expect("binding").speed(), Some(css));
+    let json = serde_json::to_string(setup.binding_for(0).expect("binding")).expect("json");
+    assert!(json.contains("\"mode\":\"css\""), "{json}");
+    assert!(json.contains("\"surface_m_per_min\":200"), "{json}");
+
+    let bare = TurnBinding::try_new(0, "main", "turret1", 0).expect("bare");
+    let bare_json = serde_json::to_string(&bare).expect("json");
+    assert!(!bare_json.contains("speed"), "{bare_json}");
+    let loaded: TurnBinding = serde_json::from_str(&bare_json).expect("load");
+    assert!(loaded.speed().is_none());
+
+    let hot = TurnBinding::try_new(0, "main", "turret1", 0)
+        .expect("binding")
+        .with_speed(Some(SpindleSpeed::css(200.0, 5_000.0).expect("css")))
+        .expect("speed");
+    assert_err(m10(None).with_binding(hot), "css max rpm");
+
+    let capped = TurnBinding::try_new(0, "main", "turret1", 0)
+        .expect("binding")
+        .with_speed(Some(SpindleSpeed::css(10.0, 4_000.0).expect("css")))
+        .expect("speed");
+    assert!(m10(None).with_binding(capped).is_ok());
+
+    let direct =
+        TurnBinding::try_new(0, "main", "turret1", 0).expect("binding").with_speed(Some(SpindleSpeed::rpm(9_000.0).expect("rpm"))).expect("speed");
+    assert!(m10(None).with_binding(direct).is_ok());
+
+    let bad = SpindleSpeed::Css { surface_m_per_min: -1.0, max_rpm: 100.0 };
+    assert_err(TurnBinding::try_new(0, "main", "turret1", 0).expect("binding").with_speed(Some(bad)), "surface speed");
 }
 
 fn turning_document() -> Document {

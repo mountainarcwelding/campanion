@@ -14,7 +14,9 @@ cargo run -p campanion-cli -- run examples/indexed.job.json -o /tmp/indexed.ngc 
 cargo run -p campanion-cli -- run examples/wrap.job.json -o /tmp/wrap.ngc --ir crates/post/tests/data/wrap.ir.json
 ```
 
-`indexed.ir.json` and `wrap.ir.json` carry an A axis. The golden test posts them only with dialects that list that axis. The other three programs are posted with every built-in.
+`indexed.ir.json` and `wrap.ir.json` carry an A axis. The golden test posts them only with dialects that list that axis. `sample`, `curves` and `dome` are posted with every built-in that is not a lathe post.
+
+`turn.ir.json` is a turning program (bar, one insert, one CSS pass). The golden test posts it with every lathe post.
 
 Then rewrite the goldens. The test posts each program with `arc_tolerance` of `0.01` mm:
 

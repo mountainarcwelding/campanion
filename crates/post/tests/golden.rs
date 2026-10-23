@@ -1,7 +1,8 @@
 //! Posted example programs match the golden files and read back onto the IR.
 //!
-//! `sample`, `curves`, and `dome` are posted with every built-in. `indexed` and `wrap` carry an
-//! A axis, so they are posted only with dialects whose `rotary.axes` include that axis.
+//! `sample`, `curves`, and `dome` are posted with every built-in that is not a lathe post.
+//! `indexed` and `wrap` carry an A axis, so they are posted only with dialects whose `rotary.axes`
+//! include that axis. `turn` is a turning program and is posted with every lathe post.
 
 use std::path::PathBuf;
 
@@ -10,6 +11,7 @@ use campanion_post::{PostDef, PostOptions, builtin, builtin_ids, compare, post_p
 
 const EXAMPLES: [&str; 3] = ["sample", "curves", "dome"];
 const ROTARY_EXAMPLES: [&str; 2] = ["indexed", "wrap"];
+const LATHE_EXAMPLES: [&str; 1] = ["turn"];
 
 fn manifest_path(parts: &[&str]) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -29,6 +31,9 @@ fn posts_for(program: &Program, rotary_only: bool) -> Result<Vec<&'static str>, 
     let mut ids = Vec::new();
     for id in builtin_ids() {
         let post = builtin(id).ok_or_else(|| format!("missing {id}"))?;
+        if post.is_lathe() {
+            continue;
+        }
         let include = if rotary_only {
             match program.rotary() {
                 Some(setup) => post.rotary_axes().contains(&setup.axis()),
@@ -43,6 +48,20 @@ fn posts_for(program: &Program, rotary_only: bool) -> Result<Vec<&'static str>, 
     }
     if ids.is_empty() {
         return Err("no post supports this rotary program".into());
+    }
+    Ok(ids)
+}
+
+fn lathe_posts() -> Result<Vec<&'static str>, String> {
+    let mut ids = Vec::new();
+    for id in builtin_ids() {
+        let post = builtin(id).ok_or_else(|| format!("missing {id}"))?;
+        if post.is_lathe() {
+            ids.push(*id);
+        }
+    }
+    if ids.is_empty() {
+        return Err("no lathe post".into());
     }
     Ok(ids)
 }
@@ -85,6 +104,11 @@ fn examples_match_goldens_and_read_back() -> Result<(), String> {
     for example in ROTARY_EXAMPLES {
         let document = load_example(example)?;
         let ids = posts_for(document.program(), true)?;
+        check_example(example, &document, &ids, update, &options)?;
+    }
+    for example in LATHE_EXAMPLES {
+        let document = load_example(example)?;
+        let ids = lathe_posts()?;
         check_example(example, &document, &ids, update, &options)?;
     }
     Ok(())

@@ -4,10 +4,13 @@
 //! [`campanion_ir::part_to_machine`] of the pose, and the A or B word is the continuous angle
 //! stored on the IR. Feeds for those moves are described in the post crate README: inverse time
 //! uses the straight-line distance between the part-frame tips.
+//!
+//! A turning program is written in the part frame. X is a radius until the lathe block asks for
+//! diameters. Y is omitted. Arc offsets stay in that radius frame: `I` along X, `K` along Z.
 
 use campanion_ir::{
-    ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, Plane, Pose, ProcessKind, Program, RotaryAxisKind, RotarySetup, Vec3,
-    part_to_machine,
+    ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind, RotarySetup,
+    SpindleSpeed, TurningSetup, Vec3, part_to_machine,
 };
 
 use crate::def::{ArcMode, PostDef, ProcessWords, RotaryFeedMode};
@@ -34,17 +37,21 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     if !program.channel_programs().is_empty() {
         return Err(unsupported("channel programs are not supported; only cutter-location toolpaths are posted"));
     }
+    check_lathe_program(program, post)?;
     check_rotary_program(program, post)?;
-    let mut writer = Writer::new(post, options, program.rotary().copied());
+    let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning());
     let name = sanitize(program.name().unwrap_or(""));
     let number = post.program_number.clone().unwrap_or_default();
     let header_vars = [("program_name", name.as_str()), ("program_number", number.as_str()), ("date-free!", "")];
     writer.templates("header", &post.header, &header_vars)?;
-    for path in program.toolpaths() {
-        writer.toolpath(path)?;
+    writer.begin_lathe()?;
+    for (index, path) in program.toolpaths().iter().enumerate() {
+        let index = u32::try_from(index).map_err(|_| invalid("too many toolpaths"))?;
+        writer.toolpath(index, path)?;
     }
     writer.stop_processes()?;
     writer.templates("footer", &post.footer, &header_vars)?;
+    writer.lathe_home()?;
     writer.templates("program_end", &post.program_end, &header_vars)?;
     Ok(writer.out)
 }
@@ -99,6 +106,10 @@ struct Writer<'a> {
     /// Modal inverse-time feed (`G93` on LinuxCNC). Units per minute is the default.
     inverse_time: bool,
     setup: Option<RotarySetup>,
+    /// Turning setup when this program is a lathe program. X in [`Self::pos`] stays a radius.
+    turning: Option<&'a TurningSetup>,
+    /// Index of the toolpath currently being written. Bindings use this index.
+    path_index: u32,
     plane: Option<Plane>,
     /// Last `G0` or `G1`, cleared by an arc so the next line is not modal.
     linear: Option<&'static str>,
@@ -111,7 +122,7 @@ struct Writer<'a> {
 }
 
 impl<'a> Writer<'a> {
-    fn new(post: &'a PostDef, options: &'a PostOptions, setup: Option<RotarySetup>) -> Self {
+    fn new(post: &'a PostDef, options: &'a PostOptions, setup: Option<RotarySetup>, turning: Option<&'a TurningSetup>) -> Self {
         let plane = if post.planes { header_plane(&post.header) } else { header_plane(&post.header).or(Some(Plane::Xy)) };
         Self {
             post,
@@ -123,6 +134,8 @@ impl<'a> Writer<'a> {
             angle: None,
             inverse_time: header_inverse(post),
             setup,
+            turning,
+            path_index: 0,
             plane,
             linear: None,
             feed: None,
@@ -134,11 +147,43 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// Diameter or radius mode, the ZX plane, and the feed-mode word. Once, after the header.
+    fn begin_lathe(&mut self) -> Result<()> {
+        if self.turning.is_none() {
+            return Ok(());
+        }
+        let Some(lathe) = self.post.lathe.clone() else {
+            return Ok(());
+        };
+        self.templates("lathe.mode_lines", &lathe.mode_lines, &[("date-free!", "")])?;
+        let plane_line = lathe.plane.clone();
+        self.templates("lathe.plane", &[plane_line], &[("date-free!", "")])?;
+        if !lathe.feed_mode.is_empty() {
+            let feed_mode = lathe.feed_mode.clone();
+            self.templates("lathe.feed_mode", &[feed_mode], &[("date-free!", "")])?;
+        }
+        if let Some(plane) = header_plane(&[lathe.plane]) {
+            self.plane = Some(plane);
+        }
+        Ok(())
+    }
+
+    fn lathe_home(&mut self) -> Result<()> {
+        if self.turning.is_none() {
+            return Ok(());
+        }
+        let Some(lathe) = self.post.lathe.clone() else {
+            return Ok(());
+        };
+        self.templates("lathe.home", &lathe.home, &[("date-free!", "")])
+    }
+
     fn curve_start(&self) -> Result<Xyz> {
         self.exact.or(self.pos).ok_or_else(|| invalid("arc needs a prior position"))
     }
 
-    fn toolpath(&mut self, path: &ClPath) -> Result<()> {
+    fn toolpath(&mut self, index: u32, path: &ClPath) -> Result<()> {
+        self.path_index = index;
         match path.compensation() {
             CompensationMode::ControllerLeft => return Err(unsupported("controller left compensation is not supported")),
             CompensationMode::ControllerRight => return Err(unsupported("controller right compensation is not supported")),
@@ -189,6 +234,9 @@ impl<'a> Writer<'a> {
     /// can emit that arc. Any other rotary arc is chorded at [`PostOptions::arc_tolerance`]
     /// before the points are mapped with [`part_to_machine`].
     fn arc(&mut self, to: Pose, plane: Plane, center: Xyz, sense: campanion_ir::ArcSense, sweep: Option<f64>, feed: f64) -> Result<()> {
+        if self.turning.is_some() && plane != Plane::Zx {
+            return Err(invalid("lathe arc must be in the zx plane"));
+        }
         if self.angle.is_none() && to.rotary().is_none() {
             let end = tip(to);
             if let Some(sweep) = sweep {
@@ -358,7 +406,7 @@ impl<'a> Writer<'a> {
         if self.post.planes && self.plane != Some(plane) {
             words.push(plane_word(plane).to_string());
         }
-        words.push(sense_word(sense).to_string());
+        words.push(sense_word(self.written_sense(sense)).to_string());
         let rounded = self.push_axes(&mut words, end)?;
         self.push_rotary(&mut words, angle)?;
         match self.post.arc_mode() {
@@ -517,6 +565,9 @@ impl<'a> Writer<'a> {
     }
 
     fn push_axes(&self, words: &mut Vec<String>, end: Xyz) -> Result<Xyz> {
+        if self.turning.is_some() {
+            return self.push_lathe_axes(words, end);
+        }
         let letters = self.post.axis_letters.chars().collect::<Vec<_>>();
         let rounded = self.round_xyz(end)?;
         for (index, letter) in letters.iter().enumerate() {
@@ -530,6 +581,36 @@ impl<'a> Writer<'a> {
             words.push(format!("{letter}{text}"));
         }
         Ok(rounded)
+    }
+
+    /// X is a diameter when the post asks for one. Y is never written. The stored point stays in
+    /// the part frame, so the next `I` is a radius offset from the rounded start.
+    fn push_lathe_axes(&self, words: &mut Vec<String>, end: Xyz) -> Result<Xyz> {
+        let lathe = self.post.lathe.as_ref().ok_or_else(|| invalid("lathe motion needs a lathe post"))?;
+        let letters = self.post.axis_letters.chars().collect::<Vec<_>>();
+        let x_letter = letters.first().copied().ok_or_else(|| invalid("axis value is missing"))?;
+        let z_letter = letters.get(2).copied().ok_or_else(|| invalid("axis value is missing"))?;
+        let x_out = if lathe.diameter_mode { end[0] * 2.0 } else { end[0] };
+        let x_text = format_fixed(x_out, self.post.decimals.linear, self.post.trailing_zeros)?;
+        let z_text = format_fixed(end[2], self.post.decimals.linear, self.post.trailing_zeros)?;
+        words.push(format!("{x_letter}{x_text}"));
+        words.push(format!("{z_letter}{z_text}"));
+        let written_x = x_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        let stored_x = if lathe.diameter_mode { written_x * 0.5 } else { written_x };
+        let stored_z = z_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        Ok([stored_x, 0.0, stored_z])
+    }
+
+    /// G2/G3 in the IR picture (Z to the right, X up, viewed from +Y). `arc_flip` swaps them.
+    fn written_sense(&self, sense: campanion_ir::ArcSense) -> campanion_ir::ArcSense {
+        let flip = self.turning.is_some() && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip);
+        if !flip {
+            return sense;
+        }
+        match sense {
+            campanion_ir::ArcSense::Cw => campanion_ir::ArcSense::Ccw,
+            campanion_ir::ArcSense::Ccw => campanion_ir::ArcSense::Cw,
+        }
     }
 
     fn push_feed(&mut self, words: &mut Vec<String>, feed: Option<f64>, force: bool) -> Result<()> {
@@ -549,6 +630,14 @@ impl<'a> Writer<'a> {
     }
 
     fn event(&mut self, event: &Event) -> Result<()> {
+        if self.turning.is_some() {
+            match event {
+                Event::ProcessOn { process: ProcessKind::Spindle, params } => return self.lathe_spindle_on(params),
+                Event::ProcessOff { process: ProcessKind::Spindle } => return self.lathe_spindle_off(),
+                Event::ToolChange { tool_id } => return self.lathe_tool_change(*tool_id),
+                _ => {}
+            }
+        }
         match event {
             Event::ProcessOn { process, params } => {
                 let lines = self.process_words(process)?.on.clone();
@@ -668,10 +757,71 @@ impl<'a> Writer<'a> {
         self.templates(field_name, &lines, &[("speed", speed.as_str()), ("power", power.as_str()), ("program_name", ""), ("date-free!", "")])
     }
 
+    fn lathe_spindle_on(&mut self, params: &ProcessParams) -> Result<()> {
+        let lathe = self.post.lathe.clone().ok_or_else(|| invalid("lathe spindle needs a lathe post"))?;
+        let speed = self.turning.and_then(|turning| turning.binding_for(self.path_index)).and_then(|binding| binding.speed());
+        match speed {
+            Some(SpindleSpeed::Css { surface_m_per_min, max_rpm }) => {
+                let surface = format_lathe_number(surface_m_per_min, self.post)?;
+                let max_rpm = format_lathe_number(max_rpm, self.post)?;
+                self.templates("lathe.css", &lathe.css, &[("surface", surface.as_str()), ("max_rpm", max_rpm.as_str()), ("date-free!", "")])?;
+            }
+            Some(SpindleSpeed::Rpm { rpm }) => {
+                let rpm = format_lathe_number(rpm, self.post)?;
+                self.templates("lathe.rpm", &lathe.rpm, &[("rpm", rpm.as_str()), ("date-free!", "")])?;
+            }
+            None => {
+                let Some(value) = params.speed_value() else {
+                    return Err(invalid("lathe spindle speed is missing"));
+                };
+                let rpm = format_lathe_number(value, self.post)?;
+                self.templates("lathe.rpm", &lathe.rpm, &[("rpm", rpm.as_str()), ("date-free!", "")])?;
+            }
+        }
+        let lines = if self.lathe_reversed() { lathe.spindle_ccw } else { lathe.spindle_cw };
+        self.templates("lathe.spindle", &lines, &[("date-free!", "")])?;
+        self.note_on(&ProcessKind::Spindle, "", "0");
+        self.arm_thc();
+        Ok(())
+    }
+
+    fn lathe_spindle_off(&mut self) -> Result<()> {
+        let lines = self.post.lathe.as_ref().map(|lathe| lathe.spindle_off.clone()).unwrap_or_default();
+        self.thc_before_off()?;
+        self.note_off(&ProcessKind::Spindle);
+        self.templates("lathe.spindle_off", &lines, &[("date-free!", "")])
+    }
+
+    fn lathe_tool_change(&mut self, tool_id: u32) -> Result<()> {
+        let lines = self.post.lathe.as_ref().map(|lathe| lathe.tool_change.clone()).unwrap_or_default();
+        let tool = tool_id.to_string();
+        let tool2 = format!("{tool_id:02}");
+        self.templates(
+            "lathe.tool_change",
+            &lines,
+            &[("tool", tool.as_str()), ("tool2", tool2.as_str()), ("offset2", tool2.as_str()), ("date-free!", "")],
+        )
+    }
+
+    fn lathe_reversed(&self) -> bool {
+        let Some(turning) = self.turning else {
+            return false;
+        };
+        let Some(binding) = turning.binding_for(self.path_index) else {
+            return false;
+        };
+        turning.spindle(binding.spindle()).is_some_and(|spindle| spindle.reversed())
+    }
+
     fn stop_processes(&mut self) -> Result<()> {
         self.thc_before_off()?;
         let on = std::mem::take(&mut self.on);
         for active in on {
+            if self.turning.is_some() && active.key == "spindle" {
+                let lines = self.post.lathe.as_ref().map(|lathe| lathe.spindle_off.clone()).unwrap_or_default();
+                self.templates("lathe.spindle_off", &lines, &[("date-free!", "")])?;
+                continue;
+            }
             let Some(words) = self.post.process.get(&active.key).or_else(|| self.post.process.get("other")) else {
                 return Err(invalid(format!("process.{} has no template", active.key)));
             };
@@ -782,6 +932,15 @@ fn format_power(post: &PostDef, power: Option<f64>) -> Result<(String, bool)> {
     }
     let text = format_fixed(value * scale, 0, false)?;
     Ok((text, missing))
+}
+
+/// `{surface}`, `{max_rpm}` and `{rpm}`. A whole number is an integer. Anything else uses the feed decimals.
+fn format_lathe_number(value: f64, post: &PostDef) -> Result<String> {
+    if !(value.is_finite() && value >= 0.0) {
+        return Err(invalid("spindle speed must be >= 0"));
+    }
+    let nearest = value.round();
+    if (value - nearest).abs() <= 1e-6 { format_fixed(nearest, 0, false) } else { format_fixed(value, post.decimals.feed, post.trailing_zeros) }
 }
 
 /// Spindle speed is a whole number of revolutions (`S12000`). An absent speed is an empty string
@@ -910,6 +1069,53 @@ fn substitute(field_name: &str, line: &str, vars: &[(&str, &str)]) -> Result<Str
 fn meaningless(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.is_empty() || trimmed == "()" || trimmed == ";"
+}
+
+/// A turning program needs a lathe post, and a lathe post needs a turning program.
+///
+/// Lathe poses are part-frame XZ: `|y|` above `1e-6` is rejected, and so is a rotary setup.
+fn check_lathe_program(program: &Program, post: &PostDef) -> Result<()> {
+    match (program.turning().is_some(), post.is_lathe()) {
+        (true, false) => return Err(unsupported(format!("post `{}` is not a lathe post", post.id()))),
+        (false, true) => return Err(unsupported(format!("lathe post `{}` needs a turning program", post.id()))),
+        _ => {}
+    }
+    if program.turning().is_none() {
+        return Ok(());
+    }
+    if program.rotary().is_some() {
+        return Err(invalid("lathe program cannot have a rotary setup"));
+    }
+    for (path_i, path) in program.toolpaths().iter().enumerate() {
+        for (block_i, block) in path.blocks().iter().enumerate() {
+            if let Some(pose) = pose_of_block(block) {
+                let y = pose.tip().y();
+                if !y.is_finite() || y.abs() > 1e-6 {
+                    return Err(invalid(format!("toolpath {path_i} block {block_i} lathe pose y must be 0")));
+                }
+            }
+            if let ClBlock::Motion(ClMotion::Arc { plane, .. } | ClMotion::Helix { plane, .. }) = block
+                && *plane != Plane::Zx
+            {
+                return Err(invalid("lathe arc must be in the zx plane"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pose_of_block(block: &ClBlock) -> Option<Pose> {
+    match block {
+        ClBlock::Motion(motion) => Some(motion_pose(motion)),
+        ClBlock::Event(Event::Probe { toward, .. }) => *toward,
+        ClBlock::Event(_) => None,
+    }
+}
+
+fn motion_pose(motion: &ClMotion) -> Pose {
+    match motion {
+        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => *to,
+    }
 }
 
 fn check_rotary_program(program: &Program, post: &PostDef) -> Result<()> {

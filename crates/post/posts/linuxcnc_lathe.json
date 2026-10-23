@@ -1,0 +1,50 @@
+{
+  "id": "linuxcnc_lathe",
+  "name": "LinuxCNC lathe",
+  "description": "Millimetre LinuxCNC lathe dialect. Absolute moves, diameter mode (G7), ZX plane (G18) and feed per minute (G94). Constant surface speed is G96 D max-rpm S metres/min; direct rpm is G97. Tool change is T and M6, then G43. IJK arcs in the ZX plane. No rotary axis.",
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 4, "feed": 4, "dwell": 3 },
+  "trailing_zeros": true,
+  "header": [
+    "({program_name})",
+    "G21",
+    "G90",
+    "G40",
+    "G49",
+    "G64 P0.01"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "s" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M2"],
+  "max_line_length": 256,
+  "axis_letters": "XYZ",
+  "lathe": {
+    "diameter_mode": true,
+    "mode_lines": ["G7"],
+    "plane": "G18",
+    "feed_mode": "G94",
+    "css": ["G96 D{max_rpm} S{surface}"],
+    "rpm": ["G97 S{rpm}"],
+    "spindle_cw": ["M3"],
+    "spindle_ccw": ["M4"],
+    "spindle_off": ["M5"],
+    "tool_change": ["T{tool} M6", "G43"],
+    "arc_flip": false,
+    "home": ["G53 G0 X0 Z0"]
+  }
+}

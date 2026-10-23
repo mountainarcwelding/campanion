@@ -9,6 +9,9 @@
 //!
 //! A post may declare a rotary axis. Poses that carry an angle are written in the machine frame.
 //! The feed rule for a move that changes the angle is in the crate README.
+//!
+//! A post may declare a lathe block. A turning program is written in the part XZ frame. Diameter
+//! mode, constant surface speed and the G2/G3 sense are described in the crate README.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -35,10 +38,11 @@ const FANUC_JSON: &str = include_str!("../posts/fanuc.json");
 const HAAS_JSON: &str = include_str!("../posts/haas.json");
 const PLASMA_JSON: &str = include_str!("../posts/plasma.json");
 const GRBL_LASER_JSON: &str = include_str!("../posts/grbl_laser.json");
+const LINUXCNC_LATHE_JSON: &str = include_str!("../posts/linuxcnc_lathe.json");
 
 /// Ids of the posts compiled into this crate, in a stable order.
 pub fn builtin_ids() -> &'static [&'static str] {
-    &["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"]
+    &["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser", "linuxcnc_lathe"]
 }
 
 /// A built-in post, or `None` when `id` is unknown or its JSON fails validation.
@@ -51,6 +55,7 @@ pub fn builtin(id: &str) -> Option<PostDef> {
         "haas" => HAAS_JSON,
         "plasma" => PLASMA_JSON,
         "grbl_laser" => GRBL_LASER_JSON,
+        "linuxcnc_lathe" => LINUXCNC_LATHE_JSON,
         _ => return None,
     };
     load_post(json).ok()
