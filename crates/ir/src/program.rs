@@ -10,10 +10,14 @@ use crate::machine::{Channel, Machine};
 use crate::motion::{ChannelProgram, ClBlock, ClMotion, ClPath};
 use crate::process::{Event, Tool};
 use crate::rotary::{RotarySetup, machine_to_part};
+use crate::turning::TurningSetup;
 use crate::{FORMAT_TAG, Result, check_format};
 
 /// How close a pose tool axis must be to the part-frame image of machine +Z at that rotary angle.
 const ROTARY_AXIS_TOL: f64 = 1e-6;
+
+/// Slack for a turning pose. |Y| may be at most this, and X may be this far below zero.
+const TURNING_PLANE_TOL: f64 = 1e-6;
 
 /// Channels that must arrive together. A sync event waits on this id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -69,6 +73,8 @@ pub struct Program {
     syncs: Vec<SyncPoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rotary: Option<RotarySetup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turning: Option<TurningSetup>,
 }
 
 impl Program {
@@ -81,7 +87,7 @@ impl Program {
         syncs: Vec<SyncPoint>,
         rotary: Option<RotarySetup>,
     ) -> Result<Self> {
-        let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary };
+        let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary, turning: None };
         program.check()?;
         Ok(program)
     }
@@ -122,16 +128,34 @@ impl Program {
         Ok(program)
     }
 
+    /// Lathe setup, when this program is a turning program.
+    pub fn turning(&self) -> Option<&TurningSetup> {
+        self.turning.as_ref()
+    }
+
+    /// Set or clear the lathe setup and re-validate the program.
+    pub fn with_turning(self, turning: Option<TurningSetup>) -> Result<Self> {
+        let program = Self { turning, ..self };
+        program.check()?;
+        Ok(program)
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
         optional_name(&self.name, "program name")?;
         check_tools(&self.tools)?;
         if let Some(machine) = &self.machine {
             machine.check()?;
         }
+        if self.rotary.is_some() && self.turning.is_some() {
+            return Err(check::invalid("rotary and turning setups cannot be combined yet"));
+        }
         if let Some(setup) = self.rotary {
             setup.check()?;
         }
         check_rotary_poses(self.rotary.as_ref(), &self.toolpaths)?;
+        if let Some(turning) = &self.turning {
+            turning.check()?;
+        }
         if self.toolpaths.len() > check::MAX_TOOLPATHS {
             return Err(check::invalid(format!("too many toolpaths: {} > {}", self.toolpaths.len(), check::MAX_TOOLPATHS)));
         }
@@ -150,6 +174,9 @@ impl Program {
                     return Err(check::invalid(format!("tool change references missing tool {tool_id}")));
                 }
             }
+        }
+        if let Some(turning) = &self.turning {
+            check_turning(turning, &self.toolpaths, &tool_ids, self.machine.as_ref())?;
         }
         check_channels(&self.machine, &self.channel_programs, &tool_ids)?;
         check_syncs(&self.machine, &self.syncs, &self.channel_programs, &self.toolpaths)?;
@@ -288,6 +315,64 @@ fn check_rotary_poses(setup: Option<&RotarySetup>, toolpaths: &[ClPath]) -> Resu
             if !vec_within(pose.axis(), expected, ROTARY_AXIS_TOL) {
                 return Err(check::invalid(format!("toolpath {path_i} block {block_i} tool axis does not match rotary angle")));
             }
+        }
+    }
+    Ok(())
+}
+
+fn check_turning(turning: &TurningSetup, toolpaths: &[ClPath], tool_ids: &BTreeSet<u32>, machine: Option<&Machine>) -> Result<()> {
+    for binding in turning.bindings() {
+        let index = binding.toolpath();
+        if bound_path(toolpaths, index).is_none() {
+            return Err(check::invalid(format!("turning binding toolpath {index} is outside 0..{}", toolpaths.len())));
+        }
+    }
+    for insert in turning.inserts() {
+        if !tool_ids.contains(&insert.tool_id()) {
+            return Err(check::invalid(format!("turning insert references missing tool {}", insert.tool_id())));
+        }
+    }
+    if let Some(machine) = machine {
+        let axes: BTreeSet<u8> = machine.axes().iter().map(|axis| axis.id()).collect();
+        let channels: BTreeSet<u16> = machine.channels().iter().map(|channel| channel.id()).collect();
+        for spindle in turning.spindles() {
+            if let Some(axis) = spindle.c_axis()
+                && !axes.contains(&axis)
+            {
+                return Err(check::invalid(format!("turning spindle {} references missing axis {axis}", spindle.name())));
+            }
+        }
+        for binding in turning.bindings() {
+            if !channels.contains(&binding.channel()) {
+                return Err(check::invalid(format!("turning binding references missing channel {}", binding.channel())));
+            }
+        }
+    }
+    for binding in turning.bindings() {
+        let index = binding.toolpath();
+        let Some(path) = bound_path(toolpaths, index) else {
+            return Err(check::invalid(format!("turning binding toolpath {index} is outside 0..{}", toolpaths.len())));
+        };
+        check_turning_poses(index, path)?;
+    }
+    Ok(())
+}
+
+fn bound_path(toolpaths: &[ClPath], index: u32) -> Option<&ClPath> {
+    usize::try_from(index).ok().and_then(|index| toolpaths.get(index))
+}
+
+fn check_turning_poses(index: u32, path: &ClPath) -> Result<()> {
+    for (block_i, block) in path.blocks().iter().enumerate() {
+        let Some(pose) = block_pose(block) else {
+            continue;
+        };
+        let tip = pose.tip();
+        if tip.y().abs() > TURNING_PLANE_TOL {
+            return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose Y is not zero")));
+        }
+        if tip.x() < -TURNING_PLANE_TOL {
+            return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose X radius is negative")));
         }
     }
     Ok(())

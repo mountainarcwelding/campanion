@@ -20,6 +20,23 @@
 //! `(u, v, w)` coordinate on a [`Cylinder`] into that frame; [`wrap_polyline`] splits the flat
 //! path so each chord stays within tolerance. Surface feed is the flat-frame length. The IR does
 //! not encode a particular controller.
+//!
+//! # Turning
+//!
+//! A program may name a lathe setup ([`TurningSetup`]) instead of a rotary table. The two cannot
+//! be combined yet. Turning toolpaths stay ordinary [`ClPath`]s whose poses are in the part frame.
+//! Z is the spindle axis, positive away from the chuck toward the tailstock and the tool. X is a
+//! radius in millimetres, never a diameter. Y is 0 for XZ work. Diameter mode is a post setting
+//! only; the IR never stores diameters in X. The pose axis is not interpreted for XZ turning
+//! moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis.
+//!
+//! Spindles are named (`main` now, a sub-spindle later). Each has its own optional C axis and a
+//! work-zero offset along Z. A head, a turret or a B-axis head, carries X and Z and optionally Y
+//! and B. Every turning toolpath has a binding that names its spindle, head and channel. An M10
+//! lathe uses one spindle `main`, one head `turret1` and channel 0. Live tooling, Y, B and a
+//! second spindle fit in these types: spindles and heads are lists, and the extra axes and flags
+//! are optional fields. Bar and tube stock runs from the finished front face at Z = 0 back to
+//! Z = -length. Facing allowance comes from the operation, not from the stock value.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -33,6 +50,7 @@ mod process;
 mod program;
 mod rotary;
 mod schema;
+mod turning;
 mod verify;
 mod wrap;
 
@@ -48,6 +66,7 @@ pub use rotary::{
     unwrap_angle,
 };
 pub use schema::json_schema;
+pub use turning::{Hand, Head, HeadAxis, Insert, InsertShape, Spindle, SpindleSpeed, TurnBinding, TurnInsert, TurnStock, TurningSetup};
 pub use verify::{Bounds, Issue, RefKind, VerifyOptions, VerifyReport, verify, verify_with};
 pub use wrap::{Cylinder, unwrap_pose, wrap_point, wrap_polyline};
 
@@ -149,3 +168,6 @@ fn valid_minor(minor: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod turning_tests;
