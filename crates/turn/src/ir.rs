@@ -3,14 +3,15 @@
 //! Poses use a radius in X and the spindle coordinate in Z. Y is 0. The tool axis is
 //! [`campanion_ir::Vec3::Z`] because a pose requires a unit axis; turning does not read it.
 
-use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, Plane, Pose, Vec3};
+use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Plane, Pose, Vec3};
 
 use crate::{Result, TurnError, TurnMove, TurnPath};
 
 /// Convert `path` into a cutter-location path.
 ///
 /// The first block is a rapid to [`TurnPath::start`]. Each [`TurnMove::Rapid`] stays a rapid
-/// with no feed. Feeds and arcs are [`MoveRole::Cut`]. An arc lies in the ZX plane. Its centre
+/// with no feed. Feeds and arcs are [`MoveRole::Cut`]. A dwell is an [`campanion_ir::Event::Dwell`].
+/// A thread move is an error until synchronised feed is wired through the IR. An arc lies in the ZX plane. Its centre
 /// is `(cx, 0, cz)`. Counter-clockwise with +Z to the right and +X up is [`ArcSense::Ccw`].
 /// Compensation is [`CompensationMode::Computed`]: nose compensation is already in `path`.
 ///
@@ -29,13 +30,23 @@ pub fn to_cl_path(path: &TurnPath, name: Option<String>, tool_id: u32, cut_feed:
     let mut blocks = Vec::with_capacity(path.moves.len().saturating_add(1));
     blocks.push(ClBlock::Motion(ClMotion::Rapid { to: pose_at(path.start.0, path.start.1)?, feed: None }));
     for motion in &path.moves {
-        blocks.push(ClBlock::Motion(cl_move(*motion, cut_feed)?));
+        blocks.push(cl_block(*motion, cut_feed)?);
     }
     Ok(ClPath::try_new(name, Some(tool_id), CompensationMode::Computed, feeds, None, Vec::new(), blocks)?)
 }
 
 fn pose_at(z: f64, x_radius: f64) -> Result<Pose> {
     Ok(Pose::new(Vec3::new(x_radius, 0.0, z)?, Vec3::Z)?)
+}
+
+fn cl_block(motion: TurnMove, cut_feed: f64) -> Result<ClBlock> {
+    Ok(match motion {
+        TurnMove::Thread { .. } => {
+            return Err(TurnError::InvalidInput("threading needs a post with synchronised feed; not wired yet".into()));
+        }
+        TurnMove::Dwell { seconds } => ClBlock::Event(Event::Dwell { seconds }),
+        other => ClBlock::Motion(cl_move(other, cut_feed)?),
+    })
 }
 
 fn cl_move(motion: TurnMove, cut_feed: f64) -> Result<ClMotion> {
@@ -50,6 +61,9 @@ fn cl_move(motion: TurnMove, cut_feed: f64) -> Result<ClMotion> {
             feed: cut_feed,
             role: MoveRole::Cut,
         },
+        TurnMove::Thread { .. } | TurnMove::Dwell { .. } => {
+            return Err(TurnError::InvalidInput("not a feed or arc move".into()));
+        }
     })
 }
 

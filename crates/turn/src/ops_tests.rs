@@ -30,9 +30,10 @@ fn assert_close(actual: f64, expected: f64, tol: f64, label: &str) {
     assert!((actual - expected).abs() <= tol, "{label}: {actual} != {expected} (tol {tol})");
 }
 
-fn target(motion: &TurnMove) -> (f64, f64) {
+fn target(from: (f64, f64), motion: &TurnMove) -> (f64, f64) {
     match *motion {
-        TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Arc { z, x, .. } => (z, x),
+        TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Arc { z, x, .. } | TurnMove::Thread { z, x, .. } => (z, x),
+        TurnMove::Dwell { .. } => from,
     }
 }
 
@@ -44,13 +45,14 @@ fn distance_to_profile(profile: &TurnProfile, z: f64, x: f64) -> f64 {
 fn sample_move(from: (f64, f64), motion: &TurnMove, n: usize) -> Vec<(f64, f64)> {
     let n = n.max(1);
     match *motion {
-        TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } => (1..=n)
+        TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Thread { z, x, .. } => (1..=n)
             .map(|i| {
                 let t = i as f64 / n as f64;
                 (from.0 + t * (z - from.0), from.1 + t * (x - from.1))
             })
             .collect(),
         TurnMove::Arc { z, x, cz, cx, ccw } => sample_arc(from, (z, x), (cz, cx), ccw, n),
+        TurnMove::Dwell { .. } => Vec::new(),
     }
 }
 
@@ -99,7 +101,7 @@ fn axial_feeds(path: &TurnPath) -> Vec<(f64, f64, f64)> {
         {
             found.push((cursor.0, z, x));
         }
-        cursor = target(motion);
+        cursor = target(cursor, motion);
     }
     found
 }
@@ -114,7 +116,7 @@ fn radial_feeds(path: &TurnPath) -> Vec<(f64, f64, f64)> {
         {
             found.push((z, cursor.1, x));
         }
-        cursor = target(motion);
+        cursor = target(cursor, motion);
     }
     found
 }
@@ -196,7 +198,7 @@ fn chamfer_and_shoulder_offset_the_convex_corner() {
                 }
             }
         }
-        cursor = target(motion);
+        cursor = target(cursor, motion);
     }
     assert!(saw_chamfer, "45° chamfer was not kept: {:?}", finished.moves);
 }
@@ -301,7 +303,7 @@ fn face_pass_count_final_z_and_centre() {
         {
             cuts.push((z, x));
         }
-        cursor = target(motion);
+        cursor = target(cursor, motion);
     }
     assert_eq!(cuts.len(), 3, "cutting feeds: {cuts:?}");
     let step = 2.0 / 3.0;
@@ -322,7 +324,7 @@ fn face_pass_count_final_z_and_centre() {
         {
             tip_cuts.push((z, x));
         }
-        cursor = target(motion);
+        cursor = target(cursor, motion);
     }
     assert_eq!(tip_cuts.len(), 3);
     assert_close(tip_cuts[2].0, 0.0, 1e-12, "imaginary tip is exact in z");
@@ -355,7 +357,7 @@ fn id_roughing_stays_inside_the_bore_and_above_zero() {
     let mut samples = vec![cursor];
     for motion in &path.moves {
         samples.extend(sample_move(cursor, motion, 8));
-        cursor = target(motion);
+        cursor = target(cursor, motion);
     }
     for (z, x) in samples {
         assert!(x >= -1e-9, "below zero at ({z}, {x})");
@@ -375,7 +377,7 @@ fn id_roughing_stays_inside_the_bore_and_above_zero() {
         {
             panic!("pass at x={x} entered past the Ø20 mouth toward z={z}");
         }
-        cursor = target(motion);
+        cursor = target(cursor, motion);
     }
 }
 
@@ -518,7 +520,7 @@ proptest! {
         };
         let mut cursor = finished.start;
         for motion in &finished.moves {
-            let end = target(motion);
+            let end = target(cursor, motion);
             let d0 = distance_to_profile(&part, cursor.0, cursor.1);
             let d1 = distance_to_profile(&part, end.0, end.1);
             let contact = d0 <= nose + 1e-2 && d1 <= nose + 1e-2;
@@ -559,7 +561,7 @@ proptest! {
         let mut samples = vec![cursor];
         for motion in &roughed.moves {
             samples.extend(sample_move(cursor, motion, 6));
-            cursor = target(motion);
+            cursor = target(cursor, motion);
         }
         for (z, x) in samples {
             prop_assert!(x >= -1e-6, "rough below zero at ({z}, {x})");

@@ -28,18 +28,21 @@
 //!
 //! Facing, longitudinal roughing, and finishing are in [`ops`]. Those paths are
 //! coordinates of the programmed point with the nose radius applied here, so they
-//! do not depend on cutter compensation (G41/G42). [`to_cl_path`] writes one path
-//! as a [`campanion_ir::ClPath`] in the ZX plane.
+//! do not depend on cutter compensation (G41/G42). Threading, grooving, parting and
+//! centreline drilling are in [`cycles`]. [`to_cl_path`] writes one path as a
+//! [`campanion_ir::ClPath`] in the ZX plane.
 //!
 //! This crate is clean-room. It does not use OCCT, FreeCAD, planegcs, or OpenCAMLib.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod cycles;
 mod ir;
 mod mesh;
 mod ops;
 mod profile;
 
+pub use cycles::{DrillParams, GrooveParams, Infeed, PartParams, ThreadParams, centre_drill, groove, part_off, thread, thread_pass_depths};
 pub use ir::to_cl_path;
 pub use mesh::MeshAxis;
 pub use ops::{FaceParams, FinishParams, RoughParams, Side, TipPoint, TurnMove, TurnPath, TurnTool, compensated_profile, face, finish, rough};

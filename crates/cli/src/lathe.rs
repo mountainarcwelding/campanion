@@ -758,6 +758,8 @@ mod tests {
             }
             cursor = match *motion {
                 TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Arc { z, x, .. } => (z, x),
+                TurnMove::Thread { z, x, .. } => (z, x),
+                TurnMove::Dwell { .. } => cursor,
             };
         }
         let Some((z0, z1, x)) = straight else {
@@ -792,6 +794,8 @@ mod tests {
                 }
                 cursor = match *motion {
                     TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Arc { z, x, .. } => (z, x),
+                    TurnMove::Thread { z, x, .. } => (z, x),
+                    TurnMove::Dwell { .. } => cursor,
                 };
             }
             assert!(saw_end, "facing feed did not cross the centre: {:?}", path.moves);
