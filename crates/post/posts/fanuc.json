@@ -7,6 +7,7 @@
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 3, "feed": 3, "dwell": 3 },
   "trailing_zeros": false,
+  "decimal_point": true,
   "header": [
     "%",
     "O{program_number}",

@@ -141,7 +141,7 @@ fn skip_z_only(post: &PostDef, pos: Option<Xyz>, end: Xyz, rapid: bool) -> Resul
     let Some(pos) = pos else {
         return Ok(false);
     };
-    if !xy_text_eq(pos, end, post.decimals.linear, post.trailing_zeros)? {
+    if !xy_text_eq(pos, end, post.decimals.linear, post.trailing_zeros, post.decimal_point)? {
         return Ok(false);
     }
     let drop_rapid = rapid && !post.process_feeds.rapid_z;

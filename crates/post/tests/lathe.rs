@@ -436,11 +436,11 @@ fn fanuc_lathe_writes_g50_before_g96_and_the_t_word() {
     let m3 = text.find("M3").expect("m3");
     assert!(g50 < g96 && g96 < m3, "{text}");
     assert!(has_word(&text, "T0101"), "{text}");
-    assert!(has_word(&text, "X20"), "{text}");
-    assert!(has_word(&text, "X10"), "{text}");
-    assert!(has_word(&text, "I-5"), "{text}");
-    assert!(has_word(&text, "K0"), "{text}");
-    assert!(!has_word(&text, "I-10"), "{text}");
+    assert!(has_word(&text, "X20."), "{text}");
+    assert!(has_word(&text, "X10."), "{text}");
+    assert!(has_word(&text, "I-5."), "{text}");
+    assert!(has_word(&text, "K0."), "{text}");
+    assert!(!has_word(&text, "I-10") && !has_word(&text, "I-10."), "{text}");
     assert!(has_word(&text, "G3"), "{text}");
     assert!(!words_of(&text).iter().any(|word| word.starts_with('R')), "{text}");
     assert!(text.contains("G28 U0 W0"), "{text}");
@@ -472,7 +472,7 @@ fn haas_lathe_writes_g98_and_g53_home() {
     let g96 = text.find("G96 S200").expect("g96");
     assert!(g50 < g96, "{text}");
     assert!(has_word(&text, "T0101"), "{text}");
-    assert!(has_word(&text, "I-5") && has_word(&text, "K0"), "{text}");
+    assert!(has_word(&text, "I-5.") && has_word(&text, "K0."), "{text}");
     assert!(!words_of(&text).iter().any(|word| word.starts_with('R')), "{text}");
     let x_home = text.find("G53 G0 X0").expect("x home");
     let z_home = text.find("G53 G0 Z0").expect("z home");
@@ -481,6 +481,46 @@ fn haas_lathe_writes_g98_and_g53_home() {
     let parked = read_back("G18\nG0 X20 Z1\nG53 G0 X0\nG53 G0 Z0\n", &post).expect("home read");
     assert_eq!(parked.len(), 1, "{parked:?}");
     compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+/// Whole Fanuc lathe axes keep a point. Feed and a millisecond dwell do not.
+#[test]
+fn fanuc_lathe_writes_a_decimal_point_on_axes_only() {
+    let blocks = vec![
+        rapid(26.0, 2.0),
+        ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+        linear(26.0, 0.0, 100.0),
+        ClBlock::Motion(ClMotion::Arc {
+            to: xz(31.0, -5.0),
+            plane: Plane::Zx,
+            center: Vec3::new(26.0, 0.0, -5.0).expect("centre"),
+            sense: ArcSense::Ccw,
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let program = lathe_program(blocks, turning(None, false));
+    let post = builtin("fanuc_lathe").expect("fanuc_lathe");
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(has_word(&text, "X52."), "{text}");
+    assert!(has_word(&text, "Z0."), "{text}");
+    assert!(has_word(&text, "I0."), "{text}");
+    assert!(has_word(&text, "F100"), "{text}");
+    assert!(has_word(&text, "P500"), "{text}");
+    assert!(!has_word(&text, "X52"), "{text}");
+    assert!(!has_word(&text, "Z0"), "{text}");
+    assert!(!has_word(&text, "I0"), "{text}");
+    assert!(!has_word(&text, "F100."), "{text}");
+    assert!(!has_word(&text, "P500."), "{text}");
+    assert!(has_word(&text, "K-5."), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let haas = builtin("haas_lathe").expect("haas_lathe");
+    let haas_text = post_program(&program, &haas, &options()).expect("haas");
+    assert!(has_word(&haas_text, "X52.") && has_word(&haas_text, "Z0.") && has_word(&haas_text, "I0."), "{haas_text}");
+    assert!(has_word(&haas_text, "F100") && has_word(&haas_text, "P500"), "{haas_text}");
+    assert!(!has_word(&haas_text, "F100.") && !has_word(&haas_text, "P500."), "{haas_text}");
+    compare(&program, &read_back(&haas_text, &haas).expect("read"), 1e-3, &haas).expect("haas compare");
 }
 
 #[test]

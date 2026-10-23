@@ -13,8 +13,9 @@
 //! and `thc.off` is written before process off.
 //!
 //! `rotary` is optional. Without it, a program that carries a rotary angle is rejected. `axes`
-//! lists `a`, `b`, or both. The A/B word uses [`crate::fmt::format_fixed`] with `decimals`
-//! (degrees). `feed_mode` is `inverse_time`, `degrees_per_minute`, or `surface`. Inverse time
+//! lists `a`, `b`, or both. The A/B word uses the dimensional formatter with `decimals`
+//! (degrees). `decimal_point` keeps a point on that word and on `X` `Y` `Z` `I` `J` `K` `R`
+//! (`90.`, `0.`). `feed_mode` is `inverse_time`, `degrees_per_minute`, or `surface`. Inverse time
 //! requires `inverse_time_on` and `inverse_time_off` (LinuxCNC uses `G93` and `G94`).
 //!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
@@ -67,6 +68,13 @@ pub struct PostDef {
     pub(crate) line_numbers: LineNumbers,
     pub(crate) decimals: Decimals,
     pub(crate) trailing_zeros: bool,
+    /// When true, dimensional words always include a decimal point (`52.`, `0.`).
+    ///
+    /// Fanuc and Haas read a word with no point as least-input increments (`X52` is 0.052 mm,
+    /// `A90` is 0.09 degrees). Feed, spindle, dwell, line numbers, and tool and program numbers
+    /// are unchanged. Defaults to false so a dialect that reads plain decimals can omit the key.
+    #[serde(default)]
+    pub(crate) decimal_point: bool,
     pub(crate) header: Vec<String>,
     pub(crate) footer: Vec<String>,
     pub(crate) modal_motion: bool,
