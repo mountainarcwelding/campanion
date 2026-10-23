@@ -37,7 +37,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 cargo run -p campanion-cli -- lathe examples/shaft.lathe.json -o out.ngc --ir out.json --post linuxcnc_lathe
 ```
 
-`campanion lathe` loads a `campanion-lathe/1` file. Without `--post`, `-o` is the RS274/NGC test sink and ZX arcs are `G18`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`). Posted text is read back at the job chord tolerance. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1.
+`campanion lathe` loads a `campanion-lathe/1` file. Without `--post`, `-o` is the RS274/NGC test sink and ZX arcs are `G18`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`). Posted text is read back at the job chord tolerance. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1. A face, rough or finish gouge is printed and the status is 1.
 
 ## Usage
 

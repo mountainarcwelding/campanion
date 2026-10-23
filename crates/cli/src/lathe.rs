@@ -12,7 +12,9 @@
 //! section on the turning setup, sampled from the profile at the job chord tolerance.
 //!
 //! `campanion_ir::verify` runs before anything is written. Issues are printed and the process
-//! exits 1. `--post` writes that dialect instead of the test-sink NGC and compares the read-back
+//! exits 1. Face, rough and finish paths are checked against the finished section for insert and
+//! holder gouges. A gouge is printed and the process exits 1. Nothing is written in either case.
+//! `--post` writes that dialect instead of the test-sink NGC and compares the read-back
 //! at the job chord tolerance. A mismatch exits 1 and nothing is written. ZX arcs in the test
 //! sink are `G18`. The test sink does not write synchronised thread moves, so a job that threads
 //! needs `--post`.
@@ -30,8 +32,8 @@ use campanion_ir::{
     TurnSection, TurnStock, TurningSetup,
 };
 use campanion_turn::{
-    DrillParams, FaceParams, FinishParams, GrooveParams, Infeed, MeshAxis, PartParams, RoughParams, Side, ThreadParams, TipPoint, TurnPath,
-    TurnProfile, TurnTool, centre_drill, face, finish, groove, part_off, rough, thread, to_cl_path,
+    DrillParams, FaceParams, FinishParams, GrooveParams, HolderGeom, Infeed, InsertGeom, MeshAxis, PartParams, RoughParams, Side, ThreadParams,
+    TipPoint, TurnGouge, TurnPath, TurnProfile, TurnTool, centre_drill, check_turn_gouges, face, finish, groove, part_off, rough, thread, to_cl_path,
 };
 use serde_json::{Map, Value};
 
@@ -57,6 +59,8 @@ const DEFAULT_FLANK_DEG: f64 = 29.5;
 const DEFAULT_FIRST_DEPTH_CAP: f64 = 0.35;
 /// Thread cycles emit rapids and synchronised moves. The path still needs a positive cut feed.
 const THREAD_RECORD_FEED: f64 = 100.0;
+/// Flank length, millimetres, used when a face, rough or finish path is checked for gouges.
+const TURN_EDGE_MM: f64 = 4.0;
 
 struct LatheArgs {
     job: PathBuf,
@@ -99,6 +103,7 @@ struct LatheTool {
     insert: Insert,
     tip: TipPoint,
     nose_radius: f64,
+    holder: Option<HolderGeom>,
 }
 
 enum Operation {
@@ -245,7 +250,14 @@ pub fn lathe(args: &[OsString]) -> Result<ExitCode, CliError> {
     let text = read_text(&args.job)?;
     let job = parse_job(&text)?;
     let profile = load_profile(&args.job, &job)?;
-    let doc = build_document(&args.job, &job, &profile)?;
+    let (doc, gouges) = build_document(&args.job, &job, &profile)?;
+    if !gouges.is_empty() {
+        let mut err_out = io::stderr().lock();
+        for line in &gouges {
+            writeln!(err_out, "{line}")?;
+        }
+        return Ok(ExitCode::from(1));
+    }
     emit(&args, &job, &doc, post.as_ref())
 }
 
@@ -477,7 +489,7 @@ fn parse_tools(value: &Value) -> Result<Vec<LatheTool>, CliError> {
 
 fn parse_tool(value: &Value) -> Result<LatheTool, CliError> {
     let map = object(value, "tool")?;
-    check_keys(map, &["id", "station", "shape", "nose_radius", "orientation_deg", "hand", "tip", "width"], "tool")?;
+    check_keys(map, &["id", "station", "shape", "nose_radius", "orientation_deg", "hand", "tip", "width", "holder"], "tool")?;
     let id = as_u32(require(map, "id")?, "tool id")?;
     let station_u = as_u32(require(map, "station")?, "station")?;
     if !(1..=STATIONS).contains(&station_u) {
@@ -495,7 +507,19 @@ fn parse_tool(value: &Value) -> Result<LatheTool, CliError> {
     };
     let insert = Insert::try_new(shape, nose_radius, width, hand, orientation_deg).map_err(|err| CliError::run(format!("tool {id}: {err}")))?;
     let tip = programmed_tip(&insert, tip_name)?;
-    Ok(LatheTool { id, station, insert, tip, nose_radius })
+    let holder = match optional(map, "holder") {
+        Some(value) => Some(parse_holder(value)?),
+        None => None,
+    };
+    Ok(LatheTool { id, station, insert, tip, nose_radius, holder })
+}
+
+fn parse_holder(value: &Value) -> Result<HolderGeom, CliError> {
+    let map = object(value, "holder")?;
+    check_keys(map, &["width", "length"], "holder")?;
+    let width = positive(require(map, "width")?, "width")?;
+    let length = positive(require(map, "length")?, "length")?;
+    Ok(HolderGeom { width, length })
 }
 
 fn parse_shape(text: &str) -> Result<InsertShape, CliError> {
@@ -826,7 +850,7 @@ fn resolve_source(job: &Path, relative: &str) -> PathBuf {
     }
 }
 
-fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Result<Document, CliError> {
+fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Result<(Document, Vec<String>), CliError> {
     let stock = turn_stock(&job.stock)?;
     let points = profile.to_polyline_points(job.chord).into_iter().map(|point| [point.x(), point.y()]).collect();
     let mut setup = TurningSetup::single(Some(stock), job.max_rpm)?.with_section(Some(TurnSection::try_new(points)?))?;
@@ -834,10 +858,23 @@ fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Res
         let mounted = TurnInsert::try_new(tool.id, HEAD, tool.station, tool.insert, false)?;
         setup = setup.with_insert(mounted)?;
     }
+    let check = job.operations.iter().any(|operation| gouge_side(operation).is_some());
+    let sample_step = if check { Some(crate::gouge::sample_step_for(job.chord)?) } else { None };
+    let section: Vec<(f64, f64)> = if sample_step.is_some() {
+        profile.to_polyline_points(job.chord).into_iter().map(|point| (point.x(), point.y())).collect()
+    } else {
+        Vec::new()
+    };
+    let mut gouge_lines = Vec::new();
     let mut toolpaths = Vec::with_capacity(job.operations.len());
     let mut previous: Option<u32> = None;
     for (index, operation) in job.operations.iter().enumerate() {
         let turned = turn_operation(job, profile, operation)?;
+        if let Some(step) = sample_step
+            && let Some(side) = gouge_side(operation)
+        {
+            gouge_lines.extend(turn_gouges(job, operation, index, &turned, side, &section, step)?);
+        }
         let motion = to_cl_path(&turned, Some(operation.name().to_string()), operation.tool_id(), operation.feed(), Some(job.clearance))
             .map_err(|err| op_fail(operation.name(), err))?;
         toolpaths.push(with_events(motion, operation.tool_id(), &mut previous)?);
@@ -846,7 +883,56 @@ fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Res
     }
     let tools = job.tools.iter().map(|tool| Tool::try_new(tool.id, None, None, None)).collect::<Result<Vec<_>, _>>()?;
     let program = Program::try_new(program_name(job_path), tools, None, toolpaths, Vec::new(), Vec::new(), None)?.with_turning(Some(setup))?;
-    Ok(Document::new(program)?)
+    Ok((Document::new(program)?, gouge_lines))
+}
+
+/// Face is always outside. Rough and finish use the operation side. Thread, groove, part and
+/// drill are skipped: those inserts are meant to enter the profile.
+fn gouge_side(operation: &Operation) -> Option<Side> {
+    match operation {
+        Operation::Face { .. } => Some(Side::Outside),
+        Operation::Rough { side, .. } | Operation::Finish { side, .. } => Some(*side),
+        Operation::Thread { .. } | Operation::Groove { .. } | Operation::Part { .. } | Operation::Drill { .. } => None,
+    }
+}
+
+fn turn_gouges(
+    job: &LatheJob,
+    operation: &Operation,
+    index: usize,
+    path: &TurnPath,
+    side: Side,
+    section: &[(f64, f64)],
+    sample_step: f64,
+) -> Result<Vec<String>, CliError> {
+    let tool = job
+        .tools
+        .iter()
+        .find(|tool| tool.id == operation.tool_id())
+        .ok_or_else(|| CliError::run(format!("operation {}: missing tool {}", operation.name(), operation.tool_id())))?;
+    let insert = InsertGeom::from_insert(&tool.insert, TURN_EDGE_MM).map_err(|err| op_fail(operation.name(), err))?;
+    let mut found = check_turn_gouges(section, side, path, tool.tip, &insert, tool.holder.as_ref(), sample_step, job.chord)
+        .map_err(|err| op_fail(operation.name(), err))?;
+    for gouge in &mut found {
+        gouge.toolpath = index;
+    }
+    Ok(found.iter().map(|gouge| format_turn_gouge(operation.name(), gouge)).collect())
+}
+
+fn format_turn_gouge(name: &str, gouge: &TurnGouge) -> String {
+    let mut clean = String::new();
+    for ch in name.chars() {
+        if ch.is_control() {
+            clean.push(' ');
+        } else {
+            clean.push(ch);
+        }
+    }
+    format!("gouge operation {clean} z {} x {} depth {} {}", num6(gouge.z), num6(gouge.x), num6(gouge.depth), gouge.what.name())
+}
+
+fn num6(value: f64) -> String {
+    if value.is_finite() { format!("{value:.6}") } else { "non_finite".to_string() }
 }
 
 fn turn_stock(stock: &Stock) -> Result<TurnStock, CliError> {

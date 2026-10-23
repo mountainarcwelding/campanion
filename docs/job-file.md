@@ -489,7 +489,7 @@ fields are rejected with a message that names the key. Every number must be fini
 millimetres. Feeds are millimetres per minute. Constant surface speed is metres per minute.
 Direct spindle speed is revolutions per minute.
 
-`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf`, then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off.
+`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off.
 
 ```json
 {
@@ -499,7 +499,7 @@ Direct spindle speed is revolutions per minute.
   "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
   "spindle": { "max_rpm": 3000 },
   "tools": [
-    { "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.8, "orientation_deg": 135, "hand": "right", "tip": "centre" }
+    { "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.8, "orientation_deg": 45, "hand": "right", "tip": "centre" }
   ],
   "operations": [
     { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 150, "speed": { "css": 200 } },
@@ -520,7 +520,7 @@ Direct spindle speed is revolutions per minute.
 | `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. |
 | `tools` | yes | Inserts, at most 256. May be empty when `operations` is empty. |
 | `operations` | yes | Face, rough, finish, thread, groove, part and drill, in order, at most 1024. |
-| `tolerance` | no | `linear` (default 1e-6, must be positive) is the profile and finish tolerance. `chord` (default 0.01) is the post read-back tolerance. `angular` is accepted, must be `>= 0`, and is not used. |
+| `tolerance` | no | `linear` (default 1e-6, must be positive) is the profile and finish tolerance. `chord` (default 0.01) is the post read-back tolerance and the gouge tolerance. The finished section is sampled at `chord`. `angular` is accepted, must be `>= 0`, and is not used. |
 | `clearance` | yes | Approach gap, millimetres, `>= 0`. Roughing retracts by the same distance. |
 
 `source` chooses the reader by extension:
@@ -533,7 +533,7 @@ Drawing X is Z and drawing Y is the radius. Z = 0 is the finished front face and
 
 `stock.kind` is `bar` (`diameter`, `length`, `front_allowance`) or `tube` (`outer_diameter`, `inner_diameter`, `length`, `front_allowance`). Diameters and `length` are positive. `front_allowance` is `>= 0`. The IR stock still occupies Z in `[-length, 0]`; the allowance is only the facing depth, from `+front_allowance` down to 0. A tube's inner diameter must be below its outer diameter.
 
-Each tool is one insert on head `turret1` (12 stations, no live tooling). `id` is the tool-table id. `station` is 1 to 12, and ids and stations are unique. `shape` is `c80`, `d55`, `v35`, `w80`, `t60`, `s90`, `r`, `groove` or `thread`. A groove needs a positive `width`; other shapes may set it. `nose_radius` is positive. `orientation_deg` is the bisector from +Z toward +X, in −360 to 360. `hand` is `left`, `right` or `neutral`. `tip` is `centre` or `imaginary`. The tool table stores no milling diameter.
+Each tool is one insert on head `turret1` (12 stations, no live tooling). `id` is the tool-table id. `station` is 1 to 12, and ids and stations are unique. `shape` is `c80`, `d55`, `v35`, `w80`, `t60`, `s90`, `r`, `groove` or `thread`. A groove needs a positive `width`; other shapes may set it. `nose_radius` is positive. `orientation_deg` is the bisector from the nose into the holder, measured from +Z toward +X, in −360 to 360. A right-hand outside tool turning toward the chuck has its holder up and toward +Z, so 45° is the usual outside orientation: an 80° insert at 45° leads at 95° and clears the end by 5°. 135° points the holder toward the chuck and gouges a shoulder. `hand` is `left`, `right` or `neutral`. `tip` is `centre` or `imaginary`. `holder`, when set, is `{ "width", "length" }`. Both are positive millimetres. The holder is a rectangle of that width, centred on the bisector, starting at the back of the insert and extending `length` into the shank. The tool table stores no milling diameter.
 
 `tip: "imaginary"` programs the theoretical sharp corner. The IR insert offset is `(dx, dz)` in `(X, Z)`, from [`Insert::tip_offset`](../crates/ir/src/turning.rs): `(-r·sign(sin o), -r·sign(cos o))`, with `sign(0) = 0`. The turning path stores that pair as `dz`, `dx`. At 45° both components are `−nose_radius`. At 135° `dx` is `−nose_radius` and `dz` is `+nose_radius`. `tip: "centre"` programs the nose centre.
 
@@ -603,6 +603,8 @@ Diameters in a thread, groove or part operation are job diameters. The cycle see
 | `through` | no | When true, the tip goes deeper by the point length. Default `false`. |
 | `feed`, `rpm` | yes | `rpm` is revolutions per minute. |
 
+`campanion lathe` checks each face, rough and finish path against the finished profile. The profile is the polyline sampled at `tolerance.chord`. The insert flank length is 4 mm, and the tool's `holder` is included when the tool has one. Samples are `min(0.25, chord * 10)` millimetres apart. A hit deeper than `chord` is a gouge. Each gouge is one stderr line, `gouge operation NAME z Z x X depth DEPTH KIND`, with `KIND` one of `nose`, `edge` or `holder` and the numbers printed to six decimal places. A gouge exits 1 and writes nothing. Thread, groove, part and drill are not checked: those inserts are meant to enter the profile.
+
 Each operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`).
 
-Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine, and it rejects synchronised thread moves, so a job that threads needs `--post`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. A thread is `G33` with the lead on `K` for LinuxCNC and grblHAL, and `G32` with the lead on `F` for Fanuc and Haas. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the finished section on `turning.section`, sampled from the loaded profile at `tolerance.chord`.
+Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine, and it rejects synchronised thread moves, so a job that threads needs `--post`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. A thread is `G33` with the lead on `K` for LinuxCNC and grblHAL, and `G32` with the lead on `F` for Fanuc and Haas. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. A face, rough or finish gouge is printed on its own, one line per gouge, and the status is 1. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the finished section on `turning.section`, sampled from the loaded profile at `tolerance.chord`.

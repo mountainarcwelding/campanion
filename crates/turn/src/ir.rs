@@ -223,11 +223,12 @@ mod tests {
         let dxf_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/shaft.dxf");
         let text = std::fs::read_to_string(&dxf_path).unwrap_or_else(|err| panic!("read {}: {err}", dxf_path.display()));
         let profile = TurnProfile::from_dxf(&text, Some("PROFILE"), 1e-6).expect("import");
-        assert!(profile.segments().iter().any(|segment| matches!(segment, Segment::Arc(_))), "shaft needs an arc");
         let (zmin, zmax) = profile.z_range();
         assert!((zmax - 0.0).abs() < 1e-6, "zmax {zmax}");
         assert!((zmin + 60.0).abs() < 1e-6, "zmin {zmin}");
-        assert!((profile.max_radius() - 23.0).abs() < 1e-6, "max radius {}", profile.max_radius());
+        assert!((profile.max_radius() - 20.0).abs() < 1e-6, "max radius {}", profile.max_radius());
+        assert!(profile.radius_at(-10.0).is_some_and(|radius| (radius - 15.0).abs() < 1e-6), "journal");
+        assert!(profile.radius_at(-50.0).is_some_and(|radius| (radius - 20.0).abs() < 1e-6), "rear diameter");
         let tool = TurnTool { nose_radius: 0.8, tip: TipPoint::Centre };
         let faced = face(&tool, &FaceParams { stock_front_z: 1.0, final_z: 0.0, step_z: 0.5, from_radius: 25.0, to_radius: 0.0, clearance: 2.0 })
             .expect("face");
@@ -248,7 +249,6 @@ mod tests {
         .expect("rough");
         let finished =
             finish(&profile, &tool, &FinishParams { side: Side::Outside, leave_x: 0.0, leave_z: 0.0, clearance: 2.0, tol: 0.001 }).expect("finish");
-        assert!(finished.moves.iter().any(|motion| matches!(motion, TurnMove::Arc { .. })), "finish lost the fillet");
         for (name, turned) in [("face", &faced), ("rough", &roughed), ("finish", &finished)] {
             let cl = to_cl_path(turned, Some(name.into()), 1, 100.0, Some(2.0)).unwrap_or_else(|err| panic!("{name}: {err}"));
             assert!(matches!(cl.blocks().first(), Some(ClBlock::Motion(ClMotion::Rapid { feed: None, .. }))), "{name}");

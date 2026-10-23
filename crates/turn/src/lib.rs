@@ -32,17 +32,24 @@
 //! centreline drilling are in [`cycles`]. [`to_cl_path`] writes one path as a
 //! [`campanion_ir::ClPath`] in the ZX plane.
 //!
+//! [`check_turn_gouges`] places the insert outline and an optional holder on every
+//! sample of a [`TurnPath`], including rapids, and reports how far the nose, a
+//! cutting edge, or the holder enters the finished solid. [`TurnGouge::toolpath`]
+//! is left at 0; the caller that checks several paths sets the index.
+//!
 //! This crate is clean-room. It does not use OCCT, FreeCAD, planegcs, or OpenCAMLib.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod cycles;
+mod gouge;
 mod ir;
 mod mesh;
 mod ops;
 mod profile;
 
 pub use cycles::{DrillParams, GrooveParams, Infeed, PartParams, ThreadParams, centre_drill, groove, part_off, thread, thread_pass_depths};
+pub use gouge::{GougeKind, HolderGeom, InsertGeom, TurnGouge, check_turn_gouges};
 pub use ir::to_cl_path;
 pub use mesh::MeshAxis;
 pub use ops::{FaceParams, FinishParams, RoughParams, Side, TipPoint, TurnMove, TurnPath, TurnTool, compensated_profile, face, finish, rough};

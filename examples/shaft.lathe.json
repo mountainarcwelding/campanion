@@ -10,7 +10,7 @@
       "station": 1,
       "shape": "c80",
       "nose_radius": 0.8,
-      "orientation_deg": 135,
+      "orientation_deg": 45,
       "hand": "right",
       "tip": "centre"
     },
@@ -73,8 +73,8 @@
       "type": "groove",
       "tool_id": 2,
       "side": "outside",
-      "z_left": -16,
-      "z_right": -12,
+      "z_left": -52,
+      "z_right": -48,
       "bottom_diameter": 36,
       "surface_diameter": 40,
       "feed": 80,
@@ -87,8 +87,8 @@
       "side": "outside",
       "major_diameter": 30,
       "pitch": 2.5,
-      "z_start": -24,
-      "z_end": -36,
+      "z_start": -8,
+      "z_end": -28,
       "rpm": 500
     },
     {
