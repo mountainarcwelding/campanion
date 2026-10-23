@@ -122,7 +122,10 @@ fn rotary_angles_need_a_post_that_names_the_axis() {
 
 #[test]
 fn builtins_load_and_match_ids() {
-    assert_eq!(builtin_ids(), &["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser", "linuxcnc_lathe"]);
+    assert_eq!(
+        builtin_ids(),
+        &["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser", "linuxcnc_lathe", "fanuc_lathe", "haas_lathe", "grbl_lathe",]
+    );
     for id in builtin_ids() {
         let post = builtin(id).expect(id);
         assert_eq!(post.id(), *id);
@@ -139,6 +142,21 @@ fn builtins_load_and_match_ids() {
     assert!(builtin("grbl_laser").expect("grbl_laser").rotary_axes().is_empty());
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").is_lathe());
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").rotary_axes().is_empty());
+    assert!(builtin("fanuc_lathe").expect("fanuc_lathe").is_lathe());
+    assert!(builtin("fanuc_lathe").expect("fanuc_lathe").rotary_axes().is_empty());
+    assert_eq!(builtin("fanuc_lathe").expect("fanuc_lathe").name(), "Fanuc lathe");
+    assert_eq!(builtin("fanuc_lathe").expect("fanuc_lathe").linear_decimals(), 3);
+    assert_eq!(builtin("fanuc_lathe").expect("fanuc_lathe").max_line_length(), Some(80));
+    assert!(builtin("haas_lathe").expect("haas_lathe").is_lathe());
+    assert!(builtin("haas_lathe").expect("haas_lathe").rotary_axes().is_empty());
+    assert_eq!(builtin("haas_lathe").expect("haas_lathe").name(), "Haas lathe");
+    assert_eq!(builtin("haas_lathe").expect("haas_lathe").linear_decimals(), 3);
+    assert_eq!(builtin("haas_lathe").expect("haas_lathe").max_line_length(), Some(80));
+    assert!(builtin("grbl_lathe").expect("grbl_lathe").is_lathe());
+    assert!(builtin("grbl_lathe").expect("grbl_lathe").rotary_axes().is_empty());
+    assert_eq!(builtin("grbl_lathe").expect("grbl_lathe").name(), "grblHAL lathe");
+    assert_eq!(builtin("grbl_lathe").expect("grbl_lathe").linear_decimals(), 4);
+    assert_eq!(builtin("grbl_lathe").expect("grbl_lathe").max_line_length(), Some(256));
     assert!(!builtin("linuxcnc").expect("linuxcnc").is_lathe());
     assert_eq!(builtin("grbl").expect("grbl").linear_decimals(), 4);
     assert_eq!(builtin("mach3").expect("mach3").linear_decimals(), 4);
