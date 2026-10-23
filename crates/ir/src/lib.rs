@@ -28,7 +28,9 @@
 //! Z is the spindle axis, positive away from the chuck toward the tailstock and the tool. X is a
 //! radius in millimetres, never a diameter. Y is 0 for XZ work. Diameter mode is a post setting
 //! only; the IR never stores diameters in X. The pose axis is not interpreted for XZ turning
-//! moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis.
+//! moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis. A single-point
+//! thread is [`ClMotion::Thread`]: a straight move whose `lead` is millimetres per spindle
+//! revolution. It is valid only when the program has a turning setup.
 //!
 //! Spindles are named (`main` now, a sub-spindle later). Each has its own optional C axis and a
 //! work-zero offset along Z. A head, a turret or a B-axis head, carries X and Z and optionally Y

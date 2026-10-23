@@ -492,6 +492,63 @@ fn rotary_and_turning_cannot_be_combined() {
 }
 
 #[test]
+fn thread_motion_needs_turning_and_a_positive_lead() {
+    let thread = ClBlock::Motion(ClMotion::Thread { to: pose_xz(10.0, 0.0, -4.0), lead: 2.5 });
+    let program = program_with(
+        vec![],
+        vec![path_with(None, vec![rapid(10.0, 0.0, 0.0), thread])],
+        m10(None).with_binding(TurnBinding::try_new(0, "main", "turret1", 0).expect("binding")).expect("bind"),
+        None,
+    )
+    .expect("program");
+    let doc = Document::new(program).expect("document");
+    let json = doc.to_json().expect("json");
+    assert!(json.contains("\"type\":\"thread\""), "{json}");
+    let loaded = Document::from_json(&json).expect("load");
+    assert!(matches!(loaded.program().toolpaths()[0].blocks()[1], ClBlock::Motion(ClMotion::Thread { lead, .. }) if lead == 2.5));
+    let report = crate::verify(loaded.program());
+    assert!(report.issues().is_empty(), "{:?}", report.issues());
+    assert!(report.total_length() > 0.0);
+    assert_eq!(report.rapid_length(), 0.0);
+    let ngc = crate::write_ngc(loaded.program()).expect_err("ngc");
+    assert!(ngc.to_string().contains("thread"), "{ngc}");
+
+    let bare_path = path_with(None, vec![ClBlock::Motion(ClMotion::Thread { to: pose_xz(8.0, 0.0, -1.0), lead: 1.25 })]);
+    let bare = Program::try_new(None, Vec::new(), None, vec![bare_path], Vec::new(), Vec::new(), None).expect("intermediate");
+    assert_err(Document::new(bare.clone()), "turning program");
+    assert_err(bare.with_turning(None), "turning program");
+
+    let off_plane = ClBlock::Motion(ClMotion::Thread { to: pose_xz(10.0, 0.01, -1.0), lead: 1.5 });
+    let bind = m10(None).with_binding(TurnBinding::try_new(0, "main", "turret1", 0).expect("binding")).expect("bind");
+    assert_err(program_with(vec![], vec![path_with(None, vec![off_plane])], bind, None), "turning pose Y");
+
+    for lead in [-1.0, f64::NAN, 1_000.1] {
+        let broken = ClPath::try_new(
+            None,
+            None,
+            CompensationMode::Off,
+            feeds(),
+            None,
+            Vec::new(),
+            vec![ClBlock::Motion(ClMotion::Thread { to: pose_xz(1.0, 0.0, 0.0), lead })],
+        );
+        assert!(broken.is_err(), "lead {lead}");
+    }
+    assert!(
+        ClPath::try_new(
+            None,
+            None,
+            CompensationMode::Off,
+            feeds(),
+            None,
+            Vec::new(),
+            vec![ClBlock::Motion(ClMotion::Thread { to: pose_xz(1.0, 0.0, 0.0), lead: 1_000.0 })],
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn deserialized_turning_is_rechecked_and_hostile_input_does_not_panic() {
     let doc = turning_document();
     let mut value = serde_json::from_str::<serde_json::Value>(&doc.to_json().expect("json")).expect("value");

@@ -580,6 +580,31 @@
             "role"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Spindle-synchronised straight feed (single-point threading). `lead` is millimetres per spindle revolution. Turning programs only.",
+          "properties": {
+            "lead": {
+              "description": "Lead, millimetres per spindle revolution.",
+              "format": "double",
+              "type": "number"
+            },
+            "to": {
+              "$ref": "#/$defs/Pose",
+              "description": "End pose."
+            },
+            "type": {
+              "const": "thread",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "to",
+            "lead"
+          ],
+          "type": "object"
         }
       ]
     },

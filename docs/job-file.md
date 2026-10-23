@@ -489,7 +489,7 @@ fields are rejected with a message that names the key. Every number must be fini
 millimetres. Feeds are millimetres per minute. Constant surface speed is metres per minute.
 Direct spindle speed is revolutions per minute.
 
-`examples/shaft.lathe.json` faces, roughs and finishes the half-profile in `examples/shaft.dxf`.
+`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf`, then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off.
 
 ```json
 {
@@ -519,7 +519,7 @@ Direct spindle speed is revolutions per minute.
 | `stock` | yes | Bar or tube, plus `front_allowance`. |
 | `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. |
 | `tools` | yes | Inserts, at most 256. May be empty when `operations` is empty. |
-| `operations` | yes | Face, rough and finish, in order, at most 1024. |
+| `operations` | yes | Face, rough, finish, thread, groove, part and drill, in order, at most 1024. |
 | `tolerance` | no | `linear` (default 1e-6, must be positive) is the profile and finish tolerance. `chord` (default 0.01) is the post read-back tolerance. `angular` is accepted, must be `>= 0`, and is not used. |
 | `clearance` | yes | Approach gap, millimetres, `>= 0`. Roughing retracts by the same distance. |
 
@@ -545,6 +545,64 @@ Operations, in cut order. Names are unique and non-empty.
 - `rough` — `side` (`outside` or `inside`), `depth_of_cut`, `leave_x`, `leave_z`, `feed`. The stock outer and inner radii are the bar or tube radii (a bar's inner radius is 0). Retract equals `clearance`. Longitudinal roughing stops at the first boundary it cannot pass.
 - `finish` — `side` and `feed`. `leave_x` and `leave_z` default to 0. The offset tolerance is `tolerance.linear`.
 
+Diameters in a thread, groove or part operation are job diameters. The cycle sees half of that number as a radius. A thread `depth` is already radial and is not halved. A drill `diameter` stays a diameter.
+
+`thread` is a single-point thread. `rpm` is required and is a positive number, not a `speed` object. Constant surface speed is rejected: a `speed` key is an unknown field. The recorded cut feed on the path is 100 mm/min because a cutter-location path requires one; the thread moves themselves carry the pitch as a lead, not that feed. `included_angle_deg` is 60 and is not a job field.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool_id`, `side` | yes | `side` is `outside` or `inside`. |
+| `major_diameter` | yes | Outside major diameter, or the bore diameter for an inside thread. Stored as a radius. |
+| `pitch` | yes | Lead, millimetres per revolution. |
+| `z_start`, `z_end` | yes | The cut runs toward the chuck, so `z_start` is greater than `z_end`. |
+| `depth` | no | Radial depth. Default `0.6134 * pitch` (metric 60°). |
+| `first_depth` | no | Radial depth of the first constant-area pass. Default `min(depth, 0.35)`. |
+| `min_depth` | no | Smallest radial increment. Default `0.05`. |
+| `spring_passes` | no | Extra passes at the final depth. Integer `0..=255`. Default `1`. |
+| `infeed` | no | `flank` (default, 29.5°) or `radial`. |
+| `clearance` | no | Axial room in front of `z_start` and the radial pull-off. Default `1.0`. |
+| `rpm` | yes | Fixed spindle speed. Threading has no `feed` and no `speed` object. |
+
+`groove` plunges with the insert's left corner. `peck` omitted is one feed to the floor.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool_id`, `side` | yes | `outside` cuts inward. `inside` cuts outward. |
+| `z_left`, `z_right` | yes | Groove walls. `z_left` is the smaller Z. |
+| `bottom_diameter` | yes | Floor diameter. Stored as a radius. |
+| `surface_diameter` | no | Diameter the groove starts from. Default is the stock outer diameter. Stored as a radius. |
+| `insert_width` | no | Width along Z. Default is the tool's insert width. A groove insert must have one. |
+| `peck` | no | Radial peck. Omit for one feed. |
+| `stepover_frac` | no | Axial step as a fraction of the insert width, in `(0, 1]`. Default `0.8`. |
+| `clearance` | no | Radial room outside the surface. Default `1.0`. |
+| `dwell_s` | no | Pause at the floor, seconds, `>= 0`. Default `0`. |
+| `feed`, `speed` | yes | `speed` is `{css}` or `{rpm}`, the same object as face, rough and finish. |
+
+`part` plunges at `z` with the same left-corner convention. The bar radius is the stock outer radius. The insert width is the tool's width, not a job field, so the tool must be a groove insert (or any shape that carries `width`).
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool_id`, `z` | yes | `z` is the left edge of the kerf. |
+| `to_diameter` | no | Diameter to feed to. Default `-0.5`, which is a radius of `-0.25` (past centre). Zero reaches the axis. |
+| `chamfer` | no | 45° corner break, millimetres. Omit for no chamfer. |
+| `peck` | no | Radial peck. Omit for one feed. |
+| `clearance` | yes | Extra radius beyond the stock for the approach and the retract. |
+| `feed`, `speed` | yes | Same `speed` object as a groove. |
+
+`drill` stays on the spindle axis. `clearance` is the job clearance, not a field of this operation. `rpm` is a positive number, the same rule as a thread.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool_id` | yes | The cycle does not read the insert. The tool still has to exist. |
+| `z_start` | no | Face the drill starts from. Default `0`. |
+| `depth` | yes | How far the tip goes past `z_start` along −Z. |
+| `diameter` | yes | Drill diameter, used for the through-hole point allowance. Not converted to a radius. |
+| `peck` | no | Axial peck. Omit for one feed. |
+| `retract` | no | Pull-back between pecks. Default `1.0`. |
+| `point_angle_deg` | no | Included point angle. Default `118`. Must be between 0 and 180. |
+| `through` | no | When true, the tip goes deeper by the point length. Default `false`. |
+| `feed`, `rpm` | yes | `rpm` is revolutions per minute. |
+
 Each operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`).
 
-Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the finished section on `turning.section`, sampled from the loaded profile at `tolerance.chord`.
+Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine, and it rejects synchronised thread moves, so a job that threads needs `--post`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. A thread is `G33` with the lead on `K` for LinuxCNC and grblHAL, and `G32` with the lead on `F` for Fanuc and Haas. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the finished section on `turning.section`, sampled from the loaded profile at `tolerance.chord`.

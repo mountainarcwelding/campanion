@@ -1,7 +1,7 @@
 {
   "id": "fanuc_lathe",
   "name": "Fanuc lathe",
-  "description": "Millimetre Fanuc lathe dialect, G-code system A. Percent-delimited program O0001 with sequence numbers. Diameter mode is the control default, so no G7 is written. G21 selects millimetres, G40 cancels tool-nose compensation and G80 cancels a canned cycle. The ZX plane is G18 and feed per minute is G98. G99 is left out: the IR feed is millimetres per minute. G90 is left out: on this control it is an outer and inner diameter cutting cycle, and X and Z are already absolute. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is the tool and offset in two digits (T0101). Arcs are I and K, I a radius. Home is G28 U0 W0, a reference return, not a part move. The program ends with M30 and %. No rotary axis.",
+  "description": "Millimetre Fanuc lathe dialect, G-code system A. Percent-delimited program O0001 with sequence numbers. Diameter mode is the control default, so no G7 is written. G21 selects millimetres, G40 cancels tool-nose compensation and G80 cancels a canned cycle. The ZX plane is G18 and feed per minute is G98. G99 is left out: the IR feed is millimetres per minute. G90 is left out: on this control it is an outer and inner diameter cutting cycle, and X and Z are already absolute. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is the tool and offset in two digits (T0101). Arcs are I and K, I a radius. Single-point threading is G32 with the lead on F. Home is G28 U0 W0, a reference return, not a part move. The program ends with M30 and %. No rotary axis.",
   "program_number": "0001",
   "units": "mm",
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
@@ -45,6 +45,7 @@
     "spindle_off": ["M5"],
     "tool_change": ["T{tool2}{offset2}"],
     "arc_flip": false,
-    "home": ["G28 U0 W0"]
+    "home": ["G28 U0 W0"],
+    "thread": { "code": "G32", "lead_word": "F" }
   }
 }

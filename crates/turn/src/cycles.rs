@@ -39,12 +39,10 @@
 //!
 //! # IR
 //!
-//! This crate does not convert turns into `campanion-ir` yet. When it does, [`TurnMove::Dwell`]
-//! maps to the existing dwell event. [`TurnMove::Thread`] must not become a linear cut: a post
-//! would emit an ordinary feed and drop the spindle lock. No IR event carries a synchronised
-//! `(z, x, lead)` move (`Event::Custom` is a named parameter bag, not a move). Until a lathe post
-//! accepts the move, that converter should return [`TurnError::InvalidInput`] with the message
-//! `threading needs a post with synchronised feed; not wired yet`.
+//! [`crate::to_cl_path`] writes these paths as cutter-location blocks. [`TurnMove::Dwell`] is an
+//! [`campanion_ir::Event::Dwell`]. [`TurnMove::Thread`] is [`campanion_ir::ClMotion::Thread`]: a
+//! straight move with a lead in millimetres per spindle revolution. It is not a linear cut, so a
+//! post cannot drop the spindle lock by emitting an ordinary feed.
 //!
 //! This crate is clean-room. It does not use OCCT, FreeCAD, planegcs, or OpenCAMLib.
 

@@ -14,7 +14,8 @@
 //! `campanion_ir::verify` runs before anything is written. Issues are printed and the process
 //! exits 1. `--post` writes that dialect instead of the test-sink NGC and compares the read-back
 //! at the job chord tolerance. A mismatch exits 1 and nothing is written. ZX arcs in the test
-//! sink are `G18`.
+//! sink are `G18`. The test sink does not write synchronised thread moves, so a job that threads
+//! needs `--post`.
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -29,12 +30,13 @@ use campanion_ir::{
     TurnSection, TurnStock, TurningSetup,
 };
 use campanion_turn::{
-    FaceParams, FinishParams, MeshAxis, RoughParams, Side, TipPoint, TurnPath, TurnProfile, TurnTool, face, finish, rough, to_cl_path,
+    DrillParams, FaceParams, FinishParams, GrooveParams, Infeed, MeshAxis, PartParams, RoughParams, Side, ThreadParams, TipPoint, TurnPath,
+    TurnProfile, TurnTool, centre_drill, face, finish, groove, part_off, rough, thread, to_cl_path,
 };
 use serde_json::{Map, Value};
 
 use crate::error::CliError;
-use crate::job::{as_f64, as_str, as_u32, check_keys, object, optional, read_text, require, required_name};
+use crate::job::{as_bool, as_f64, as_str, as_u32, check_keys, object, optional, read_text, require, required_name};
 use crate::jobfile::DEFAULT_JOB_CHORD_MM;
 
 const FORMAT_TAG: &str = "campanion-lathe/1";
@@ -47,6 +49,14 @@ const HEAD: &str = "turret1";
 const SPINDLE: &str = "main";
 /// [`TurningSetup::single`] builds a 12-station turret.
 const STATIONS: u32 = 12;
+/// Radial depth of a metric 60° thread, as a fraction of the pitch.
+const METRIC_THREAD_DEPTH_FACTOR: f64 = 0.6134;
+/// Compound infeed for a 60° metric form.
+const DEFAULT_FLANK_DEG: f64 = 29.5;
+/// Default first-pass depth is `min(depth, 0.35)`.
+const DEFAULT_FIRST_DEPTH_CAP: f64 = 0.35;
+/// Thread cycles emit rapids and synchronised moves. The path still needs a positive cut feed.
+const THREAD_RECORD_FEED: f64 = 100.0;
 
 struct LatheArgs {
     job: PathBuf,
@@ -92,33 +102,136 @@ struct LatheTool {
 }
 
 enum Operation {
-    Face { name: String, tool_id: u32, step_z: f64, feed: f64, speed: SpindleSpeed },
-    Rough { name: String, tool_id: u32, side: Side, depth_of_cut: f64, leave_x: f64, leave_z: f64, feed: f64, speed: SpindleSpeed },
-    Finish { name: String, tool_id: u32, side: Side, leave_x: f64, leave_z: f64, feed: f64, speed: SpindleSpeed },
+    Face {
+        name: String,
+        tool_id: u32,
+        step_z: f64,
+        feed: f64,
+        speed: SpindleSpeed,
+    },
+    Rough {
+        name: String,
+        tool_id: u32,
+        side: Side,
+        depth_of_cut: f64,
+        leave_x: f64,
+        leave_z: f64,
+        feed: f64,
+        speed: SpindleSpeed,
+    },
+    Finish {
+        name: String,
+        tool_id: u32,
+        side: Side,
+        leave_x: f64,
+        leave_z: f64,
+        feed: f64,
+        speed: SpindleSpeed,
+    },
+    Thread {
+        name: String,
+        tool_id: u32,
+        side: Side,
+        major_diameter: f64,
+        pitch: f64,
+        z_start: f64,
+        z_end: f64,
+        depth: f64,
+        first_depth: f64,
+        min_depth: f64,
+        spring_passes: u8,
+        infeed: Infeed,
+        clearance: f64,
+        speed: SpindleSpeed,
+    },
+    Groove {
+        name: String,
+        tool_id: u32,
+        side: Side,
+        z_left: f64,
+        z_right: f64,
+        bottom_diameter: f64,
+        surface_diameter: Option<f64>,
+        insert_width: Option<f64>,
+        peck: Option<f64>,
+        stepover_frac: f64,
+        clearance: f64,
+        dwell_s: f64,
+        feed: f64,
+        speed: SpindleSpeed,
+    },
+    Part {
+        name: String,
+        tool_id: u32,
+        z: f64,
+        to_diameter: f64,
+        chamfer: Option<f64>,
+        peck: Option<f64>,
+        clearance: f64,
+        feed: f64,
+        speed: SpindleSpeed,
+    },
+    Drill {
+        name: String,
+        tool_id: u32,
+        z_start: f64,
+        depth: f64,
+        diameter: f64,
+        peck: Option<f64>,
+        retract: f64,
+        point_angle_deg: f64,
+        through: bool,
+        feed: f64,
+        speed: SpindleSpeed,
+    },
 }
 
 impl Operation {
     fn name(&self) -> &str {
         match self {
-            Self::Face { name, .. } | Self::Rough { name, .. } | Self::Finish { name, .. } => name,
+            Self::Face { name, .. }
+            | Self::Rough { name, .. }
+            | Self::Finish { name, .. }
+            | Self::Thread { name, .. }
+            | Self::Groove { name, .. }
+            | Self::Part { name, .. }
+            | Self::Drill { name, .. } => name,
         }
     }
 
     fn tool_id(&self) -> u32 {
         match self {
-            Self::Face { tool_id, .. } | Self::Rough { tool_id, .. } | Self::Finish { tool_id, .. } => *tool_id,
+            Self::Face { tool_id, .. }
+            | Self::Rough { tool_id, .. }
+            | Self::Finish { tool_id, .. }
+            | Self::Thread { tool_id, .. }
+            | Self::Groove { tool_id, .. }
+            | Self::Part { tool_id, .. }
+            | Self::Drill { tool_id, .. } => *tool_id,
         }
     }
 
     fn feed(&self) -> f64 {
         match self {
-            Self::Face { feed, .. } | Self::Rough { feed, .. } | Self::Finish { feed, .. } => *feed,
+            Self::Face { feed, .. }
+            | Self::Rough { feed, .. }
+            | Self::Finish { feed, .. }
+            | Self::Groove { feed, .. }
+            | Self::Part { feed, .. }
+            | Self::Drill { feed, .. } => *feed,
+            Self::Thread { .. } => THREAD_RECORD_FEED,
         }
     }
 
     fn speed(&self) -> SpindleSpeed {
         match self {
-            Self::Face { speed, .. } | Self::Rough { speed, .. } | Self::Finish { speed, .. } => *speed,
+            Self::Face { speed, .. }
+            | Self::Rough { speed, .. }
+            | Self::Finish { speed, .. }
+            | Self::Thread { speed, .. }
+            | Self::Groove { speed, .. }
+            | Self::Part { speed, .. }
+            | Self::Drill { speed, .. } => *speed,
         }
     }
 }
@@ -442,6 +555,42 @@ fn parse_operation(value: &Value, max_rpm: f64, names: &mut BTreeSet<String>) ->
         "face" => &["name", "type", "tool_id", "step_z", "feed", "speed"],
         "rough" => &["name", "type", "tool_id", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed"],
         "finish" => &["name", "type", "tool_id", "side", "feed", "speed", "leave_x", "leave_z"],
+        "thread" => &[
+            "name",
+            "type",
+            "tool_id",
+            "side",
+            "major_diameter",
+            "pitch",
+            "z_start",
+            "z_end",
+            "depth",
+            "first_depth",
+            "min_depth",
+            "spring_passes",
+            "infeed",
+            "clearance",
+            "rpm",
+        ],
+        "groove" => &[
+            "name",
+            "type",
+            "tool_id",
+            "side",
+            "z_left",
+            "z_right",
+            "bottom_diameter",
+            "surface_diameter",
+            "insert_width",
+            "peck",
+            "stepover_frac",
+            "clearance",
+            "dwell_s",
+            "feed",
+            "speed",
+        ],
+        "part" => &["name", "type", "tool_id", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed"],
+        "drill" => &["name", "type", "tool_id", "z_start", "depth", "diameter", "peck", "retract", "point_angle_deg", "through", "feed", "rpm"],
         other => return Err(CliError::invalid(format!("unknown operation type `{other}`"))),
     };
     check_keys(map, allowed, "operation")?;
@@ -450,30 +599,160 @@ fn parse_operation(value: &Value, max_rpm: f64, names: &mut BTreeSet<String>) ->
         return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
     }
     let tool_id = as_u32(require(map, "tool_id")?, "tool_id")?;
-    let feed = positive(require(map, "feed")?, "feed")?;
-    let speed = parse_speed(require(map, "speed")?, max_rpm)?;
     match op_type {
-        "face" => Ok(Operation::Face { name, tool_id, step_z: positive(require(map, "step_z")?, "step_z")?, feed, speed }),
-        "rough" => Ok(Operation::Rough {
-            name,
-            tool_id,
-            side: parse_side(as_str(require(map, "side")?, "side")?)?,
-            depth_of_cut: positive(require(map, "depth_of_cut")?, "depth_of_cut")?,
-            leave_x: non_negative(require(map, "leave_x")?, "leave_x")?,
-            leave_z: non_negative(require(map, "leave_z")?, "leave_z")?,
-            feed,
-            speed,
-        }),
-        "finish" => Ok(Operation::Finish {
-            name,
-            tool_id,
-            side: parse_side(as_str(require(map, "side")?, "side")?)?,
-            leave_x: optional_non_negative(map, "leave_x")?.unwrap_or(0.0),
-            leave_z: optional_non_negative(map, "leave_z")?.unwrap_or(0.0),
-            feed,
-            speed,
-        }),
+        "face" | "rough" | "finish" | "groove" | "part" => {
+            let feed = positive(require(map, "feed")?, "feed")?;
+            let speed = parse_speed(require(map, "speed")?, max_rpm)?;
+            match op_type {
+                "face" => Ok(Operation::Face { name, tool_id, step_z: positive(require(map, "step_z")?, "step_z")?, feed, speed }),
+                "rough" => Ok(Operation::Rough {
+                    name,
+                    tool_id,
+                    side: parse_side(as_str(require(map, "side")?, "side")?)?,
+                    depth_of_cut: positive(require(map, "depth_of_cut")?, "depth_of_cut")?,
+                    leave_x: non_negative(require(map, "leave_x")?, "leave_x")?,
+                    leave_z: non_negative(require(map, "leave_z")?, "leave_z")?,
+                    feed,
+                    speed,
+                }),
+                "finish" => Ok(Operation::Finish {
+                    name,
+                    tool_id,
+                    side: parse_side(as_str(require(map, "side")?, "side")?)?,
+                    leave_x: optional_non_negative(map, "leave_x")?.unwrap_or(0.0),
+                    leave_z: optional_non_negative(map, "leave_z")?.unwrap_or(0.0),
+                    feed,
+                    speed,
+                }),
+                "groove" => parse_groove(map, name, tool_id, feed, speed),
+                "part" => parse_part(map, name, tool_id, feed, speed),
+                _ => Err(CliError::invalid(format!("unknown operation type `{op_type}`"))),
+            }
+        }
+        "thread" => parse_thread(map, name, tool_id),
+        "drill" => parse_drill(map, name, tool_id),
         other => Err(CliError::invalid(format!("unknown operation type `{other}`"))),
+    }
+}
+
+fn parse_thread(map: &Map<String, Value>, name: String, tool_id: u32) -> Result<Operation, CliError> {
+    let pitch = positive(require(map, "pitch")?, "pitch")?;
+    let depth = match optional(map, "depth") {
+        Some(value) => positive(value, "depth")?,
+        None => METRIC_THREAD_DEPTH_FACTOR * pitch,
+    };
+    let first_depth = match optional(map, "first_depth") {
+        Some(value) => positive(value, "first_depth")?,
+        None => depth.min(DEFAULT_FIRST_DEPTH_CAP),
+    };
+    let min_depth = match optional(map, "min_depth") {
+        Some(value) => positive(value, "min_depth")?,
+        None => 0.05,
+    };
+    Ok(Operation::Thread {
+        name,
+        tool_id,
+        side: parse_side(as_str(require(map, "side")?, "side")?)?,
+        major_diameter: positive(require(map, "major_diameter")?, "major_diameter")?,
+        pitch,
+        z_start: as_f64(require(map, "z_start")?, "z_start")?,
+        z_end: as_f64(require(map, "z_end")?, "z_end")?,
+        depth,
+        first_depth,
+        min_depth,
+        spring_passes: optional_u8(map, "spring_passes")?.unwrap_or(1),
+        infeed: match optional(map, "infeed") {
+            Some(value) => parse_infeed(as_str(value, "infeed")?)?,
+            None => Infeed::Flank { angle_deg: DEFAULT_FLANK_DEG },
+        },
+        clearance: match optional(map, "clearance") {
+            Some(value) => non_negative(value, "clearance")?,
+            None => 1.0,
+        },
+        speed: SpindleSpeed::rpm(positive(require(map, "rpm")?, "rpm")?)?,
+    })
+}
+
+fn parse_groove(map: &Map<String, Value>, name: String, tool_id: u32, feed: f64, speed: SpindleSpeed) -> Result<Operation, CliError> {
+    let stepover_frac = match optional(map, "stepover_frac") {
+        Some(value) => as_f64(value, "stepover_frac")?,
+        None => 0.8,
+    };
+    if !(stepover_frac > 0.0 && stepover_frac <= 1.0) {
+        return Err(CliError::invalid("stepover fraction must be in (0, 1]"));
+    }
+    Ok(Operation::Groove {
+        name,
+        tool_id,
+        side: parse_side(as_str(require(map, "side")?, "side")?)?,
+        z_left: as_f64(require(map, "z_left")?, "z_left")?,
+        z_right: as_f64(require(map, "z_right")?, "z_right")?,
+        bottom_diameter: positive(require(map, "bottom_diameter")?, "bottom_diameter")?,
+        surface_diameter: optional_positive(map, "surface_diameter")?,
+        insert_width: optional_positive(map, "insert_width")?,
+        peck: optional_positive(map, "peck")?,
+        stepover_frac,
+        clearance: match optional(map, "clearance") {
+            Some(value) => non_negative(value, "clearance")?,
+            None => 1.0,
+        },
+        dwell_s: optional_non_negative(map, "dwell_s")?.unwrap_or(0.0),
+        feed,
+        speed,
+    })
+}
+
+fn parse_part(map: &Map<String, Value>, name: String, tool_id: u32, feed: f64, speed: SpindleSpeed) -> Result<Operation, CliError> {
+    Ok(Operation::Part {
+        name,
+        tool_id,
+        z: as_f64(require(map, "z")?, "z")?,
+        to_diameter: match optional(map, "to_diameter") {
+            Some(value) => as_f64(value, "to_diameter")?,
+            None => -0.5,
+        },
+        chamfer: optional_positive(map, "chamfer")?,
+        peck: optional_positive(map, "peck")?,
+        clearance: non_negative(require(map, "clearance")?, "clearance")?,
+        feed,
+        speed,
+    })
+}
+
+fn parse_drill(map: &Map<String, Value>, name: String, tool_id: u32) -> Result<Operation, CliError> {
+    let point_angle_deg = match optional(map, "point_angle_deg") {
+        Some(value) => as_f64(value, "point_angle_deg")?,
+        None => 118.0,
+    };
+    Ok(Operation::Drill {
+        name,
+        tool_id,
+        z_start: match optional(map, "z_start") {
+            Some(value) => as_f64(value, "z_start")?,
+            None => 0.0,
+        },
+        depth: positive(require(map, "depth")?, "depth")?,
+        diameter: positive(require(map, "diameter")?, "diameter")?,
+        peck: optional_positive(map, "peck")?,
+        retract: match optional(map, "retract") {
+            Some(value) => non_negative(value, "retract")?,
+            None => 1.0,
+        },
+        point_angle_deg,
+        through: match optional(map, "through") {
+            Some(value) => as_bool(value, "through")?,
+            None => false,
+        },
+        feed: positive(require(map, "feed")?, "feed")?,
+        speed: SpindleSpeed::rpm(positive(require(map, "rpm")?, "rpm")?)?,
+    })
+}
+
+fn parse_infeed(text: &str) -> Result<Infeed, CliError> {
+    match text {
+        "radial" => Ok(Infeed::Radial),
+        "flank" => Ok(Infeed::Flank { angle_deg: DEFAULT_FLANK_DEG }),
+        other => Err(CliError::invalid(format!("unknown infeed `{other}`"))),
     }
 }
 
@@ -614,6 +893,95 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
             let params = FinishParams { side: *side, leave_x: *leave_x, leave_z: *leave_z, clearance: job.clearance, tol: job.linear };
             finish(profile, &turn_tool, &params).map_err(|err| op_fail(name, err))
         }
+        Operation::Thread {
+            name,
+            side,
+            major_diameter,
+            pitch,
+            z_start,
+            z_end,
+            depth,
+            first_depth,
+            min_depth,
+            spring_passes,
+            infeed,
+            clearance,
+            ..
+        } => {
+            let params = ThreadParams {
+                side: *side,
+                major_radius: *major_diameter * 0.5,
+                depth: *depth,
+                pitch: *pitch,
+                z_start: *z_start,
+                z_end: *z_end,
+                first_depth: *first_depth,
+                min_depth: *min_depth,
+                spring_passes: *spring_passes,
+                infeed: *infeed,
+                clearance: *clearance,
+                included_angle_deg: 60.0,
+            };
+            thread(&params).map_err(|err| op_fail(name, err))
+        }
+        Operation::Groove {
+            name,
+            side,
+            z_left,
+            z_right,
+            bottom_diameter,
+            surface_diameter,
+            insert_width,
+            peck,
+            stepover_frac,
+            clearance,
+            dwell_s,
+            ..
+        } => {
+            let width = match insert_width {
+                Some(width) => *width,
+                None => tool.insert.width().ok_or_else(|| op_fail(name, "groove insert needs a width"))?,
+            };
+            let params = GrooveParams {
+                side: *side,
+                z_left: *z_left,
+                z_right: *z_right,
+                bottom_radius: *bottom_diameter * 0.5,
+                surface_radius: surface_diameter.map(|diameter| diameter * 0.5).unwrap_or_else(|| stock.outer_radius()),
+                insert_width: width,
+                peck: *peck,
+                stepover_frac: *stepover_frac,
+                clearance: *clearance,
+                dwell_s: *dwell_s,
+            };
+            groove(&turn_tool, &params).map_err(|err| op_fail(name, err))
+        }
+        Operation::Part { name, z, to_diameter, chamfer, peck, clearance, .. } => {
+            let width = tool.insert.width().ok_or_else(|| op_fail(name, "part-off insert needs a width"))?;
+            let params = PartParams {
+                z: *z,
+                surface_radius: stock.outer_radius(),
+                insert_width: width,
+                to_radius: *to_diameter * 0.5,
+                chamfer: *chamfer,
+                peck: *peck,
+                clearance: *clearance,
+            };
+            part_off(&turn_tool, &params).map_err(|err| op_fail(name, err))
+        }
+        Operation::Drill { name, z_start, depth, diameter, peck, retract, point_angle_deg, through, .. } => {
+            let params = DrillParams {
+                z_start: *z_start,
+                depth: *depth,
+                peck: *peck,
+                retract: *retract,
+                clearance: job.clearance,
+                point_angle_deg: *point_angle_deg,
+                diameter: *diameter,
+                through: *through,
+            };
+            centre_drill(&params).map_err(|err| op_fail(name, err))
+        }
     }
 }
 
@@ -691,6 +1059,28 @@ fn optional_non_negative(map: &Map<String, Value>, key: &str) -> Result<Option<f
         Some(value) => Ok(Some(non_negative(value, key)?)),
         None => Ok(None),
     }
+}
+
+fn optional_positive(map: &Map<String, Value>, key: &str) -> Result<Option<f64>, CliError> {
+    match optional(map, key) {
+        Some(value) => Ok(Some(positive(value, key)?)),
+        None => Ok(None),
+    }
+}
+
+fn optional_u8(map: &Map<String, Value>, key: &str) -> Result<Option<u8>, CliError> {
+    let Some(value) = optional(map, key) else {
+        return Ok(None);
+    };
+    let number = as_f64(value, key)?;
+    if !(0.0..=255.0).contains(&number) {
+        return Err(CliError::invalid(format!("{key} is out of range")));
+    }
+    let rounded = number.round();
+    if (number - rounded).abs() > 1e-6 {
+        return Err(CliError::invalid(format!("{key} must be an integer")));
+    }
+    Ok(Some(rounded as u8))
 }
 
 fn show(err: impl std::fmt::Display) -> CliError {

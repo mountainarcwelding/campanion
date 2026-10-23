@@ -549,3 +549,62 @@ fn grbl_lathe_writes_g7_and_a_manual_tool_change() {
     assert_eq!(parked.len(), 1, "{parked:?}");
     compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
 }
+
+fn thread_move(x: f64, z: f64, lead: f64) -> ClBlock {
+    ClBlock::Motion(ClMotion::Thread { to: xz(x, z), lead })
+}
+
+fn rpm_turning() -> TurningSetup {
+    turning(Some(SpindleSpeed::rpm(800.0).expect("rpm")), false)
+}
+
+#[test]
+fn thread_writes_a_diameter_and_a_lead_and_resets_modal_motion() {
+    let program = lathe_program(vec![rapid(11.0, 1.0), thread_move(9.0, -12.0, 2.5), rapid(11.0, 1.0)], rpm_turning());
+    let post = linux_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(has_word(&text, "G33"), "{text}");
+    assert!(has_word(&text, "X22.0000"), "{text}");
+    assert!(has_word(&text, "X18.0000"), "{text}");
+    assert!(has_word(&text, "K2.5000"), "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    let thread_at = lines.iter().position(|line| line.contains("G33")).expect("g33 line");
+    assert!(lines[thread_at + 1..].iter().any(|line| line.split_whitespace().any(|word| word == "G0")), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let fanuc = builtin("fanuc_lathe").expect("fanuc_lathe");
+    let fanuc_program = lathe_program(vec![linear(11.0, 1.0, 2.5), thread_move(9.0, -12.0, 2.5), linear(8.0, -13.0, 2.5)], rpm_turning());
+    let fanuc_text = post_program(&fanuc_program, &fanuc, &options()).expect("fanuc");
+    assert!(fanuc_text.lines().any(|line| line.contains("G32") && line.split_whitespace().any(|word| word == "F2.5")), "{fanuc_text}");
+    let g1 = fanuc_text.lines().skip_while(|line| !line.contains("G32")).skip(1).find(|line| line.contains("G1")).expect("feed after thread");
+    assert!(g1.split_whitespace().any(|word| word == "F2.5"), "{fanuc_text}");
+    compare(&fanuc_program, &read_back(&fanuc_text, &fanuc).expect("read"), 1e-3, &fanuc).expect("fanuc compare");
+}
+
+#[test]
+fn thread_under_css_or_without_a_thread_post_errors_without_panic() {
+    let blocks = vec![rapid(11.0, 1.0), thread_move(9.0, -12.0, 2.5)];
+    let css = turning(Some(SpindleSpeed::css(120.0, 3_000.0).expect("css")), false);
+    let css_err = post_program(&lathe_program(blocks.clone(), css), &linux_lathe(), &options()).expect_err("css");
+    assert!(css_err.to_string().contains("threading needs a fixed rpm binding"), "{css_err}");
+
+    let unset = post_program(&lathe_program(blocks.clone(), turning(None, false)), &linux_lathe(), &options()).expect_err("unset");
+    assert!(unset.to_string().contains("threading needs a fixed rpm binding"), "{unset}");
+
+    let mill = builtin("linuxcnc").expect("linuxcnc");
+    let mill_err = post_program(&lathe_program(blocks.clone(), rpm_turning()), &mill, &options()).expect_err("mill");
+    assert!(mill_err.to_string().contains("does not support threading"), "{mill_err}");
+
+    let mut raw = lathe_json();
+    raw["lathe"].as_object_mut().expect("lathe").remove("thread");
+    let bare = post_from(raw);
+    let bare_err = post_program(&lathe_program(blocks, rpm_turning()), &bare, &options()).expect_err("bare");
+    assert!(bare_err.to_string().contains("does not support synchronised threading"), "{bare_err}");
+
+    for lead in [-1.0, f64::NAN, 1_000.1] {
+        let broken = ClPath::try_new(None, None, CompensationMode::Off, feeds(), None, Vec::new(), vec![thread_move(9.0, -1.0, lead)]);
+        assert!(broken.is_err(), "lead {lead} should be rejected");
+    }
+    let edge = ClPath::try_new(None, None, CompensationMode::Off, feeds(), None, Vec::new(), vec![thread_move(9.0, -1.0, 1_000.0)]);
+    assert!(edge.is_ok(), "lead 1000 is the limit");
+}

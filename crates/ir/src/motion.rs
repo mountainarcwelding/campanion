@@ -203,6 +203,13 @@ pub enum ClMotion {
         /// Cut, lead, plunge or retract.
         role: MoveRole,
     },
+    /// Spindle-synchronised straight feed (single-point threading). `lead` is millimetres per spindle revolution. Turning programs only.
+    Thread {
+        /// End pose.
+        to: Pose,
+        /// Lead, millimetres per spindle revolution.
+        lead: f64,
+    },
 }
 
 impl ClMotion {
@@ -228,6 +235,13 @@ impl ClMotion {
                 center.check("helix centre")?;
                 positive(*sweep, "helix sweep")?;
                 positive(*feed, "feed")?;
+            }
+            Self::Thread { to, lead } => {
+                to.check()?;
+                positive(*lead, "thread lead")?;
+                if *lead > 1000.0 {
+                    return Err(check::invalid("thread lead must be <= 1000"));
+                }
             }
         }
         Ok(())

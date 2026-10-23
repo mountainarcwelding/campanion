@@ -33,9 +33,13 @@ fn campanion(cwd: &Path, args: &[&str]) -> Result<Output, String> {
 
 fn motion_pose(block: &ClBlock) -> Option<Pose> {
     match block {
-        ClBlock::Motion(ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. }) => {
-            Some(*to)
-        }
+        ClBlock::Motion(
+            ClMotion::Rapid { to, .. }
+            | ClMotion::Linear { to, .. }
+            | ClMotion::Arc { to, .. }
+            | ClMotion::Helix { to, .. }
+            | ClMotion::Thread { to, .. },
+        ) => Some(*to),
         ClBlock::Event(_) => None,
     }
 }

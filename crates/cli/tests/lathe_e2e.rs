@@ -52,8 +52,8 @@ fn shaft_posts_linuxcnc_lathe_and_keeps_three_bindings() -> Result<(), String> {
     let ir_text = std::fs::read_to_string(&ir).map_err(|err| err.to_string())?;
     let doc = campanion_ir::Document::from_json(&ir_text).map_err(|err| err.to_string())?;
     let turning = doc.program().turning().ok_or("turning setup is missing")?;
-    if turning.bindings().len() != 3 {
-        return Err(format!("expected 3 bindings, found {}", turning.bindings().len()));
+    if turning.bindings().len() != 7 {
+        return Err(format!("expected 7 bindings, found {}", turning.bindings().len()));
     }
     let section = turning.section().ok_or("turning section is missing")?;
     let points = section.points();
@@ -65,8 +65,38 @@ fn shaft_posts_linuxcnc_lathe_and_keeps_three_bindings() -> Result<(), String> {
     if first_z < last_z {
         return Err(format!("section z runs from {first_z} to {last_z}"));
     }
-    if doc.program().toolpaths().len() != 3 {
-        return Err(format!("expected 3 toolpaths, found {}", doc.program().toolpaths().len()));
+    if doc.program().toolpaths().len() != 7 {
+        return Err(format!("expected 7 toolpaths, found {}", doc.program().toolpaths().len()));
+    }
+    Ok(())
+}
+
+#[test]
+fn shaft_posts_every_lathe_dialect_and_fanuc_threads_at_pitch() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/shaft.lathe.json"))?;
+    for id in ["linuxcnc_lathe", "grbl_lathe", "fanuc_lathe", "haas_lathe"] {
+        let out = temp_path(&format!("campanion-lathe-shaft-{id}.nc"));
+        let _ = std::fs::remove_file(&out);
+        run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", id])?;
+        let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+        if posted.trim().is_empty() {
+            return Err(format!("{id} wrote an empty program"));
+        }
+        if id == "fanuc_lathe" {
+            let threaded = posted.lines().any(|line| line.contains("G32") && line.split_whitespace().any(|word| word == "F2.5"));
+            if !threaded {
+                return Err(format!("fanuc thread line is missing G32 F2.5\n{posted}"));
+            }
+            for token in posted.split_whitespace() {
+                if token.starts_with('X')
+                    && token.chars().nth(1).is_some_and(|ch| ch.is_ascii_digit() || ch == '-' || ch == '.')
+                    && !token.contains('.')
+                {
+                    return Err(format!("fanuc X word has no decimal point: {token}"));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -132,5 +162,62 @@ fn hostile_jobs_error_without_panic() -> Result<(), String> {
         "clearance": 1
     }"#;
     assert_rejects(missing, "campanion-lathe-missing-tool.json", "missing tool 99")?;
+
+    let tool = r#"{ "id": 1, "station": 1, "shape": "thread", "nose_radius": 0.2, "orientation_deg": 60, "hand": "right", "tip": "centre" }"#;
+    let negative = format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 20, "length": 30, "front_allowance": 0 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        "tools": [{tool}],
+        "operations": [{{ "name": "thread", "type": "thread", "tool_id": 1, "side": "outside", "major_diameter": 20, "pitch": -2.5, "z_start": 0, "z_end": -10, "rpm": 400 }}],
+        "clearance": 1
+    }}"#
+    );
+    assert_rejects(&negative, "campanion-lathe-negative-pitch.json", "pitch must be positive")?;
+
+    let css = format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 20, "length": 30, "front_allowance": 0 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        "tools": [{tool}],
+        "operations": [{{ "name": "thread", "type": "thread", "tool_id": 1, "side": "outside", "major_diameter": 20, "pitch": 2.5, "z_start": 0, "z_end": -10, "rpm": 400, "speed": {{ "css": 100 }} }}],
+        "clearance": 1
+    }}"#
+    );
+    assert_rejects(&css, "campanion-lathe-thread-css.json", "unknown operation field `speed`")?;
+
+    let no_rpm = format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 20, "length": 30, "front_allowance": 0 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        "tools": [{tool}],
+        "operations": [{{ "name": "thread", "type": "thread", "tool_id": 1, "side": "outside", "major_diameter": 20, "pitch": 2.5, "z_start": 0, "z_end": -10 }}],
+        "clearance": 1
+    }}"#
+    );
+    assert_rejects(&no_rpm, "campanion-lathe-thread-rpm.json", "missing `rpm`")?;
+
+    let infeed = format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 20, "length": 30, "front_allowance": 0 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        "tools": [{tool}],
+        "operations": [{{ "name": "thread", "type": "thread", "tool_id": 1, "side": "outside", "major_diameter": 20, "pitch": 2.5, "z_start": 0, "z_end": -10, "rpm": 400, "infeed": "alternating" }}],
+        "clearance": 1
+    }}"#
+    );
+    assert_rejects(&infeed, "campanion-lathe-thread-infeed.json", "unknown infeed")?;
     Ok(())
 }

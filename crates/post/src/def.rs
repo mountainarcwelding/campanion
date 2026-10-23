@@ -253,6 +253,18 @@ pub(crate) fn g_code_number(text: &str) -> Option<u16> {
     text.strip_prefix('G')?.parse().ok()
 }
 
+/// Synchronised feed for single-point threading.
+///
+/// Absent on a lathe post: thread moves are rejected.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ThreadOutput {
+    /// Motion code, for example `G33` or `G32`.
+    pub(crate) code: String,
+    /// Word letter carrying the lead, for example `K` or `F`.
+    pub(crate) lead_word: String,
+}
+
 /// How a lathe post writes X, spindle speed, tool changes and the ZX plane.
 ///
 /// `diameter_mode` doubles X words. `I` stays a radius offset either way. `arc_flip` swaps G2
@@ -287,6 +299,9 @@ pub(crate) struct LatheOutput {
     /// Machine-coordinate retract written before `program_end`. May be empty.
     #[serde(default)]
     pub(crate) home: Vec<String>,
+    /// Synchronised feed for threading. Absent: the post rejects thread moves.
+    #[serde(default)]
+    pub(crate) thread: Option<ThreadOutput>,
 }
 
 fn default_z_mode() -> String {
@@ -420,6 +435,23 @@ fn check_lathe(post: &PostDef) -> Result<()> {
     check_templates("lathe.spindle_off", &lathe.spindle_off, LATHE_BARE)?;
     check_templates("lathe.tool_change", &lathe.tool_change, LATHE_TOOL)?;
     check_templates("lathe.home", &lathe.home, LATHE_BARE)?;
+    if let Some(thread) = &lathe.thread {
+        check_thread_output(thread)?;
+    }
+    Ok(())
+}
+
+fn check_thread_output(thread: &ThreadOutput) -> Result<()> {
+    if g_code_number(&thread.code).is_none() {
+        return Err(field("lathe.thread.code", "must be a G code such as G33"));
+    }
+    let mut chars = thread.lead_word.chars();
+    let Some(letter) = chars.next() else {
+        return Err(field("lathe.thread.lead_word", "must be one uppercase ASCII letter"));
+    };
+    if chars.next().is_some() || !letter.is_ascii_uppercase() {
+        return Err(field("lathe.thread.lead_word", "must be one uppercase ASCII letter"));
+    }
     Ok(())
 }
 

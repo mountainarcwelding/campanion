@@ -38,6 +38,7 @@ fn motion(block: &ClBlock) -> Option<(Pose, Option<MoveRole>)> {
     match block {
         ClBlock::Motion(ClMotion::Rapid { to, .. }) => Some((*to, None)),
         ClBlock::Motion(ClMotion::Linear { to, role, .. }) => Some((*to, Some(*role))),
+        ClBlock::Motion(ClMotion::Thread { to, .. }) => Some((*to, Some(MoveRole::Cut))),
         ClBlock::Motion(ClMotion::Arc { .. } | ClMotion::Helix { .. }) => None,
         ClBlock::Event(_) => None,
     }

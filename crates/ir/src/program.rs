@@ -88,7 +88,9 @@ impl Program {
         rotary: Option<RotarySetup>,
     ) -> Result<Self> {
         let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary, turning: None };
-        program.check()?;
+        // A thread move is legal on this intermediate. [`Self::with_turning`] and [`Document::new`]
+        // reject it when the finished program still has no turning setup.
+        program.check_structure()?;
         Ok(program)
     }
 
@@ -141,6 +143,12 @@ impl Program {
     }
 
     pub(crate) fn check(&self) -> Result<()> {
+        self.check_structure()?;
+        self.check_threads_need_turning()?;
+        Ok(())
+    }
+
+    fn check_structure(&self) -> Result<()> {
         optional_name(&self.name, "program name")?;
         check_tools(&self.tools)?;
         if let Some(machine) = &self.machine {
@@ -180,6 +188,21 @@ impl Program {
         }
         check_channels(&self.machine, &self.channel_programs, &tool_ids)?;
         check_syncs(&self.machine, &self.syncs, &self.channel_programs, &self.toolpaths)?;
+        Ok(())
+    }
+
+    /// A synchronised thread is a turning move. A program that still has no turning setup is invalid.
+    fn check_threads_need_turning(&self) -> Result<()> {
+        if self.turning.is_some() {
+            return Ok(());
+        }
+        for (path_i, path) in self.toolpaths.iter().enumerate() {
+            for (block_i, block) in path.blocks().iter().enumerate() {
+                if matches!(block, ClBlock::Motion(ClMotion::Thread { .. })) {
+                    return Err(check::invalid(format!("toolpath {path_i} block {block_i} thread motion needs a turning program")));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -377,7 +400,13 @@ fn check_turning_poses(index: u32, path: &ClPath) -> Result<()> {
 
 fn block_pose(block: &ClBlock) -> Option<&Pose> {
     match block {
-        ClBlock::Motion(ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. }) => Some(to),
+        ClBlock::Motion(
+            ClMotion::Rapid { to, .. }
+            | ClMotion::Linear { to, .. }
+            | ClMotion::Arc { to, .. }
+            | ClMotion::Helix { to, .. }
+            | ClMotion::Thread { to, .. },
+        ) => Some(to),
         ClBlock::Event(Event::Probe { toward, .. }) => toward.as_ref(),
         ClBlock::Event(_) => None,
     }

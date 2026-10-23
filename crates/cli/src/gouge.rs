@@ -181,6 +181,11 @@ fn check_rotary(
                 }
                 cursor = Some(*to);
             }
+            ClMotion::Thread { to, .. } => {
+                let start = cursor.unwrap_or(*to);
+                push_rotary_cut(name, &mut groups, &mut rotating, setup, start, *to)?;
+                cursor = Some(*to);
+            }
             ClMotion::Arc { role, .. } | ClMotion::Helix { role, .. } => {
                 if cutting(*role) {
                     return Err(CliError::run(format!("operation {name}: gouge check cannot sample a rotary arc; rotary finish emits lines")));
@@ -375,6 +380,11 @@ fn cutting_segments(path: &ClPath, sample_step: f64, setup: Option<&RotarySetup>
                 }
                 cursor = Some(*to);
             }
+            ClMotion::Thread { to, .. } => {
+                let start = cursor.unwrap_or(*to);
+                push_segment(&mut segments, mesh_vec(machine_tip(setup, start)), mesh_vec(machine_tip(setup, *to)))?;
+                cursor = Some(*to);
+            }
             ClMotion::Arc { to, plane, center, sense, role, .. } => {
                 if cutting(*role) {
                     let Some(start) = cursor else {
@@ -442,7 +452,11 @@ fn path_angle(path: &ClPath) -> f64 {
 
 fn motion_pose(motion: &ClMotion) -> Pose {
     match motion {
-        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => *to,
+        ClMotion::Rapid { to, .. }
+        | ClMotion::Linear { to, .. }
+        | ClMotion::Arc { to, .. }
+        | ClMotion::Helix { to, .. }
+        | ClMotion::Thread { to, .. } => *to,
     }
 }
 

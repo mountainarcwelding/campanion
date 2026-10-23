@@ -1,7 +1,7 @@
 {
   "id": "grbl_lathe",
   "name": "grblHAL lathe",
-  "description": "Millimetre grblHAL lathe dialect. No line numbers and no program number. Diameter mode is G7, the ZX plane is G18, and feed per minute is G94. Constant surface speed is G96 D max-rpm S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. Tool change is T and M6. A manual tool change is expected. Arcs are I and K, I a radius. There is no home block. Comments are in parentheses. The program ends with M30. No rotary axis.",
+  "description": "Millimetre grblHAL lathe dialect. No line numbers and no program number. Diameter mode is G7, the ZX plane is G18, and feed per minute is G94. Constant surface speed is G96 D max-rpm S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. Tool change is T and M6. A manual tool change is expected. Arcs are I and K, I a radius. Single-point threading is G33 with the lead on K. There is no home block. Comments are in parentheses. The program ends with M30. No rotary axis.",
   "units": "mm",
   "line_numbers": { "enabled": false, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 4, "feed": 3, "dwell": 3 },
@@ -42,6 +42,7 @@
     "spindle_off": ["M5"],
     "tool_change": ["T{tool} M6"],
     "arc_flip": false,
-    "home": []
+    "home": [],
+    "thread": { "code": "G33", "lead_word": "K" }
   }
 }
