@@ -3,7 +3,8 @@
 //! Turning toolpaths stay ordinary [`crate::ClPath`]s. Their poses are in the part frame:
 //!
 //! - Z is the spindle axis. +Z points away from the chuck, toward the tailstock and the tool.
-//! - X is a radius in millimetres, never a diameter. Y is 0 for XZ work.
+//! - X is a radius in millimetres, never a diameter. It may be negative when a face crosses the
+//!   spindle axis (the tip is past centre). Y is 0 for XZ work.
 //! - Diameter mode is a post setting only ([`TurningSetup::diameter_mode`]). The IR never stores
 //!   a diameter in X.
 //! - The pose axis is not interpreted for XZ turning moves. Callers pass [`crate::Vec3::Z`]
@@ -46,7 +47,8 @@ const TIP_ZERO: f64 = 1e-12;
 
 /// Spindle speed for a turning pass: constant surface speed, or a direct rpm.
 ///
-/// Not stored on [`TurningSetup`]. A later operation record uses this same enum.
+/// Stored on [`TurnBinding`] when that toolpath names a speed. A binding with no speed leaves
+/// the number to the process-on parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SpindleSpeed {
@@ -561,20 +563,25 @@ impl TurnInsert {
 /// Binds one toolpath to a spindle, a head and a channel.
 ///
 /// `toolpath` is an index into [`crate::Program::toolpaths`]. `channel` is a [`crate::Channel`]
-/// id. An M10 binding uses spindle `main`, head `turret1` and channel 0.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+/// id. An M10 binding uses spindle `main`, head `turret1` and channel 0. `speed` is the spindle
+/// speed for that toolpath. Absent means the post uses the process-on speed parameter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TurnBinding {
     toolpath: u32,
     spindle: String,
     head: String,
     channel: u16,
+    /// Constant surface speed or direct rpm for this toolpath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speed: Option<SpindleSpeed>,
 }
 
 impl TurnBinding {
     /// `spindle` and `head` are required names. The setup check requires they exist.
+    /// `speed` starts unset; use [`Self::with_speed`].
     pub fn try_new(toolpath: u32, spindle: impl Into<String>, head: impl Into<String>, channel: u16) -> Result<Self> {
-        let binding = Self { toolpath, spindle: spindle.into(), head: head.into(), channel };
+        let binding = Self { toolpath, spindle: spindle.into(), head: head.into(), channel, speed: None };
         binding.check()?;
         Ok(binding)
     }
@@ -599,9 +606,24 @@ impl TurnBinding {
         self.channel
     }
 
+    /// Spindle speed for this toolpath, when the binding names one.
+    pub fn speed(&self) -> Option<SpindleSpeed> {
+        self.speed
+    }
+
+    /// Set or clear the spindle speed and re-validate.
+    pub fn with_speed(mut self, speed: Option<SpindleSpeed>) -> Result<Self> {
+        self.speed = speed;
+        self.check()?;
+        Ok(self)
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
         required_name(&self.spindle, "binding spindle")?;
         required_name(&self.head, "binding head")?;
+        if let Some(speed) = self.speed {
+            speed.check()?;
+        }
         Ok(())
     }
 }
@@ -790,8 +812,13 @@ impl TurningSetup {
         let mut seen = BTreeSet::new();
         for binding in &self.bindings {
             binding.check()?;
-            if self.spindle(&binding.spindle).is_none() {
+            let Some(spindle) = self.spindle(&binding.spindle) else {
                 return Err(check::invalid(format!("binding spindle {} is not on this setup", binding.spindle)));
+            };
+            if let Some(SpindleSpeed::Css { max_rpm, .. }) = binding.speed()
+                && max_rpm > spindle.max_rpm()
+            {
+                return Err(check::invalid(format!("css max rpm is above spindle {} max rpm", spindle.name())));
             }
             if self.head(&binding.head).is_none() {
                 return Err(check::invalid(format!("binding head {} is not on this setup", binding.head)));

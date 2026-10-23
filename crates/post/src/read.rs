@@ -4,6 +4,10 @@
 //! A signed `R` is the radius. Comments, line numbers, `%` tape edges and `O` program numbers are
 //! skipped. `G4` is a dwell. A post with a rotary block also accepts its A/B word and the
 //! inverse-time codes (`G93` / `G94` on LinuxCNC). Those stay modal the way `X` `Y` `Z` do.
+//!
+//! A lathe post returns part-frame positions. In diameter mode each X word is divided by two.
+//! Y is 0. `I` is already a radius offset, so the centre is `start + (I, 0, K)` in that frame.
+//! `arc_flip` swaps G2 and G3 back to the IR sense. `G53` is a machine move and is not returned.
 
 use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 
@@ -163,7 +167,7 @@ impl<'a> Parser<'a> {
         let mut planes = 0u8;
         let mut motions = 0u8;
         let mut inverse_time = self.inverse_time;
-        for code in g_codes {
+        for &code in &g_codes {
             if self.post.rotary.as_ref().is_some_and(|rotary| rotary.on_code() == Some(code)) {
                 inverse_time = true;
                 continue;
@@ -204,6 +208,8 @@ impl<'a> Parser<'a> {
                 }
                 20 => return Err(invalid("inches are not supported")),
                 91 => return Err(invalid("incremental motion is not supported")),
+                7 | 8 | 96 | 97 if self.post.is_lathe() => {}
+                53 if self.post.is_lathe() => {}
                 21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
                 other => return Err(invalid(format!("unsupported G{other}"))),
             }
@@ -212,6 +218,10 @@ impl<'a> Parser<'a> {
             return Err(invalid("line has conflicting G codes"));
         }
         self.inverse_time = inverse_time;
+        // G53 is a non-modal machine-coordinate move (the lathe home). It is not a part-frame point.
+        if self.post.is_lathe() && g_codes.contains(&53) {
+            return Ok(None);
+        }
         let axis_values = [unique(&words, axes[0])?, unique(&words, axes[1])?, unique(&words, axes[2])?];
         let has_axis = axis_values.iter().any(Option::is_some);
         if dwell {
@@ -258,6 +268,12 @@ impl<'a> Parser<'a> {
                 end[index] = *value;
             }
         }
+        if self.post.is_lathe() {
+            if self.post.lathe.as_ref().is_some_and(|lathe| lathe.diameter_mode) && axes[0].is_some() {
+                end[0] *= 0.5;
+            }
+            end[1] = 0.0;
+        }
         if let Some(feed) = f {
             self.feed = Some(feed);
         }
@@ -268,7 +284,13 @@ impl<'a> Parser<'a> {
             Motion::Rapid => ReadMove::Rapid { end, feed, rotary, inverse_time },
             Motion::Linear => ReadMove::Linear { end, feed, rotary, inverse_time },
             Motion::Cw | Motion::Ccw => {
-                let sense = if matches!(motion, Motion::Cw) { ArcSense::Cw } else { ArcSense::Ccw };
+                let mut sense = if matches!(motion, Motion::Cw) { ArcSense::Cw } else { ArcSense::Ccw };
+                if self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip) {
+                    sense = match sense {
+                        ArcSense::Cw => ArcSense::Ccw,
+                        ArcSense::Ccw => ArcSense::Cw,
+                    };
+                }
                 let radius = unique(words, 'R')?;
                 let (i, j, k) = (unique(words, 'I')?, unique(words, 'J')?, unique(words, 'K')?);
                 if radius.is_some() && (i.is_some() || j.is_some() || k.is_some()) {

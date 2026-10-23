@@ -16,7 +16,7 @@ use crate::{FORMAT_TAG, Result, check_format};
 /// How close a pose tool axis must be to the part-frame image of machine +Z at that rotary angle.
 const ROTARY_AXIS_TOL: f64 = 1e-6;
 
-/// Slack for a turning pose. |Y| may be at most this, and X may be this far below zero.
+/// Slack for a turning pose. |Y| may be at most this. X may be negative when a face crosses the axis.
 const TURNING_PLANE_TOL: f64 = 1e-6;
 
 /// Channels that must arrive together. A sync event waits on this id.
@@ -370,9 +370,6 @@ fn check_turning_poses(index: u32, path: &ClPath) -> Result<()> {
         let tip = pose.tip();
         if tip.y().abs() > TURNING_PLANE_TOL {
             return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose Y is not zero")));
-        }
-        if tip.x() < -TURNING_PLANE_TOL {
-            return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose X radius is negative")));
         }
     }
     Ok(())

@@ -16,6 +16,10 @@
 //! lists `a`, `b`, or both. The A/B word uses [`crate::fmt::format_fixed`] with `decimals`
 //! (degrees). `feed_mode` is `inverse_time`, `degrees_per_minute`, or `surface`. Inverse time
 //! requires `inverse_time_on` and `inverse_time_off` (LinuxCNC uses `G93` and `G94`).
+//!
+//! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
+//! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
+//! `{offset2}` and `{date-free!}`, each only on the lines that name that value.
 
 use std::collections::BTreeMap;
 
@@ -30,6 +34,10 @@ const MAX_TEMPLATE_CHARS: usize = 400;
 const HEADER_KEYS: &[&str] = &["program_name", "program_number", "date-free!"];
 const PROCESS_KEYS: &[&str] = &["program_name", "date-free!", "speed", "power"];
 const TOOL_KEYS: &[&str] = &["program_name", "date-free!", "tool"];
+const LATHE_BARE: &[&str] = &["date-free!"];
+const LATHE_CSS: &[&str] = &["surface", "max_rpm", "date-free!"];
+const LATHE_RPM: &[&str] = &["rpm", "date-free!"];
+const LATHE_TOOL: &[&str] = &["tool", "tool2", "offset2", "date-free!"];
 
 /// How circular moves are written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +97,9 @@ pub struct PostDef {
     /// Fourth-axis words. Absent on a post that rejects rotary programs.
     #[serde(default)]
     pub(crate) rotary: Option<RotaryOutput>,
+    /// Lathe words. Absent on a mill post. A turning program requires this block.
+    #[serde(default)]
+    pub(crate) lathe: Option<LatheOutput>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -234,6 +245,42 @@ pub(crate) fn g_code_number(text: &str) -> Option<u16> {
     text.strip_prefix('G')?.parse().ok()
 }
 
+/// How a lathe post writes X, spindle speed, tool changes and the ZX plane.
+///
+/// `diameter_mode` doubles X words. `I` stays a radius offset either way. `arc_flip` swaps G2
+/// and G3 for a front turret. `home` is written before `program_end` and may be empty.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LatheOutput {
+    /// When true, X words are diameters (`2 * radius`). Read-back divides X by two.
+    pub(crate) diameter_mode: bool,
+    /// Written once after the header. LinuxCNC uses `G7` (diameter) or `G8` (radius). Fanuc uses none.
+    pub(crate) mode_lines: Vec<String>,
+    /// Plane word written once after `mode_lines`, such as `G18`.
+    pub(crate) plane: String,
+    /// Feed-mode word written once after the plane, such as `G94` or `G98`.
+    pub(crate) feed_mode: String,
+    /// Constant surface speed. `{surface}` is metres per minute. `{max_rpm}` is the cap.
+    pub(crate) css: Vec<String>,
+    /// Direct revolutions per minute. `{rpm}` is the spindle speed.
+    pub(crate) rpm: Vec<String>,
+    /// Spindle forward, after the css or rpm lines.
+    pub(crate) spindle_cw: Vec<String>,
+    /// Spindle reverse, when the bound spindle is reversed.
+    pub(crate) spindle_ccw: Vec<String>,
+    /// Spindle stop.
+    pub(crate) spindle_off: Vec<String>,
+    /// Replaces the mill `tool_change` lines for a turning program. `{tool}` is the id, `{tool2}` and
+    /// `{offset2}` are that id in two digits.
+    pub(crate) tool_change: Vec<String>,
+    /// When true, G2 and G3 are swapped (front turret, X-down pictures).
+    #[serde(default)]
+    pub(crate) arc_flip: bool,
+    /// Machine-coordinate retract written before `program_end`. May be empty.
+    #[serde(default)]
+    pub(crate) home: Vec<String>,
+}
+
 fn default_z_mode() -> String {
     "keep".to_string()
 }
@@ -282,7 +329,13 @@ impl PostDef {
         self.axis_letters = check_axes(&self.axis_letters)?;
         check_dwell_word(&self.dwell.word, &self.axis_letters, &self.line_numbers.prefix)?;
         check_rotary(&mut self)?;
+        check_lathe(&self)?;
         Ok(self)
+    }
+
+    /// True when this post writes a turning program.
+    pub fn is_lathe(&self) -> bool {
+        self.lathe.is_some()
     }
 
     /// Rotary axes this post writes, in the order the JSON lists them.
@@ -340,6 +393,26 @@ impl PostDef {
     pub(crate) fn drop_z(&self) -> bool {
         self.z_mode == "drop"
     }
+}
+
+fn check_lathe(post: &PostDef) -> Result<()> {
+    let Some(lathe) = &post.lathe else {
+        return Ok(());
+    };
+    if lathe.plane.is_empty() {
+        return Err(field("lathe.plane", "must not be empty"));
+    }
+    check_templates("lathe.mode_lines", &lathe.mode_lines, LATHE_BARE)?;
+    check_templates("lathe.plane", std::slice::from_ref(&lathe.plane), LATHE_BARE)?;
+    check_templates("lathe.feed_mode", std::slice::from_ref(&lathe.feed_mode), LATHE_BARE)?;
+    check_templates("lathe.css", &lathe.css, LATHE_CSS)?;
+    check_templates("lathe.rpm", &lathe.rpm, LATHE_RPM)?;
+    check_templates("lathe.spindle_cw", &lathe.spindle_cw, LATHE_BARE)?;
+    check_templates("lathe.spindle_ccw", &lathe.spindle_ccw, LATHE_BARE)?;
+    check_templates("lathe.spindle_off", &lathe.spindle_off, LATHE_BARE)?;
+    check_templates("lathe.tool_change", &lathe.tool_change, LATHE_TOOL)?;
+    check_templates("lathe.home", &lathe.home, LATHE_BARE)?;
+    Ok(())
 }
 
 fn check_power_scale(scale: Option<f64>) -> Result<()> {

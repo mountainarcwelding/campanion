@@ -151,7 +151,7 @@ fn posts_lists_every_builtin() -> Result<(), String> {
     let stdout = text(&output.stdout)?;
     let ids: Vec<&str> =
         stdout.lines().filter(|line| !line.starts_with(' ') && !line.is_empty()).filter_map(|line| line.split_whitespace().next()).collect();
-    if ids != ["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"] {
+    if ids != ["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser", "linuxcnc_lathe"] {
         return Err(format!("posts ids were {ids:?}\n{stdout}"));
     }
     if !stdout.contains("linuxcnc LinuxCNC\n") || !stdout.contains("cutter compensation cancelled") {
