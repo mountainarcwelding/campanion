@@ -68,6 +68,11 @@
 //! the cylinder radius as well as the stock of the other operations. A wrap next to an indexed
 //! operation still takes the index-change retract and rotate. Feeds stay the tool's surface feeds.
 
+//! `--up-axis z|y|auto` applies only to a STEP source. The default is `auto`: the exporter
+//! header SolidCraft reports is trusted, and a Y-up file (SolidWorks) is turned so Z is up.
+//! `z` and `y` skip that probe. Any other source ignores the flag. The face point is in the
+//! frame after the turn. A file point `(x, y, z)` is `(x, -z, y)` once Y up has been turned.
+
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -107,6 +112,7 @@ struct RunArgs {
     output: PathBuf,
     ir: Option<PathBuf>,
     post: Option<PathBuf>,
+    up_axis: step::UpAxis,
 }
 
 struct Cut<'a> {
@@ -145,7 +151,8 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
             return Err(CliError::run("STEP source has no face"));
         };
         let cli = step::find_cli().ok_or_else(step::missing_cli_error)?;
-        let dxf = step::face_to_dxf(&cli, &source, face)?;
+        // `face` is already in the frame `--up-axis` produces. Y up is turned inside SolidCraft.
+        let dxf = step::face_to_dxf(&cli, &source, face, args.up_axis)?;
         import_dxf(&dxf, &options)
     } else if is_svg {
         import_svg(&text, &options)
@@ -248,13 +255,29 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     let mut output: Option<&OsStr> = None;
     let mut ir: Option<&OsStr> = None;
     let mut post: Option<&OsStr> = None;
+    let mut up_axis: Option<step::UpAxis> = None;
     let mut index = 0;
     while index < args.len() {
         let Some(arg) = args.get(index) else {
             break;
         };
         index += 1;
-        if arg.as_os_str() == "-o" || arg.as_os_str() == "--ir" || arg.as_os_str() == "--post" {
+        if arg.as_os_str() == "--up-axis" {
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage("--up-axis needs a value"));
+            };
+            index += 1;
+            if value.is_empty() {
+                return Err(CliError::usage("--up-axis needs a value"));
+            }
+            if up_axis.is_some() {
+                return Err(CliError::usage("--up-axis is already set"));
+            }
+            let Some(text) = value.to_str() else {
+                return Err(CliError::usage("--up-axis must be z, y or auto"));
+            };
+            up_axis = Some(step::UpAxis::parse(text)?);
+        } else if arg.as_os_str() == "-o" || arg.as_os_str() == "--ir" || arg.as_os_str() == "--post" {
             let flag = if arg.as_os_str() == "-o" {
                 "-o"
             } else if arg.as_os_str() == "--ir" {
@@ -297,7 +320,13 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     if ir.is_some_and(|path| path == output) {
         return Err(CliError::usage("-o and --ir must be different files"));
     }
-    Ok(RunArgs { job: PathBuf::from(job), output: PathBuf::from(output), ir: ir.map(PathBuf::from), post: post.map(PathBuf::from) })
+    Ok(RunArgs {
+        job: PathBuf::from(job),
+        output: PathBuf::from(output),
+        ir: ir.map(PathBuf::from),
+        post: post.map(PathBuf::from),
+        up_axis: up_axis.unwrap_or(step::UpAxis::Auto),
+    })
 }
 
 fn starts_with_dash(arg: &OsStr) -> bool {
