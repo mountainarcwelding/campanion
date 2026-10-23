@@ -9,7 +9,9 @@ use crate::motion::{ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole
 use crate::process::{Event, Tool};
 use crate::program::{Document, Program};
 use crate::rotary::{RotaryAxisKind, RotaryDirection, RotarySetup};
-use crate::turning::{Hand, Head, HeadAxis, Insert, InsertShape, Spindle, SpindleSpeed, TurnBinding, TurnInsert, TurnStock, TurningSetup};
+use crate::turning::{
+    Hand, Head, HeadAxis, Insert, InsertShape, Spindle, SpindleSpeed, TurnBinding, TurnInsert, TurnSection, TurnStock, TurningSetup,
+};
 
 fn assert_err(result: Result<impl std::fmt::Debug>, text: &str) {
     let err = result.expect_err("expected an error");
@@ -590,6 +592,40 @@ fn binding_speed_round_trips_and_css_respects_the_spindle_cap() {
 
     let bad = SpindleSpeed::Css { surface_m_per_min: -1.0, max_rpm: 100.0 };
     assert_err(TurnBinding::try_new(0, "main", "turret1", 0).expect("binding").with_speed(Some(bad)), "surface speed");
+}
+
+#[test]
+fn section_bounds_round_trip_and_old_setups_still_load() {
+    assert_err(TurnSection::try_new(vec![[0.0, 1.0]]), "found 1");
+    assert_err(TurnSection::try_new(vec![[f64::NAN, 1.0], [-1.0, 1.0]]), "finite");
+    assert_err(TurnSection::try_new(vec![[0.0, -1.0], [-5.0, 2.0]]), ">=");
+    let points = [[0.0, 0.0], [-12.0, 8.0]];
+    let section = TurnSection::try_new(points.to_vec()).expect("two points");
+    assert_eq!(section.points(), &points);
+
+    let setup = m10(None).with_section(Some(section)).expect("section");
+    let json = serde_json::to_string(&setup).expect("json");
+    let loaded: TurningSetup = serde_json::from_str(&json).expect("round trip");
+    assert_eq!(loaded, setup);
+    assert_eq!(loaded.section().expect("section").points(), &points);
+    let program = program_with(Vec::new(), Vec::new(), setup, None).expect("program");
+    round_trip(&Document::new(program).expect("document"));
+
+    let bare = m10(None);
+    let bare_json = serde_json::to_string(&bare).expect("bare json");
+    assert!(!bare_json.contains("\"section\""), "{bare_json}");
+    let loaded: TurningSetup = serde_json::from_str(&bare_json).expect("setup without section");
+    assert!(loaded.section().is_none());
+    let old = r#"{"format":"campanion-ir/1","program":{"tools":[],"toolpaths":[],"channel_programs":[],"syncs":[],"turning":{"spindles":[{"name":"main","work_zero_z":0,"max_rpm":1}],"heads":[{"name":"turret1","axes":["x","z"],"stations":12,"live_tooling":false}],"inserts":[],"bindings":[]}}}"#;
+    let doc = Document::from_json(old).expect("old setup");
+    assert!(doc.program().turning().expect("turning").section().is_none());
+
+    let unknown = r#"{"spindles":[{"name":"main","work_zero_z":0.0,"max_rpm":1000.0}],"heads":[{"name":"turret1","axes":["x","z"],"stations":12,"live_tooling":false}],"inserts":[],"bindings":[],"nope":1}"#;
+    let err = serde_json::from_str::<TurningSetup>(unknown).expect_err("unknown setup field");
+    assert!(err.to_string().contains("unknown field"), "{err}");
+    let bad_section = r#"{"points":[[0.0,1.0],[-1.0,1.0]],"nope":1}"#;
+    let err = serde_json::from_str::<TurnSection>(bad_section).expect_err("unknown section field");
+    assert!(err.to_string().contains("unknown field"), "{err}");
 }
 
 fn turning_document() -> Document {

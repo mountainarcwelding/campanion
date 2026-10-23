@@ -8,7 +8,8 @@
 //! Z = 0 is the finished front face. `stock.front_allowance` is how far the blank sticks out in
 //! +Z; facing cuts that down to 0. The stock record itself still occupies Z in `[-length, 0]`.
 //! Each operation is one toolpath: a tool change when the tool id changes, spindle on, the
-//! moves, then spindle off. Speed is stored on the turning binding.
+//! moves, then spindle off. Speed is stored on the turning binding. The IR stores the finished
+//! section on the turning setup, sampled from the profile at the job chord tolerance.
 //!
 //! `campanion_ir::verify` runs before anything is written. Issues are printed and the process
 //! exits 1. `--post` writes that dialect instead of the test-sink NGC and compares the read-back
@@ -25,7 +26,7 @@ use campanion_geom::Tolerance;
 use campanion_import::{ImportOptions, import_svg};
 use campanion_ir::{
     ClBlock, ClPath, Document, Event, Hand, Insert, InsertShape, ProcessKind, ProcessParams, Program, SpindleSpeed, Tool, TurnBinding, TurnInsert,
-    TurnStock, TurningSetup,
+    TurnSection, TurnStock, TurningSetup,
 };
 use campanion_turn::{
     FaceParams, FinishParams, MeshAxis, RoughParams, Side, TipPoint, TurnPath, TurnProfile, TurnTool, face, finish, rough, to_cl_path,
@@ -548,7 +549,8 @@ fn resolve_source(job: &Path, relative: &str) -> PathBuf {
 
 fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Result<Document, CliError> {
     let stock = turn_stock(&job.stock)?;
-    let mut setup = TurningSetup::single(Some(stock), job.max_rpm)?;
+    let points = profile.to_polyline_points(job.chord).into_iter().map(|point| [point.x(), point.y()]).collect();
+    let mut setup = TurningSetup::single(Some(stock), job.max_rpm)?.with_section(Some(TurnSection::try_new(points)?))?;
     for tool in &job.tools {
         let mounted = TurnInsert::try_new(tool.id, HEAD, tool.station, tool.insert, false)?;
         setup = setup.with_insert(mounted)?;
