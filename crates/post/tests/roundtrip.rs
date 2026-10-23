@@ -3,7 +3,9 @@
 //! Mill steps are posted with every built-in that is not a lathe post. XZ steps are a turning
 //! program and are posted with every lathe post.
 
-use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, Plane, Pose, Program, TurningSetup, Vec3};
+use campanion_ir::{
+    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, Plane, Pose, Program, SpindleSpeed, TurnBinding, TurningSetup, Vec3,
+};
 use campanion_post::{PostOptions, builtin, builtin_ids, compare, post_program, read_back};
 use proptest::prelude::*;
 
@@ -110,6 +112,7 @@ enum XzStep {
     Rapid { x: f64, z: f64 },
     Linear { x: f64, z: f64, feed: f64 },
     Arc { radius: f64, sweep: f64, ccw: bool, feed: f64 },
+    Thread { x: f64, z: f64, lead: f64 },
 }
 
 fn xz_program(steps: &[XzStep]) -> Option<Program> {
@@ -156,11 +159,23 @@ fn xz_program(steps: &[XzStep]) -> Option<Program> {
                 }));
                 pos = end;
             }
+            XzStep::Thread { x, z, lead } => {
+                if !placed {
+                    return None;
+                }
+                blocks.push(ClBlock::Motion(ClMotion::Thread { to: pose(x, 0.0, z)?, lead }));
+                pos = [x, z];
+            }
         }
     }
     let feeds = Feeds::try_new(100.0, None, None, None, None).ok()?;
     let path = ClPath::try_new(Some("turn".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).ok()?;
-    let turning = TurningSetup::single(None, 6_000.0).ok()?;
+    let mut turning = TurningSetup::single(None, 6_000.0).ok()?;
+    if steps.iter().any(|step| matches!(step, XzStep::Thread { .. })) {
+        let speed = SpindleSpeed::rpm(800.0).ok()?;
+        let binding = TurnBinding::try_new(0, "main", "turret1", 0).ok()?.with_speed(Some(speed)).ok()?;
+        turning = turning.with_binding(binding).ok()?;
+    }
     Program::try_new(Some("turn".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).ok()?.with_turning(Some(turning)).ok()
 }
 
@@ -169,7 +184,8 @@ fn xz_steps() -> impl Strategy<Value = Vec<XzStep>> {
     let linear = (-80.0..80.0, -80.0..40.0, 20.0..1500.0).prop_map(|(x, z, feed)| XzStep::Linear { x, z, feed });
     let arc =
         (1.0..30.0, 0.4..TAU, proptest::bool::ANY, 20.0..1500.0).prop_map(|(radius, sweep, ccw, feed)| XzStep::Arc { radius, sweep, ccw, feed });
-    let rest = prop::collection::vec(prop_oneof![linear, arc], 0..6);
+    let thread = (1.0..40.0, -80.0..40.0, 0.2..5.0).prop_map(|(x, z, lead)| XzStep::Thread { x, z, lead });
+    let rest = prop::collection::vec(prop_oneof![linear, arc, thread], 0..6);
     (rapid, rest).prop_map(|(first, rest)| {
         let mut steps = vec![first];
         steps.extend(rest);

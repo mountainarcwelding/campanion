@@ -2,7 +2,7 @@
 //!
 //! `sample`, `curves`, and `dome` are posted with every built-in that is not a lathe post.
 //! `indexed` and `wrap` carry an A axis, so they are posted only with dialects whose `rotary.axes`
-//! include that axis. `turn` is a turning program and is posted with every lathe post.
+//! include that axis. `turn` and `turn_thread` are turning programs and are posted with every lathe post.
 
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ use campanion_post::{PostDef, PostOptions, builtin, builtin_ids, compare, post_p
 
 const EXAMPLES: [&str; 3] = ["sample", "curves", "dome"];
 const ROTARY_EXAMPLES: [&str; 2] = ["indexed", "wrap"];
-const LATHE_EXAMPLES: [&str; 1] = ["turn"];
+const LATHE_EXAMPLES: [&str; 2] = ["turn", "turn_thread"];
 
 fn manifest_path(parts: &[&str]) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

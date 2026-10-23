@@ -37,6 +37,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     if !program.channel_programs().is_empty() {
         return Err(unsupported("channel programs are not supported; only cutter-location toolpaths are posted"));
     }
+    check_thread_support(program, post)?;
     check_lathe_program(program, post)?;
     check_rotary_program(program, post)?;
     let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning());
@@ -216,6 +217,41 @@ impl<'a> Writer<'a> {
                 self.thc_before_cut()?;
                 self.arc(*to, *plane, xyz(*center), *sense, Some(*sweep), *feed)
             }
+            ClMotion::Thread { to, lead } => self.thread_move(*to, *lead),
+        }
+    }
+
+    /// `<code> X.. Z.. <lead_word><lead>`. The code is never modal. The next G0 or G1 is written
+    /// in full. When the lead word is `F`, the modal feed is cleared so the next feed repeats it.
+    fn thread_move(&mut self, to: Pose, lead: f64) -> Result<()> {
+        self.require_rpm_binding()?;
+        let lathe = self.post.lathe.as_ref().ok_or_else(|| unsupported(format!("post `{}` does not support threading", self.post.id())))?;
+        let thread =
+            lathe.thread.as_ref().ok_or_else(|| unsupported(format!("post `{}` does not support synchronised threading", self.post.id())))?;
+        if !(lead.is_finite() && lead > 0.0) {
+            return Err(invalid("thread lead must be positive"));
+        }
+        let posted = self.posted_end(to)?;
+        let mut words = vec![thread.code.clone()];
+        let rounded = self.push_lathe_axes(&mut words, posted.xyz)?;
+        let lead_text = self.format_axis(lead, self.post.decimals.linear)?;
+        words.push(format!("{}{lead_text}", thread.lead_word));
+        self.linear = None;
+        if thread.lead_word == "F" {
+            self.feed = None;
+        }
+        self.pos = Some(rounded);
+        self.exact = Some(posted.xyz);
+        self.part_tip = Some(posted.part);
+        self.angle = posted.angle;
+        self.emit_words(&words)
+    }
+
+    fn require_rpm_binding(&self) -> Result<()> {
+        let speed = self.turning.and_then(|turning| turning.binding_for(self.path_index)).and_then(|binding| binding.speed());
+        match speed {
+            Some(SpindleSpeed::Rpm { .. }) => Ok(()),
+            _ => Err(invalid("threading needs a fixed rpm binding")),
         }
     }
 
@@ -1078,6 +1114,20 @@ fn meaningless(line: &str) -> bool {
     trimmed.is_empty() || trimmed == "()" || trimmed == ";"
 }
 
+/// Mill posts, and lathe posts with no `thread` block, reject a program that contains a thread move.
+fn check_thread_support(program: &Program, post: &PostDef) -> Result<()> {
+    let has_thread =
+        program.toolpaths().iter().any(|path| path.blocks().iter().any(|block| matches!(block, ClBlock::Motion(ClMotion::Thread { .. }))));
+    if !has_thread {
+        return Ok(());
+    }
+    match post.lathe.as_ref() {
+        None => Err(unsupported(format!("post `{}` does not support threading", post.id()))),
+        Some(lathe) if lathe.thread.is_none() => Err(unsupported(format!("post `{}` does not support synchronised threading", post.id()))),
+        Some(_) => Ok(()),
+    }
+}
+
 /// A turning program needs a lathe post, and a lathe post needs a turning program.
 ///
 /// Lathe poses are part-frame XZ: `|y|` above `1e-6` is rejected, and so is a rotary setup.
@@ -1121,7 +1171,11 @@ fn pose_of_block(block: &ClBlock) -> Option<Pose> {
 
 fn motion_pose(motion: &ClMotion) -> Pose {
     match motion {
-        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => *to,
+        ClMotion::Rapid { to, .. }
+        | ClMotion::Linear { to, .. }
+        | ClMotion::Arc { to, .. }
+        | ClMotion::Helix { to, .. }
+        | ClMotion::Thread { to, .. } => *to,
     }
 }
 
@@ -1182,7 +1236,11 @@ fn block_uses_rotary(block: &ClBlock) -> bool {
 
 fn motion_uses_rotary(motion: &ClMotion) -> bool {
     match motion {
-        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => to.rotary().is_some(),
+        ClMotion::Rapid { to, .. }
+        | ClMotion::Linear { to, .. }
+        | ClMotion::Arc { to, .. }
+        | ClMotion::Helix { to, .. }
+        | ClMotion::Thread { to, .. } => to.rotary().is_some(),
     }
 }
 

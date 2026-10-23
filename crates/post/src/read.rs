@@ -13,7 +13,7 @@
 
 use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 
-use crate::def::PostDef;
+use crate::def::{PostDef, g_code_number};
 use crate::error::{Result, invalid};
 use crate::geom::{self, Xyz};
 
@@ -63,6 +63,17 @@ pub enum ReadMove {
     Dwell {
         /// Seconds.
         seconds: f64,
+    },
+    /// Spindle-synchronised straight feed (`G33`/`K` or `G32`/`F` on a lathe post).
+    Thread {
+        /// Absolute end position, in the part frame. Diameter-mode X has already been halved.
+        end: Xyz,
+        /// Lead, millimetres per spindle revolution.
+        lead: f64,
+        /// Modal A/B angle in degrees after this block.
+        rotary: Option<f64>,
+        /// Modal inverse-time state after this block.
+        inverse_time: bool,
     },
     /// An `M` or `T` block that does not move.
     Other {
@@ -167,9 +178,11 @@ impl<'a> Parser<'a> {
         let mut plane = self.plane;
         let mut motion = self.motion;
         let mut dwell = false;
+        let mut threading = false;
         let mut planes = 0u8;
         let mut motions = 0u8;
         let mut inverse_time = self.inverse_time;
+        let thread_code = self.thread_code();
         for &code in &g_codes {
             if self.post.rotary.as_ref().is_some_and(|rotary| rotary.on_code() == Some(code)) {
                 inverse_time = true;
@@ -214,6 +227,10 @@ impl<'a> Parser<'a> {
                 7 | 8 | 50 | 96 | 97 | 98 if self.post.is_lathe() => {}
                 28 | 53 if self.post.is_lathe() => {}
                 21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
+                code if thread_code == Some(code) => {
+                    threading = true;
+                    motions += 1;
+                }
                 other => return Err(invalid(format!("unsupported G{other}"))),
             }
         }
@@ -244,6 +261,12 @@ impl<'a> Parser<'a> {
             }
             self.plane = plane;
             return Ok(Some(ReadMove::Dwell { seconds }));
+        }
+        if threading {
+            if !has_axis {
+                return Err(invalid("thread move needs an end position"));
+            }
+            return self.thread_block(plane, axis_values, &words);
         }
         if has_axis {
             return self.motion_block(motion, plane, axis_values, &words, f);
@@ -320,6 +343,41 @@ impl<'a> Parser<'a> {
         self.motion = Some(motion);
         self.plane = plane;
         Ok(Some(move_))
+    }
+
+    /// G33/G32. The lead word is not a modal feed, and the motion code is not left modal.
+    fn thread_block(&mut self, plane: Plane, axes: [Option<f64>; 3], words: &[(char, f64)]) -> Result<Option<ReadMove>> {
+        let letter = self.thread_lead_letter().ok_or_else(|| invalid("thread lead word is missing"))?;
+        let mut end = self.pos;
+        for (index, value) in axes.iter().enumerate() {
+            if let Some(value) = value {
+                end[index] = *value;
+            }
+        }
+        if self.post.is_lathe() {
+            if self.post.lathe.as_ref().is_some_and(|lathe| lathe.diameter_mode) && axes[0].is_some() {
+                end[0] *= 0.5;
+            }
+            end[1] = 0.0;
+        }
+        let lead = unique(words, letter)?.ok_or_else(|| invalid("thread lead is missing"))?;
+        if !(lead.is_finite() && lead > 0.0) {
+            return Err(invalid("thread lead must be positive"));
+        }
+        let move_ = ReadMove::Thread { end, lead, rotary: self.angle, inverse_time: self.inverse_time };
+        self.pos = end;
+        self.motion = None;
+        self.plane = plane;
+        Ok(Some(move_))
+    }
+
+    fn thread_code(&self) -> Option<u16> {
+        let thread = self.post.lathe.as_ref()?.thread.as_ref()?;
+        g_code_number(&thread.code)
+    }
+
+    fn thread_lead_letter(&self) -> Option<char> {
+        self.post.lathe.as_ref()?.thread.as_ref()?.lead_word.chars().next()
     }
 
     fn is_rotary_letter(&self, letter: char) -> bool {

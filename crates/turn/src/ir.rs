@@ -11,7 +11,7 @@ use crate::{Result, TurnError, TurnMove, TurnPath};
 ///
 /// The first block is a rapid to [`TurnPath::start`]. Each [`TurnMove::Rapid`] stays a rapid
 /// with no feed. Feeds and arcs are [`MoveRole::Cut`]. A dwell is an [`campanion_ir::Event::Dwell`].
-/// A thread move is an error until synchronised feed is wired through the IR. An arc lies in the ZX plane. Its centre
+/// A thread move is [`ClMotion::Thread`] with the same lead. An arc lies in the ZX plane. Its centre
 /// is `(cx, 0, cz)`. Counter-clockwise with +Z to the right and +X up is [`ArcSense::Ccw`].
 /// Compensation is [`CompensationMode::Computed`]: nose compensation is already in `path`.
 ///
@@ -41,10 +41,8 @@ fn pose_at(z: f64, x_radius: f64) -> Result<Pose> {
 
 fn cl_block(motion: TurnMove, cut_feed: f64) -> Result<ClBlock> {
     Ok(match motion {
-        TurnMove::Thread { .. } => {
-            return Err(TurnError::InvalidInput("threading needs a post with synchronised feed; not wired yet".into()));
-        }
         TurnMove::Dwell { seconds } => ClBlock::Event(Event::Dwell { seconds }),
+        TurnMove::Thread { z, x, lead } => ClBlock::Motion(ClMotion::Thread { to: pose_at(z, x)?, lead }),
         other => ClBlock::Motion(cl_move(other, cut_feed)?),
     })
 }
@@ -92,7 +90,11 @@ mod tests {
     fn tip_of(block: &ClBlock) -> (f64, f64, f64) {
         let ClBlock::Motion(motion) = block else { panic!("event in a converted path") };
         let pose = match motion {
-            ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => to,
+            ClMotion::Rapid { to, .. }
+            | ClMotion::Linear { to, .. }
+            | ClMotion::Arc { to, .. }
+            | ClMotion::Helix { to, .. }
+            | ClMotion::Thread { to, .. } => to,
         };
         let tip = pose.tip();
         assert_eq!(pose.axis(), Vec3::Z);
@@ -251,5 +253,78 @@ mod tests {
             let cl = to_cl_path(turned, Some(name.into()), 1, 100.0, Some(2.0)).unwrap_or_else(|err| panic!("{name}: {err}"));
             assert!(matches!(cl.blocks().first(), Some(ClBlock::Motion(ClMotion::Rapid { feed: None, .. }))), "{name}");
         }
+    }
+
+    #[test]
+    fn thread_and_dwell_become_synchronised_motion_and_an_event() {
+        let path = TurnPath { start: (1.0, 12.0), moves: vec![TurnMove::Thread { z: -8.0, x: 9.0, lead: 2.5 }, TurnMove::Dwell { seconds: 0.2 }] };
+        let cl = to_cl_path(&path, Some("thread".into()), 3, 100.0, None).expect("convert");
+        let Some(ClBlock::Motion(ClMotion::Thread { to, lead })) = cl.blocks().get(1) else {
+            panic!("thread block missing: {:?}", cl.blocks());
+        };
+        assert_eq!(to.tip().z(), -8.0);
+        assert_eq!(to.tip().x(), 9.0);
+        assert_eq!(to.tip().y(), 0.0);
+        assert_eq!(*lead, 2.5);
+        assert!(matches!(cl.blocks().get(2), Some(ClBlock::Event(campanion_ir::Event::Dwell { seconds })) if *seconds == 0.2));
+    }
+
+    /// M20×2.5 outside thread, four constant-area passes, fixed at 800 rpm.
+    ///
+    /// `UPDATE_THREAD_IR=1` rewrites `crates/post/tests/data/turn_thread.ir.json`.
+    #[test]
+    fn m20_thread_ir_matches_the_post_fixture() {
+        use campanion_ir::{Document, Program, SpindleSpeed, Tool, TurnBinding, TurnStock, TurningSetup};
+
+        let depth = 0.6134 * 2.5;
+        let params = crate::ThreadParams {
+            side: Side::Outside,
+            major_radius: 10.0,
+            depth,
+            pitch: 2.5,
+            z_start: 0.0,
+            z_end: -16.0,
+            first_depth: depth / 2.0,
+            min_depth: 0.05,
+            spring_passes: 0,
+            infeed: crate::Infeed::Flank { angle_deg: 29.5 },
+            clearance: 1.0,
+            included_angle_deg: 60.0,
+        };
+        let turned = crate::thread(&params).expect("thread");
+        let threads = turned.moves.iter().filter(|motion| matches!(motion, TurnMove::Thread { lead, .. } if *lead == 2.5)).count();
+        assert_eq!(threads, 4, "expected four passes, got {threads}");
+        let motion = to_cl_path(&turned, Some("thread".into()), 1, 100.0, Some(1.0)).expect("cl");
+        let stock = TurnStock::bar(20.0, 30.0).expect("stock");
+        let binding =
+            TurnBinding::try_new(0, "main", "turret1", 0).expect("binding").with_speed(Some(SpindleSpeed::rpm(800.0).expect("rpm"))).expect("speed");
+        let turning = TurningSetup::single(Some(stock), 3_000.0).expect("setup").with_binding(binding).expect("bound");
+        let tool = Tool::try_new(1, Some("thread".into()), None, None).expect("tool");
+        let program = Program::try_new(Some("turn_thread".into()), vec![tool], None, vec![motion], Vec::new(), Vec::new(), None)
+            .expect("program")
+            .with_turning(Some(turning))
+            .expect("turning");
+        let doc = Document::new(program).expect("document");
+        let mut pretty = doc.to_json_pretty().expect("json");
+        pretty.push('\n');
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../post/tests/data/turn_thread.ir.json");
+        if std::env::var("UPDATE_THREAD_IR").ok().as_deref() == Some("1") {
+            std::fs::write(&path, &pretty).unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        assert_eq!(committed, pretty, "turn_thread.ir.json drifted; rerun with UPDATE_THREAD_IR=1");
+        // serde_json does not bit-preserve every f64, so compare the loaded program by its thread moves.
+        let loaded = Document::from_json(&committed).unwrap_or_else(|err| panic!("load {}: {err}", path.display()));
+        let loaded_threads: Vec<f64> = loaded.program().toolpaths()[0]
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                ClBlock::Motion(ClMotion::Thread { lead, .. }) => Some(*lead),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loaded_threads, vec![2.5, 2.5, 2.5, 2.5]);
+        let speed = loaded.program().turning().and_then(|turning| turning.binding_for(0)).and_then(|binding| binding.speed());
+        assert!(matches!(speed, Some(SpindleSpeed::Rpm { rpm }) if rpm == 800.0));
     }
 }

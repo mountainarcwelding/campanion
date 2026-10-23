@@ -1,7 +1,7 @@
 {
   "id": "linuxcnc_lathe",
   "name": "LinuxCNC lathe",
-  "description": "Millimetre LinuxCNC lathe dialect. Absolute moves, diameter mode (G7), ZX plane (G18) and feed per minute (G94). Constant surface speed is G96 D max-rpm S metres/min; direct rpm is G97. Tool change is T and M6, then G43. IJK arcs in the ZX plane. No rotary axis.",
+  "description": "Millimetre LinuxCNC lathe dialect. Absolute moves, diameter mode (G7), ZX plane (G18) and feed per minute (G94). Constant surface speed is G96 D max-rpm S metres/min; direct rpm is G97. Tool change is T and M6, then G43. IJK arcs in the ZX plane. Single-point threading is G33 with the lead on K. No rotary axis.",
   "units": "mm",
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 4, "feed": 4, "dwell": 3 },
@@ -45,6 +45,7 @@
     "spindle_off": ["M5"],
     "tool_change": ["T{tool} M6", "G43"],
     "arc_flip": false,
-    "home": ["G53 G0 X0 Z0"]
+    "home": ["G53 G0 X0 Z0"],
+    "thread": { "code": "G33", "lead_word": "K" }
   }
 }

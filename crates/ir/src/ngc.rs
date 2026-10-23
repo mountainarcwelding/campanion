@@ -206,6 +206,7 @@ impl Writer {
             ClMotion::Linear { to, feed, .. } => self.write_xyz("G1", to.tip(), Some(*feed)),
             ClMotion::Arc { to, plane, center, sense, feed, .. } => self.write_arc(*sense, *plane, to.tip(), *center, *feed, &[]),
             ClMotion::Helix { to, plane, center, sense, sweep, feed, .. } => self.write_helix(*sense, *plane, to.tip(), *center, *sweep, *feed, &[]),
+            ClMotion::Thread { .. } => Err(invalid("synchronised thread moves are not written by the NGC test sink")),
         }
     }
 

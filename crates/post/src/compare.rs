@@ -122,6 +122,9 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                         CurveCheck { setup, start_angle: prev_angle, end_angle, ir_feed: *feed, angle_tol, post },
                     )?;
                 }
+                ClMotion::Thread { lead, .. } => {
+                    take_thread(&motions, &mut cursor, part_end, *lead, tol, index, drop_z, post, end_angle, angle_tol, setup)?;
+                }
             }
             part = Some(part_end);
             written = Some(written_end);
@@ -184,7 +187,7 @@ fn take_line(
     let (got_rapid, got, got_angle, got_feed, got_inverse) = match mv {
         ReadMove::Rapid { end, feed, rotary, inverse_time } => (true, *end, *rotary, *feed, *inverse_time),
         ReadMove::Linear { end, feed, rotary, inverse_time } => (false, *end, *rotary, *feed, *inverse_time),
-        ReadMove::Arc { .. } => return Err(invalid(format!("motion {index}: expected a line"))),
+        ReadMove::Arc { .. } | ReadMove::Thread { .. } => return Err(invalid(format!("motion {index}: expected a line"))),
         _ => return Err(invalid(format!("motion {index}: expected a line"))),
     };
     if got_rapid != rapid {
@@ -371,14 +374,51 @@ fn forward_from(start: Xyz, point: Xyz, center: Xyz, plane: Plane, sense: ArcSen
 }
 
 fn is_motion(move_: &ReadMove) -> bool {
-    matches!(move_, ReadMove::Rapid { .. } | ReadMove::Linear { .. } | ReadMove::Arc { .. })
+    matches!(move_, ReadMove::Rapid { .. } | ReadMove::Linear { .. } | ReadMove::Arc { .. } | ReadMove::Thread { .. })
 }
 
 fn end_of(move_: &ReadMove) -> Xyz {
     match move_ {
-        ReadMove::Rapid { end, .. } | ReadMove::Linear { end, .. } | ReadMove::Arc { end, .. } => *end,
+        ReadMove::Rapid { end, .. } | ReadMove::Linear { end, .. } | ReadMove::Arc { end, .. } | ReadMove::Thread { end, .. } => *end,
         ReadMove::Dwell { .. } | ReadMove::Other { .. } => [0.0, 0.0, 0.0],
     }
+}
+
+fn take_thread(
+    moves: &[&ReadMove],
+    cursor: &mut usize,
+    end: Xyz,
+    lead: f64,
+    tol: f64,
+    index: usize,
+    drop_z: bool,
+    post: &PostDef,
+    angle: Option<f64>,
+    angle_tol: f64,
+    setup: Option<&RotarySetup>,
+) -> Result<()> {
+    let Some(mv) = moves.get(*cursor).copied() else {
+        return Err(invalid(format!("motion {index}: missing g-code")));
+    };
+    *cursor += 1;
+    let ReadMove::Thread { end: got, lead: got_lead, rotary, .. } = mv else {
+        return Err(invalid(format!("motion {index}: expected a thread move")));
+    };
+    let got = map_tip(*got, *rotary, angle, setup, index)?;
+    if let Some(expect) = angle {
+        check_angle(*rotary, expect, angle_tol, index)?;
+    }
+    let got = project(got, drop_z);
+    let end = project(end, drop_z);
+    if geom::dist3(got, end) > tol {
+        return Err(invalid(format!("motion {index}: end differs by {:.6} mm", geom::dist3(got, end))));
+    }
+    let quantum = 10_f64.powi(-i32::from(post.linear_decimals()));
+    let limit = tol.max(quantum * 0.51);
+    if (got_lead - lead).abs() > limit {
+        return Err(invalid(format!("motion {index}: lead {got_lead} differs from {lead}")));
+    }
+    Ok(())
 }
 
 fn tip(pose: Pose) -> Xyz {
@@ -388,7 +428,11 @@ fn tip(pose: Pose) -> Xyz {
 
 fn pose_of(motion: &ClMotion) -> Pose {
     match motion {
-        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => *to,
+        ClMotion::Rapid { to, .. }
+        | ClMotion::Linear { to, .. }
+        | ClMotion::Arc { to, .. }
+        | ClMotion::Helix { to, .. }
+        | ClMotion::Thread { to, .. } => *to,
     }
 }
 
@@ -439,7 +483,7 @@ fn check_feed_number(got: Option<f64>, expected: f64, decimals: u8, index: usize
 
 fn move_angle(mv: &ReadMove) -> Option<f64> {
     match mv {
-        ReadMove::Rapid { rotary, .. } | ReadMove::Linear { rotary, .. } | ReadMove::Arc { rotary, .. } => *rotary,
+        ReadMove::Rapid { rotary, .. } | ReadMove::Linear { rotary, .. } | ReadMove::Arc { rotary, .. } | ReadMove::Thread { rotary, .. } => *rotary,
         ReadMove::Dwell { .. } | ReadMove::Other { .. } => None,
     }
 }
@@ -447,13 +491,16 @@ fn move_angle(mv: &ReadMove) -> Option<f64> {
 fn move_feed(mv: &ReadMove) -> Option<f64> {
     match mv {
         ReadMove::Rapid { feed, .. } | ReadMove::Linear { feed, .. } | ReadMove::Arc { feed, .. } => *feed,
-        ReadMove::Dwell { .. } | ReadMove::Other { .. } => None,
+        ReadMove::Thread { .. } | ReadMove::Dwell { .. } | ReadMove::Other { .. } => None,
     }
 }
 
 fn move_inverse(mv: &ReadMove) -> bool {
     match mv {
-        ReadMove::Rapid { inverse_time, .. } | ReadMove::Linear { inverse_time, .. } | ReadMove::Arc { inverse_time, .. } => *inverse_time,
+        ReadMove::Rapid { inverse_time, .. }
+        | ReadMove::Linear { inverse_time, .. }
+        | ReadMove::Arc { inverse_time, .. }
+        | ReadMove::Thread { inverse_time, .. } => *inverse_time,
         ReadMove::Dwell { .. } | ReadMove::Other { .. } => false,
     }
 }

@@ -1,0 +1,411 @@
+{
+  "format": "campanion-ir/1",
+  "program": {
+    "name": "turn_thread",
+    "tools": [
+      {
+        "id": 1,
+        "name": "thread",
+        "diameter": null,
+        "kerf": null
+      }
+    ],
+    "machine": null,
+    "toolpaths": [
+      {
+        "name": "thread",
+        "tool_id": 1,
+        "compensation": "computed",
+        "feeds": {
+          "cut": 100.0,
+          "lead_in": null,
+          "lead_out": null,
+          "plunge": null,
+          "retract": null
+        },
+        "pierce": null,
+        "tabs": [],
+        "blocks": [
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 1.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 0.5661937223245272
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 9.23325,
+                "y": 0.0,
+                "z": 0.5661937223245272
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "thread",
+            "to": {
+              "tip": {
+                "x": 9.23325,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "lead": 2.5
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 1.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 0.3865052786687576
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 8.91565175105043,
+                "y": 0.0,
+                "z": 0.3865052786687576
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "thread",
+            "to": {
+              "tip": {
+                "x": 8.91565175105043,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "lead": 2.5
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 1.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 0.24862548642374882
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 8.671950043296563,
+                "y": 0.0,
+                "z": 0.24862548642374882
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "thread",
+            "to": {
+              "tip": {
+                "x": 8.671950043296563,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "lead": 2.5
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 1.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 0.1323874446490545
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 8.4665,
+                "y": 0.0,
+                "z": 0.1323874446490545
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "thread",
+            "to": {
+              "tip": {
+                "x": 8.4665,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "lead": 2.5
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": -16.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 11.0,
+                "y": 0.0,
+                "z": 1.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          }
+        ]
+      }
+    ],
+    "channel_programs": [],
+    "syncs": [],
+    "turning": {
+      "spindles": [
+        {
+          "name": "main",
+          "work_zero_z": 0.0,
+          "max_rpm": 3000.0,
+          "reversed": false
+        }
+      ],
+      "heads": [
+        {
+          "name": "turret1",
+          "axes": [
+            "x",
+            "z"
+          ],
+          "stations": 12,
+          "live_tooling": false
+        }
+      ],
+      "stock": {
+        "kind": "bar",
+        "diameter": 20.0,
+        "length": 30.0
+      },
+      "inserts": [],
+      "bindings": [
+        {
+          "toolpath": 0,
+          "spindle": "main",
+          "head": "turret1",
+          "channel": 0,
+          "speed": {
+            "mode": "rpm",
+            "rpm": 800.0
+          }
+        }
+      ],
+      "diameter_mode": true
+    }
+  }
+}

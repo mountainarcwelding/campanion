@@ -272,6 +272,11 @@ fn map_block(block: &ClBlock, setup: &RotarySetup, angle_deg: f64, chord_mm: f64
             *cursor = Some(to.tip());
             Ok(vec![ClBlock::Motion(ClMotion::Linear { to: mapped, feed: *feed, role: *role })])
         }
+        ClBlock::Motion(ClMotion::Thread { to, lead }) => {
+            let mapped = map_machine_pose(setup, *to, angle_deg)?;
+            *cursor = Some(to.tip());
+            Ok(vec![ClBlock::Motion(ClMotion::Thread { to: mapped, lead: *lead })])
+        }
         ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role }) => {
             map_curve(Curve::Arc, *to, *plane, *center, *sense, None, *feed, *role, setup, angle_deg, chord_mm, cursor)
         }
@@ -524,9 +529,13 @@ fn machine_tip(setup: &RotarySetup, pose: Pose) -> Result<Vec3, CliError> {
 
 fn block_pose(block: &ClBlock) -> Option<Pose> {
     match block {
-        ClBlock::Motion(ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. }) => {
-            Some(*to)
-        }
+        ClBlock::Motion(
+            ClMotion::Rapid { to, .. }
+            | ClMotion::Linear { to, .. }
+            | ClMotion::Arc { to, .. }
+            | ClMotion::Helix { to, .. }
+            | ClMotion::Thread { to, .. },
+        ) => Some(*to),
         ClBlock::Event(_) => None,
     }
 }

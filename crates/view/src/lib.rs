@@ -933,7 +933,11 @@ fn record_event(scene: &mut Scene, toolpath: usize, event: &Event, cursor: Optio
 
 fn motion_pose(motion: &ClMotion) -> &campanion_ir::Pose {
     match motion {
-        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => to,
+        ClMotion::Rapid { to, .. }
+        | ClMotion::Linear { to, .. }
+        | ClMotion::Arc { to, .. }
+        | ClMotion::Helix { to, .. }
+        | ClMotion::Thread { to, .. } => to,
     }
 }
 
@@ -960,7 +964,7 @@ fn stroke_from_motion(
     let end_xy = [end[0], end[1]];
     let (points, rapid) = match motion {
         ClMotion::Rapid { .. } => (vec![start_xy, end_xy], true),
-        ClMotion::Linear { .. } => (vec![start_xy, end_xy], false),
+        ClMotion::Linear { .. } | ClMotion::Thread { .. } => (vec![start_xy, end_xy], false),
         ClMotion::Arc { plane, center, sense, .. } => {
             let points = plan_curve(start_xy, end_xy, center, sense, plane, None, tol);
             (points, false)
@@ -985,7 +989,7 @@ fn stroke_from_motion(
 /// Heights for every plan point. Lines keep the real endpoint Z. Arcs and helices follow XY arc length.
 fn heights_for(motion: &ClMotion, points: &[[f64; 2]], z_start: f64, z_end: f64) -> Vec<f64> {
     match motion {
-        ClMotion::Rapid { .. } | ClMotion::Linear { .. } => endpoint_heights(points, z_start, z_end),
+        ClMotion::Rapid { .. } | ClMotion::Linear { .. } | ClMotion::Thread { .. } => endpoint_heights(points, z_start, z_end),
         ClMotion::Arc { .. } | ClMotion::Helix { .. } => arc_length_heights(points, z_start, z_end),
     }
 }

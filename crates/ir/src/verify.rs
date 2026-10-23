@@ -393,6 +393,10 @@ fn verify_cl_motion(toolpath: usize, block: usize, motion: &ClMotion, cursor: &m
             let length = arc_or_line(toolpath, block, start, tip, *center, *plane, *sense, Some(*sweep), out);
             add_motion(out, length, false, Some(*feed));
         }
+        ClMotion::Thread { .. } => {
+            let length = distance(start, tip);
+            add_motion(out, length, false, None);
+        }
     }
     include_point(out, tip);
     *cursor = Some(tip);
@@ -513,7 +517,11 @@ fn vec_is_finite(value: Vec3) -> bool {
 
 fn motion_end(motion: &ClMotion) -> Pose {
     match motion {
-        ClMotion::Rapid { to, .. } | ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } => *to,
+        ClMotion::Rapid { to, .. }
+        | ClMotion::Linear { to, .. }
+        | ClMotion::Arc { to, .. }
+        | ClMotion::Helix { to, .. }
+        | ClMotion::Thread { to, .. } => *to,
     }
 }
 
