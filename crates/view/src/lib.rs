@@ -9,11 +9,13 @@
 //! are tessellated so the chord error stays within the requested tolerance. Playback then reveals
 //! the scene by arc length, and [`View`] maps world millimetres onto a viewport. A rotary setup
 //! adds the axis segment through the centre, across the toolpath extent, and either the distinct
-//! index angles or the continuous angle range.
+//! index angles or the continuous angle range. A turning setup is an XZ half-section: Z to the
+//! right, radius upward. Stroke points are `(tip.z, tip.x)`, ZX arcs are tessellated in that
+//! plane, and [`LathePreview`] carries the stock, the finished section, and the removed region.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAxisKind, RotarySetup};
+use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAxisKind, RotarySetup, TurningSetup};
 
 /// Motions whose XY travel is at or below this (millimetres) are vertical feeds.
 ///
@@ -66,11 +68,14 @@ pub struct Stroke {
     /// Index of the source toolpath in program order.
     pub toolpath: usize,
     /// Plan-view polyline, including the start and the exact end. Y is up.
+    ///
+    /// A turning scene stores `(z, x)` instead, so radius is up and Z points right.
     pub points: Vec<[f64; 2]>,
-    /// Z of each point in [`Stroke::points`], in millimetres. Always the same length as `points`.
+    /// Height of each point in [`Stroke::points`], in millimetres. Always the same length as `points`.
     ///
     /// A line stores the exact endpoint heights. An arc or helix stores heights interpolated by
-    /// XY arc length from `z_start` to `z_end`.
+    /// plan length from `z_start` to `z_end`. A mill scene stores Z. A turning scene stores Y,
+    /// because Z is already the horizontal plan coordinate.
     pub zs: Vec<f64>,
     /// Z of the first point, in millimetres.
     pub z_start: f64,
@@ -157,6 +162,36 @@ impl RotaryPreview {
     }
 }
 
+/// XZ half-section of a turning program, in the `(z, radius)` plane.
+///
+/// Z grows to the right and radius grows upward. The spindle axis is the line at radius 0.
+/// [`LathePreview::stock`] is the bar or tube blank. [`LathePreview::part`] is the finished
+/// section closed down to the axis, or to the tube bore. [`LathePreview::removed`] is the blank
+/// minus that part, one convex trapezoid per Z strip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LathePreview {
+    /// Closed stock polygon, `(z, radius)`. A bar runs from radius 0; a tube from the bore.
+    pub stock: Vec<[f64; 2]>,
+    /// Closed finished section: the profile plus the axis or bore closure.
+    pub part: Vec<[f64; 2]>,
+    /// Stock minus part. Empty when the setup has no finished section. Several pieces when a
+    /// step, a facing slab, or a chuck-side remainder splits the region.
+    pub removed: Vec<Vec<[f64; 2]>>,
+    /// Spindle centre line `(start, end)` at radius 0, spanning the stock, the section, and any
+    /// toolpath Z passed in as `bounds_z`.
+    pub axis: ([f64; 2], [f64; 2]),
+}
+
+impl LathePreview {
+    /// Convex trapezoids covering [`LathePreview::part`], from low Z to high Z.
+    ///
+    /// The outline in [`LathePreview::part`] can be concave at a shoulder. Each returned polygon
+    /// is a trapezoid, so a fill that only accepts convex shapes still covers the section.
+    pub fn part_fill(&self) -> Vec<Vec<[f64; 2]>> {
+        polygon_strips(&self.part)
+    }
+}
+
 /// A pierce: the plan position where a process turns on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Marker {
@@ -189,8 +224,9 @@ pub struct Scene {
     /// Axis-aligned bounds of every stroke point, rapids included. `None` when nothing was drawn.
     /// The pair is `(min_xy, max_xy)`.
     pub bounds: Option<([f64; 2], [f64; 2])>,
-    /// Min and max Z of every cut and plunge point, in millimetres. Rapids are left out.
-    /// `None` when the program never cuts or plunges.
+    /// Min and max stored height of every cut and plunge point, in millimetres. Rapids are left out.
+    /// `None` when the program never cuts or plunges. This is Z on a mill scene and Y on a turning
+    /// scene (0 for ordinary XZ work).
     pub z_range: Option<(f64, f64)>,
     /// Sum of [`Stroke::length`], in millimetres.
     pub total_length: f64,
@@ -198,6 +234,8 @@ pub struct Scene {
     pub names: Vec<String>,
     /// Rotary axis and angles when the program has a setup. `None` for a 3-axis program.
     pub rotary: Option<RotaryPreview>,
+    /// XZ half-section when the program is a turning program. `None` for a mill program.
+    pub lathe: Option<LathePreview>,
 }
 
 /// Parse a program and build its preview scene.
@@ -232,11 +270,18 @@ pub fn load_scene(json: &str, arc_tol: f64) -> Result<Scene, String> {
 /// When the program has a rotary setup, each stroke also stores the rotary angle along the move
 /// (empty for a 3-axis pose). The scene's [`RotaryPreview`] is the axis segment through the
 /// setup centre, across the toolpath extent, plus the index list or the continuous range.
+///
+/// A turning program uses a different plan plane. Stroke points are `(tip.z, tip.x)` so Z points
+/// right and radius points up. The stored height of each point is Y (0 on XZ work), which keeps
+/// the polyline length equal to the tool travel. Arcs and helices in [`Plane::Zx`] are tessellated
+/// in that plane; other planes stay a chord. [`LathePreview`] is set from the turning setup.
 pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     let tol = sanitize_tol(arc_tol);
+    let lathe_mode = doc.program().turning().is_some();
     let mut scene = empty_scene();
     let mut bounds = BoundsAcc::new();
     let mut z_range = ZRangeAcc::new();
+    let mut path_z = ZRangeAcc::new();
     let mut cursor: Option<Placed> = None;
     let mut samples = Vec::new();
 
@@ -249,6 +294,9 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
                     let Some(end) = motion_tip(motion) else {
                         continue;
                     };
+                    if lathe_mode {
+                        path_z.include(end[2]);
+                    }
                     let end_angle = motion_angle(motion);
                     let Some(start) = cursor else {
                         if let Some(angle) = end_angle {
@@ -262,10 +310,23 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
                         let rapid = matches!(motion, ClMotion::Rapid { .. });
                         samples.push(RotarySample { start_deg, end_deg: angle, rapid });
                     }
-                    push_stroke(&mut scene, &mut bounds, &mut z_range, &mut labeled, toolpath, motion, start.at, end, start.angle, end_angle, tol);
+                    push_stroke(
+                        &mut scene,
+                        &mut bounds,
+                        &mut z_range,
+                        &mut labeled,
+                        toolpath,
+                        motion,
+                        start.at,
+                        end,
+                        start.angle,
+                        end_angle,
+                        tol,
+                        lathe_mode,
+                    );
                     cursor = Some(Placed { at: end, angle: end_angle });
                 }
-                ClBlock::Event(event) => record_event(&mut scene, toolpath, event, cursor.as_ref().map(|placed| placed.at)),
+                ClBlock::Event(event) => record_event(&mut scene, toolpath, event, cursor.as_ref().map(|placed| placed.at), lathe_mode),
             }
         }
     }
@@ -276,7 +337,41 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     if let Some(setup) = doc.program().rotary().copied() {
         scene.rotary = Some(rotary_preview(&setup, scene.bounds, &samples));
     }
+    if let Some(setup) = doc.program().turning() {
+        scene.lathe = lathe_preview(setup, path_z.finish());
+    }
     scene
+}
+
+/// Stock, finished section, and removed material for one lathe setup.
+///
+/// Returns `None` when the setup has neither stock nor a finished section.
+///
+/// The blank occupies Z in `[-length, front]`. `front` is 0, or the greatest section Z when that
+/// is past the finished face. `bounds_z` is the toolpath Z range. It extends the spindle line and
+/// does not add facing stock: a retract past the face is air, not a longer bar. A tube closes the
+/// part on the bore radius; a bar closes it on the axis.
+pub fn lathe_preview(setup: &TurningSetup, bounds_z: Option<(f64, f64)>) -> Option<LathePreview> {
+    let section = setup.section().map(campanion_ir::TurnSection::points);
+    let stock = setup.stock();
+    if stock.is_none() && section.is_none() {
+        return None;
+    }
+
+    let (z_back, z_front, r_inner, r_outer, r_close, have_stock) = if let Some(stock) = stock {
+        let front = stock_front(section);
+        (stock_back(stock.length()), front, stock.inner_radius(), stock.outer_radius(), stock.inner_radius(), true)
+    } else {
+        let points = section?;
+        let (lo, hi) = z_extent(points)?;
+        (lo, hi.max(0.0), 0.0, 0.0, 0.0, false)
+    };
+
+    let stock_poly = if have_stock { rectangle(z_back, z_front, r_inner, r_outer) } else { Vec::new() };
+    let part = section.map(|points| close_profile(points, r_close)).unwrap_or_default();
+    let removed = if stock_poly.len() >= 3 && part.len() >= 3 { stock_minus_part(&stock_poly, &part) } else { Vec::new() };
+    let axis = axis_span(z_back, z_front, section, bounds_z);
+    Some(LathePreview { stock: stock_poly, part, removed, axis })
 }
 
 /// Join labels that land on the same plan point.
@@ -453,9 +548,11 @@ pub fn project(p: [f64; 2], z: f64, projection: Projection) -> [f64; 2] {
     }
 }
 
-/// Axis-aligned bounds of every stroke point after [`project`].
+/// Axis-aligned bounds of every stroke point after [`project`], plus a rotary axis or a lathe section.
 ///
-/// Rapids are included, matching [`Scene::bounds`]. `None` when the scene has no finite projected point.
+/// Rapids are included, matching [`Scene::bounds`]. Stock, the finished section, the removed
+/// region, and the spindle line are included so a turning scene fits the blank. `None` when the
+/// scene has no finite projected point.
 pub fn projected_bounds(scene: &Scene, projection: Projection) -> Option<([f64; 2], [f64; 2])> {
     let mut bounds = BoundsAcc::new();
     for stroke in &scene.strokes {
@@ -467,6 +564,18 @@ pub fn projected_bounds(scene: &Scene, projection: Projection) -> Option<([f64; 
     if let Some((start, end)) = scene.rotary.as_ref().and_then(|rotary| rotary.line) {
         bounds.include(project([start[0], start[1]], start[2], projection));
         bounds.include(project([end[0], end[1]], end[2], projection));
+    }
+    if let Some(lathe) = &scene.lathe {
+        for point in lathe.stock.iter().chain(lathe.part.iter()) {
+            bounds.include(project(*point, 0.0, projection));
+        }
+        for polygon in &lathe.removed {
+            for point in polygon {
+                bounds.include(project(*point, 0.0, projection));
+            }
+        }
+        bounds.include(project(lathe.axis.0, 0.0, projection));
+        bounds.include(project(lathe.axis.1, 0.0, projection));
     }
     bounds.finish()
 }
@@ -851,6 +960,7 @@ fn empty_scene() -> Scene {
         total_length: 0.0,
         names: Vec::new(),
         rotary: None,
+        lathe: None,
     }
 }
 
@@ -883,8 +993,9 @@ fn push_stroke(
     start_angle: Option<f64>,
     end_angle: Option<f64>,
     tol: f64,
+    lathe: bool,
 ) {
-    let stroke = stroke_from_motion(toolpath, motion, start, end, start_angle, end_angle, tol);
+    let stroke = stroke_from_motion(toolpath, motion, start, end, start_angle, end_angle, tol, lathe);
     if stroke.points.is_empty() {
         return;
     }
@@ -914,13 +1025,13 @@ fn push_stroke(
     scene.strokes.push(stroke);
 }
 
-fn record_event(scene: &mut Scene, toolpath: usize, event: &Event, cursor: Option<[f64; 3]>) {
+fn record_event(scene: &mut Scene, toolpath: usize, event: &Event, cursor: Option<[f64; 3]>, lathe: bool) {
     match event {
         Event::ProcessOn { .. } => {
             let Some(cursor) = cursor else {
                 return;
             };
-            let at = [cursor[0], cursor[1]];
+            let at = plan_point(cursor, lathe);
             if !at[0].is_finite() || !at[1].is_finite() {
                 return;
             }
@@ -951,6 +1062,11 @@ fn motion_angle(motion: &ClMotion) -> Option<f64> {
     motion_pose(motion).rotary().filter(|deg| deg.is_finite())
 }
 
+/// Plan point for one tip. A lathe scene maps `(z, x)` so radius is up and Z is to the right.
+fn plan_point(tip: [f64; 3], lathe: bool) -> [f64; 2] {
+    if lathe { [tip[2], tip[0]] } else { [tip[0], tip[1]] }
+}
+
 fn stroke_from_motion(
     toolpath: usize,
     motion: &ClMotion,
@@ -959,22 +1075,25 @@ fn stroke_from_motion(
     start_angle: Option<f64>,
     end_angle: Option<f64>,
     tol: f64,
+    lathe: bool,
 ) -> Stroke {
-    let start_xy = [start[0], start[1]];
-    let end_xy = [end[0], end[1]];
+    let start_xy = plan_point(start, lathe);
+    let end_xy = plan_point(end, lathe);
+    // On a lathe the plan already holds Z and X, so the stored height is Y. Mill scenes keep Z.
+    let (height_start, height_end) = if lathe { (start[1], end[1]) } else { (start[2], end[2]) };
     let (points, rapid) = match motion {
         ClMotion::Rapid { .. } => (vec![start_xy, end_xy], true),
         ClMotion::Linear { .. } | ClMotion::Thread { .. } => (vec![start_xy, end_xy], false),
         ClMotion::Arc { plane, center, sense, .. } => {
-            let points = plan_curve(start_xy, end_xy, center, sense, plane, None, tol);
+            let points = plan_curve(start_xy, end_xy, center, sense, plane, None, tol, lathe);
             (points, false)
         }
         ClMotion::Helix { plane, center, sense, sweep, .. } => {
-            let points = plan_curve(start_xy, end_xy, center, sense, plane, Some(*sweep), tol);
+            let points = plan_curve(start_xy, end_xy, center, sense, plane, Some(*sweep), tol, lathe);
             (points, false)
         }
     };
-    let zs = heights_for(motion, &points, start[2], end[2]);
+    let zs = heights_for(motion, &points, height_start, height_end);
     let angles = match end_angle.filter(|angle| angle.is_finite()) {
         Some(end_angle) => {
             let start_angle = start_angle.filter(|angle| angle.is_finite()).unwrap_or(end_angle);
@@ -983,7 +1102,7 @@ fn stroke_from_motion(
         None => Vec::new(),
     };
     let length = polyline_length_zs(&points, &zs);
-    Stroke { kind: stroke_kind(rapid, &points), toolpath, points, zs, z_start: start[2], z_end: end[2], angles, length }
+    Stroke { kind: stroke_kind(rapid, &points), toolpath, points, zs, z_start: height_start, z_end: height_end, angles, length }
 }
 
 /// Heights for every plan point. Lines keep the real endpoint Z. Arcs and helices follow XY arc length.
@@ -1047,13 +1166,20 @@ fn plan_curve(
     plane: &Plane,
     sweep: Option<f64>,
     tol: f64,
+    lathe: bool,
 ) -> Vec<[f64; 2]> {
-    let center_xy = [center.x(), center.y()];
-    let xy_plane = matches!(plane, Plane::Xy);
-    if !xy_plane || !center_xy[0].is_finite() || !center_xy[1].is_finite() {
+    // ZX angles match the plan `(z, x)` once radius is up: CCW from +Z toward +X, viewed from +Y.
+    let center_plane = if lathe && matches!(plane, Plane::Zx) {
+        [center.z(), center.x()]
+    } else if !lathe && matches!(plane, Plane::Xy) {
+        [center.x(), center.y()]
+    } else {
+        return vec![start, end];
+    };
+    if !center_plane[0].is_finite() || !center_plane[1].is_finite() {
         return vec![start, end];
     }
-    xy_arc(XyArc { start, end, center: center_xy, ccw: matches!(sense, ArcSense::Ccw), sweep, tol })
+    xy_arc(XyArc { start, end, center: center_plane, ccw: matches!(sense, ArcSense::Ccw), sweep, tol })
 }
 
 fn stroke_kind(rapid: bool, points: &[[f64; 2]]) -> StrokeKind {
@@ -1337,6 +1463,337 @@ fn shortest_angle(start: f64, end: f64) -> f64 {
     delta
 }
 
+/// Z samples this close are one station. Keeps a vertical shoulder from splitting a strip.
+const LATHE_Z_EPS: f64 = 1e-9;
+/// Radii this close are the same wall when subtracting stock and part.
+const LATHE_R_EPS: f64 = 1e-9;
+
+fn stock_back(length: f64) -> f64 {
+    if length.is_finite() { -length } else { 0.0 }
+}
+
+/// Finished-face Z of the blank. Facing stock is the section past Z = 0, and nothing more.
+fn stock_front(section: Option<&[[f64; 2]]>) -> f64 {
+    section.and_then(z_extent).map_or(0.0, |(_lo, hi)| hi.max(0.0))
+}
+
+fn z_extent(points: &[[f64; 2]]) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for point in points {
+        if point[0].is_finite() {
+            lo = lo.min(point[0]);
+            hi = hi.max(point[0]);
+        }
+    }
+    if lo.is_finite() && hi.is_finite() { Some((lo, hi)) } else { None }
+}
+
+fn axis_span(z_back: f64, z_front: f64, section: Option<&[[f64; 2]]>, bounds_z: Option<(f64, f64)>) -> ([f64; 2], [f64; 2]) {
+    let mut lo = z_back.min(z_front);
+    let mut hi = z_back.max(z_front);
+    if let Some((section_lo, section_hi)) = section.and_then(z_extent) {
+        lo = lo.min(section_lo);
+        hi = hi.max(section_hi);
+    }
+    if let Some((bound_lo, bound_hi)) = bounds_z
+        && bound_lo.is_finite()
+        && bound_hi.is_finite()
+    {
+        lo = lo.min(bound_lo.min(bound_hi));
+        hi = hi.max(bound_lo.max(bound_hi));
+    }
+    ([lo, 0.0], [hi, 0.0])
+}
+
+fn rectangle(z0: f64, z1: f64, r0: f64, r1: f64) -> Vec<[f64; 2]> {
+    let (z0, z1) = if z0 <= z1 { (z0, z1) } else { (z1, z0) };
+    let (r0, r1) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
+    vec![[z0, r0], [z1, r0], [z1, r1], [z0, r1]]
+}
+
+/// Section polyline plus a leg down to `r_close` at both ends.
+fn close_profile(section: &[[f64; 2]], r_close: f64) -> Vec<[f64; 2]> {
+    let mut part = Vec::with_capacity(section.len() + 2);
+    for point in section {
+        push_distinct(&mut part, *point);
+    }
+    let Some(first) = part.first().copied() else {
+        return part;
+    };
+    let Some(last) = part.last().copied() else {
+        return part;
+    };
+    if r_close.is_finite() {
+        push_distinct(&mut part, [last[0], r_close]);
+        push_distinct(&mut part, [first[0], r_close]);
+    }
+    if part.len() >= 2 && same_point(part[0], part[part.len() - 1]) {
+        part.pop();
+    }
+    part
+}
+
+fn push_distinct(points: &mut Vec<[f64; 2]>, point: [f64; 2]) {
+    if !is_finite2(point) {
+        return;
+    }
+    if points.last().is_some_and(|last| same_point(*last, point)) {
+        return;
+    }
+    points.push(point);
+}
+
+/// Absolute shoelace area. A polygon shorter than a triangle has area 0.
+fn polygon_area(poly: &[[f64; 2]]) -> f64 {
+    let n = poly.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for index in 0..n {
+        let Some(start) = poly.get(index) else {
+            break;
+        };
+        let Some(end) = poly.get((index + 1) % n) else {
+            break;
+        };
+        sum += start[0] * end[1] - end[0] * start[1];
+    }
+    (sum * 0.5).abs()
+}
+
+#[derive(Clone, Copy)]
+struct ProfileEdge {
+    z_lo: f64,
+    z_hi: f64,
+    a: [f64; 2],
+    b: [f64; 2],
+    /// 0 is the subject (stock, or the part when filling it). 1 is the clip (the finished part).
+    class: u8,
+}
+
+#[derive(Clone, Copy)]
+struct ProfileWall {
+    r0: f64,
+    r_mid: f64,
+    r1: f64,
+}
+
+#[derive(Clone, Copy)]
+struct ProfileSpan {
+    lo: ProfileWall,
+    hi: ProfileWall,
+}
+
+/// Trapezoids covering `polygon`.
+fn polygon_strips(polygon: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
+    if polygon.len() < 3 {
+        return Vec::new();
+    }
+    stock_minus_part(polygon, &[])
+}
+
+/// `stock` minus `part`, as convex Z-strips.
+///
+/// Sample Z is every vertex plus each place a part edge crosses a stock edge. Between two sample
+/// Z values the walls are straight and do not cross, so one vertical cut classifies the whole
+/// strip. A connected section covers every Z between its ends, and stock past either end becomes
+/// the facing slab or the chuck-side remainder.
+fn stock_minus_part(stock: &[[f64; 2]], part: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
+    if stock.len() < 3 {
+        return Vec::new();
+    }
+    let mut edges = profile_edges(stock, 0);
+    edges.extend(profile_edges(part, 1));
+    edges.sort_by(|left, right| left.z_lo.total_cmp(&right.z_lo).then(left.z_hi.total_cmp(&right.z_hi)));
+    let samples = sample_z(stock, part);
+    if samples.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut active: Vec<usize> = Vec::new();
+    let mut next_edge = 0;
+    let mut removed = Vec::new();
+    for window in samples.windows(2) {
+        let (Some(&z0), Some(&z1)) = (window.first(), window.get(1)) else {
+            break;
+        };
+        if !(z1 - z0 > LATHE_Z_EPS) {
+            continue;
+        }
+        let z_mid = (z0 + z1) * 0.5;
+        while next_edge < edges.len() && edges.get(next_edge).is_some_and(|edge| edge.z_lo <= z_mid) {
+            active.push(next_edge);
+            next_edge += 1;
+        }
+        active.retain(|index| edges.get(*index).is_some_and(|edge| edge.z_lo < z_mid && edge.z_hi > z_mid));
+
+        let mut stock_hits = Vec::new();
+        let mut part_hits = Vec::new();
+        for index in &active {
+            let Some(edge) = edges.get(*index) else {
+                continue;
+            };
+            let Some(wall) = wall_on(edge, z0, z_mid, z1) else {
+                continue;
+            };
+            if edge.class == 0 { stock_hits.push(wall) } else { part_hits.push(wall) }
+        }
+        stock_hits.sort_by(|left, right| left.r_mid.total_cmp(&right.r_mid));
+        part_hits.sort_by(|left, right| left.r_mid.total_cmp(&right.r_mid));
+        let stock_spans = pair_walls(&stock_hits);
+        let part_spans = pair_walls(&part_hits);
+        for span in subtract_spans(&stock_spans, &part_spans) {
+            if let Some(quad) = span_quad(z0, z1, span) {
+                removed.push(quad);
+            }
+        }
+    }
+    removed
+}
+
+fn profile_edges(polygon: &[[f64; 2]], class: u8) -> Vec<ProfileEdge> {
+    let mut edges = Vec::new();
+    let count = polygon.len();
+    for index in 0..count {
+        let (Some(start), Some(end)) = (polygon.get(index), polygon.get((index + 1) % count)) else {
+            break;
+        };
+        if !is_finite2(*start) || !is_finite2(*end) || (start[0] - end[0]).abs() <= LATHE_Z_EPS {
+            continue;
+        }
+        let (z_lo, z_hi) = if start[0] <= end[0] { (start[0], end[0]) } else { (end[0], start[0]) };
+        edges.push(ProfileEdge { z_lo, z_hi, a: *start, b: *end, class });
+    }
+    edges
+}
+
+fn sample_z(stock: &[[f64; 2]], part: &[[f64; 2]]) -> Vec<f64> {
+    let mut samples = Vec::new();
+    for point in stock.iter().chain(part.iter()) {
+        if point[0].is_finite() {
+            samples.push(point[0]);
+        }
+    }
+    let stock_count = stock.len();
+    let part_count = part.len();
+    for stock_index in 0..stock_count {
+        let (Some(stock_a), Some(stock_b)) = (stock.get(stock_index), stock.get((stock_index + 1) % stock_count)) else {
+            break;
+        };
+        for part_index in 0..part_count {
+            let (Some(part_a), Some(part_b)) = (part.get(part_index), part.get((part_index + 1) % part_count)) else {
+                break;
+            };
+            if let Some(z) = segments_cross_z(*stock_a, *stock_b, *part_a, *part_b) {
+                samples.push(z);
+            }
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    let mut unique = Vec::with_capacity(samples.len());
+    for z in samples {
+        if unique.last().is_none_or(|prev: &f64| (z - *prev).abs() > LATHE_Z_EPS) {
+            unique.push(z);
+        }
+    }
+    unique
+}
+
+/// Z of a proper crossing. Endpoints are already sample stations, and parallel edges are not.
+fn segments_cross_z(a0: [f64; 2], a1: [f64; 2], b0: [f64; 2], b1: [f64; 2]) -> Option<f64> {
+    if ![a0, a1, b0, b1].into_iter().all(is_finite2) {
+        return None;
+    }
+    let da = [a1[0] - a0[0], a1[1] - a0[1]];
+    let db = [b1[0] - b0[0], b1[1] - b0[1]];
+    let denom = da[0] * db[1] - da[1] * db[0];
+    if !denom.is_finite() || denom.abs() <= 1e-18 {
+        return None;
+    }
+    let delta = [b0[0] - a0[0], b0[1] - a0[1]];
+    let t = (delta[0] * db[1] - delta[1] * db[0]) / denom;
+    let u = (delta[0] * da[1] - delta[1] * da[0]) / denom;
+    if !t.is_finite() || !u.is_finite() || t <= 1e-9 || t >= 1.0 - 1e-9 || u <= 1e-9 || u >= 1.0 - 1e-9 {
+        return None;
+    }
+    let z = a0[0] + t * da[0];
+    if z.is_finite() { Some(z) } else { None }
+}
+
+fn wall_on(edge: &ProfileEdge, z0: f64, z_mid: f64, z1: f64) -> Option<ProfileWall> {
+    Some(ProfileWall { r0: edge_radius(edge, z0)?, r_mid: edge_radius(edge, z_mid)?, r1: edge_radius(edge, z1)? })
+}
+
+fn edge_radius(edge: &ProfileEdge, z: f64) -> Option<f64> {
+    let dz = edge.b[0] - edge.a[0];
+    if !dz.is_finite() || dz.abs() <= 1e-15 || !z.is_finite() {
+        return None;
+    }
+    let t = (z - edge.a[0]) / dz;
+    if !(-1e-8..=1.0 + 1e-8).contains(&t) {
+        return None;
+    }
+    let radius = edge.a[1] + t.clamp(0.0, 1.0) * (edge.b[1] - edge.a[1]);
+    if radius.is_finite() { Some(radius) } else { None }
+}
+
+fn pair_walls(hits: &[ProfileWall]) -> Vec<ProfileSpan> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index + 1 < hits.len() {
+        let (Some(lo), Some(hi)) = (hits.get(index), hits.get(index + 1)) else {
+            break;
+        };
+        if hi.r_mid > lo.r_mid + LATHE_R_EPS {
+            spans.push(ProfileSpan { lo: *lo, hi: *hi });
+        }
+        index += 2;
+    }
+    spans
+}
+
+fn subtract_spans(stock: &[ProfileSpan], parts: &[ProfileSpan]) -> Vec<ProfileSpan> {
+    let mut remaining = stock.to_vec();
+    for part in parts {
+        let mut next = Vec::new();
+        for span in remaining {
+            next.extend(subtract_one(span, *part));
+        }
+        remaining = next;
+    }
+    remaining
+}
+
+fn subtract_one(stock: ProfileSpan, part: ProfileSpan) -> Vec<ProfileSpan> {
+    let stock_lo = stock.lo.r_mid;
+    let stock_hi = stock.hi.r_mid;
+    let part_lo = part.lo.r_mid;
+    let part_hi = part.hi.r_mid;
+    if part_hi <= stock_lo + LATHE_R_EPS || part_lo >= stock_hi - LATHE_R_EPS {
+        return vec![stock];
+    }
+    if part_lo <= stock_lo + LATHE_R_EPS && part_hi >= stock_hi - LATHE_R_EPS {
+        return Vec::new();
+    }
+    if part_lo <= stock_lo + LATHE_R_EPS {
+        return vec![ProfileSpan { lo: part.hi, hi: stock.hi }];
+    }
+    if part_hi >= stock_hi - LATHE_R_EPS {
+        return vec![ProfileSpan { lo: stock.lo, hi: part.lo }];
+    }
+    vec![ProfileSpan { lo: stock.lo, hi: part.lo }, ProfileSpan { lo: part.hi, hi: stock.hi }]
+}
+
+fn span_quad(z0: f64, z1: f64, span: ProfileSpan) -> Option<Vec<[f64; 2]>> {
+    if span.hi.r_mid <= span.lo.r_mid + LATHE_R_EPS {
+        return None;
+    }
+    let quad = vec![[z0, span.lo.r0], [z1, span.lo.r1], [z1, span.hi.r1], [z0, span.hi.r0]];
+    if polygon_area(&quad) <= 1e-12 { None } else { Some(quad) }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::float_cmp)]
 mod tests {
@@ -1507,6 +1964,7 @@ mod tests {
             total_length: 20.0,
             names: vec!["path".to_string()],
             rotary: None,
+            lathe: None,
         }
     }
 
@@ -1556,6 +2014,7 @@ mod tests {
             total_length: 20.0,
             names: Vec::new(),
             rotary: None,
+            lathe: None,
         };
         let shown = visible(&bend, 15.0);
         assert_eq!(shown.len(), 1);
@@ -1585,6 +2044,7 @@ mod tests {
             total_length: length,
             names: Vec::new(),
             rotary: None,
+            lathe: None,
         };
         let half = visible(&ramp, length * 0.5);
         assert_eq!(half.len(), 1);
@@ -1835,6 +2295,7 @@ mod tests {
             total_length: 0.0,
             names: Vec::new(),
             rotary: None,
+            lathe: None,
         };
         assert!(projected_bounds(&empty, Projection::Top).is_none());
         assert!(projected_bounds(&empty, Projection::Iso).is_none());
@@ -1868,6 +2329,7 @@ mod tests {
     fn non_rotary_scene_has_no_axis_and_no_angles() {
         let scene = curve_scene();
         assert!(scene.rotary.is_none());
+        assert!(scene.lathe.is_none());
         for stroke in &scene.strokes {
             assert!(stroke.angles.is_empty(), "{:?} stored angles", stroke.kind);
         }
@@ -2057,5 +2519,194 @@ mod tests {
         assert_eq!(shown.angles.len(), shown.points.len());
         assert_close(*shown.angles.last().expect("angle"), 100.0);
         assert_pt(*shown.points.last().expect("point"), [0.0, 5.0]);
+    }
+
+    fn areas(polygons: &[Vec<[f64; 2]>]) -> f64 {
+        polygons.iter().map(|polygon| super::polygon_area(polygon)).sum()
+    }
+
+    fn stepped_bar() -> campanion_ir::TurningSetup {
+        use campanion_ir::{TurnSection, TurnStock, TurningSetup};
+        let stock = TurnStock::bar(50.0, 60.0).expect("bar");
+        let section =
+            TurnSection::try_new(vec![[0.0, 10.0], [-20.0, 10.0], [-20.0, 15.0], [-40.0, 15.0], [-40.0, 20.0], [-60.0, 20.0]]).expect("section");
+        TurningSetup::single(Some(stock), 3000.0).expect("setup").with_section(Some(section)).expect("section on setup")
+    }
+
+    #[test]
+    fn stepped_bar_half_section_matches_stock_minus_part() {
+        let preview = super::lathe_preview(&stepped_bar(), None).expect("preview");
+        assert_eq!(preview.stock, vec![[-60.0, 0.0], [0.0, 0.0], [0.0, 25.0], [-60.0, 25.0]]);
+        assert_eq!(
+            preview.part,
+            vec![[0.0, 10.0], [-20.0, 10.0], [-20.0, 15.0], [-40.0, 15.0], [-40.0, 20.0], [-60.0, 20.0], [-60.0, 0.0], [0.0, 0.0]]
+        );
+        assert_eq!(
+            preview.removed,
+            vec![
+                vec![[-60.0, 20.0], [-40.0, 20.0], [-40.0, 25.0], [-60.0, 25.0]],
+                vec![[-40.0, 15.0], [-20.0, 15.0], [-20.0, 25.0], [-40.0, 25.0]],
+                vec![[-20.0, 10.0], [0.0, 10.0], [0.0, 25.0], [-20.0, 25.0]],
+            ]
+        );
+        assert_eq!(preview.axis, ([-60.0, 0.0], [0.0, 0.0]));
+        let stock_area = super::polygon_area(&preview.stock);
+        let part_area = super::polygon_area(&preview.part);
+        assert!(
+            (areas(&preview.removed) - (stock_area - part_area)).abs() <= 1e-6,
+            "removed {} stock {stock_area} part {part_area}",
+            areas(&preview.removed)
+        );
+
+        // Toolpath Z extends the centre line only. The blank front stays on the section.
+        let extended = super::lathe_preview(&stepped_bar(), Some((-80.0, 4.0))).expect("bounds");
+        assert_eq!(extended.axis, ([-80.0, 0.0], [4.0, 0.0]));
+        assert_eq!(extended.stock, preview.stock);
+
+        // Section past the finished face lengthens the blank. A short section leaves a facing slab.
+        use campanion_ir::{TurnSection, TurnStock, TurningSetup};
+        let faced = TurnSection::try_new(vec![[2.0, 10.0], [-60.0, 10.0]]).expect("faced");
+        let faced =
+            TurningSetup::single(Some(TurnStock::bar(50.0, 60.0).expect("bar")), 3000.0).expect("setup").with_section(Some(faced)).expect("section");
+        let faced = super::lathe_preview(&faced, None).expect("faced preview");
+        assert_eq!(faced.stock, vec![[-60.0, 0.0], [2.0, 0.0], [2.0, 25.0], [-60.0, 25.0]]);
+
+        let short = TurnSection::try_new(vec![[-10.0, 12.0], [-40.0, 12.0]]).expect("short");
+        let short =
+            TurningSetup::single(Some(TurnStock::bar(50.0, 60.0).expect("bar")), 3000.0).expect("setup").with_section(Some(short)).expect("section");
+        let short = super::lathe_preview(&short, None).expect("short preview");
+        assert!(
+            short.removed.iter().any(|polygon| polygon == &vec![[-10.0, 0.0], [0.0, 0.0], [0.0, 25.0], [-10.0, 25.0]]),
+            "front slab {:?}",
+            short.removed
+        );
+        let stock_area = super::polygon_area(&short.stock);
+        let part_area = super::polygon_area(&short.part);
+        assert!((areas(&short.removed) - (stock_area - part_area)).abs() <= 1e-6);
+        assert!(super::lathe_preview(&TurningSetup::single(None, 1000.0).expect("bare"), None).is_none());
+
+        let taper = TurnSection::try_new(vec![[0.0, 10.0], [-60.0, 20.0]]).expect("taper");
+        let taper =
+            TurningSetup::single(Some(TurnStock::bar(50.0, 60.0).expect("bar")), 3000.0).expect("setup").with_section(Some(taper)).expect("section");
+        let taper = super::lathe_preview(&taper, None).expect("taper preview");
+        assert_eq!(taper.removed, vec![vec![[-60.0, 20.0], [0.0, 10.0], [0.0, 25.0], [-60.0, 25.0]]]);
+        let stock_area = super::polygon_area(&taper.stock);
+        let part_area = super::polygon_area(&taper.part);
+        assert!((areas(&taper.removed) - (stock_area - part_area)).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn tube_section_closes_on_the_bore() {
+        use campanion_ir::{TurnSection, TurnStock, TurningSetup};
+        let stock = TurnStock::tube(50.0, 20.0, 60.0).expect("tube");
+        let section = TurnSection::try_new(vec![[0.0, 16.0], [-30.0, 16.0], [-30.0, 22.0], [-60.0, 22.0]]).expect("section");
+        let setup = TurningSetup::single(Some(stock), 3000.0).expect("setup").with_section(Some(section)).expect("section");
+        let preview = super::lathe_preview(&setup, None).expect("preview");
+        assert_eq!(preview.stock, vec![[-60.0, 10.0], [0.0, 10.0], [0.0, 25.0], [-60.0, 25.0]]);
+        assert_eq!(preview.part, vec![[0.0, 16.0], [-30.0, 16.0], [-30.0, 22.0], [-60.0, 22.0], [-60.0, 10.0], [0.0, 10.0]]);
+        assert!(preview.part.iter().all(|point| point[1] >= 10.0 - 1e-9), "bore closure {:?}", preview.part);
+        assert!(!preview.part.iter().any(|point| point[1].abs() <= 1e-9), "tube must not close on the axis");
+        let stock_area = super::polygon_area(&preview.stock);
+        let part_area = super::polygon_area(&preview.part);
+        assert!((areas(&preview.removed) - (stock_area - part_area)).abs() <= 1e-6);
+        assert_eq!(preview.removed.len(), 2);
+    }
+
+    #[test]
+    fn turning_quarter_arc_tessellates_in_the_zx_plane() {
+        use std::f64::consts::FRAC_PI_2;
+
+        use campanion_ir::{
+            ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Document, Feeds, MoveRole, Plane, Program, TurnStock, TurningSetup, Vec3,
+        };
+        let stock = TurnStock::bar(40.0, 30.0).expect("bar");
+        let turning = TurningSetup::single(Some(stock), 2000.0).expect("setup");
+        let feeds = Feeds::try_new(80.0, None, None, None, None).expect("feeds");
+        let center = Vec3::new(0.0, 0.0, 0.0).expect("centre");
+        let blocks = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: pose(0.0, 0.0, -10.0),
+                plane: Plane::Zx,
+                center,
+                sense: ArcSense::Ccw,
+                feed: 80.0,
+                role: MoveRole::Cut,
+            }),
+        ];
+        let path = ClPath::try_new(Some("arc".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let program = Program::try_new(Some("arc".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new(), None)
+            .expect("program")
+            .with_turning(Some(turning))
+            .expect("turning");
+        let scene = build_scene(&Document::new(program).expect("document"), 0.05);
+        assert!(scene.lathe.is_some());
+        assert_eq!(scene.strokes.len(), 1);
+        let arc = &scene.strokes[0];
+        assert_eq!(arc.kind, StrokeKind::Cut);
+        assert!(arc.points.len() >= 3, "quarter arc needs more than the chord, got {}", arc.points.len());
+        assert_pt(arc.points[0], [0.0, 10.0]);
+        assert_pt(*arc.points.last().expect("end"), [-10.0, 0.0]);
+        for point in &arc.points {
+            assert_close(point[0].hypot(point[1]), 10.0);
+            assert!(point[0] <= 1e-9 && point[1] >= -1e-9, "quarter stays in +X and -Z, got {point:?}");
+        }
+        let deviation = max_arc_deviation(&arc.points, [0.0, 0.0], 10.0, true, FRAC_PI_2);
+        assert!(deviation <= 0.05 + 1e-9, "zx quarter deviation {deviation}");
+        let true_len = 10.0 * FRAC_PI_2;
+        assert!(arc.length > 14.0, "tessellated quarter should be longer than the chord, {}", arc.length);
+        assert!((arc.length - true_len).abs() < 0.05, "polyline {} vs arc {true_len}", arc.length);
+    }
+
+    #[test]
+    fn mill_zx_arc_stays_a_chord() {
+        use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Document, Feeds, MoveRole, Plane, Program, Vec3};
+        let feeds = Feeds::try_new(80.0, None, None, None, None).expect("feeds");
+        let blocks = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: pose(0.0, 0.0, -10.0),
+                plane: Plane::Zx,
+                center: Vec3::new(0.0, 0.0, 0.0).expect("centre"),
+                sense: ArcSense::Ccw,
+                feed: 80.0,
+                role: MoveRole::Cut,
+            }),
+        ];
+        let path = ClPath::try_new(None, None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
+        let scene = build_scene(&Document::new(program).expect("document"), 0.05);
+        assert!(scene.lathe.is_none());
+        assert_eq!(scene.strokes.len(), 1);
+        // Mill plan is XY, so this ZX arc contributes no plan curve.
+        assert_eq!(scene.strokes[0].points, vec![[10.0, 0.0], [0.0, 0.0]]);
+    }
+
+    #[test]
+    fn turn_ir_maps_strokes_into_the_half_section() {
+        let scene = load_scene(include_str!("../../post/tests/data/turn.ir.json"), 0.05).expect("turn ir");
+        let lathe = scene.lathe.clone().expect("turning setup");
+        assert!(scene.rotary.is_none());
+        assert_eq!(lathe.stock, vec![[-60.0, 0.0], [0.0, 0.0], [0.0, 25.0], [-60.0, 25.0]]);
+        assert!(lathe.part.is_empty(), "turn.ir.json stores no finished section");
+        assert!(lathe.removed.is_empty());
+        assert_eq!(lathe.axis.0[1], 0.0);
+        assert_eq!(lathe.axis.1[1], 0.0);
+        assert!(lathe.axis.0[0] <= -60.0 + 1e-9, "axis covers the chuck end, {:?}", lathe.axis);
+        assert!(lathe.axis.1[0] >= 5.0 - 1e-9, "axis covers the retract, {:?}", lathe.axis);
+
+        assert!(scene.strokes.len() >= 6, "strokes {}", scene.strokes.len());
+        assert_eq!(scene.strokes[0].points, vec![[2.0, 26.0], [0.0, -0.8]]);
+        let arc = &scene.strokes[5];
+        assert!(arc.points.len() >= 3, "zx arc was not tessellated: {}", arc.points.len());
+        assert_pt(arc.points[0], [-11.0, 23.0]);
+        assert_pt(*arc.points.last().expect("arc end"), [-14.0, 26.0]);
+        for point in &arc.points {
+            let radius = (point[0] + 14.0).hypot(point[1] - 23.0);
+            assert_close(radius, 3.0);
+        }
+        let (min, max) = projected_bounds(&scene, Projection::Top).expect("bounds");
+        assert!(min[0] <= -60.0 + 1e-6, "stock Z must be inside the fit, {min:?}");
+        assert!(max[1] >= 25.0 - 1e-6, "stock radius must be inside the fit, {max:?}");
     }
 }
