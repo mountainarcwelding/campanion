@@ -24,8 +24,8 @@ use campanion_geom::{Arc, Contour, Line, Point, Segment, Tolerance};
 
 use crate::{Result, TurnError, TurnProfile};
 
-/// Most moves one facing, roughing, or finishing call may emit.
-const MAX_MOVES: usize = 100_000;
+/// Most moves one turning call may emit.
+pub(crate) const MAX_MOVES: usize = 100_000;
 
 /// A boundary this far past the pass radius, in millimetres, actually blocks the pass.
 ///
@@ -50,6 +50,14 @@ pub enum TurnMove {
     ///
     /// `ccw` is counter-clockwise when +Z points right and +X (radius) points up.
     Arc { z: f64, x: f64, cz: f64, cx: f64, ccw: bool },
+    /// Spindle-synchronised feed to `(z, x)`.
+    ///
+    /// `lead` is millimetres per revolution. The slide stays locked to the spindle, so this is
+    /// not an ordinary [`TurnMove::Feed`]. A post may emit G32/G33, or fold a whole threading
+    /// cycle into G76. Mapping the move to a plain linear cut drops that lock.
+    Thread { z: f64, x: f64, lead: f64 },
+    /// Pause. The tool does not move. `seconds` is `>= 0`.
+    Dwell { seconds: f64 },
 }
 
 /// A programmed-point path. `start` is `(z, x)` before `moves`.
@@ -388,20 +396,20 @@ fn free_sign(side: Side) -> f64 {
     }
 }
 
-fn invalid(message: impl Into<String>) -> TurnError {
+pub(crate) fn invalid(message: impl Into<String>) -> TurnError {
     TurnError::InvalidInput(message.into())
 }
 
-fn finite(value: f64, what: &str) -> Result<()> {
+pub(crate) fn finite(value: f64, what: &str) -> Result<()> {
     if value.is_finite() { Ok(()) } else { Err(invalid(format!("{what} must be finite"))) }
 }
 
-fn positive(value: f64, what: &str) -> Result<()> {
+pub(crate) fn positive(value: f64, what: &str) -> Result<()> {
     finite(value, what)?;
     if value > 0.0 { Ok(()) } else { Err(invalid(format!("{what} must be positive"))) }
 }
 
-fn non_negative(value: f64, what: &str) -> Result<()> {
+pub(crate) fn non_negative(value: f64, what: &str) -> Result<()> {
     finite(value, what)?;
     if value >= 0.0 { Ok(()) } else { Err(invalid(format!("{what} must be >= 0"))) }
 }
@@ -970,11 +978,20 @@ fn safe_from(x: f64, free: f64, retract: f64) -> f64 {
 
 fn move_target(motion: TurnMove) -> (f64, f64) {
     match motion {
-        TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Arc { z, x, .. } => (z, x),
+        TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Arc { z, x, .. } | TurnMove::Thread { z, x, .. } => (z, x),
+        // A dwell has no endpoint. [`move_to`] handles it before asking for one.
+        TurnMove::Dwell { .. } => (f64::NAN, f64::NAN),
     }
 }
 
 fn move_to(moves: &mut Vec<TurnMove>, cursor: &mut (f64, f64), motion: TurnMove, allow_negative: bool) -> Result<()> {
+    if let TurnMove::Dwell { seconds } = motion {
+        non_negative(seconds, "dwell")?;
+        return push(moves, motion);
+    }
+    if let TurnMove::Thread { lead, .. } = motion {
+        positive(lead, "thread lead")?;
+    }
     let (z, x) = move_target(motion);
     if !z.is_finite() || !x.is_finite() {
         return Err(invalid("move coordinate is not finite"));
@@ -994,9 +1011,18 @@ fn push(moves: &mut Vec<TurnMove>, motion: TurnMove) -> Result<()> {
     if moves.len() >= MAX_MOVES {
         return Err(invalid(format!("too many moves: limit is {MAX_MOVES}")));
     }
-    let (z, x) = move_target(motion);
-    finite(z, "move z")?;
-    finite(x, "move x")?;
+    match motion {
+        TurnMove::Dwell { seconds } => non_negative(seconds, "dwell")?,
+        TurnMove::Thread { z, x, lead } => {
+            finite(z, "move z")?;
+            finite(x, "move x")?;
+            positive(lead, "thread lead")?;
+        }
+        TurnMove::Rapid { z, x } | TurnMove::Feed { z, x } | TurnMove::Arc { z, x, .. } => {
+            finite(z, "move z")?;
+            finite(x, "move x")?;
+        }
+    }
     moves.push(motion);
     Ok(())
 }
