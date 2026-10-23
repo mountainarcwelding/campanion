@@ -55,6 +55,16 @@ fn shaft_posts_linuxcnc_lathe_and_keeps_three_bindings() -> Result<(), String> {
     if turning.bindings().len() != 3 {
         return Err(format!("expected 3 bindings, found {}", turning.bindings().len()));
     }
+    let section = turning.section().ok_or("turning section is missing")?;
+    let points = section.points();
+    if points.len() < 2 {
+        return Err(format!("turning section has {} points", points.len()));
+    }
+    let first_z = points.first().map(|point| point[0]).ok_or("turning section is empty")?;
+    let last_z = points.last().map(|point| point[0]).ok_or("turning section is empty")?;
+    if first_z < last_z {
+        return Err(format!("section z runs from {first_z} to {last_z}"));
+    }
     if doc.program().toolpaths().len() != 3 {
         return Err(format!("expected 3 toolpaths, found {}", doc.program().toolpaths().len()));
     }

@@ -526,7 +526,7 @@ Direct spindle speed is revolutions per minute.
 `source` chooses the reader by extension:
 
 - `.dxf` — [`TurnProfile::from_dxf`](../crates/turn/src/profile.rs). Optional `layer`. `axis` and `step` are rejected.
-- `.svg` — `from_svg` when `layer` is omitted. A layer uses the SVG importer and `TurnProfile::from_drawing`. The SVG fit uses `linear` as its chord; the job `chord` is only the post read-back.
+- `.svg` — `from_svg` when `layer` is omitted. A layer uses the SVG importer and `TurnProfile::from_drawing`. The SVG fit uses `linear` as its chord; the job `chord` is the post read-back.
 - `.stl` — `from_mesh`. Requires `axis` (`x`, `y` or `z`) and a positive `step`. A `layer` is rejected.
 
 Drawing X is Z and drawing Y is the radius. Z = 0 is the finished front face and the part extends toward −Z. A closed drawing is opened by dropping the spindle-axis run.
@@ -547,4 +547,4 @@ Operations, in cut order. Names are unique and non-empty.
 
 Each operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`).
 
-Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ.
+Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the finished section on `turning.section`, sampled from the loaded profile at `tolerance.chord`.

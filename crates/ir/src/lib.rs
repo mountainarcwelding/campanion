@@ -37,6 +37,7 @@
 //! second spindle fit in these types: spindles and heads are lists, and the extra axes and flags
 //! are optional fields. Bar and tube stock runs from the finished front face at Z = 0 back to
 //! Z = -length. Facing allowance comes from the operation, not from the stock value.
+//! The IR stores the finished section on the turning setup when one is recorded.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -66,7 +67,7 @@ pub use rotary::{
     unwrap_angle,
 };
 pub use schema::json_schema;
-pub use turning::{Hand, Head, HeadAxis, Insert, InsertShape, Spindle, SpindleSpeed, TurnBinding, TurnInsert, TurnStock, TurningSetup};
+pub use turning::{Hand, Head, HeadAxis, Insert, InsertShape, Spindle, SpindleSpeed, TurnBinding, TurnInsert, TurnSection, TurnStock, TurningSetup};
 pub use verify::{Bounds, Issue, RefKind, VerifyOptions, VerifyReport, verify, verify_with};
 pub use wrap::{Cylinder, unwrap_pose, wrap_point, wrap_polyline};
 

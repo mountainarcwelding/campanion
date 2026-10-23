@@ -632,11 +632,55 @@ fn default_diameter_mode() -> bool {
     true
 }
 
+/// Finished part half-profile, stored for preview and for insert and holder checks.
+///
+/// `points` is a polyline of `(z, radius)` in millimetres, ordered from the front (the end
+/// toward the tailstock, larger Z) toward the chuck. The radius is never negative. The
+/// polyline is the finished surface. It is not stock, and it does not add a leg down to the
+/// axis unless the caller included one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TurnSection {
+    points: Vec<[f64; 2]>,
+}
+
+/// Fewest samples [`TurnSection::try_new`] accepts.
+const MIN_SECTION_POINTS: usize = 2;
+/// Most samples [`TurnSection::try_new`] accepts.
+const MAX_SECTION_POINTS: usize = 200_000;
+
+impl TurnSection {
+    /// `points` holds 2 to 200000 positions. Each Z is finite and each radius is finite and `>= 0`.
+    pub fn try_new(points: Vec<[f64; 2]>) -> Result<Self> {
+        let section = Self { points };
+        section.check()?;
+        Ok(section)
+    }
+
+    /// `(z, radius)` points, front to back.
+    pub fn points(&self) -> &[[f64; 2]] {
+        &self.points
+    }
+
+    pub(crate) fn check(&self) -> Result<()> {
+        let count = self.points.len();
+        if !(MIN_SECTION_POINTS..=MAX_SECTION_POINTS).contains(&count) {
+            return Err(check::invalid(format!("turning section needs {MIN_SECTION_POINTS} to {MAX_SECTION_POINTS} points, found {count}")));
+        }
+        for point in &self.points {
+            finite(point[0], "section z")?;
+            non_negative(point[1], "section radius")?;
+        }
+        Ok(())
+    }
+}
+
 /// Spindles, heads, stock, inserts and the toolpath bindings for one lathe program.
 ///
 /// `diameter_mode` is only a hint for posts. When true, a post may write X as a diameter.
 /// Toolpath X stays a radius either way. The default hint is true. There are 1 to 4 spindles
 /// and 1 to 8 heads, so a sub-spindle or a second head does not need a new type.
+/// [`Self::section`] is the finished half-profile when a caller stored one.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TurningSetup {
@@ -644,6 +688,9 @@ pub struct TurningSetup {
     heads: Vec<Head>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stock: Option<TurnStock>,
+    /// Finished half-profile, `(z, radius)`, front to back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    section: Option<TurnSection>,
     inserts: Vec<TurnInsert>,
     bindings: Vec<TurnBinding>,
     /// Post hint only. Toolpath X is still a radius.
@@ -660,7 +707,7 @@ impl TurningSetup {
         inserts: Vec<TurnInsert>,
         bindings: Vec<TurnBinding>,
     ) -> Result<Self> {
-        let setup = Self { spindles, heads, stock, inserts, bindings, diameter_mode: true };
+        let setup = Self { spindles, heads, stock, section: None, inserts, bindings, diameter_mode: true };
         setup.check()?;
         Ok(setup)
     }
@@ -693,6 +740,13 @@ impl TurningSetup {
         self
     }
 
+    /// Store or clear the finished half-profile and re-validate.
+    pub fn with_section(mut self, section: Option<TurnSection>) -> Result<Self> {
+        self.section = section;
+        self.check()?;
+        Ok(self)
+    }
+
     /// Spindles, main first when built with [`Self::single`].
     pub fn spindles(&self) -> &[Spindle] {
         &self.spindles
@@ -706,6 +760,11 @@ impl TurningSetup {
     /// Blank, when the setup records one.
     pub fn stock(&self) -> Option<TurnStock> {
         self.stock
+    }
+
+    /// Finished half-profile, when the setup records one.
+    pub fn section(&self) -> Option<&TurnSection> {
+        self.section.as_ref()
     }
 
     /// Inserts mounted on heads.
@@ -748,6 +807,9 @@ impl TurningSetup {
         self.check_heads()?;
         if let Some(stock) = self.stock {
             stock.check()?;
+        }
+        if let Some(section) = &self.section {
+            section.check()?;
         }
         self.check_inserts()?;
         self.check_bindings()?;

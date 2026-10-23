@@ -1786,6 +1786,28 @@
       ],
       "type": "object"
     },
+    "TurnSection": {
+      "additionalProperties": false,
+      "description": "Finished part half-profile, stored for preview and for insert and holder checks.\n\n`points` is a polyline of `(z, radius)` in millimetres, ordered from the front (the end\ntoward the tailstock, larger Z) toward the chuck. The radius is never negative. The\npolyline is the finished surface. It is not stock, and it does not add a leg down to the\naxis unless the caller included one.",
+      "properties": {
+        "points": {
+          "items": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "points"
+      ],
+      "type": "object"
+    },
     "TurnStock": {
       "description": "Bar or tube blank.\n\nThe stock occupies Z in `[-length, 0]` relative to the spindle work zero. Z = 0 is the\nfinished front face, the face toward the tailstock. The chuck is toward -Z. Diameters are\nmillimetres. Facing stock allowance is not stored here; an operation supplies it.\n\nX toolpaths use radii ([`Self::outer_radius`], [`Self::inner_radius`]), not these diameters.",
       "oneOf": [
@@ -1851,7 +1873,7 @@
     },
     "TurningSetup": {
       "additionalProperties": false,
-      "description": "Spindles, heads, stock, inserts and the toolpath bindings for one lathe program.\n\n`diameter_mode` is only a hint for posts. When true, a post may write X as a diameter.\nToolpath X stays a radius either way. The default hint is true. There are 1 to 4 spindles\nand 1 to 8 heads, so a sub-spindle or a second head does not need a new type.",
+      "description": "Spindles, heads, stock, inserts and the toolpath bindings for one lathe program.\n\n`diameter_mode` is only a hint for posts. When true, a post may write X as a diameter.\nToolpath X stays a radius either way. The default hint is true. There are 1 to 4 spindles\nand 1 to 8 heads, so a sub-spindle or a second head does not need a new type.\n[`Self::section`] is the finished half-profile when a caller stored one.",
       "properties": {
         "bindings": {
           "items": {
@@ -1875,6 +1897,17 @@
             "$ref": "#/$defs/TurnInsert"
           },
           "type": "array"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnSection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Finished half-profile, `(z, radius)`, front to back."
         },
         "spindles": {
           "items": {
