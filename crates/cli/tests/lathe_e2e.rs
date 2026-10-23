@@ -221,3 +221,102 @@ fn hostile_jobs_error_without_panic() -> Result<(), String> {
     assert_rejects(&infeed, "campanion-lathe-thread-infeed.json", "unknown infeed")?;
     Ok(())
 }
+
+#[test]
+fn wrong_orientation_reports_a_gouge_and_writes_nothing() -> Result<(), String> {
+    let dir = temp_path("campanion-lathe-gouge");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let dxf = "\
+0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+PROFILE
+10
+0.0
+20
+0.0
+11
+0.0
+21
+19.0
+0
+LINE
+8
+PROFILE
+10
+0.0
+20
+19.0
+11
+-1.0
+21
+20.0
+0
+LINE
+8
+PROFILE
+10
+-1.0
+20
+20.0
+11
+-40.0
+21
+20.0
+0
+ENDSEC
+0
+EOF
+";
+    std::fs::write(dir.join("cylinder.dxf"), dxf).map_err(|err| err.to_string())?;
+    let job = r#"{
+        "format": "campanion-lathe/1",
+        "source": { "path": "cylinder.dxf", "layer": "PROFILE" },
+        "units": "mm",
+        "stock": { "kind": "bar", "diameter": 50, "length": 40, "front_allowance": 1.0 },
+        "spindle": { "max_rpm": 3000 },
+        "tools": [
+            { "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.8, "orientation_deg": 315, "hand": "right", "tip": "centre" }
+        ],
+        "operations": [
+            { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "rpm": 1000 } }
+        ],
+        "tolerance": { "linear": 0.001, "chord": 0.01 },
+        "clearance": 2.0
+    }"#;
+    let job_path = dir.join("job.json");
+    std::fs::write(&job_path, job).map_err(|err| err.to_string())?;
+    let out = dir.join("out.nc");
+    let _ = std::fs::remove_file(&out);
+    let output = campanion(&["lathe", &path_arg(&job_path)?, "-o", &path_arg(&out)?])?;
+    let stderr = text(&output.stderr)?;
+    let code = output.status.code();
+    if code == Some(101) || stderr.to_ascii_lowercase().contains("panicked") {
+        return Err(format!("lathe panicked ({code:?}): {stderr}"));
+    }
+    if code != Some(1) {
+        return Err(format!("exit {code:?}, expected 1\n{stderr}"));
+    }
+    if !stderr.lines().any(|line| line.starts_with("gouge operation finish ") && line.split_whitespace().any(|word| word == "edge")) {
+        return Err(format!("stderr missing an edge gouge line: {stderr}"));
+    }
+    if out.exists() {
+        return Err(format!("gouged job wrote {}", out.display()));
+    }
+    Ok(())
+}

@@ -69,6 +69,8 @@ lathe   Import a campanion-lathe/1 job and write turning toolpaths. Units are mi
         Posted text is read back and compared at the job chord tolerance.
         A mismatch exits 1 and nothing is written.
         Verify errors are printed and the status is 1. See docs/job-file.md.
+        Face, rough and finish paths are checked for insert and holder gouges.
+        A gouge is printed and the status is 1. Nothing is written.
 post    Post an IR JSON file. --post is an id or a file ending in .json, same as run.
         -o writes a file. Omit -o to print the G-code.
         Read-back uses the default job chord tolerance, 0.01 mm. A mismatch exits 1.
