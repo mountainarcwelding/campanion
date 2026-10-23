@@ -287,6 +287,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "campanion-turn"
+version = "0.5.1"
+dependencies = [
+ "campanion-geom",
+ "campanion-import",
+ "campanion-mesh",
+ "proptest",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "campanion-view"
 version = "0.5.1"
 dependencies = [
