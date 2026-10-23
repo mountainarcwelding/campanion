@@ -958,6 +958,169 @@
       ],
       "type": "object"
     },
+    "Hand": {
+      "description": "Which way the cutting edge faces along the spindle.",
+      "oneOf": [
+        {
+          "const": "left",
+          "description": "Left-hand insert.",
+          "type": "string"
+        },
+        {
+          "const": "right",
+          "description": "Right-hand insert.",
+          "type": "string"
+        },
+        {
+          "const": "neutral",
+          "description": "Symmetric insert, such as a groove or a round.",
+          "type": "string"
+        }
+      ]
+    },
+    "Head": {
+      "additionalProperties": false,
+      "description": "A turret or a B-axis head.\n\n`stations` is the number of tool pockets, from 1 to 256. `live_tooling` is true when the\nhead can drive a spinning tool. Axes always include X and Z. Y and B are optional. The same\nstruct is a plain turret today and a Y/B live head later.",
+      "properties": {
+        "axes": {
+          "items": {
+            "$ref": "#/$defs/HeadAxis"
+          },
+          "type": "array"
+        },
+        "live_tooling": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "stations": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "axes",
+        "stations",
+        "live_tooling"
+      ],
+      "type": "object"
+    },
+    "HeadAxis": {
+      "description": "Axis a turning head can carry.\n\nX and Z are required. Y and B are optional, so a later live-tool or B-axis head uses this\nsame enum.",
+      "oneOf": [
+        {
+          "const": "x",
+          "description": "Radial axis. Toolpaths store this as a radius.",
+          "type": "string"
+        },
+        {
+          "const": "y",
+          "description": "Optional cross axis.",
+          "type": "string"
+        },
+        {
+          "const": "z",
+          "description": "Spindle axis.",
+          "type": "string"
+        },
+        {
+          "const": "b",
+          "description": "Optional head rotation.",
+          "type": "string"
+        }
+      ]
+    },
+    "Insert": {
+      "additionalProperties": false,
+      "description": "One turning insert.\n\n`orientation_deg` is the angle in the XZ plane, in degrees, from +Z toward +X, of the\ninsert's bisector. The bisector points from the nose into the holder. `hand` records which\nway the edge faces; it does not change [`Self::tip_offset`].",
+      "properties": {
+        "hand": {
+          "$ref": "#/$defs/Hand"
+        },
+        "nose_radius": {
+          "description": "Nose radius, millimetres. Zero is a sharp corner. A round insert must be greater than zero.",
+          "format": "double",
+          "type": "number"
+        },
+        "orientation_deg": {
+          "description": "Bisector from the nose into the holder, degrees in the XZ plane, from +Z toward +X.",
+          "format": "double",
+          "type": "number"
+        },
+        "shape": {
+          "$ref": "#/$defs/InsertShape"
+        },
+        "width": {
+          "description": "Insert width, millimetres. Required for a groove insert. Positive when set.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "shape",
+        "nose_radius",
+        "hand",
+        "orientation_deg"
+      ],
+      "type": "object"
+    },
+    "InsertShape": {
+      "description": "ISO insert shape. The number is the included angle in degrees, when the shape has one.",
+      "oneOf": [
+        {
+          "const": "c80",
+          "description": "80° rhombic.",
+          "type": "string"
+        },
+        {
+          "const": "d55",
+          "description": "55° rhombic.",
+          "type": "string"
+        },
+        {
+          "const": "v35",
+          "description": "35° rhombic.",
+          "type": "string"
+        },
+        {
+          "const": "w80",
+          "description": "80° trigon.",
+          "type": "string"
+        },
+        {
+          "const": "t60",
+          "description": "60° triangular.",
+          "type": "string"
+        },
+        {
+          "const": "s90",
+          "description": "90° square.",
+          "type": "string"
+        },
+        {
+          "const": "r",
+          "description": "Round. No single included angle.",
+          "type": "string"
+        },
+        {
+          "const": "groove",
+          "description": "Parting or grooving insert. No included angle.",
+          "type": "string"
+        },
+        {
+          "const": "thread",
+          "description": "Threading insert. Included angle 60°.",
+          "type": "string"
+        }
+      ]
+    },
     "KinematicNode": {
       "additionalProperties": false,
       "description": "Where a joint sits on its parent.\n\n`direction` is the positive linear travel, or the rotary axis, in the parent frame.\n`offset` is the joint origin relative to the parent origin, in millimetres.\n`parent` is `None` when the joint is mounted on the machine base.",
@@ -1293,6 +1456,16 @@
             "$ref": "#/$defs/Tool"
           },
           "type": "array"
+        },
+        "turning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurningSetup"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1383,6 +1556,45 @@
       ],
       "type": "object"
     },
+    "Spindle": {
+      "additionalProperties": false,
+      "description": "One lathe spindle.\n\n`name` is unique on the setup (`main` now, a sub-spindle later). `c_axis` is that spindle's\nC axis as a machine axis id, when the machine has one. `work_zero_z` is the work-zero offset\nalong Z, in millimetres. Stock Z is measured from that zero.",
+      "properties": {
+        "c_axis": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_rpm": {
+          "description": "Fastest programmed speed, revolutions per minute.",
+          "format": "double",
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reversed": {
+          "default": false,
+          "description": "Positive rotation is opposite the default when true.",
+          "type": "boolean"
+        },
+        "work_zero_z": {
+          "description": "Work-zero offset along Z, millimetres.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "work_zero_z",
+        "max_rpm"
+      ],
+      "type": "object"
+    },
     "SyncPoint": {
       "additionalProperties": false,
       "description": "Channels that must arrive together. A sync event waits on this id.",
@@ -1445,6 +1657,185 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "TurnBinding": {
+      "additionalProperties": false,
+      "description": "Binds one toolpath to a spindle, a head and a channel.\n\n`toolpath` is an index into [`crate::Program::toolpaths`]. `channel` is a [`crate::Channel`]\nid. An M10 binding uses spindle `main`, head `turret1` and channel 0.",
+      "properties": {
+        "channel": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head": {
+          "type": "string"
+        },
+        "spindle": {
+          "type": "string"
+        },
+        "toolpath": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "toolpath",
+        "spindle",
+        "head",
+        "channel"
+      ],
+      "type": "object"
+    },
+    "TurnInsert": {
+      "additionalProperties": false,
+      "description": "An insert mounted on a head station.\n\n`live` is true for a driven tool. The head named here must then have [`Head::live_tooling`].\n`station` is a pocket number from 1 through the head's station count.",
+      "properties": {
+        "head": {
+          "type": "string"
+        },
+        "insert": {
+          "$ref": "#/$defs/Insert"
+        },
+        "live": {
+          "type": "boolean"
+        },
+        "station": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_id": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tool_id",
+        "head",
+        "station",
+        "insert",
+        "live"
+      ],
+      "type": "object"
+    },
+    "TurnStock": {
+      "description": "Bar or tube blank.\n\nThe stock occupies Z in `[-length, 0]` relative to the spindle work zero. Z = 0 is the\nfinished front face, the face toward the tailstock. The chuck is toward -Z. Diameters are\nmillimetres. Facing stock allowance is not stored here; an operation supplies it.\n\nX toolpaths use radii ([`Self::outer_radius`], [`Self::inner_radius`]), not these diameters.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Solid bar. `diameter` and `length` are millimetres.",
+          "properties": {
+            "diameter": {
+              "description": "Outside diameter, millimetres.",
+              "format": "double",
+              "type": "number"
+            },
+            "kind": {
+              "const": "bar",
+              "type": "string"
+            },
+            "length": {
+              "description": "Blank length, millimetres. The blank occupies Z in `[-length, 0]`.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "diameter",
+            "length"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Tube. Diameters and `length` are millimetres. The inner diameter is less than the outer.",
+          "properties": {
+            "inner_diameter": {
+              "description": "Hole diameter, millimetres. Must be less than `outer_diameter`.",
+              "format": "double",
+              "type": "number"
+            },
+            "kind": {
+              "const": "tube",
+              "type": "string"
+            },
+            "length": {
+              "description": "Blank length, millimetres. The blank occupies Z in `[-length, 0]`.",
+              "format": "double",
+              "type": "number"
+            },
+            "outer_diameter": {
+              "description": "Outside diameter, millimetres.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "outer_diameter",
+            "inner_diameter",
+            "length"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TurningSetup": {
+      "additionalProperties": false,
+      "description": "Spindles, heads, stock, inserts and the toolpath bindings for one lathe program.\n\n`diameter_mode` is only a hint for posts. When true, a post may write X as a diameter.\nToolpath X stays a radius either way. The default hint is true. There are 1 to 4 spindles\nand 1 to 8 heads, so a sub-spindle or a second head does not need a new type.",
+      "properties": {
+        "bindings": {
+          "items": {
+            "$ref": "#/$defs/TurnBinding"
+          },
+          "type": "array"
+        },
+        "diameter_mode": {
+          "default": true,
+          "description": "Post hint only. Toolpath X is still a radius.",
+          "type": "boolean"
+        },
+        "heads": {
+          "items": {
+            "$ref": "#/$defs/Head"
+          },
+          "type": "array"
+        },
+        "inserts": {
+          "items": {
+            "$ref": "#/$defs/TurnInsert"
+          },
+          "type": "array"
+        },
+        "spindles": {
+          "items": {
+            "$ref": "#/$defs/Spindle"
+          },
+          "type": "array"
+        },
+        "stock": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnStock"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "spindles",
+        "heads",
+        "inserts",
+        "bindings"
       ],
       "type": "object"
     },

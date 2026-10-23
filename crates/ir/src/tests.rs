@@ -335,8 +335,10 @@ fn old_ir_files_load_and_reserialize_byte_identically() {
         let original = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
         let doc = Document::from_json(&original).unwrap_or_else(|err| panic!("{rel}: {err}"));
         assert!(doc.program().rotary().is_none(), "{rel} should have no rotary setup");
+        assert!(doc.program().turning().is_none(), "{rel} should have no turning setup");
         let json = doc.to_json().expect("json");
         assert!(!json.contains("\"rotary\""), "{rel} gained a rotary field");
+        assert!(!json.contains("\"turning\""), "{rel} gained a turning field");
         let original_value: serde_json::Value = serde_json::from_str(&original).expect("original value");
         let written_value: serde_json::Value = serde_json::from_str(&json).expect("written value");
         assert_eq!(written_value, original_value, "{rel}");
