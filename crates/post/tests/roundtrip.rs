@@ -1,7 +1,7 @@
 //! Random lines and arcs survive posting and read-back.
 //!
 //! Mill steps are posted with every built-in that is not a lathe post. XZ steps are a turning
-//! program and are posted with `linuxcnc_lathe`.
+//! program and are posted with every lathe post.
 
 use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, Plane, Pose, Program, TurningSetup, Vec3};
 use campanion_post::{PostOptions, builtin, builtin_ids, compare, post_program, read_back};
@@ -185,11 +185,16 @@ proptest! {
         let Some(program) = xz_program(&steps) else {
             return Ok(());
         };
-        let post = builtin("linuxcnc_lathe").expect("linuxcnc_lathe");
         let options = PostOptions { arc_tolerance: 0.05 };
-        let text = post_program(&program, &post, &options).expect("post");
-        let moves = read_back(&text, &post).expect("read");
-        let tol = 10_f64.powi(-(post.linear_decimals() as i32));
-        compare(&program, &moves, tol, &post).expect("compare");
+        for id in builtin_ids() {
+            let post = builtin(id).expect(id);
+            if !post.is_lathe() {
+                continue;
+            }
+            let text = post_program(&program, &post, &options).unwrap_or_else(|err| panic!("{id}: {err}"));
+            let moves = read_back(&text, &post).unwrap_or_else(|err| panic!("{id}: {err}"));
+            let tol = 10_f64.powi(-(post.linear_decimals() as i32));
+            compare(&program, &moves, tol, &post).unwrap_or_else(|err| panic!("{id}: {err}"));
+        }
     }
 }

@@ -8,6 +8,8 @@
 //! A lathe post returns part-frame positions. In diameter mode each X word is divided by two.
 //! Y is 0. `I` is already a radius offset, so the centre is `start + (I, 0, K)` in that frame.
 //! `arc_flip` swaps G2 and G3 back to the IR sense. `G53` is a machine move and is not returned.
+//! `G28` is a reference return and is not returned. `U` and `W` are accepted only on that block.
+//! `G50` (spindle cap) and `G98` (Fanuc and Haas feed per minute) are not moves.
 
 use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 
@@ -153,6 +155,7 @@ impl<'a> Parser<'a> {
                 'M' => saw_m = true,
                 'T' => saw_t = true,
                 'I' | 'J' | 'K' | 'R' | 'F' | 'S' | 'H' | 'D' | 'P' => {}
+                'U' | 'W' if self.post.is_lathe() => {}
                 letter if axes.contains(&letter) || letter == dwell_letter || self.is_rotary_letter(letter) => {}
                 letter => return Err(invalid(format!("unexpected word {letter}"))),
             }
@@ -208,8 +211,8 @@ impl<'a> Parser<'a> {
                 }
                 20 => return Err(invalid("inches are not supported")),
                 91 => return Err(invalid("incremental motion is not supported")),
-                7 | 8 | 96 | 97 if self.post.is_lathe() => {}
-                53 if self.post.is_lathe() => {}
+                7 | 8 | 50 | 96 | 97 | 98 if self.post.is_lathe() => {}
+                28 | 53 if self.post.is_lathe() => {}
                 21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
                 other => return Err(invalid(format!("unsupported G{other}"))),
             }
@@ -217,9 +220,15 @@ impl<'a> Parser<'a> {
         if motions > 1 || planes > 1 {
             return Err(invalid("line has conflicting G codes"));
         }
+        // U and W are incremental lathe axes. Fanuc home is `G28 U0 W0`. Any other use would
+        // move in a frame this parser does not track.
+        if words.iter().any(|(letter, _)| *letter == 'U' || *letter == 'W') && !g_codes.contains(&28) {
+            return Err(invalid("incremental U or W is only accepted on lathe G28"));
+        }
         self.inverse_time = inverse_time;
-        // G53 is a non-modal machine-coordinate move (the lathe home). It is not a part-frame point.
-        if self.post.is_lathe() && g_codes.contains(&53) {
+        // G53 is a non-modal machine-coordinate move. G28 is a reference return (Fanuc writes
+        // U0 W0). Neither block is a part-frame point.
+        if self.post.is_lathe() && (g_codes.contains(&28) || g_codes.contains(&53)) {
             return Ok(None);
         }
         let axis_values = [unique(&words, axes[0])?, unique(&words, axes[1])?, unique(&words, axes[2])?];

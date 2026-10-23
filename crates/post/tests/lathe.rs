@@ -389,3 +389,123 @@ fn turn_fixture_posts_and_matches_the_helper() {
     assert!(!text.split_whitespace().any(|word| word.starts_with('Y')), "{text}");
     compare(doc.program(), &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
 }
+
+fn css_tool_program() -> Program {
+    let mut blocks = vec![ClBlock::Event(Event::ToolChange { tool_id: 1 }), spindle_on(None)];
+    blocks.extend(quarter_blocks());
+    blocks.push(spindle_off());
+    with_tool(blocks, turning(Some(SpindleSpeed::css(200.0, 2_500.0).expect("css")), false))
+}
+
+fn sequence_numbers(text: &str) -> Vec<u32> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix('N')?;
+            rest.split_whitespace().next()?.parse().ok()
+        })
+        .collect()
+}
+
+fn assert_step_ten(text: &str) {
+    let numbers = sequence_numbers(text);
+    assert_eq!(numbers.first().copied(), Some(10), "{text}");
+    for pair in numbers.windows(2) {
+        assert_eq!(pair[1] - pair[0], 10, "{text}");
+    }
+}
+
+#[test]
+fn fanuc_lathe_writes_g50_before_g96_and_the_t_word() {
+    let program = css_tool_program();
+    let post = builtin("fanuc_lathe").expect("fanuc_lathe");
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_eq!(post.name(), "Fanuc lathe");
+    assert!(text.starts_with("%\nO0001\nN10 "), "{text}");
+    assert!(text.trim_end().ends_with('%'), "{text}");
+    assert!(!text.lines().any(|line| line.starts_with('%') && line.contains('N')), "{text}");
+    assert!(text.lines().any(|line| line == "O0001"), "{text}");
+    assert_step_ten(&text);
+    assert!(has_word(&text, "G98"), "{text}");
+    assert!(has_word(&text, "G18"), "{text}");
+    assert!(has_word(&text, "G21"), "{text}");
+    assert!(!has_word(&text, "G7"), "{text}");
+    assert!(!has_word(&text, "G90"), "{text}");
+    assert!(!has_word(&text, "G99"), "{text}");
+    let g50 = text.find("G50 S2500").expect("g50");
+    let g96 = text.find("G96 S200").expect("g96");
+    let m3 = text.find("M3").expect("m3");
+    assert!(g50 < g96 && g96 < m3, "{text}");
+    assert!(has_word(&text, "T0101"), "{text}");
+    assert!(has_word(&text, "X20"), "{text}");
+    assert!(has_word(&text, "X10"), "{text}");
+    assert!(has_word(&text, "I-5"), "{text}");
+    assert!(has_word(&text, "K0"), "{text}");
+    assert!(!has_word(&text, "I-10"), "{text}");
+    assert!(has_word(&text, "G3"), "{text}");
+    assert!(!words_of(&text).iter().any(|word| word.starts_with('R')), "{text}");
+    assert!(text.contains("G28 U0 W0"), "{text}");
+    let home = text.find("G28 U0 W0").expect("home");
+    let end = text.rfind("M30").expect("m30");
+    assert!(home < end, "{text}");
+    let parked = read_back("G18\nG0 X20 Z1\nG28 U0 W0\n", &post).expect("home read");
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    let err = read_back("G0 U1\n", &post).expect_err("incremental");
+    assert!(err.to_string().contains("G28"), "{err}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn haas_lathe_writes_g98_and_g53_home() {
+    let program = css_tool_program();
+    let post = builtin("haas_lathe").expect("haas_lathe");
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_eq!(post.name(), "Haas lathe");
+    assert!(text.starts_with("%\nO00001\nN10 "), "{text}");
+    assert!(text.trim_end().ends_with('%'), "{text}");
+    assert!(text.lines().any(|line| line == "O00001"), "{text}");
+    assert_step_ten(&text);
+    assert!(text.contains("G21 G18 G40 G80"), "{text}");
+    assert!(has_word(&text, "G98"), "{text}");
+    assert!(!has_word(&text, "G99"), "{text}");
+    assert!(!has_word(&text, "G7"), "{text}");
+    let g50 = text.find("G50 S2500").expect("g50");
+    let g96 = text.find("G96 S200").expect("g96");
+    assert!(g50 < g96, "{text}");
+    assert!(has_word(&text, "T0101"), "{text}");
+    assert!(has_word(&text, "I-5") && has_word(&text, "K0"), "{text}");
+    assert!(!words_of(&text).iter().any(|word| word.starts_with('R')), "{text}");
+    let x_home = text.find("G53 G0 X0").expect("x home");
+    let z_home = text.find("G53 G0 Z0").expect("z home");
+    let end = text.rfind("M30").expect("m30");
+    assert!(x_home < z_home && z_home < end, "{text}");
+    let parked = read_back("G18\nG0 X20 Z1\nG53 G0 X0\nG53 G0 Z0\n", &post).expect("home read");
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn grbl_lathe_writes_g7_and_a_manual_tool_change() {
+    let program = css_tool_program();
+    let post = builtin("grbl_lathe").expect("grbl_lathe");
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_eq!(post.name(), "grblHAL lathe");
+    assert!(post.description().contains("manual tool change"), "{}", post.description());
+    assert!(text.starts_with("(turn)\n"), "{text}");
+    assert!(text.trim_end().ends_with("M30"), "{text}");
+    assert!(text.lines().all(|line| !line.starts_with('N') && line.trim() != "%" && !line.starts_with('O')), "{text}");
+    assert!(has_word(&text, "G7"), "{text}");
+    assert!(has_word(&text, "G18"), "{text}");
+    assert!(has_word(&text, "G94"), "{text}");
+    assert!(has_word(&text, "G90"), "{text}");
+    assert!(text.contains("G96 D2500 S200"), "{text}");
+    assert!(text.contains("T1 M6"), "{text}");
+    assert!(!text.contains("G28"), "{text}");
+    assert!(!text.contains("G53"), "{text}");
+    assert!(!has_word(&text, "G98"), "{text}");
+    assert!(!has_word(&text, "G99"), "{text}");
+    assert!(has_word(&text, "X20") && has_word(&text, "I-5") && has_word(&text, "K0"), "{text}");
+    assert!(!words_of(&text).iter().any(|word| word.starts_with('R')), "{text}");
+    let parked = read_back("G7\nG18\nG94\nG0 X20 Z1\n", &post).expect("mode read");
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}

@@ -1,0 +1,49 @@
+{
+  "id": "fanuc_lathe",
+  "name": "Fanuc lathe",
+  "description": "Millimetre Fanuc lathe dialect, G-code system A. Percent-delimited program O0001 with sequence numbers. Diameter mode is the control default, so no G7 is written. G21 selects millimetres, G40 cancels tool-nose compensation and G80 cancels a canned cycle. The ZX plane is G18 and feed per minute is G98. G99 is left out: the IR feed is millimetres per minute. G90 is left out: on this control it is an outer and inner diameter cutting cycle, and X and Z are already absolute. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is the tool and offset in two digits (T0101). Arcs are I and K, I a radius. Home is G28 U0 W0, a reference return, not a part move. The program ends with M30 and %. No rotary axis.",
+  "program_number": "0001",
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 3, "feed": 3, "dwell": 3 },
+  "trailing_zeros": false,
+  "header": [
+    "%",
+    "O{program_number}",
+    "({program_name})",
+    "G21 G40 G80"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "ms" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M30", "%"],
+  "max_line_length": 80,
+  "axis_letters": "XYZ",
+  "lathe": {
+    "diameter_mode": true,
+    "mode_lines": [],
+    "plane": "G18",
+    "feed_mode": "G98",
+    "css": ["G50 S{max_rpm}", "G96 S{surface}"],
+    "rpm": ["G97 S{rpm}"],
+    "spindle_cw": ["M3"],
+    "spindle_ccw": ["M4"],
+    "spindle_off": ["M5"],
+    "tool_change": ["T{tool2}{offset2}"],
+    "arc_flip": false,
+    "home": ["G28 U0 W0"]
+  }
+}
