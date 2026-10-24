@@ -241,6 +241,19 @@ Part C: B-axis heads and 5-axis milling
 9. **Indexed 3+2:** tilted work planes (G68.2 or the LinuxCNC equivalent, or explicit rotated
    coordinates), any 2.5D/3-axis op on a tilted plane, with a reachability and limit check.
 10. **Angled turning and boring with a B head** (insert orientation follows B).
+Haas ST/DS lathe completion (ahead of items 11–13; checked against the Haas NGC lathe operator's manual):
+- **H1. Threading feed mode and tailstock:** `haas_lathe` writes G99 around G32 thread passes (Haas
+  requires feed per revolution for G32) and G98 after; a tailstock operation advances with M21 and
+  retracts with M22 (ST-10 hydraulic quill, ST-20/30 hydraulic, ST-40 servo). Hold force and
+  advance distances are machine settings, not program words. A tailstock zone check keeps the
+  turret clear while it is engaged. Programmed B positioning of the ST tailstock is not written.
+- **H2. Part handling:** parts catcher M36/M37 (and M35) with part-off, bar feeder G105, steady
+  rest M146/M147.
+- **H3. Machine limits:** Y travel and live-tool rpm per machine model (DS-30Y Y ±51 mm),
+  secondary spindle brake and orient (M114/M115, M119), and live tooling on the sub-spindle once
+  its C-axis addressing is confirmed.
+- **H4. Optional threading and cycles:** multi-start and taper threads, canned G76 and G71/G70
+  output.
 11. **Continuous 5-axis:** tool-axis control (lead/tilt, toward point/curve, swarf on ruled
     surfaces), axis smoothing and singularity handling near B=0.
 12. **TCP and non-TCP posts:** G43.4/TCPC and LinuxCNC TCP kinematics, or the post doing the
@@ -253,7 +266,8 @@ Part C: B-axis heads and 5-axis milling
 Also open from M10: canned `G76` threading as a post option.
 
 Releases: v0.7.0 after 0–4 (Haas post; LinuxCNC as soon as it is ready), v0.7.1 after 5–7,
-v0.8.0 after 8–10, v0.8.1 for the mill drill and rapid safety fix, v0.8.2 after 11–13.
+v0.8.0 after 8–10, v0.8.1 for the mill drill and rapid safety fix, v0.8.2 for the arc read-back
+fix, then H1–H4 in patch releases from v0.8.3, then 11–13 in the release after them.
 
 ### M12: Additive and non-planar slicing
 See the additive entry under Later; it becomes M12 after M11.
@@ -318,3 +332,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-24: v0.8.1 is a safety patch: mill drill feeds to depth from the R plane instead of
   rapiding (v0.1.0–v0.8.0), surface rapids stay above the model top (v0.3.0–v0.8.0), and a rapid
   safety rule blocks low rapids. Continuous 5-axis (items 11–13) moves to v0.8.2.
+- 2026-10-24: v0.8.2 is the arc read-back and short-arc posting fix alone. Haas ST/DS lathe
+  completion (H1–H4) moves ahead of continuous 5-axis and ships in patch releases from v0.8.3;
+  items 11–13 follow it.

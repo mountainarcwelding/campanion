@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.8.2 — 2026-10-24
+
 ### Fixed
 
 - Posting `examples/dome_rough.job.json` (and other programs with very short fitted arcs) no longer fails read-back with "point is off the arc". The read-back comparator ignored the travel of arcs shorter than the tolerance and used angle limits tighter than endpoint rounding.
