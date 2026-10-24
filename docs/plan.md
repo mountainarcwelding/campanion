@@ -247,6 +247,8 @@ Part C: B-axis heads and 5-axis milling
     inverse kinematics; inverse-time feed where the control needs it.
 13. **Collision checks** for holder/head against stock, fixture and part for 5-axis and
     mill-turn, plus a viewer machine simulation (kinematic model, not a full machine CAD).
+14. **Mesh ops on tilted planes (follow-up):** surface, rough and waterline on a 3+2 plane;
+    v0.8.0 supports 2D ops only.
 
 Also open from M10: canned `G76` threading as a post option.
 
@@ -310,3 +312,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   additive and non-planar slicing.
 - 2026-10-23: M10 done (v0.6.1) except the STEP section, which moves to M11 v0.7.0. M11 broken
   down into Parts A–C. Mill-turn posts: Haas first, then LinuxCNC. 5-axis milling stays in M11.
+- 2026-10-24: M11 Part C items 8–10 released as v0.8.0 (kinematics, indexed 3+2 with Haas G254
+  and LinuxCNC machine-coordinate posts, B-head turning). Deferred mesh ops on tilted planes to a
+  follow-up to keep v0.8.0 small.
