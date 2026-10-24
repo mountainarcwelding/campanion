@@ -68,10 +68,11 @@
 //! the cylinder radius as well as the stock of the other operations. A wrap next to an indexed
 //! operation still takes the index-change retract and rotate. Feeds stay the tool's surface feeds.
 
-//! `--up-axis z|y|auto` applies only to a STEP source. The default is `auto`: the exporter
-//! header SolidCraft reports is trusted, and a Y-up file (SolidWorks) is turned so Z is up.
-//! `z` and `y` skip that probe. Any other source ignores the flag. The face point is in the
-//! frame after the turn. A file point `(x, y, z)` is `(x, -z, y)` once Y up has been turned.
+//! `--up-axis z|y|auto` applies only to a STEP source. The default is `z`. `auto` is opt-in:
+//! the exporter header SolidCraft reports is trusted, and a Y-up file (SolidWorks) is turned
+//! so Z is up. `z` and `y` skip that probe. Any other source ignores the flag. The face point
+//! is in the frame after the turn. A file point `(x, y, z)` is `(x, -z, y)` once Y up has been
+//! turned.
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -325,7 +326,7 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
         output: PathBuf::from(output),
         ir: ir.map(PathBuf::from),
         post: post.map(PathBuf::from),
-        up_axis: up_axis.unwrap_or(step::UpAxis::Auto),
+        up_axis: up_axis.unwrap_or(step::UpAxis::Z),
     })
 }
 

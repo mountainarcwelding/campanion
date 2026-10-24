@@ -472,7 +472,9 @@ A STEP part is cut from one planar face. `face` is a point on that face, in mill
 part's model coordinates (never scaled by `units`). `campanion run` hands the part to SolidCraft's
 command-line tool, which exports the face's outline and holes as DXF, and imports that DXF.
 
-`campanion run` accepts `--up-axis z|y|auto`. The default is `auto`. DXF, SVG and STL jobs ignore it.
+`campanion run` accepts `--up-axis z|y|auto`. The default is `z`. `auto` is opt-in. DXF, SVG and
+STL jobs ignore it. SolidCraft itself now asks which axis is up rather than guessing, so
+CAMpanion does not guess by default.
 
 - `auto` trusts the exporter named in the STEP header (`exporter` and `exporter_up`, as SolidCraft
   reports them). SolidWorks means Y up: the part is turned a quarter turn about +X so Z is up.
