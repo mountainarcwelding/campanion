@@ -2,7 +2,8 @@
 //!
 //! The source path is relative to the job file. `.dxf` and `.svg` are half-profiles in the
 //! drawing plane (drawing X is Z, drawing Y is the radius). `.stl` is an outside-diameter
-//! envelope. Units are millimetres. Feeds are millimetres per minute. Constant surface speed is
+//! envelope. `.step` and `.stp` are sectioned through the spindle axis by `solidcraft-cli`.
+//! Units are millimetres. Feeds are millimetres per minute. Constant surface speed is
 //! metres per minute and is capped at the spindle `max_rpm`.
 //!
 //! Z = 0 is the finished front face. `stock.front_allowance` is how far the blank sticks out in
@@ -67,6 +68,7 @@ struct LatheArgs {
     output: PathBuf,
     ir: Option<PathBuf>,
     post: Option<PathBuf>,
+    up_axis: crate::step::UpAxis,
 }
 
 struct LatheJob {
@@ -90,6 +92,7 @@ enum SourceKind {
     Dxf { layer: Option<String> },
     Svg { layer: Option<String> },
     Stl { axis: MeshAxis, step: f64 },
+    Step { body: Option<String> },
 }
 
 enum Stock {
@@ -249,7 +252,7 @@ pub fn lathe(args: &[OsString]) -> Result<ExitCode, CliError> {
     };
     let text = read_text(&args.job)?;
     let job = parse_job(&text)?;
-    let profile = load_profile(&args.job, &job)?;
+    let profile = load_profile(&args.job, &job, args.up_axis)?;
     let (doc, gouges) = build_document(&args.job, &job, &profile)?;
     if !gouges.is_empty() {
         let mut err_out = io::stderr().lock();
@@ -266,13 +269,29 @@ fn parse_lathe(args: &[OsString]) -> Result<LatheArgs, CliError> {
     let mut output: Option<&OsStr> = None;
     let mut ir: Option<&OsStr> = None;
     let mut post: Option<&OsStr> = None;
+    let mut up_axis: Option<crate::step::UpAxis> = None;
     let mut index = 0;
     while index < args.len() {
         let Some(arg) = args.get(index) else {
             break;
         };
         index += 1;
-        if arg.as_os_str() == "-o" || arg.as_os_str() == "--ir" || arg.as_os_str() == "--post" {
+        if arg.as_os_str() == "--up-axis" {
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage("--up-axis needs a value"));
+            };
+            index += 1;
+            if value.is_empty() {
+                return Err(CliError::usage("--up-axis needs a value"));
+            }
+            if up_axis.is_some() {
+                return Err(CliError::usage("--up-axis is already set"));
+            }
+            let Some(text) = value.to_str() else {
+                return Err(CliError::usage("--up-axis must be z, y or auto"));
+            };
+            up_axis = Some(crate::step::UpAxis::parse(text)?);
+        } else if arg.as_os_str() == "-o" || arg.as_os_str() == "--ir" || arg.as_os_str() == "--post" {
             let flag = if arg.as_os_str() == "-o" {
                 "-o"
             } else if arg.as_os_str() == "--ir" {
@@ -315,7 +334,13 @@ fn parse_lathe(args: &[OsString]) -> Result<LatheArgs, CliError> {
     if ir.is_some_and(|path| path == output) {
         return Err(CliError::usage("-o and --ir must be different files"));
     }
-    Ok(LatheArgs { job: PathBuf::from(job), output: PathBuf::from(output), ir: ir.map(PathBuf::from), post: post.map(PathBuf::from) })
+    Ok(LatheArgs {
+        job: PathBuf::from(job),
+        output: PathBuf::from(output),
+        ir: ir.map(PathBuf::from),
+        post: post.map(PathBuf::from),
+        up_axis: up_axis.unwrap_or(crate::step::UpAxis::Z),
+    })
 }
 
 fn parse_job(text: &str) -> Result<LatheJob, CliError> {
@@ -366,6 +391,7 @@ fn parse_source(value: &Value) -> Result<Source, CliError> {
     let allowed: &[&str] = match kind {
         SourceKind::Dxf { .. } | SourceKind::Svg { .. } => &["path", "layer"],
         SourceKind::Stl { .. } => &["path", "axis", "step"],
+        SourceKind::Step { .. } => &["path", "body"],
     };
     check_keys(map, allowed, "source")?;
     let source_kind = match kind {
@@ -376,6 +402,7 @@ fn parse_source(value: &Value) -> Result<Source, CliError> {
             let step = positive(require(map, "step")?, "step")?;
             SourceKind::Stl { axis, step }
         }
+        SourceKind::Step { .. } => SourceKind::Step { body: optional_body(map)? },
     };
     Ok(Source { path: path.to_string(), kind: source_kind })
 }
@@ -386,7 +413,15 @@ fn source_kind(path: &str) -> Result<SourceKind, CliError> {
         "dxf" => Ok(SourceKind::Dxf { layer: None }),
         "svg" => Ok(SourceKind::Svg { layer: None }),
         "stl" => Ok(SourceKind::Stl { axis: MeshAxis::Z, step: 1.0 }),
-        _ => Err(CliError::invalid("source path must end in .dxf, .svg or .stl")),
+        "step" | "stp" => Ok(SourceKind::Step { body: None }),
+        _ => Err(CliError::invalid("source path must end in .dxf, .svg, .stl, .step or .stp")),
+    }
+}
+
+fn optional_body(map: &Map<String, Value>) -> Result<Option<String>, CliError> {
+    match optional(map, "body") {
+        Some(value) => Ok(Some(required_name(as_str(value, "body")?, "body")?)),
+        None => Ok(None),
     }
 }
 
@@ -818,7 +853,7 @@ fn parse_tolerance(value: Option<&Value>) -> Result<(f64, f64), CliError> {
     Ok((linear, chord))
 }
 
-fn load_profile(job_path: &Path, job: &LatheJob) -> Result<TurnProfile, CliError> {
+fn load_profile(job_path: &Path, job: &LatheJob, up_axis: crate::step::UpAxis) -> Result<TurnProfile, CliError> {
     let path = resolve_source(job_path, &job.source.path);
     match &job.source.kind {
         SourceKind::Dxf { layer } => {
@@ -839,6 +874,11 @@ fn load_profile(job_path: &Path, job: &LatheJob) -> Result<TurnProfile, CliError
             let bytes = crate::run::read_bytes(&path)?;
             let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
             TurnProfile::from_mesh(&mesh, *axis, *step).map_err(show)
+        }
+        SourceKind::Step { body } => {
+            let cli = crate::step::find_cli().ok_or_else(crate::step::missing_cli_error)?;
+            let text = crate::step::section_to_dxf(&cli, &path, body.as_deref(), up_axis)?;
+            TurnProfile::from_section_dxf(&text, job.linear).map_err(show)
         }
     }
 }
@@ -1183,7 +1223,36 @@ mod tests {
     use campanion_ir::{Hand, Insert, InsertShape};
     use campanion_turn::{FaceParams, FinishParams, Side, TipPoint, TurnMove, TurnProfile, TurnTool, face, finish};
 
-    use super::{face_to_radius, programmed_tip};
+    use super::{SourceKind, face_to_radius, parse_source, programmed_tip, source_kind};
+
+    fn ok_source(value: serde_json::Value) -> super::Source {
+        parse_source(&value).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    #[test]
+    fn step_and_stp_sources_take_an_optional_body() {
+        assert!(matches!(source_kind("Part.STEP").unwrap_or_else(|err| panic!("{err}")), SourceKind::Step { body: None }));
+        assert!(matches!(source_kind("shaft.Stp").unwrap_or_else(|err| panic!("{err}")), SourceKind::Step { body: None }));
+        let rejected = match source_kind("part.igs") {
+            Ok(_) => panic!("igs was accepted"),
+            Err(err) => err,
+        };
+        assert!(rejected.to_string().contains("source path must end in .dxf, .svg, .stl, .step or .stp"), "{rejected}");
+        let named = ok_source(serde_json::json!({"path": "a.step", "body": "shaft"}));
+        assert!(matches!(named.kind, SourceKind::Step { body: Some(name) } if name == "shaft"));
+        let omitted = ok_source(serde_json::json!({"path": "a.stp"}));
+        assert!(matches!(omitted.kind, SourceKind::Step { body: None }));
+        let empty = match parse_source(&serde_json::json!({"path": "a.step", "body": ""})) {
+            Ok(_) => panic!("empty body was accepted"),
+            Err(err) => err,
+        };
+        assert!(empty.to_string().contains("body is empty"), "{empty}");
+        let layer = match parse_source(&serde_json::json!({"path": "a.step", "layer": "0"})) {
+            Ok(_) => panic!("layer was accepted"),
+            Err(err) => err,
+        };
+        assert!(layer.to_string().contains("layer"), "{layer}");
+    }
 
     fn close(actual: f64, expected: f64) -> bool {
         (actual - expected).abs() <= 1e-9

@@ -500,13 +500,13 @@ file `(x, y, z)` is `(x, -z, y)`.
 
 ## Lathe jobs
 
-`campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]` loads a `campanion-lathe/1`
+`campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]` loads a `campanion-lathe/1`
 file. It is not a `campanion-job/1` file: the fields below are the whole schema, and unknown
 fields are rejected with a message that names the key. Every number must be finite. Lengths are
 millimetres. Feeds are millimetres per minute. Constant surface speed is metres per minute.
 Direct spindle speed is revolutions per minute.
 
-`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off.
+`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off. `examples/shaft_fillet.lathe.json` is the same part with an R3 front fillet, read from `examples/shaft_fillet.step`; that job needs SolidCraft's `solidcraft-cli`.
 
 ```json
 {
@@ -545,8 +545,9 @@ Direct spindle speed is revolutions per minute.
 - `.dxf` — [`TurnProfile::from_dxf`](../crates/turn/src/profile.rs). Optional `layer`. `axis` and `step` are rejected.
 - `.svg` — `from_svg` when `layer` is omitted. A layer uses the SVG importer and `TurnProfile::from_drawing`. The SVG fit uses `linear` as its chord; the job `chord` is the post read-back.
 - `.stl` — `from_mesh`. Requires `axis` (`x`, `y` or `z`) and a positive `step`. A `layer` is rejected.
+- `.step` and `.stp` — [`TurnProfile::from_section_dxf`](../crates/turn/src/section.rs). `solidcraft-cli` sections the solid through world Z after `--up-axis` (`z`, `y`, or `auto`; default `z`). `auto` turns Y up onto Z when the exporter header says Y. The part must be turned about Z, with the finished front face where you want lathe Z 0, because model Z is lathe Z. Optional `body` names the solid and is required when the file lists more than one. The importer keeps one half (the +X half when both agree, otherwise the half that still joins from the axis back to the axis), which is how a seam on the section plane is avoided. A through-bore is not supported yet.
 
-Drawing X is Z and drawing Y is the radius. Z = 0 is the finished front face and the part extends toward −Z. A closed drawing is opened by dropping the spindle-axis run.
+Drawing X is Z and drawing Y is the radius for `.dxf` and `.svg`. Z = 0 is the finished front face and the part extends toward −Z. A closed drawing is opened by dropping the spindle-axis run.
 
 `stock.kind` is `bar` (`diameter`, `length`, `front_allowance`) or `tube` (`outer_diameter`, `inner_diameter`, `length`, `front_allowance`). Diameters and `length` are positive. `front_allowance` is `>= 0`. The IR stock still occupies Z in `[-length, 0]`; the allowance is only the facing depth, from `+front_allowance` down to 0. A tube's inner diameter must be below its outer diameter.
 

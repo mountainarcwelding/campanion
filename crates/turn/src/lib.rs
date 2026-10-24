@@ -23,8 +23,10 @@
 //! # Meshes and STEP
 //!
 //! [`TurnProfile::from_mesh`] samples the **outside diameter** of a mesh that is
-//! already centred on the spindle. An internal bore is not recovered. STEP solids
-//! are not read here: section them with `solidcraft-cli` and import the DXF it writes.
+//! already centred on the spindle. An internal bore is not recovered.
+//! [`TurnProfile::from_section_dxf`] reads a full planar section through the turning
+//! axis (DXF X is a signed radius, DXF Y is Z), as `solidcraft-cli` writes it, and
+//! keeps one half-profile.
 //!
 //! Facing, longitudinal roughing, and finishing are in [`ops`]. Those paths are
 //! coordinates of the programmed point with the nose radius applied here, so they
@@ -47,6 +49,10 @@ mod ir;
 mod mesh;
 mod ops;
 mod profile;
+mod section;
+
+#[cfg(test)]
+mod section_tests;
 
 pub use cycles::{DrillParams, GrooveParams, Infeed, PartParams, ThreadParams, centre_drill, groove, part_off, thread, thread_pass_depths};
 pub use gouge::{GougeKind, HolderGeom, InsertGeom, TurnGouge, check_turn_gouges};

@@ -1,10 +1,11 @@
-//! Turn one planar face of a STEP part into DXF text.
+//! Turn one planar face of a STEP part into DXF text, or section it through Z.
 //!
 //! SolidCraft stays a separate program. This module runs its documented
 //! `solidcraft-cli run` command and does not link or copy SolidCraft.
 //! [`UpAxis::Auto`] probes the exporter header. A Y-up file is opened with
 //! `doc.open` `"up": "y"` so the face point is in a Z-up frame. Z up keeps
-//! `run <script> --in <step> --quiet`.
+//! `run <script> --in <step> --quiet`. [`section_to_dxf`] always probes, then
+//! sections the named body through the XZ plane.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -172,11 +173,14 @@ enum CliMode<'a> {
 struct ProbeReply {
     y_up: bool,
     exporter: Option<String>,
+    /// `Some` when the first reply has a `bodies` array. Non-strings are dropped.
+    /// `None` when the field is missing or is not an array.
+    bodies: Option<Vec<String>>,
 }
 
 impl ProbeReply {
     fn keep() -> Self {
-        Self { y_up: false, exporter: None }
+        Self { y_up: false, exporter: None, bodies: None }
     }
 }
 
@@ -258,7 +262,75 @@ fn probe_reply(text: &str) -> ProbeReply {
     };
     let exporter = object.get("exporter").and_then(serde_json::Value::as_str).map(str::to_string);
     let y_up = object.get("exporter_up").and_then(serde_json::Value::as_str) == Some("y");
-    ProbeReply { y_up, exporter }
+    ProbeReply { y_up, exporter, bodies: body_names(object) }
+}
+
+/// String entries of a `bodies` array. Missing or non-array is "no list".
+fn body_names(object: &serde_json::Map<String, serde_json::Value>) -> Option<Vec<String>> {
+    let array = object.get("bodies")?.as_array()?;
+    Some(array.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+}
+
+/// The body to section. A requested name is checked only when a list was read.
+fn select_body(requested: Option<&str>, bodies: Option<&[String]>) -> Result<String, CliError> {
+    match requested {
+        Some(name) => match bodies {
+            Some(list) if list.iter().any(|body| body == name) => Ok(name.to_string()),
+            Some(list) => Err(CliError::invalid(format!("STEP has no body {name}; bodies: {}", list.join(", ")))),
+            None => Ok(name.to_string()),
+        },
+        None => match bodies {
+            Some([only]) => Ok(only.clone()),
+            Some(list) => Err(CliError::invalid(format!("STEP has {} bodies ({}); set source.body", list.len(), list.join(", ")))),
+            None => Err(CliError::invalid("solidcraft-cli did not list the bodies; set source.body")),
+        },
+    }
+}
+
+/// Section script. `"up": "y"` is sent only when `turn` is set; `"up": "z"` is never sent.
+fn section_commands(step_path: &str, body: &str, dxf_path: &str, turn: bool) -> serde_json::Value {
+    let open_params = if turn { serde_json::json!({ "path": step_path, "up": "y" }) } else { serde_json::json!({ "path": step_path }) };
+    serde_json::json!([
+        { "command": "doc.open", "params": open_params },
+        { "command": "sketch.create", "params": { "plane": "XZ", "name": "campanion_section" } },
+        { "command": "sketch.intersect", "params": { "refs": [{ "body": body }] } },
+        { "command": "sketch.export_dxf", "params": { "sketch": "campanion_section", "path": dxf_path } }
+    ])
+}
+
+fn write_section_script(script: &Path, dxf: &Path, step_path: &str, body: &str, turn: bool) -> Result<(), CliError> {
+    let dxf_path = absolute_utf8(dxf)?;
+    write_json(script, &section_commands(step_path, body, &dxf_path, turn))
+}
+
+/// Section of `step` through the Z axis (after `up`), as DXF text from solidcraft-cli.
+///
+/// The doc.open probe always runs first. A non-zero probe is an error. `body` must be
+/// one of the listed bodies when a list was read; with no `body`, the file must contain
+/// exactly one. [`UpAxis::Y`], and [`UpAxis::Auto`] when the header says Y, open the
+/// part with `"up": "y"`. [`UpAxis::Z`] does not. The note is printed only for `auto`.
+pub fn section_to_dxf(cli: &Path, step: &Path, body: Option<&str>, up: UpAxis) -> Result<String, CliError> {
+    let temp = TempDir::create()?;
+    let absolute = absolute_utf8(step)?;
+    let probe_script = temp.path().join("probe-script.json");
+    let results = temp.path().join("probe.json");
+    write_probe_script(&probe_script, &absolute)?;
+    run_cli(cli, &probe_script, step, temp.path(), CliMode::Probe { json_out: &results })?;
+    let reply = read_probe_reply(&results);
+    let chosen = select_body(body, reply.bodies.as_deref())?;
+    let turn = match up {
+        UpAxis::Z => false,
+        UpAxis::Y => true,
+        UpAxis::Auto => reply.y_up,
+    };
+    if turn && matches!(up, UpAxis::Auto) {
+        print_y_up_note(reply.exporter.as_deref())?;
+    }
+    let script = temp.path().join("main.json");
+    let dxf = temp.path().join("section.dxf");
+    write_section_script(&script, &dxf, &absolute, &chosen, turn)?;
+    run_cli(cli, &script, step, temp.path(), CliMode::Script)?;
+    read_dxf(&dxf)
 }
 
 fn read_probe_reply(path: &Path) -> ProbeReply {
@@ -545,6 +617,60 @@ mod tests {
         let reply = probe_reply(text);
         assert!(reply.y_up);
         assert_eq!(reply.exporter.as_deref(), Some("SolidWorks"));
+        assert_eq!(reply.bodies, Some(vec!["plate".to_string()]));
+    }
+
+    #[test]
+    fn probe_reply_keeps_only_string_bodies() {
+        let listed = probe_reply(r#"[{"bodies":["shaft2", 1, "other"],"exporter_up":"z"}]"#);
+        assert_eq!(listed.bodies, Some(vec!["shaft2".to_string(), "other".to_string()]));
+        assert!(probe_reply(r#"[{"exporter_up":"z"}]"#).bodies.is_none());
+        assert!(probe_reply(r#"[{"bodies":"shaft"}]"#).bodies.is_none());
+        assert_eq!(probe_reply(r#"[{"bodies":[]}]"#).bodies, Some(Vec::<String>::new()));
+    }
+
+    #[test]
+    fn section_script_sends_up_only_when_turning() {
+        let plain = section_commands("/abs/part.step", "shaft", "/abs/section.dxf", false);
+        let turned = section_commands("/abs/part.step", "shaft", "/abs/section.dxf", true);
+        assert!(plain.to_string().contains("\"path\":\"/abs/part.step\""), "{plain}");
+        assert!(!plain.to_string().contains("\"up\""), "{plain}");
+        assert_eq!(turned.pointer("/0/params/up").and_then(serde_json::Value::as_str), Some("y"));
+        for script in [&plain, &turned] {
+            let commands = script.as_array().expect("array");
+            assert_eq!(commands.len(), 4);
+            assert_eq!(script.pointer("/0/command").and_then(serde_json::Value::as_str), Some("doc.open"));
+            assert_eq!(script.pointer("/1/command").and_then(serde_json::Value::as_str), Some("sketch.create"));
+            assert_eq!(script.pointer("/1/params/plane").and_then(serde_json::Value::as_str), Some("XZ"));
+            assert_eq!(script.pointer("/1/params/name").and_then(serde_json::Value::as_str), Some("campanion_section"));
+            assert_eq!(script.pointer("/2/command").and_then(serde_json::Value::as_str), Some("sketch.intersect"));
+            assert_eq!(script.pointer("/2/params/refs/0/body").and_then(serde_json::Value::as_str), Some("shaft"));
+            assert_eq!(script.pointer("/3/command").and_then(serde_json::Value::as_str), Some("sketch.export_dxf"));
+            assert_eq!(script.pointer("/3/params/sketch").and_then(serde_json::Value::as_str), Some("campanion_section"));
+            assert_eq!(script.pointer("/3/params/path").and_then(serde_json::Value::as_str), Some("/abs/section.dxf"));
+        }
+    }
+
+    #[test]
+    fn select_body_requires_one_listed_body_or_an_explicit_name() {
+        let one = vec!["shaft".to_string()];
+        let two = vec!["a".to_string(), "b".to_string()];
+        let chosen = |result: Result<String, CliError>| result.unwrap_or_else(|err| panic!("{err}"));
+        let rejected = |result: Result<String, CliError>| match result {
+            Ok(body) => panic!("accepted {body}"),
+            Err(err) => err,
+        };
+        assert_eq!(chosen(select_body(None, Some(&one))), "shaft");
+        assert_eq!(chosen(select_body(Some("b"), Some(&two))), "b");
+        assert_eq!(chosen(select_body(Some("only"), None)), "only");
+        let several = rejected(select_body(None, Some(&two)));
+        assert!(several.to_string().contains("STEP has 2 bodies (a, b); set source.body"), "{several}");
+        let none = rejected(select_body(None, Some(&[])));
+        assert!(none.to_string().contains("STEP has 0 bodies (); set source.body"), "{none}");
+        let missing = rejected(select_body(None, None));
+        assert!(missing.to_string().contains("solidcraft-cli did not list the bodies; set source.body"), "{missing}");
+        let unknown = rejected(select_body(Some("nope"), Some(&two)));
+        assert!(unknown.to_string().contains("STEP has no body nope; bodies: a, b"), "{unknown}");
     }
 
     #[test]

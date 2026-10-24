@@ -42,6 +42,8 @@ cargo run -p campanion-cli -- lathe examples/shaft.lathe.json -o out.ngc --ir ou
 
 `campanion lathe` loads a `campanion-lathe/1` file. Without `--post`, `-o` is the RS274/NGC test sink and ZX arcs are `G18`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`). Posted text is read back at the job chord tolerance. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1. A face, rough or finish gouge is printed and the status is 1.
 
+A `.step` or `.stp` lathe source is sectioned through the spindle by `solidcraft-cli` (`--up-axis`, default `z`); `examples/shaft_fillet.lathe.json` reads `examples/shaft_fillet.step` that way.
+
 ## Usage
 
 `campanion verify FILE` checks an IR file and prints a report. The status is 1 when the report

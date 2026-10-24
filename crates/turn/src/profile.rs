@@ -193,7 +193,7 @@ impl TurnProfile {
     /// samples.
     ///
     /// STEP input is not meshed here. Section the solid with `solidcraft-cli` and
-    /// import the DXF it exports.
+    /// read that DXF with [`TurnProfile::from_section_dxf`].
     pub fn from_mesh(mesh: &Mesh, axis: MeshAxis, step: f64) -> Result<Self> {
         let segments = crate::mesh::envelope(mesh, axis, step)?;
         Self::try_new(segments, 1e-9)
@@ -226,7 +226,7 @@ fn check_tol(tol: f64) -> Result<()> {
     if tol.is_finite() && tol >= 0.0 { Ok(()) } else { Err(TurnError::InvalidInput("tolerance must be finite and >= 0".into())) }
 }
 
-fn import_tolerance(tol: f64) -> Result<Tolerance> {
+pub(crate) fn import_tolerance(tol: f64) -> Result<Tolerance> {
     check_tol(tol)?;
     Ok(Tolerance::new(tol, Tolerance::DEFAULT_ANGULAR_RAD)?)
 }
@@ -414,7 +414,7 @@ fn mirror_point(point: Point) -> Result<Point> {
     Ok(Point::new(point.x(), -point.y())?)
 }
 
-fn mirror_segment(segment: Segment) -> Result<Segment> {
+pub(crate) fn mirror_segment(segment: Segment) -> Result<Segment> {
     match segment {
         Segment::Line(line) => {
             let start = mirror_point(line.start())?;
