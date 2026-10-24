@@ -55,7 +55,8 @@
 //!
 //! [`Kinematics`] names one or two rotary joints and a spindle direction. It is not stored on a
 //! [`Document`]. Angles are degrees. [`Kinematics::forward`] maps a joint position and a tool
-//! length to a tool tip and axis in the part frame.
+//! length to a tool tip and axis in the part frame. [`Kinematics::inverse`] lists joint solutions
+//! for a pose, and [`Kinematics::choose`] picks one.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -76,7 +77,7 @@ mod wrap;
 
 pub use convert::Import;
 pub use geom::{ArcSense, Plane, Pose, Vec3};
-pub use kinematics::{Carrier, Joints, Kinematics, RotaryJoint, ToolPose};
+pub use kinematics::{Carrier, Choice, Joints, Kinematics, RotaryJoint, ToolPose};
 pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
 pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};

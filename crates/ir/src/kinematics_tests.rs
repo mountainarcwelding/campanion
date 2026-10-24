@@ -1,6 +1,6 @@
 //! Forward kinematics of the illustrative joint files.
 
-use super::{Carrier, IrError, Joints, Kinematics, Vec3};
+use super::{Carrier, Choice, IrError, Joints, Kinematics, ToolPose, Vec3};
 
 const TABLE_TABLE_AC: &str = include_str!("../kinematics/table_table_ac.json");
 const TABLE_TABLE_BC: &str = include_str!("../kinematics/table_table_bc.json");
@@ -35,6 +35,35 @@ fn assert_unit(axis: Vec3) {
 
 fn invalid(message: &str) -> IrError {
     IrError::InvalidInput(message.to_string())
+}
+
+fn gap(left: Vec3, right: Vec3) -> f64 {
+    let dx = left.x() - right.x();
+    let dy = left.y() - right.y();
+    let dz = left.z() - right.z();
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn angles_near(left: [f64; 2], right: [f64; 2], tol: f64) -> bool {
+    (left[0] - right[0]).abs() <= tol && (left[1] - right[1]).abs() <= tol
+}
+
+fn assert_inverse_contains(kin: &Kinematics, xyz: Vec3, angles: [f64; 2], tool_length: f64) {
+    let pose = kin.forward(&joints(xyz, angles), tool_length).expect("forward");
+    let sols = kin.inverse(&pose, tool_length, angles).expect("inverse");
+    assert!(
+        sols.iter().any(|sol| angles_near(sol.angles, angles, 1e-7)),
+        "{} angles {angles:?} not in {:?}",
+        kin.name,
+        sols.iter().map(|sol| sol.angles).collect::<Vec<_>>()
+    );
+    for sol in &sols {
+        let back = kin.forward(sol, tool_length).expect("back");
+        let tip_gap = gap(back.tip, pose.tip);
+        let axis_gap = gap(back.axis, pose.axis);
+        assert!(tip_gap <= 1e-6, "{} tip gap {tip_gap} angles {:?}", kin.name, sol.angles);
+        assert!(axis_gap <= 1e-9, "{} axis gap {axis_gap} angles {:?}", kin.name, sol.angles);
+    }
 }
 
 #[test]
@@ -316,6 +345,151 @@ fn unknown_fields_are_rejected() {
     )
     .expect_err("unknown joint");
     assert!(matches!(err, IrError::Json(_)));
+}
+
+#[test]
+fn inverse_roundtrip_on_each_example() {
+    let cases: [(&str, [[f64; 2]; 3]); 4] = [
+        (TABLE_TABLE_AC, [[0.0, 0.0], [90.0, 0.0], [25.0, -40.0]]),
+        (TABLE_TABLE_BC, [[20.0, -15.0], [-10.0, 40.0], [90.0, 10.0]]),
+        (HEAD_TABLE_BC, [[0.0, 0.0], [45.0, 90.0], [-30.0, -45.0]]),
+        (HEAD_HEAD_AC, [[0.0, 0.0], [90.0, 90.0], [20.0, -30.0]]),
+    ];
+    let places = [Vec3::ZERO, pt(10.0, -20.0, 30.0), pt(5.0, 6.0, 7.0)];
+    let lengths = [0.0, 15.0, 40.0];
+    for (text, hands) in cases {
+        let kin = load(text);
+        for (index, angles) in hands.iter().enumerate() {
+            assert!(kin.within_limits(*angles), "{} {angles:?}", kin.name);
+            assert_inverse_contains(&kin, places[index], *angles, lengths[index]);
+        }
+    }
+}
+
+#[test]
+fn table_table_bc_at_b0_returns_hint_c() {
+    let kin = load(TABLE_TABLE_BC);
+    let xyz = pt(4.0, -2.0, 8.0);
+    let tool_length = 12.5;
+    for c in [0.0, 25.0, -40.0, 179.0] {
+        let angles = [0.0, c];
+        let pose = kin.forward(&joints(xyz, angles), tool_length).expect("forward");
+        let sols = kin.inverse(&pose, tool_length, angles).expect("inverse");
+        assert!(sols.iter().any(|sol| angles_near(sol.angles, angles, 1e-7)), "{sols:?}");
+        for sol in &sols {
+            assert!((sol.angles[1] - c).abs() <= 1e-7, "C {} != hint {c}", sol.angles[1]);
+            let back = kin.forward(sol, tool_length).expect("back");
+            assert!(gap(back.tip, pose.tip) <= 1e-6);
+            assert!(gap(back.axis, pose.axis) <= 1e-9);
+        }
+    }
+}
+
+#[test]
+fn tilted_target_on_a_c_table_is_not_reachable() {
+    let kin = load(
+        r#"{"name":"c_table","spindle_axis":{"x":0.0,"y":0.0,"z":1.0},"rotaries":[{"letter":"C","carrier":"table","axis":{"x":0.0,"y":0.0,"z":1.0},"pivot":{"x":0.0,"y":0.0,"z":0.0}}]}"#,
+    );
+    let pose = ToolPose { tip: pt(1.0, 2.0, 3.0), axis: Vec3::X };
+    let err = kin.inverse(&pose, 5.0, [0.0, 0.0]).expect_err("tilted");
+    assert_eq!(err, invalid("tool axis (1.000000, 0.000000, 0.000000) is not reachable"));
+}
+
+#[test]
+fn target_outside_b_limits_reports_the_limit_error() {
+    let kin = load(TABLE_TABLE_BC);
+    let pose = ToolPose { tip: pt(1.0, 2.0, 3.0), axis: pt(0.0, 0.0, -1.0) };
+    let err = kin.inverse(&pose, 10.0, [0.0, 0.0]).expect_err("limits");
+    assert_eq!(err, invalid("tool axis (0.000000, 0.000000, -1.000000) is outside the rotary limits"));
+}
+
+#[test]
+fn choose_picks_the_requested_branch_on_table_table_bc() {
+    let kin = load(TABLE_TABLE_BC);
+    let tool_length = 12.0;
+    let pose = kin.forward(&joints(pt(3.0, -4.0, 5.0), [-30.0, 0.0]), tool_length).expect("forward");
+    assert!((pose.axis.x() - 0.5).abs() < 1e-9);
+    assert!(pose.axis.y().abs() < 1e-9);
+    assert!((pose.axis.z() - 3.0_f64.sqrt() / 2.0).abs() < 1e-9);
+
+    let positive = kin.choose(&pose, tool_length, Choice::FirstPositive).expect("positive");
+    let negative = kin.choose(&pose, tool_length, Choice::FirstNegative).expect("negative");
+    assert!(positive.angles[0] >= 0.0, "{:?}", positive.angles);
+    assert!(negative.angles[0] <= 0.0, "{:?}", negative.angles);
+    assert!(positive.angles[0] > 1.0 && negative.angles[0] < -1.0);
+
+    let near_negative = kin.choose(&pose, tool_length, Choice::Nearest([-29.0, 0.0])).expect("near neg");
+    let near_positive = kin.choose(&pose, tool_length, Choice::Nearest([29.0, 180.0])).expect("near pos");
+    assert!(near_negative.angles[0] < 0.0, "{:?}", near_negative.angles);
+    assert!(near_positive.angles[0] > 0.0, "{:?}", near_positive.angles);
+
+    let sols = kin.inverse(&pose, tool_length, [0.0, 0.0]).expect("sols");
+    assert!(sols.len() >= 2);
+    let preferred = [0.0, 90.0];
+    let distance = |angles: [f64; 2]| (angles[0] - preferred[0]).abs().max((angles[1] - preferred[1]).abs());
+    let picked = kin.choose(&pose, tool_length, Choice::Nearest(preferred)).expect("tie");
+    let best = distance(sols[0].angles).min(distance(sols[1].angles));
+    assert!((distance(picked.angles) - best).abs() <= 1e-9);
+    if (distance(sols[0].angles) - distance(sols[1].angles)).abs() <= 1e-9 {
+        assert!(angles_near(picked.angles, sols[0].angles, 1e-9));
+    }
+    for sol in [positive, negative, near_negative, near_positive, picked] {
+        let back = kin.forward(&sol, tool_length).expect("back");
+        assert!(gap(back.tip, pose.tip) <= 1e-6);
+        assert!(gap(back.axis, pose.axis) <= 1e-9);
+    }
+}
+
+#[test]
+fn inverse_errors_for_tool_length_and_a_zero_axis() {
+    let kin = load(TABLE_TABLE_AC);
+    let pose = ToolPose { tip: Vec3::ZERO, axis: Vec3::Z };
+    for length in [-0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let err = kin.inverse(&pose, length, [0.0, 0.0]).expect_err("length");
+        assert_eq!(err, invalid("tool length must be finite and non-negative"));
+    }
+    let zero = ToolPose { tip: pt(1.0, 2.0, 3.0), axis: Vec3::ZERO };
+    let err = kin.inverse(&zero, 1.0, [0.0, 0.0]).expect_err("zero");
+    assert_eq!(err, invalid("tool axis is zero"));
+}
+
+#[test]
+fn one_joint_inverse_uses_the_carrier_sign_and_the_hint_when_free() {
+    let table = load(
+        r#"{"name":"a_table","rotaries":[{"letter":"A","carrier":"table","axis":{"x":1.0,"y":0.0,"z":0.0},"pivot":{"x":0.0,"y":0.0,"z":0.0}}]}"#,
+    );
+    assert_inverse_contains(&table, pt(2.0, -3.0, 4.0), [30.0, 0.0], 16.0);
+
+    let head = load(
+        r#"{"name":"b_head","rotaries":[{"letter":"B","carrier":"head","axis":{"x":0.0,"y":1.0,"z":0.0},"pivot":{"x":0.0,"y":0.0,"z":25.0}}],"spindle_axis":{"x":0.0,"y":0.0,"z":1.0}}"#,
+    );
+    assert_inverse_contains(&head, pt(4.0, 5.0, 6.0), [-20.0, 0.0], 10.0);
+
+    let c_table = load(
+        r#"{"name":"c_table","rotaries":[{"letter":"C","carrier":"table","axis":{"x":0.0,"y":0.0,"z":1.0},"pivot":{"x":1.0,"y":2.0,"z":0.0}}]}"#,
+    );
+    let angles = [50.0, 0.0];
+    let pose = c_table.forward(&joints(pt(1.0, 2.0, 3.0), angles), 8.0).expect("forward");
+    let sols = c_table.inverse(&pose, 8.0, [50.0, 7.0]).expect("inverse");
+    assert!(sols.iter().any(|sol| angles_near(sol.angles, angles, 1e-7)), "{sols:?}");
+}
+
+#[test]
+fn parallel_axes_keep_the_hint_split() {
+    let heads = load(
+        r#"{"name":"parallel_heads","rotaries":[{"letter":"B","carrier":"head","axis":{"x":0.0,"y":1.0,"z":0.0},"pivot":{"x":0.0,"y":0.0,"z":0.0}},{"letter":"A","carrier":"head","axis":{"x":0.0,"y":1.0,"z":0.0},"pivot":{"x":0.0,"y":5.0,"z":12.0}}]}"#,
+    );
+    assert_inverse_contains(&heads, pt(1.0, 2.0, 3.0), [30.0, 10.0], 25.0);
+
+    let tables = load(
+        r#"{"name":"parallel_tables","rotaries":[{"letter":"B","carrier":"table","axis":{"x":0.0,"y":1.0,"z":0.0},"pivot":{"x":0.0,"y":0.0,"z":0.0}},{"letter":"A","carrier":"table","axis":{"x":0.0,"y":1.0,"z":0.0},"pivot":{"x":8.0,"y":0.0,"z":4.0}}]}"#,
+    );
+    assert_inverse_contains(&tables, pt(-6.0, 3.0, 9.0), [10.0, 25.0], 18.0);
+
+    let free = load(
+        r#"{"name":"parallel_c","rotaries":[{"letter":"A","carrier":"table","axis":{"x":0.0,"y":0.0,"z":1.0},"pivot":{"x":0.0,"y":0.0,"z":0.0}},{"letter":"C","carrier":"table","axis":{"x":0.0,"y":0.0,"z":1.0},"pivot":{"x":15.0,"y":-6.0,"z":2.0}}]}"#,
+    );
+    assert_inverse_contains(&free, pt(7.0, 1.0, -2.0), [12.0, -40.0], 22.0);
 }
 
 proptest::proptest! {
