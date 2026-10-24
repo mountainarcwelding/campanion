@@ -59,8 +59,8 @@ run     Import the DXF, SVG, STEP or STL (by extension) named by a campanion-job
         --post ID writes a built-in post. A value ending in .json is a custom post file.
         An unknown id lists the built-in ids. Posted text is read back and compared at the job
         chord tolerance. A mismatch exits 1 and nothing is written.
-        --up-axis is z, y or auto (default auto) for a STEP source. auto trusts the exporter
-        header and turns Y up onto Z. A non-STEP source ignores the flag.
+        --up-axis is z, y or auto (default z) for a STEP source. auto is opt-in and trusts the
+        exporter header and turns Y up onto Z. A non-STEP source ignores the flag.
         A changed source hash is a warning on stderr. The job file is not rewritten.
         Verify errors are printed and the status is 1. Warnings stay on stderr.
         An STL job checks each cutting move against the mesh with that operation's cutter.

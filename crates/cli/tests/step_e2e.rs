@@ -471,24 +471,21 @@ fn expect_success(ran: &Ran, label: &str) -> Result<(), String> {
 #[test]
 fn step_auto_y_turns_and_notes() -> Result<(), String> {
     let reply = r#"[{"bodies":["plate"],"component":1,"exporter":"SolidWorks","exporter_up":"y","exporter_version":"2024","system":"SolidWorks 2024","warnings":[],"stand_up":2,"future":{"keep":true}},{"ignored":true}]"#;
-    for extra in [Vec::<&str>::new(), vec!["--up-axis", "auto"]] {
-        let label = if extra.is_empty() { "default" } else { "auto" };
-        let ran = run_with_cli(&format!("auto-y-{label}"), &extra, Some(reply), None)?;
-        expect_success(&ran, label)?;
-        if ran.calls.len() != 2 {
-            return Err(format!("{label}: calls {:?}", ran.calls));
-        }
-        assert_probe_call(&ran.calls[0].0)?;
-        let step = temp_step(&ran.calls[0].1)?;
-        assert_probe_script(&ran.calls[0].1, &step)?;
-        assert_turn_call(&ran.calls[1].0)?;
-        assert_turn_script(&ran.calls[1].1, &step)?;
-        if ran.calls[0].0.get(1).and_then(|path| Path::new(path).parent()) != ran.calls[1].0.get(1).and_then(|path| Path::new(path).parent()) {
-            return Err(format!("{label}: probe and main used different temp dirs"));
-        }
-        if ran.stderr.trim() != Y_NOTE {
-            return Err(format!("{label}: stderr {:?}", ran.stderr));
-        }
+    let ran = run_with_cli("auto-y", &["--up-axis", "auto"], Some(reply), None)?;
+    expect_success(&ran, "auto")?;
+    if ran.calls.len() != 2 {
+        return Err(format!("auto: calls {:?}", ran.calls));
+    }
+    assert_probe_call(&ran.calls[0].0)?;
+    let step = temp_step(&ran.calls[0].1)?;
+    assert_probe_script(&ran.calls[0].1, &step)?;
+    assert_turn_call(&ran.calls[1].0)?;
+    assert_turn_script(&ran.calls[1].1, &step)?;
+    if ran.calls[0].0.get(1).and_then(|path| Path::new(path).parent()) != ran.calls[1].0.get(1).and_then(|path| Path::new(path).parent()) {
+        return Err("auto: probe and main used different temp dirs".into());
+    }
+    if ran.stderr.trim() != Y_NOTE {
+        return Err(format!("auto: stderr {:?}", ran.stderr));
     }
     Ok(())
 }
@@ -510,7 +507,7 @@ fn step_auto_non_y_uses_in() -> Result<(), String> {
         ("non-array", r#"{"exporter":"SolidWorks","exporter_up":"y"}"#),
     ];
     for (name, reply) in replies {
-        let ran = run_with_cli(&format!("auto-keep-{name}"), &[], Some(reply), None)?;
+        let ran = run_with_cli(&format!("auto-keep-{name}"), &["--up-axis", "auto"], Some(reply), None)?;
         expect_success(&ran, name)?;
         if ran.calls.len() != 2 {
             return Err(format!("{name}: calls {:?}", ran.calls));
@@ -548,6 +545,23 @@ fn step_up_axis_z_does_not_probe() -> Result<(), String> {
 
 fn step_from_in_args(args: &[String]) -> Result<PathBuf, String> {
     args.get(3).map(PathBuf::from).ok_or_else(|| format!("--in path missing: {args:?}"))
+}
+
+#[test]
+fn step_default_is_z_and_does_not_probe() -> Result<(), String> {
+    let reply = r#"[{"bodies":["plate"],"component":1,"exporter":"SolidWorks","exporter_up":"y","exporter_version":"2024","system":"SolidWorks 2024","warnings":[],"stand_up":2,"future":{"keep":true}},{"ignored":true}]"#;
+    let ran = run_with_cli("default-z", &[], Some(reply), None)?;
+    expect_success(&ran, "default")?;
+    if ran.calls.len() != 1 {
+        return Err(format!("default: calls {:?}", ran.calls));
+    }
+    let step = step_from_in_args(&ran.calls[0].0)?;
+    assert_in_call(&ran.calls[0].0, &step)?;
+    assert_plain_script(&ran.calls[0].1)?;
+    if ran.stderr.contains("note:") || ran.stderr.contains("turned Y up") {
+        return Err(format!("default: stderr {}", ran.stderr));
+    }
+    Ok(())
 }
 
 #[test]
@@ -593,7 +607,7 @@ fn step_bad_up_axis_is_usage() -> Result<(), String> {
 
 #[test]
 fn step_probe_failure_includes_stderr() -> Result<(), String> {
-    let ran = run_with_cli("probe-fail", &[], None, Some("probe broke"))?;
+    let ran = run_with_cli("probe-fail", &["--up-axis", "auto"], None, Some("probe broke"))?;
     if ran.status == Some(0) {
         return Err(format!("probe failure exited 0: {}", ran.stderr));
     }
