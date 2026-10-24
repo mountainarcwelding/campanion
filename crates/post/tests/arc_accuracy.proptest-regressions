@@ -7,3 +7,4 @@
 cc b995e4cbeb56cb54b487ab982bdf433586601b186c3860b9426b6fc6d1e7d887 # shrinks to case = ArcCase { x: 0.0, y: 0.0, z: 0.0, radius: 1.0, sweep: 3.243680376046116e-6, ccw: false, feed: 50.0 }
 cc f4ca66a0bc90f9ec70264d3b65b021071c6a56cbc9dad9f7bb865bb4a0453d5f # shrinks to case = ArcCase { x: -88.90359769759836, y: 0.0, z: 0.0, radius: 0.036545928631864746, sweep: 2.6154741331062157, ccw: false, feed: 50.0 }
 cc 573bb0d2eb54bfa932af2e781acaff6d7f5e99ede9bd369e647d132f2cb0b949 # shrinks to case = ArcCase { x: 0.0, y: 0.0, z: 0.0, radius: 0.3061664054479007, sweep: 2.799539588561477, ccw: false, feed: 50.0 }
+cc 75fa2fb7bcc71b742fc03cf9b321d25831282e9e723d76596b6e20e2e33feb75 # shrinks to case = ArcCase { x: 0.0, y: 0.0, z: 0.0, radius: 0.026821555229418526, sweep: 3.169811299437078, ccw: false, feed: 50.0 }

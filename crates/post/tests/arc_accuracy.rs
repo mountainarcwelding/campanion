@@ -137,7 +137,7 @@ fn has_g2(text: &str) -> bool {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig::default())]
 
     #[test]
     fn short_arcs_post_and_read_back(case in arc_strategy()) {
@@ -177,6 +177,32 @@ fn zero_chord_arc_is_a_feed_line() {
         let quantum = 10_f64.powi(-(post.linear_decimals() as i32));
         compare(&program, &moves, quantum, &post).map_err(|err| format!("{id} compare: {err}\n{text}")).expect("compare");
     }
+}
+
+fn assert_mill_arc(case: ArcCase) {
+    let program = program_of(&case);
+    let options = PostOptions { arc_tolerance: ARC_TOLERANCE };
+    for id in builtin_ids() {
+        let post = builtin(id).expect(id);
+        if post.is_lathe() {
+            continue;
+        }
+        let text = post_program(&program, &post, &options).map_err(|err| format!("{id}: {err}")).expect("post");
+        let moves = read_back(&text, &post).map_err(|err| format!("{id} read: {err}")).expect("read");
+        let quantum = 10_f64.powi(-(post.linear_decimals() as i32));
+        compare(&program, &moves, quantum, &post).map_err(|err| format!("{id} compare: {err}\n{text}")).expect("compare");
+        controller_ok(&moves, &case, quantum).map_err(|err| format!("{id} controller: {err}\n{text}")).expect("controller");
+    }
+}
+
+#[test]
+fn split_arc_tail_at_the_origin() {
+    assert_mill_arc(ArcCase { x: 0.0, y: 0.0, z: 0.0, radius: 0.026821555229418526, sweep: 3.169811299437078, ccw: false, feed: 50.0 });
+}
+
+#[test]
+fn split_arc_tail_away_from_the_origin() {
+    assert_mill_arc(ArcCase { x: -14.007, y: -78.572, z: 7.182, radius: 0.026821555229418526, sweep: 3.169811299437078, ccw: false, feed: 50.0 });
 }
 
 #[test]

@@ -590,6 +590,20 @@ fn consume_curve(
             if acc > sweep + 0.25 {
                 return Err(invalid(format!("motion {index}: arc travelled too far")));
             }
+            // `slack` can reach the programmed sweep one block early. A short final piece is
+            // still this arc. Rotary sense is remapped from the block angle above; that path is
+            // not peeked, because the next block's angle is not this one.
+            let tail_still_open = acc + 1e-3 < sweep
+                && !rotary_curve
+                && moves.get(*cursor).is_some_and(|next| match next {
+                    ReadMove::Arc { sense: got, .. } if *got == sense => {
+                        on_curve(project(end_of(next), drop_z), start, end, center, plane, sense, sweep, tol)
+                    }
+                    _ => false,
+                });
+            if tail_still_open {
+                continue;
+            }
             if let Some(expect) = check.end_angle {
                 check_angle(angle, expect, check.angle_tol, index)?;
             }

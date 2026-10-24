@@ -899,6 +899,12 @@ impl<'a> Writer<'a> {
                 && sweep <= std::f64::consts::PI
                 && sagitta <= self.options.arc_tolerance
             {
+                // Repeating every rounded axis is not a move. A feed here is taken as the next
+                // program block. A helix that still changes an axis stays a feed line.
+                if geom::dist3(start, rounded) <= 1e-12 {
+                    self.exact = Some(end);
+                    return Ok(());
+                }
                 return self.linear_move("G1", plain(end), Some(feed));
             }
             return Err(invalid("arc end rounds onto its start"));
