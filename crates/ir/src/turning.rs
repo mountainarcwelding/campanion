@@ -118,7 +118,7 @@ impl SpindleSpeed {
 
 /// One lathe spindle.
 ///
-/// `name` is unique on the setup (`main` now, a sub-spindle later). `c_axis` is that spindle's
+/// `name` is unique on the setup (`main`, and further names such as `sub`). `c_axis` is that spindle's
 /// C axis as a machine axis id, when the machine has one. `work_zero_z` is the work-zero offset
 /// along Z, in millimetres. Stock Z is measured from that zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

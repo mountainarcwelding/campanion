@@ -115,6 +115,8 @@ struct Parser<'a> {
     face_mode: bool,
     /// Unrolled cylinder frame. Y is kept and X follows lathe diameter mode.
     cyl_mode: bool,
+    /// True after a `sub_spindle.select` line, until a `deselect` line.
+    on_sub: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -129,6 +131,7 @@ impl<'a> Parser<'a> {
             inverse_time: false,
             face_mode: false,
             cyl_mode: false,
+            on_sub: false,
         }
     }
 
@@ -171,6 +174,7 @@ pub fn read_back(text: &str, post: &PostDef) -> Result<Vec<ReadMove>> {
 
 impl<'a> Parser<'a> {
     fn interpret(&mut self, words: Vec<(char, f64)>, raw: &str) -> Result<Option<ReadMove>> {
+        self.note_sub_line(raw);
         if let Some((letter, value)) = words.first().copied()
             && letter == 'O'
             && words.len() == 1
@@ -271,6 +275,7 @@ impl<'a> Parser<'a> {
                 7 | 8 | 50 | 96 | 97 | 98 if self.post.is_lathe() => {}
                 28 | 53 if self.post.is_lathe() => {}
                 21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
+                code if self.is_sub_spindle_g(code) => {}
                 code if thread_code == Some(code) => {
                     threading = true;
                     motions += 1;
@@ -359,13 +364,16 @@ impl<'a> Parser<'a> {
             Motion::Cw | Motion::Ccw => {
                 let mut sense = if matches!(motion, Motion::Cw) { ArcSense::Cw } else { ArcSense::Ccw };
                 if plane == Plane::Zx && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip) {
-                    sense = match sense {
-                        ArcSense::Cw => ArcSense::Ccw,
-                        ArcSense::Ccw => ArcSense::Cw,
-                    };
+                    sense = flip_sense(sense);
+                }
+                if self.mirroring() && matches!(plane, Plane::Zx | Plane::Yz) {
+                    sense = flip_sense(sense);
                 }
                 let radius = unique(words, 'R')?;
-                let (i, j, k) = (unique(words, 'I')?, unique(words, 'J')?, unique(words, 'K')?);
+                let (i, j, mut k) = (unique(words, 'I')?, unique(words, 'J')?, unique(words, 'K')?);
+                if self.mirroring() {
+                    k = k.map(|value| -value);
+                }
                 if radius.is_some() && (i.is_some() || j.is_some() || k.is_some()) {
                     return Err(invalid("arc has both R and IJK"));
                 }
@@ -525,6 +533,9 @@ impl<'a> Parser<'a> {
         }
         let Some(letter) = self.y_axis_letter() else {
             end[1] = 0.0;
+            if self.mirroring() && axes_present[2].is_some() {
+                end[2] = -end[2];
+            }
             return Ok(end);
         };
         let second = axis_letters(self.post)[1];
@@ -533,7 +544,35 @@ impl<'a> Parser<'a> {
         {
             end[1] = value;
         }
+        if self.mirroring() && axes_present[2].is_some() {
+            end[2] = -end[2];
+        }
         Ok(end)
+    }
+
+    /// A select line enters the sub frame. A deselect line leaves it. Moves in between are un-mirrored
+    /// when `mirror_z` is set, so read-back returns the part frame the writer started from.
+    fn note_sub_line(&mut self, raw: &str) {
+        let Some(sub) = self.post.lathe.as_ref().and_then(|lathe| lathe.sub_spindle.as_ref()) else {
+            return;
+        };
+        let body = block_body(self.post, raw);
+        if sub.select.iter().any(|line| line.trim() == body) {
+            self.on_sub = true;
+        } else if sub.deselect.iter().any(|line| line.trim() == body) {
+            self.on_sub = false;
+        }
+    }
+
+    fn mirroring(&self) -> bool {
+        self.on_sub && self.post.lathe.as_ref().and_then(|lathe| lathe.sub_spindle.as_ref()).is_some_and(|sub| sub.mirror_z)
+    }
+
+    fn is_sub_spindle_g(&self, code: u16) -> bool {
+        let Some(sub) = self.post.lathe.as_ref().and_then(|lathe| lathe.sub_spindle.as_ref()) else {
+            return false;
+        };
+        template_g_codes(&sub.select).contains(&code) || template_g_codes(&sub.deselect).contains(&code)
     }
 
     fn rotary_word(&self, words: &[(char, f64)]) -> Result<Option<f64>> {
@@ -670,6 +709,30 @@ fn unique(words: &[(char, f64)], letter: char) -> Result<Option<f64>> {
         }
     }
     Ok(found)
+}
+
+fn flip_sense(sense: ArcSense) -> ArcSense {
+    match sense {
+        ArcSense::Cw => ArcSense::Ccw,
+        ArcSense::Ccw => ArcSense::Cw,
+    }
+}
+
+/// Drop a leading sequence number so `N40 G55` matches the template `G55`.
+fn block_body(post: &PostDef, raw: &str) -> String {
+    let raw = raw.trim();
+    if !post.line_numbers.enabled {
+        return raw.to_string();
+    }
+    let Some(rest) = raw.strip_prefix(post.line_numbers.prefix.as_str()) else {
+        return raw.to_string();
+    };
+    let rest = rest.trim_start();
+    let after = rest.trim_start_matches(|ch: char| ch.is_ascii_digit());
+    if after.len() == rest.len() {
+        return raw.to_string();
+    }
+    after.trim().to_string()
 }
 
 fn is_motion_g(code: u16, thread: Option<u16>) -> bool {

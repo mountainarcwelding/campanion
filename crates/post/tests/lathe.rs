@@ -1314,6 +1314,145 @@ fn live_tool_lines_cannot_be_empty_and_c_feed_is_named() {
     .expect("empty lists");
     assert!(text.contains("C0.0000"), "{text}");
     assert!(!text.contains("M154") && !text.contains("M14"), "{text}");
+
+fn index_of(text: &str, needle: &str) -> usize {
+    let found = text.find(needle);
+    assert!(found.is_some(), "missing {needle}\n{text}");
+    found.expect("present")
+}
+
+fn tool_row(id: u32) -> Tool {
+    Tool::try_new(id, None, None, None).expect("tool")
+}
+
+fn spindle_named(name: &str, c_axis: Option<u8>, max_rpm: f64) -> Spindle {
+    Spindle::try_new(name, c_axis, 0.0, max_rpm).expect("spindle")
+}
+
+fn turret() -> Head {
+    Head::try_new("turret1", vec![HeadAxis::X, HeadAxis::Z], 12, false).expect("head")
+}
+
+fn bound(index: u32, spindle: &str) -> TurnBinding {
+    TurnBinding::try_new(index, spindle, "turret1", 0).expect("binding").with_speed(Some(SpindleSpeed::rpm(800.0).expect("rpm"))).expect("speed")
+}
+
+fn program_on(spindles: Vec<Spindle>, bindings: Vec<TurnBinding>, paths: Vec<ClPath>) -> Program {
+    let tools: Vec<Tool> = paths.iter().filter_map(|path| path.tool_id()).map(tool_row).collect();
+    let setup = TurningSetup::try_new(spindles, vec![turret()], None, Vec::new(), bindings).expect("turning");
+    Program::try_new(Some("turn".into()), tools, None, paths, Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_turning(Some(setup))
+        .expect("turning")
+}
+
+/// Main op, then a sub op. The sub block starts with G55 G14 before its tool change, and G15 G54
+/// precedes the home lines.
+#[test]
+fn haas_selects_the_sub_before_its_tool_change_and_deselects_before_home() {
+    let main = vec![ClBlock::Event(Event::ToolChange { tool_id: 1 }), spindle_on(None), rapid(12.0, 1.0), linear(12.0, 0.0, 100.0), spindle_off()];
+    let sub = vec![ClBlock::Event(Event::ToolChange { tool_id: 2 }), spindle_on(None), rapid(12.0, 0.5), linear(12.0, -5.0, 100.0), spindle_off()];
+    let program = program_on(
+        vec![spindle_named("main", None, 3_000.0), spindle_named("sub", None, 2_500.0)],
+        vec![bound(0, "main"), bound(1, "sub")],
+        vec![path(Some("main_face"), Some(1), main), path(Some("sub_face"), Some(2), sub)],
+    );
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let t1 = index_of(&text, "T0101");
+    let off = index_of(&text, "M5");
+    let g55 = index_of(&text, "G55");
+    let g14 = index_of(&text, "G14");
+    let t2 = index_of(&text, "T0202");
+    let g15 = index_of(&text, "G15");
+    let g54 = index_of(&text, "G54");
+    let home = index_of(&text, "G53");
+    let end = index_of(&text, "M30");
+    assert!(t1 < off && off < g55 && g55 < g14 && g14 < t2, "{text}");
+    assert!(t2 < g15 && g15 < g54 && g54 < home && home < end, "{text}");
+    assert!(has_word(&text, "Z-5."), "{text}");
+    assert!(!has_word(&text, "Z5."), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+/// The spindle is still on when the binding changes, so M5 is written before G55.
+#[test]
+fn haas_stops_the_running_spindle_before_selecting_the_sub() {
+    let main = vec![ClBlock::Event(Event::ToolChange { tool_id: 1 }), spindle_on(None), rapid(12.0, 1.0)];
+    let sub = vec![ClBlock::Event(Event::ToolChange { tool_id: 2 }), rapid(12.0, -5.0)];
+    let program = program_on(
+        vec![spindle_named("main", None, 3_000.0), spindle_named("sub", None, 2_500.0)],
+        vec![bound(0, "main"), bound(1, "sub")],
+        vec![path(Some("main_face"), Some(1), main), path(Some("sub_face"), Some(2), sub)],
+    );
+    let text = post_program(&program, &haas_lathe(), &options()).expect("post");
+    let m3 = index_of(&text, "M3");
+    let m5 = index_of(&text, "M5");
+    let g55 = index_of(&text, "G55");
+    let g14 = index_of(&text, "G14");
+    let t2 = index_of(&text, "T0202");
+    assert!(m3 < m5 && m5 < g55 && g55 < g14 && g14 < t2, "{text}");
+}
+
+#[test]
+fn haas_rejects_a_spindle_it_does_not_serve() {
+    let program =
+        program_on(vec![spindle_named("tail", None, 1_000.0)], vec![bound(0, "tail")], vec![path(Some("face"), Some(1), vec![rapid(10.0, 0.0)])]);
+    let err = post_program(&program, &haas_lathe(), &options()).expect_err("tail");
+    assert!(err.to_string().contains("post `haas_lathe` has no spindle `tail`"), "{err}");
+}
+
+#[test]
+fn haas_rejects_c_axis_and_live_tooling_on_the_sub() {
+    let events = [
+        Event::CAxis { spindle: "sub".into(), engage: true },
+        Event::SpindleBrake { spindle: "sub".into(), clamp: true },
+        Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward },
+        Event::FaceInterpolation { on: true },
+        Event::CylinderInterpolation { radius: Some(20.0) },
+    ];
+    for event in events {
+        let blocks = vec![ClBlock::Event(Event::ToolChange { tool_id: 1 }), ClBlock::Event(event)];
+        let program = program_on(
+            vec![spindle_named("main", None, 3_000.0), spindle_named("sub", Some(0), 2_500.0)],
+            vec![bound(0, "sub")],
+            vec![path(Some("sub_face"), Some(1), blocks)],
+        );
+        let err = post_program(&program, &haas_lathe(), &options()).expect_err("sub cycle");
+        assert!(err.to_string().contains("post `haas_lathe`: live tooling and C axis on spindle `sub` are not supported"), "{err}");
+    }
+}
+
+#[test]
+fn mirror_z_negates_z_and_flips_g2_g3() {
+    let mut raw = haas_json();
+    raw["lathe"]["sub_spindle"]["mirror_z"] = serde_json::json!(true);
+    let post = post_from(raw);
+    let blocks = vec![
+        rapid(10.0, 0.0),
+        ClBlock::Motion(ClMotion::Arc {
+            to: xz(5.0, -5.0),
+            plane: Plane::Zx,
+            center: Vec3::new(10.0, 0.0, -5.0).expect("centre"),
+            sense: ArcSense::Ccw,
+            feed: 80.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let program = program_on(
+        vec![spindle_named("main", None, 3_000.0), spindle_named("sub", None, 2_500.0)],
+        vec![bound(0, "sub")],
+        vec![path(Some("sub_arc"), Some(1), blocks)],
+    );
+    let text = post_program(&program, &post, &options()).expect("post");
+    let arc = text.lines().find(|line| line.split_whitespace().any(|word| word == "G2" || word == "G3")).expect("arc");
+    assert!(arc.split_whitespace().any(|word| word == "G2"), "{arc}");
+    assert!(!arc.split_whitespace().any(|word| word == "G3"), "{arc}");
+    assert!(arc.split_whitespace().any(|word| word == "Z5."), "{arc}");
+    assert!(arc.split_whitespace().any(|word| word == "K5."), "{arc}");
+    assert!(arc.split_whitespace().any(|word| word == "I0."), "{arc}");
+    assert!(!has_word(&text, "Z-5."), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
 }
 
 #[test]

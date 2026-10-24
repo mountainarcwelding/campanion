@@ -62,6 +62,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     writer.stop_processes()?;
     writer.templates("footer", &post.footer, &header_vars)?;
     writer.finish_mill_turn()?;
+    writer.deselect_sub_at_end()?;
     writer.lathe_home()?;
     writer.templates("program_end", &post.program_end, &header_vars)?;
     Ok(writer.out)
@@ -171,6 +172,8 @@ struct Writer<'a> {
     turning: Option<&'a TurningSetup>,
     /// Index of the toolpath currently being written. Bindings use this index.
     path_index: u32,
+    /// Spindle the previous toolpath left active. Starts as `main`.
+    active_spindle: String,
     plane: Option<Plane>,
     /// Last `G0` or `G1`, cleared by an arc so the next line is not modal.
     linear: Option<&'static str>,
@@ -208,6 +211,7 @@ impl<'a> Writer<'a> {
             setup,
             turning,
             path_index: 0,
+            active_spindle: "main".to_string(),
             plane,
             linear: None,
             feed: None,
@@ -260,6 +264,7 @@ impl<'a> Writer<'a> {
 
     fn toolpath(&mut self, index: u32, path: &ClPath) -> Result<()> {
         self.path_index = index;
+        self.sync_spindle()?;
         match path.compensation() {
             CompensationMode::ControllerLeft => return Err(unsupported("controller left compensation is not supported")),
             CompensationMode::ControllerRight => return Err(unsupported("controller right compensation is not supported")),
@@ -585,9 +590,12 @@ impl<'a> Writer<'a> {
             ArcMode::Ijk => {
                 let offsets = [center[0] - start[0], center[1] - start[1], center[2] - start[2]];
                 for (letter, index) in plane_centre_words(plane) {
-                    let Some(value) = offsets.get(*index).copied() else {
+                    let Some(mut value) = offsets.get(*index).copied() else {
                         return Err(invalid("arc offset is missing"));
                     };
+                    if *letter == "K" && self.mirror_z() {
+                        value = -value;
+                    }
                     words.push(format!("{letter}{}", self.format_axis(value, self.post.decimals.linear)?));
                 }
             }
@@ -951,7 +959,8 @@ impl<'a> Writer<'a> {
         let x_out = if lathe.diameter_mode { end[0] * 2.0 } else { end[0] };
         let x_text = self.format_axis(x_out, self.post.decimals.linear)?;
         let y_text = self.format_axis(end[1], self.post.decimals.linear)?;
-        let z_text = self.format_axis(end[2], self.post.decimals.linear)?;
+        let z_out = if self.mirror_z() { -end[2] } else { end[2] };
+        let z_text = self.format_axis(z_out, self.post.decimals.linear)?;
         words.push(format!("{x_letter}{x_text}"));
         let has_y = lathe.y_axis.is_some();
         if has_y && (self.force_axes || self.y_text_changes(&y_text)?) {
@@ -966,7 +975,10 @@ impl<'a> Writer<'a> {
         let written_x = x_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
         let stored_x = if lathe.diameter_mode { written_x * 0.5 } else { written_x };
         let stored_y = y_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
-        let stored_z = z_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        let mut stored_z = z_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        if self.mirror_z() {
+            stored_z = -stored_z;
+        }
         Ok([stored_x, stored_y, stored_z])
     }
 
@@ -1005,9 +1017,11 @@ impl<'a> Writer<'a> {
     }
 
     /// G2/G3 in the IR picture. `arc_flip` swaps them only for the ZX lathe view, not for a face or a cylinder.
+    /// Mirroring Z reverses a ZX or YZ arc, so that swaps G2 and G3 as well. Both swaps cancel.
     fn written_sense(&self, sense: campanion_ir::ArcSense, plane: Plane) -> campanion_ir::ArcSense {
-        let flip = plane == Plane::Zx && self.turning.is_some() && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip);
-        if !flip {
+        let turret = plane == Plane::Zx && self.turning.is_some() && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip);
+        let mirror = self.mirror_z() && matches!(plane, Plane::Zx | Plane::Yz);
+        if turret == mirror {
             return sense;
         }
         match sense {
@@ -1047,6 +1061,7 @@ impl<'a> Writer<'a> {
             return Err(unsupported(format!("post `{}` does not support mill-turn spindle modes", self.post.id())));
         }
         if self.turning.is_some() {
+            self.reject_sub_cycle(event)?;
             match event {
                 Event::ProcessOn { process: ProcessKind::Spindle, params } => return self.lathe_spindle_on(params),
                 Event::ProcessOff { process: ProcessKind::Spindle } => return self.lathe_spindle_off(),
@@ -1221,6 +1236,95 @@ impl<'a> Writer<'a> {
         self.thc_before_off()?;
         self.note_off(&ProcessKind::Spindle);
         self.templates("lathe.spindle_off", &lines, &[("date-free!", "")])
+    }
+
+    /// Stop the running spindle, then select or deselect, before this toolpath's first line.
+    ///
+    /// The active name starts as `main`. A binding to any other name needs `lathe.sub_spindle`
+    /// to name that spindle. Entering it writes `select`. Leaving it writes `deselect`.
+    fn sync_spindle(&mut self) -> Result<()> {
+        let Some(turning) = self.turning else {
+            return Ok(());
+        };
+        let Some(binding) = turning.binding_for(self.path_index) else {
+            return Ok(());
+        };
+        let name = binding.spindle().to_string();
+        if name != "main" && !self.is_configured_sub(&name) {
+            return Err(unsupported(format!("post `{}` has no spindle `{name}`", self.post.id())));
+        }
+        if name == self.active_spindle {
+            return Ok(());
+        }
+        if self.spindle_running() {
+            self.lathe_spindle_off()?;
+        }
+        if self.on_sub() {
+            self.write_sub_lines(false)?;
+        }
+        if self.is_configured_sub(&name) {
+            self.write_sub_lines(true)?;
+        }
+        self.active_spindle = name;
+        Ok(())
+    }
+
+    /// `deselect` before the home and program-end lines when the program finishes on the sub.
+    fn deselect_sub_at_end(&mut self) -> Result<()> {
+        if self.turning.is_none() || !self.on_sub() {
+            return Ok(());
+        }
+        self.write_sub_lines(false)?;
+        self.active_spindle = "main".to_string();
+        Ok(())
+    }
+
+    fn reject_sub_cycle(&self, event: &Event) -> Result<()> {
+        let blocked = matches!(
+            event,
+            Event::CAxis { .. }
+                | Event::SpindleBrake { .. }
+                | Event::LiveToolOn { .. }
+                | Event::FaceInterpolation { .. }
+                | Event::CylinderInterpolation { .. }
+        );
+        if blocked && self.on_sub() {
+            return Err(unsupported(format!(
+                "post `{}`: live tooling and C axis on spindle `{}` are not supported",
+                self.post.id(),
+                self.active_spindle
+            )));
+        }
+        Ok(())
+    }
+
+    fn spindle_running(&self) -> bool {
+        self.on.iter().any(|active| active.key == "spindle")
+    }
+
+    fn on_sub(&self) -> bool {
+        self.configured_sub_name().is_some_and(|name| name == self.active_spindle)
+    }
+
+    fn is_configured_sub(&self, name: &str) -> bool {
+        self.configured_sub_name().is_some_and(|sub| sub == name)
+    }
+
+    fn configured_sub_name(&self) -> Option<&str> {
+        self.post.lathe.as_ref()?.sub_spindle.as_ref().map(|sub| sub.spindle.as_str())
+    }
+
+    /// Negate Z, K, and the arc direction while the active spindle asks for it.
+    fn mirror_z(&self) -> bool {
+        self.on_sub() && self.post.lathe.as_ref().and_then(|lathe| lathe.sub_spindle.as_ref()).is_some_and(|sub| sub.mirror_z)
+    }
+
+    fn write_sub_lines(&mut self, select: bool) -> Result<()> {
+        let Some(sub) = self.post.lathe.as_ref().and_then(|lathe| lathe.sub_spindle.clone()) else {
+            return Ok(());
+        };
+        let (field_name, lines) = if select { ("lathe.sub_spindle.select", sub.select) } else { ("lathe.sub_spindle.deselect", sub.deselect) };
+        self.templates(field_name, &lines, &[("date-free!", "")])
     }
 
     fn c_axis(&mut self, engage: bool) -> Result<()> {

@@ -335,6 +335,14 @@ pub(crate) struct LatheOutput {
     /// writes `G93` and `F = 1 / minutes`.
     #[serde(default = "default_c_feed")]
     pub(crate) c_feed: String,
+    /// Second work spindle. Absent: a binding other than `main` is rejected.
+    ///
+    /// `select` is written before the first output of a toolpath that enters this spindle.
+    /// `deselect` is written when a later toolpath leaves it, and again before the home lines
+    /// when the program ends on it. `mirror_z` negates Z (and arc K, and swaps G2/G3) for moves
+    /// on this spindle. Haas leaves `mirror_z` false because G14 mirrors Z on the control.
+    #[serde(default)]
+    pub(crate) sub_spindle: Option<SubSpindleOutput>,
 }
 
 fn default_c_feed() -> String {
@@ -354,6 +362,24 @@ impl LatheOutput {
     pub(crate) fn c_feed_off_code(&self) -> Option<u16> {
         g_code_number(&self.c_feed_off_word())
     }
+}
+
+/// Select and deselect lines for one secondary spindle.
+///
+/// `spindle` is the IR spindle name these lines serve. `select` and `deselect` take no
+/// placeholders, the same rule as [`LatheOutput::spindle_off`].
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubSpindleOutput {
+    /// IR spindle name, for example `sub`.
+    pub(crate) spindle: String,
+    /// Written when a toolpath enters this spindle, before its tool change.
+    pub(crate) select: Vec<String>,
+    /// Written when a toolpath leaves this spindle, and before home if the program ends on it.
+    pub(crate) deselect: Vec<String>,
+    /// When true, the writer negates Z and arc K and swaps G2/G3. Default false.
+    #[serde(default)]
+    pub(crate) mirror_z: bool,
 }
 
 /// Y-axis live milling on a lathe.
@@ -620,6 +646,11 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_plane_word("lathe.y_axis.face_plane", &y_axis.face_plane)?;
         check_plane_word("lathe.y_axis.side_plane", &y_axis.side_plane)?;
         check_plane_word("lathe.y_axis.turn_plane", &y_axis.turn_plane)?;
+    }
+    if let Some(sub) = &lathe.sub_spindle {
+        check_token("lathe.sub_spindle.spindle", &sub.spindle, 64)?;
+        check_templates("lathe.sub_spindle.select", &sub.select, LATHE_BARE)?;
+        check_templates("lathe.sub_spindle.deselect", &sub.deselect, LATHE_BARE)?;
     }
     Ok(())
 }
