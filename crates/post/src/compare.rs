@@ -503,6 +503,21 @@ fn consume_curve(
     let mut acc = 0.0;
     let mut guard = 0u32;
     loop {
+        // A post with Z words omitted drops a feed whose XY does not change. A collapsed arc
+        // then has no block. The following motion belongs to the next program move.
+        if !rotary_curve {
+            let prev_read = (*cursor > 0).then(|| moves.get(*cursor - 1)).flatten().map(|m| project(end_of(m), drop_z));
+            let already = prev_read.is_some_and(|at| geom::dist3(at, end) <= tol && geom::dist3(at, start) <= tol);
+            let next_on_curve =
+                moves.get(*cursor).is_some_and(|mv| on_curve(project(end_of(mv), drop_z), start, end, center, plane, sense, sweep, tol));
+            if already && !next_on_curve {
+                if let Some(expect) = check.end_angle {
+                    let angle = (*cursor > 0).then(|| moves.get(*cursor - 1)).flatten().and_then(|mv| move_angle(mv));
+                    check_angle(angle, expect, check.angle_tol, index)?;
+                }
+                return Ok(());
+            }
+        }
         let Some(mv) = moves.get(*cursor).copied() else {
             return Err(invalid(format!("motion {index}: g-code ended before the arc")));
         };
@@ -523,6 +538,15 @@ fn consume_curve(
         match mv {
             ReadMove::Rapid { .. } => return Err(invalid(format!("motion {index}: arc was posted as a rapid"))),
             ReadMove::Arc { sense: got, center: got_center, radius, .. } => {
+                if !rotary_curve {
+                    let read_start = (*cursor >= 2).then(|| moves.get(*cursor - 2)).flatten().map(|m| project(end_of(m), drop_z));
+                    if let Some(rs) = read_start
+                        && geom::in_plane_len(plane, rs, point) <= 1e-9
+                        && sweep < std::f64::consts::TAU - 0.2
+                    {
+                        return Err(invalid(format!("motion {index}: arc block has equal endpoints and cuts a full circle")));
+                    }
+                }
                 let got_sense = if rotary_curve {
                     let angle = angle.ok_or_else(|| invalid(format!("motion {index}: missing rotary angle")))?;
                     let setup = check.setup.ok_or_else(|| invalid("rotary angle needs a rotary setup"))?;
@@ -557,7 +581,12 @@ fn consume_curve(
         prev = point;
         prev_part = part_point;
         prev_angle = angle;
-        if geom::dist3(point, end) <= tol && acc + 1e-3 >= sweep {
+        let radius = geom::in_plane_len(plane, start, center);
+        let slack = if radius <= 1e-12 { 1e-3 } else { 1e-3_f64.max(tol / radius) };
+        // Both programmed ends lie on this posted point when the chord rounded away.
+        // A line there cannot cut a circle; an equal-endpoint arc was rejected above.
+        let unresolved = matches!(mv, ReadMove::Linear { .. }) && geom::dist3(point, start) <= tol;
+        if geom::dist3(point, end) <= tol && (acc + slack >= sweep || unresolved) {
             if acc > sweep + 0.25 {
                 return Err(invalid(format!("motion {index}: arc travelled too far")));
             }
@@ -593,6 +622,10 @@ fn centre_ok(got: Xyz, expect: Xyz, plane: Plane, _radius_mode: bool, tol: f64) 
 }
 
 fn on_curve(point: Xyz, start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: ArcSense, sweep: f64, tol: f64) -> bool {
+    // Rounding can leave the first posted point slightly behind the programmed start.
+    if geom::dist3(point, start) <= tol {
+        return true;
+    }
     let radius = geom::in_plane_len(plane, start, center);
     if (geom::in_plane_len(plane, point, center) - radius).abs() > tol {
         return false;
@@ -617,7 +650,13 @@ fn on_curve(point: Xyz, start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: 
 
 fn travel(prev: Xyz, point: Xyz, center: Xyz, plane: Plane, sense: ArcSense, remaining: f64, tol: f64) -> f64 {
     if geom::in_plane_len(plane, prev, point) <= tol.max(1e-9) {
-        if remaining >= std::f64::consts::TAU - 0.2 { std::f64::consts::TAU } else { 0.0 }
+        if remaining >= std::f64::consts::TAU - 0.2 {
+            std::f64::consts::TAU
+        } else {
+            // A step that rounds slightly backwards is not travel.
+            let forward = forward_from(prev, point, center, plane, sense);
+            if forward <= std::f64::consts::PI { forward } else { 0.0 }
+        }
     } else {
         forward_from(prev, point, center, plane, sense)
     }
@@ -797,4 +836,43 @@ fn check_curve_feed(
 
 fn xyz(point: Vec3) -> Xyz {
     [point.x(), point.y(), point.z()]
+}
+
+#[cfg(test)]
+mod tests {
+    use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, Plane, Pose, Program, Vec3};
+
+    use crate::{builtin, read_back};
+
+    fn tip(x: f64, y: f64, z: f64) -> Pose {
+        Pose::new(Vec3::new(x, y, z).expect("tip"), Vec3::Z).expect("pose")
+    }
+
+    #[test]
+    fn equal_arc_endpoints_cut_a_full_circle() {
+        let start = [1.23456, 2.0, 0.0];
+        let radius = 0.5_f64;
+        let sweep = 1e-5_f64;
+        let center = [start[0] - radius, start[1], start[2]];
+        let end = [center[0] + radius * sweep.cos(), center[1] - radius * sweep.sin(), start[2]];
+        let blocks = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: tip(start[0], start[1], start[2]), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: tip(end[0], end[1], end[2]),
+                plane: Plane::Xy,
+                center: Vec3::new(center[0], center[1], center[2]).expect("center"),
+                sense: ArcSense::Cw,
+                feed: 100.0,
+                role: MoveRole::Cut,
+            }),
+        ];
+        let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
+        let path = ClPath::try_new(None, None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
+        let post = builtin("linuxcnc").expect("linuxcnc");
+        let text = "G21\nG90\nG17\nG0 X1.2346 Y2.0000 Z0.0000\nG2 X1.2346 Y2.0000 Z0.0000 I-0.5000 J0.0000 F100\n";
+        let moves = read_back(text, &post).expect("read");
+        let err = super::compare(&program, &moves, 1e-4, &post).expect_err("full circle");
+        assert!(err.to_string().contains("cuts a full circle"), "{err}");
+    }
 }
