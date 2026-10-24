@@ -201,7 +201,8 @@ impl<'a> Parser<'a> {
                         || letter == dwell_letter
                         || self.is_rotary_letter(letter)
                         || self.is_c_letter(letter)
-                        || self.is_y_letter(letter) => {}
+                        || self.is_y_letter(letter)
+                        || self.is_transfer_letter(letter) => {}
                 letter => return Err(invalid(format!("unexpected word {letter}"))),
             }
         }
@@ -276,6 +277,7 @@ impl<'a> Parser<'a> {
                 28 | 53 if self.post.is_lathe() => {}
                 21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
                 code if self.is_sub_spindle_g(code) => {}
+                code if self.is_transfer_g(code) => {}
                 code if thread_code == Some(code) => {
                     threading = true;
                     motions += 1;
@@ -577,6 +579,32 @@ impl<'a> Parser<'a> {
         template_g_codes(&sub.select).contains(&code) || template_g_codes(&sub.deselect).contains(&code)
     }
 
+    fn is_transfer_letter(&self, letter: char) -> bool {
+        transfer_axis_letter(self.post) == Some(letter)
+    }
+
+    fn is_transfer_g(&self, code: u16) -> bool {
+        let Some(transfer) = self.post.lathe.as_ref().and_then(|lathe| lathe.transfer.as_ref()) else {
+            return false;
+        };
+        let groups = [
+            &transfer.clamp_main,
+            &transfer.unclamp_main,
+            &transfer.clamp_sub,
+            &transfer.unclamp_sub,
+            &transfer.sub_cw,
+            &transfer.sub_ccw,
+            &transfer.sub_stop,
+            &transfer.sync_on,
+            &transfer.sync_on_phase,
+            &transfer.sync_off,
+            &transfer.move_rapid,
+            &transfer.move_feed,
+            &transfer.move_machine,
+        ];
+        groups.iter().any(|lines| template_g_codes(lines).contains(&code))
+    }
+
     fn rotary_word(&self, words: &[(char, f64)]) -> Result<Option<f64>> {
         let mill = self.mill_rotary_word(words)?;
         let c = match self.c_axis_letter() {
@@ -739,6 +767,25 @@ fn block_body(post: &PostDef, raw: &str) -> String {
 
 fn is_motion_g(code: u16, thread: Option<u16>) -> bool {
     matches!(code, 0..=3) || thread == Some(code)
+}
+
+/// Axis letter written immediately before `{z}` on a transfer move, for example `B` in `G00 B{z}`.
+fn transfer_axis_letter(post: &PostDef) -> Option<char> {
+    let transfer = post.lathe.as_ref()?.transfer.as_ref()?;
+    for lines in [&transfer.move_rapid, &transfer.move_feed, &transfer.move_machine] {
+        for line in lines {
+            let Some(index) = line.find("{z}") else {
+                continue;
+            };
+            let Some(letter) = line[..index].chars().next_back() else {
+                continue;
+            };
+            if letter.is_ascii_alphabetic() {
+                return Some(letter.to_ascii_uppercase());
+            }
+        }
+    }
+    None
 }
 
 /// G codes named in interpolation templates, such as `G112` or `G107`.

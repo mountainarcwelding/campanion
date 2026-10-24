@@ -32,6 +32,7 @@
   "operations": [
     { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 150, "speed": { "css": 180 } },
     { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "css": 200 } },
+    { "name": "handoff", "type": "transfer", "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 250 },
     { "name": "sub_face", "type": "face", "tool_id": 2, "spindle": "sub", "step_z": 0.25, "feed": 150, "speed": { "css": 160 } },
     { "name": "sub_finish", "type": "finish", "tool_id": 2, "spindle": "sub", "side": "outside", "feed": 100, "speed": { "css": 180 } }
   ],

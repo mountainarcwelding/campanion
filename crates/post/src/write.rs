@@ -1072,6 +1072,10 @@ impl<'a> Writer<'a> {
                 Event::LiveToolOff => return self.live_tool_off(),
                 Event::FaceInterpolation { on } => return self.face_interpolation(*on),
                 Event::CylinderInterpolation { radius } => return self.cylinder_interpolation(*radius),
+                Event::ChuckClamp { spindle, clamp } => return self.chuck_clamp(spindle, *clamp),
+                Event::SpindleSync { engage, phase_deg } => return self.spindle_sync(*engage, *phase_deg),
+                Event::SpindleRun { spindle, rpm, reverse } => return self.spindle_run(spindle, *rpm, *reverse),
+                Event::SpindleMove { spindle, z, machine, feed } => return self.spindle_move(spindle, *z, *machine, *feed),
                 _ => {}
             }
         }
@@ -1124,6 +1128,9 @@ impl<'a> Writer<'a> {
             | Event::LiveToolOff
             | Event::FaceInterpolation { .. }
             | Event::CylinderInterpolation { .. } => Err(unsupported(format!("post `{}` does not support mill-turn spindle modes", self.post.id()))),
+            Event::ChuckClamp { .. } | Event::SpindleSync { .. } | Event::SpindleRun { .. } | Event::SpindleMove { .. } => {
+                Err(unsupported(format!("post `{}` has no part transfer", self.post.id())))
+            }
         }
     }
 
@@ -1236,6 +1243,120 @@ impl<'a> Writer<'a> {
         self.thc_before_off()?;
         self.note_off(&ProcessKind::Spindle);
         self.templates("lathe.spindle_off", &lines, &[("date-free!", "")])
+    }
+
+    fn part_transfer(&self) -> Result<crate::def::TransferOutput> {
+        self.post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.transfer.clone())
+            .ok_or_else(|| unsupported(format!("post `{}` has no part transfer", self.post.id())))
+    }
+
+    fn require_transfer_spindle(&self, spindle: &str, transfer: &crate::def::TransferOutput) -> Result<()> {
+        if spindle == "main" || spindle == transfer.spindle {
+            Ok(())
+        } else {
+            Err(unsupported(format!("post `{}` has no spindle `{spindle}`", self.post.id())))
+        }
+    }
+
+    fn chuck_clamp(&mut self, spindle: &str, clamp: bool) -> Result<()> {
+        let transfer = self.part_transfer()?;
+        self.require_transfer_spindle(spindle, &transfer)?;
+        let (field_name, lines) = if spindle == "main" {
+            if clamp { ("lathe.transfer.clamp_main", transfer.clamp_main) } else { ("lathe.transfer.unclamp_main", transfer.unclamp_main) }
+        } else if clamp {
+            ("lathe.transfer.clamp_sub", transfer.clamp_sub)
+        } else {
+            ("lathe.transfer.unclamp_sub", transfer.unclamp_sub)
+        };
+        self.templates(field_name, &lines, &[("date-free!", "")])
+    }
+
+    fn spindle_sync(&mut self, engage: bool, phase: Option<f64>) -> Result<()> {
+        let transfer = self.part_transfer()?;
+        if !engage {
+            return self.templates("lathe.transfer.sync_off", &transfer.sync_off, &[("date-free!", "")]);
+        }
+        if let Some(phase) = phase {
+            let text = format_lathe_number(phase, self.post)?;
+            return self.templates("lathe.transfer.sync_on_phase", &transfer.sync_on_phase, &[("phase", text.as_str()), ("date-free!", "")]);
+        }
+        self.templates("lathe.transfer.sync_on", &transfer.sync_on, &[("date-free!", "")])
+    }
+
+    /// `rpm` 0 stops. A positive speed on `main` uses the rpm lines and the event's direction.
+    /// The secondary spindle uses `sub_cw`, `sub_ccw` or `sub_stop` and does not mark the main spindle on.
+    fn spindle_run(&mut self, spindle: &str, rpm: f64, reverse: bool) -> Result<()> {
+        let transfer = self.part_transfer()?;
+        self.require_transfer_spindle(spindle, &transfer)?;
+        if spindle == "main" {
+            return self.main_spindle_run(rpm, reverse);
+        }
+        if rpm == 0.0 {
+            return self.templates("lathe.transfer.sub_stop", &transfer.sub_stop, &[("date-free!", "")]);
+        }
+        let text = format_lathe_number(rpm, self.post)?;
+        let (field_name, lines) = if reverse { ("lathe.transfer.sub_ccw", transfer.sub_ccw) } else { ("lathe.transfer.sub_cw", transfer.sub_cw) };
+        self.templates(field_name, &lines, &[("rpm", text.as_str()), ("date-free!", "")])
+    }
+
+    fn main_spindle_run(&mut self, rpm: f64, reverse: bool) -> Result<()> {
+        if rpm == 0.0 {
+            return self.lathe_spindle_off();
+        }
+        if self.c_engaged {
+            return Err(invalid("turning spindle start while the C axis is engaged"));
+        }
+        let lathe = self.post.lathe.clone().ok_or_else(|| invalid("lathe spindle needs a lathe post"))?;
+        let text = format_lathe_number(rpm, self.post)?;
+        self.templates("lathe.rpm", &lathe.rpm, &[("rpm", text.as_str()), ("date-free!", "")])?;
+        let lines = if reverse { lathe.spindle_ccw } else { lathe.spindle_cw };
+        self.templates("lathe.spindle", &lines, &[("date-free!", "")])?;
+        self.note_on(&ProcessKind::Spindle, "", "0");
+        self.arm_thc();
+        Ok(())
+    }
+
+    /// `machine` selects `move_machine`. A feed otherwise selects `move_feed`. Anything else is a rapid.
+    fn spindle_move(&mut self, spindle: &str, z: f64, machine: bool, feed: Option<f64>) -> Result<()> {
+        let transfer = self.part_transfer()?;
+        self.require_transfer_spindle(spindle, &transfer)?;
+        let z_text = format_lathe_number_signed(z, self.post)?;
+        if machine {
+            self.templates("lathe.transfer.move_machine", &transfer.move_machine, &[("z", z_text.as_str()), ("date-free!", "")])?;
+            self.note_transfer_modal(&transfer.move_machine, None);
+            return Ok(());
+        }
+        if let Some(feed) = feed {
+            let feed_text = format_lathe_number(feed, self.post)?;
+            self.templates(
+                "lathe.transfer.move_feed",
+                &transfer.move_feed,
+                &[("z", z_text.as_str()), ("feed", feed_text.as_str()), ("date-free!", "")],
+            )?;
+            self.note_transfer_modal(&transfer.move_feed, Some(feed_text.as_str()));
+            return Ok(());
+        }
+        self.templates("lathe.transfer.move_rapid", &transfer.move_rapid, &[("z", z_text.as_str()), ("date-free!", "")])?;
+        self.note_transfer_modal(&transfer.move_rapid, None);
+        Ok(())
+    }
+
+    /// Keep the writer's modal motion aligned with read-back. A `G53` or `G28` line does not change it.
+    fn note_transfer_modal(&mut self, lines: &[String], feed_text: Option<&str>) {
+        for line in lines {
+            let Some(code) = transfer_modal_code(line) else {
+                continue;
+            };
+            self.linear = Some(code);
+            if code == "G1"
+                && let Some(feed) = feed_text
+            {
+                self.feed = Some(feed.to_string());
+            }
+        }
     }
 
     /// Stop the running spindle, then select or deselect, before this toolpath's first line.
@@ -1951,6 +2072,37 @@ fn format_lathe_number(value: f64, post: &PostDef) -> Result<String> {
     }
     let nearest = value.round();
     if (value - nearest).abs() <= 1e-6 { format_fixed(nearest, 0, false) } else { format_fixed(value, post.decimals.feed, post.trailing_zeros) }
+}
+
+/// Signed `{z}`. A whole number is an integer. A negative zero is `0`.
+fn format_lathe_number_signed(value: f64, post: &PostDef) -> Result<String> {
+    if !value.is_finite() {
+        return Err(invalid("number must be finite"));
+    }
+    if value < 0.0 {
+        let text = format_lathe_number(-value, post)?;
+        if text == "0" { Ok(text) } else { Ok(format!("-{text}")) }
+    } else {
+        format_lathe_number(value, post)
+    }
+}
+
+/// Motion code a transfer template leaves modal, when the line is not a machine move.
+fn transfer_modal_code(line: &str) -> Option<&'static str> {
+    let mut motion = None;
+    let mut machine = false;
+    for word in line.split_whitespace() {
+        let upper = word.to_ascii_uppercase();
+        if upper == "G28" || upper == "G53" {
+            machine = true;
+        }
+        if upper == "G0" || upper == "G00" {
+            motion = Some("G0");
+        } else if upper == "G1" || upper == "G01" {
+            motion = Some("G1");
+        }
+    }
+    if machine { None } else { motion }
 }
 
 /// Spindle speed is a whole number of revolutions (`S12000`). An absent speed is an empty string

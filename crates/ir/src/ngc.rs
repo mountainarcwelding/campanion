@@ -364,6 +364,32 @@ impl Writer {
                 Some(radius) => self.line(&format!("(cylinder interpolation {radius})")),
                 None => self.line("(cylinder interpolation off)"),
             },
+            Event::ChuckClamp { spindle, clamp } => {
+                let verb = if *clamp { "clamp" } else { "unclamp" };
+                self.line(&format!("(chuck {verb} {})", strip_parens(spindle)));
+            }
+            Event::SpindleSync { engage, phase_deg } => match (engage, phase_deg) {
+                (true, Some(phase)) => self.line(&format!("(spindle sync on {phase})")),
+                (true, None) => self.line("(spindle sync on)"),
+                (false, _) => self.line("(spindle sync off)"),
+            },
+            Event::SpindleRun { spindle, rpm, reverse } => {
+                let name = strip_parens(spindle);
+                if *rpm == 0.0 {
+                    self.line(&format!("(spindle stop {name})"));
+                } else {
+                    let verb = if *reverse { "reverse" } else { "forward" };
+                    self.line(&format!("(spindle {verb} {name} {rpm})"));
+                }
+            }
+            Event::SpindleMove { spindle, z, machine, feed } => {
+                let frame = if *machine { "machine" } else { "work" };
+                let name = strip_parens(spindle);
+                match feed {
+                    Some(feed) => self.line(&format!("(spindle move {name} {frame} {z} f {feed})")),
+                    None => self.line(&format!("(spindle move {name} {frame} {z})")),
+                }
+            }
         }
         Ok(())
     }

@@ -506,7 +506,7 @@ fields are rejected with a message that names the key. Every number must be fini
 millimetres. Feeds are millimetres per minute. Constant surface speed is metres per minute.
 Direct spindle speed is revolutions per minute.
 
-`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off. `examples/shaft_fillet.lathe.json` is the same part with an R3 front fillet, read from `examples/shaft_fillet.step`; that job needs SolidCraft's `solidcraft-cli`. `examples/millturn.lathe.json` faces that shaft, then drills four holes on the front face and cuts an axial slot on the Ø40, with the spindle indexed as C. `examples/millturn_flat.lathe.json` mills one flat on a Ø40 field of that shaft with the Y axis. `examples/subspindle.lathe.json` faces and finishes `examples/subspindle.dxf` on the main spindle, then faces and finishes the same half-profile on the sub. `examples/millturn_face.lathe.json` mills a 16×10 mm front-face pocket from `examples/millturn_face.dxf` with face interpolation.
+`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off. `examples/shaft_fillet.lathe.json` is the same part with an R3 front fillet, read from `examples/shaft_fillet.step`; that job needs SolidCraft's `solidcraft-cli`. `examples/millturn.lathe.json` faces that shaft, then drills four holes on the front face and cuts an axial slot on the Ø40, with the spindle indexed as C. `examples/millturn_flat.lathe.json` mills one flat on a Ø40 field of that shaft with the Y axis. `examples/subspindle.lathe.json` faces and finishes `examples/subspindle.dxf` on the main spindle, hands the part to the sub, then faces and finishes the same half-profile on the sub. `examples/transfer.lathe.json` faces and finishes that bar, transfers it with a phased sync and a part-off, faces the sub, then ejects. `examples/millturn_face.lathe.json` mills a 16×10 mm front-face pocket from `examples/millturn_face.dxf` with face interpolation.
 
 ```json
 {
@@ -538,7 +538,7 @@ Direct spindle speed is revolutions per minute.
 | `sub` | no | Second spindle. `max_rpm` (positive, at most 100000), `source` (the same shape as the job `source`), and `back_allowance` (`>= 0`, default 0). Adds IR spindle `sub` with no C axis, work zero 0 and `reversed` false. |
 | `head` | no | Y travel for turret `turret1`. `y_axis` is a boolean, default false. When it is false, `y_min` and `y_max` are rejected. When it is true both limits are required, with `y_min < 0 < y_max`, and the head lists axis Y. There is no default travel: the job supplies the numbers (a Haas ST-Y class machine is about ±50.8 mm). A tool-centre Y outside `[y_min, y_max]` is `operation NAME: Y VALUE outside head travel`. |
 | `tools` | yes | Inserts and live tools, at most 256. May be empty when `operations` is empty. |
-| `operations` | yes | Face, rough, finish, thread, groove, part, drill, `live_drill`, `live_slot`, `live_flat` and `live_mill`, in order, at most 1024. |
+| `operations` | yes | Face, rough, finish, thread, groove, part, drill, `transfer`, `eject`, `live_drill`, `live_slot`, `live_flat` and `live_mill`, in order, at most 1024. |
 | `tolerance` | no | `linear` (default 1e-6, must be positive) is the profile and finish tolerance. `chord` (default 0.01) is the post read-back tolerance and the gouge tolerance. The finished section is sampled at `chord`. `angular` is accepted, must be `>= 0`, and is not used. |
 | `clearance` | yes | Approach gap, millimetres, `>= 0`. Roughing retracts by the same distance. |
 
@@ -568,6 +568,48 @@ Drawing X is Z and drawing Y is the radius for `.dxf` and `.svg`. Z = 0 is the f
 ```
 
 `examples/subspindle.dxf` is an open half-profile from `(0, 0)` to `(0, 10)` to `(-20, 10)`: a Ø20 cylinder, 20 mm long, front face on the axis. The job stock is a Ø30 bar of that length. Main `front_allowance` is 1 and the main face steps 0.5. Sub `back_allowance` is 0.5 and the sub face steps 0.25. Main `max_rpm` is 3000 and sub `max_rpm` is 2500, so a CSS op on each spindle clamps at a different speed.
+
+### Part transfer
+
+`transfer` hands the part from the main chuck to the sub. It needs the `sub` block. Without it the error is `operation NAME: transfer needs a "sub" block`. The operation is one toolpath bound to `main`. `approach_z` and `grip_z` are sub-housing positions in work coordinates, written as the post writes them. `park_z` is that housing in machine coordinates. `feed` is the grip feed and must be positive. `rpm` is the main spindle speed during the handoff, `>= 0`, default `0` (both spindles stay stopped after the sync). `phase` is optional degrees, finite, from 0 up to but not including 360. `dwell` is the pause at the approach and after the sub clamps, seconds, `>= 0`, default `0.5`.
+
+`part_off`, when set, is a part operation without `name`, `type` or `spindle`. It uses the same fields as `part` (`tool_id`, `z`, optional `to_diameter`, optional `chamfer`, optional `peck`, `clearance`, `feed`, `speed`). The cut runs after the sub has clamped, and the spindle is not stopped at the end of that cut. Without `part_off` the main chuck unclamps before the retract and clamps again after the sub parks.
+
+The blocks, in order:
+
+1. Unclamp the sub.
+2. Stop the main spindle and stop the sub spindle.
+3. Engage spindle sync. `phase` is sent when it is set.
+4. When `rpm` is above 0, start the main spindle at that rpm. Direction follows the main spindle's reversed flag. A job leaves that flag false, so the handoff runs forward.
+5. Rapid the sub housing to `approach_z`, dwell, feed to `grip_z`, clamp the sub, dwell.
+6. With `part_off`: that part-off toolpath (tool change, speed, cut, retract) and no spindle stop. Without it: unclamp the main.
+7. Rapid back to `approach_z`, cancel sync, stop the main, rapid the housing to `park_z` in machine coordinates.
+8. Without `part_off`: clamp the main.
+
+`eject` is `{ "name", "type": "eject" }` and is bound to the sub. It stops the sub spindle and unclamps the sub chuck. On a Haas post the spring part ejector acts when the jaws open (Haas NGC lathe manual 96-8910 §8.1.35). It needs the `sub` block: `operation NAME: eject needs a "sub" block`.
+
+An operation with `spindle` `sub`, and an `eject`, must follow a `transfer`. Otherwise the error is `operation NAME: sub-spindle op before any transfer`.
+
+```json
+{
+  "name": "handoff",
+  "type": "transfer",
+  "rpm": 600,
+  "phase": 90,
+  "approach_z": 5,
+  "grip_z": -2,
+  "park_z": -100,
+  "feed": 200,
+  "dwell": 0.5,
+  "part_off": { "tool_id": 2, "z": -18, "clearance": 2, "feed": 80, "speed": { "rpm": 800 } }
+}
+```
+
+```json
+{ "name": "drop", "type": "eject" }
+```
+
+`examples/transfer.lathe.json` is that handoff on `examples/subspindle.dxf`: main face and finish, transfer with `phase` and `part_off`, a sub face, then eject.
 
 `stock.kind` is `bar` (`diameter`, `length`, `front_allowance`) or `tube` (`outer_diameter`, `inner_diameter`, `length`, `front_allowance`). Diameters and `length` are positive. `front_allowance` is `>= 0`. The IR stock still occupies Z in `[-length, 0]`; the allowance is only the facing depth, from `+front_allowance` down to 0. A tube's inner diameter must be below its outer diameter.
 
@@ -712,9 +754,9 @@ A pocket, and a profile with `side` `inside`, need a closed contour. None is `op
 | `diameter` | od | Cylinder diameter. The mapping radius is half of this. |
 | `rpm`, `feed` | yes | Live-tool rpm and cutting feed, millimetres per minute. |
 
-`campanion lathe` checks each face, rough and finish path against that operation's finished profile. A main operation uses the main profile. A sub operation uses the sub profile. The profile is the polyline sampled at `tolerance.chord`. The insert flank length is 4 mm, and the tool's `holder` is included when the tool has one. Samples are `min(0.25, chord * 10)` millimetres apart. A hit deeper than `chord` is a gouge. Each gouge is one stderr line, `gouge operation NAME z Z x X depth DEPTH KIND`, with `KIND` one of `nose`, `edge` or `holder` and the numbers printed to six decimal places. A gouge exits 1 and writes nothing. Thread, groove, part, drill and the live cycles are not checked: those tools are meant to enter the profile, or they are not inserts.
+`campanion lathe` checks each face, rough and finish path against that operation's finished profile. A main operation uses the main profile. A sub operation uses the sub profile. The profile is the polyline sampled at `tolerance.chord`. The insert flank length is 4 mm, and the tool's `holder` is included when the tool has one. Samples are `min(0.25, chord * 10)` millimetres apart. A hit deeper than `chord` is a gouge. Each gouge is one stderr line, `gouge operation NAME z Z x X depth DEPTH KIND`, with `KIND` one of `nose`, `edge` or `holder` and the numbers printed to six decimal places. A gouge exits 1 and writes nothing. Thread, groove, part, drill, transfer, eject and the live cycles are not checked: those tools are meant to enter the profile, or they are not inserts.
 
-Each turning operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`). A live cycle uses the same tool-change rule and the same compensation, and it does not turn the work spindle on. For `live_drill` and `live_slot` the blocks are C-axis engage on spindle `main`, live tool on forward at `rpm`, then for each hole or for the slot a rapid to the clearance point at the new C, brake clamp, the feed (pecking retracts all the way to the clearance point between pecks), a feed back out, a rapid to clearance when that point is not already the end of the feed, and brake release. Then the live tool stops and C disengages. `live_flat` clamps before the live tool starts: tool change, C-axis engage, the Y = 0 approach rapid, brake clamp, live tool on, the feeds, live tool off, brake release, C disengage. `live_mill` does not clamp the brake, because interpolation rejects a clamped brake. Its blocks are tool change, C-axis engage, the clearance rapid, live tool on forward, interpolation on, the cut, interpolation off, live tool off, C disengage. A front `y_axis` mill omits the interpolation events. Rapids between features stay inside interpolation, at the clearance level.
+Each turning operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. A `transfer` is one toolpath on `main` and does not follow that on/off pair: the blocks are the handoff above, and a nested part-off keeps the spindle running. An `eject` is one toolpath on `sub` with a sub stop and an unclamp, and no tool change. Nose compensation is already in the coordinates (`compensation: computed`). A live cycle uses the same tool-change rule and the same compensation, and it does not turn the work spindle on. For `live_drill` and `live_slot` the blocks are C-axis engage on spindle `main`, live tool on forward at `rpm`, then for each hole or for the slot a rapid to the clearance point at the new C, brake clamp, the feed (pecking retracts all the way to the clearance point between pecks), a feed back out, a rapid to clearance when that point is not already the end of the feed, and brake release. Then the live tool stops and C disengages. `live_flat` clamps before the live tool starts: tool change, C-axis engage, the Y = 0 approach rapid, brake clamp, live tool on, the feeds, live tool off, brake release, C disengage.
 
 Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine, and it rejects synchronised thread moves, so a job that threads needs `--post`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. A thread is `G33` with the lead on `K` for LinuxCNC and grblHAL, and `G32` with the lead on `F` for Fanuc and Haas. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. A face, rough or finish gouge is printed on its own, one line per gouge, and the status is 1. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the main finished section on `turning.section`, sampled from the main profile at `tolerance.chord`. A sub profile is not stored on the setup.
 
@@ -723,6 +765,8 @@ Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink 
 `haas_lathe` writes an indexed live cycle as `M154` then `G28 H0.` to engage C, `M155` to disengage, `M14` to clamp the spindle brake and `M15` to release it, `P<rpm> M133` to start the live tool forward, and `M135` to stop it. Posted X is a diameter. Y is not doubled. The work spindle is not started with `M3` while C is engaged. A Y move with a radial tool writes `G19` on its own line before the move. An axial tool writes `G17`. `G18` is restored before `M155`. There is no Y activation code. A front `live_mill` posts `G112` around the cut and `G113` to leave it, with no `C` word between them; under `G112`, X is a radius. An OD `live_mill` posts `G107 Y0 C0 R<radius>` and a later `G107` cancels it. A front `live_mill` with `y_axis` posts X and Y at the indexed C and does not post `G112`. Y axis, G17/G19 live milling planes, no activation code: Haas NGC Lathe Operator's Manual 6.12 / https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html
 
 A toolpath bound to spindle `sub` is preceded by `G55` then `G14` (secondary work offset, then the spindle swap) before its tool change. `G14` mirrors Z on the control, so the posted Z words stay in the part frame (`mirror_z` false). When the program ends on the sub, `G15` then `G54` are written before the `G53` home lines. G14/G15: Haas NGC lathe manual 96-8910 §7.1.8 (G14 secondary spindle swap; G14 mirrors Z automatically; cancelled by G15/M30/reset). G55: §7.1.72 example: G55 for secondary spindle work offset.
+
+A part transfer on `haas_lathe` unclamps the sub with `M111` and clamps it with `M110`, and uses `M11` / `M10` for the main chuck. `M145` stops the sub spindle. `M143 P{rpm}` and `M144 P{rpm}` run it forward and reverse. `G199` engages synchronous spindle control and `G199 R{phase}` adds the phase. `G198` cancels it. The sub housing rapids with `G00 B{z}`, feeds with `G01 B{z} F{feed}`, and parks in machine coordinates with `G00 G53 B{z}`. M10/M11: §8.1.6. M110/M111 and the spring ejector: §8.1.35. M143/M144/M145: §8.1.44. G199/G198: §7.1.71-72. B axis: §6.34.
 
 - https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html
 - https://www.haascnc.com/service/codes-settings.type=gcode.machine=lathe.value=G107.html

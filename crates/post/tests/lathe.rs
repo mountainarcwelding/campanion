@@ -1324,6 +1324,22 @@ fn index_of(text: &str, needle: &str) -> usize {
     found.expect("present")
 }
 
+/// Byte offset of the first line whose words include `word` exactly.
+/// `M11` must not match inside `M111` or `M110`.
+fn index_of_word(text: &str, word: &str) -> usize {
+    let mut offset = 0;
+    let mut found = None;
+    for line in text.split_inclusive('\n') {
+        if line.split_whitespace().any(|token| token == word) {
+            found = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+    assert!(found.is_some(), "missing word {word}\n{text}");
+    found.expect("present")
+}
+
 fn tool_row(id: u32) -> Tool {
     Tool::try_new(id, None, None, None).expect("tool")
 }
@@ -1470,4 +1486,116 @@ fn interpolation_rejects_a_clamped_spindle_brake() {
         let err = post_program(&program, &haas, &options()).expect_err("clamped");
         assert!(err.to_string().contains("interpolation with the spindle brake clamped"), "{err}");
     }
+}
+
+fn event_block(event: Event) -> ClBlock {
+    ClBlock::Event(event)
+}
+
+#[test]
+fn haas_writes_part_transfer_and_a_following_rapid_still_compares() {
+    let blocks = vec![
+        rapid(10.0, 1.0),
+        event_block(Event::ChuckClamp { spindle: "sub".into(), clamp: false }),
+        event_block(Event::SpindleRun { spindle: "main".into(), rpm: 0.0, reverse: false }),
+        event_block(Event::SpindleRun { spindle: "sub".into(), rpm: 0.0, reverse: false }),
+        event_block(Event::SpindleSync { engage: true, phase_deg: None }),
+        event_block(Event::SpindleSync { engage: true, phase_deg: Some(90.0) }),
+        event_block(Event::SpindleRun { spindle: "main".into(), rpm: 1_200.0, reverse: false }),
+        event_block(Event::SpindleRun { spindle: "main".into(), rpm: 900.0, reverse: true }),
+        event_block(Event::SpindleRun { spindle: "sub".into(), rpm: 500.0, reverse: false }),
+        event_block(Event::SpindleRun { spindle: "sub".into(), rpm: 800.0, reverse: true }),
+        event_block(Event::SpindleMove { spindle: "sub".into(), z: 5.0, machine: false, feed: None }),
+        event_block(Event::Dwell { seconds: 0.5 }),
+        event_block(Event::SpindleMove { spindle: "sub".into(), z: -2.5, machine: false, feed: Some(80.0) }),
+        event_block(Event::ChuckClamp { spindle: "sub".into(), clamp: true }),
+        linear(10.0, 0.0, 100.0),
+        rapid(12.0, 0.0),
+        event_block(Event::SpindleMove { spindle: "sub".into(), z: 5.0, machine: false, feed: None }),
+        event_block(Event::SpindleSync { engage: false, phase_deg: None }),
+        event_block(Event::SpindleRun { spindle: "main".into(), rpm: 0.0, reverse: true }),
+        event_block(Event::SpindleMove { spindle: "sub".into(), z: -100.0, machine: true, feed: None }),
+        event_block(Event::ChuckClamp { spindle: "main".into(), clamp: false }),
+        event_block(Event::ChuckClamp { spindle: "main".into(), clamp: true }),
+        rapid(14.0, -1.0),
+    ];
+    let program = lathe_program(blocks, turning(None, false));
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let m111 = index_of(&text, "M111");
+    let m5 = index_of(&text, "M5");
+    let m145 = index_of(&text, "M145");
+    let g199 = index_of(&text, "G199 R90");
+    let s1200 = index_of(&text, "G97 S1200");
+    let m3 = index_of(&text, "M3");
+    let s900 = index_of(&text, "G97 S900");
+    let m4 = index_of(&text, "M4");
+    let m143 = index_of(&text, "M143 P500");
+    let m144 = index_of(&text, "M144 P800");
+    let approach = index_of(&text, "G00 B5");
+    let dwell = index_of(&text, "G4 P500");
+    let grip = index_of(&text, "G01 B-2.5 F80");
+    let m110 = index_of(&text, "M110");
+    let g198 = index_of(&text, "G198");
+    let park = index_of(&text, "G00 G53 B-100");
+    let m11 = index_of_word(&text, "M11");
+    let m10 = index_of_word(&text, "M10");
+    assert!(m111 < m5 && m5 < m145 && m145 < g199, "{text}");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "G199") && !line.contains('R')), "{text}");
+    assert!(g199 < s1200 && s1200 < m3 && m3 < s900 && s900 < m4, "{text}");
+    assert!(m4 < m143 && m143 < m144 && m144 < approach && approach < dwell && dwell < grip && grip < m110, "{text}");
+    assert!(m110 < g198 && g198 < park && park < m11 && m11 < m10, "{text}");
+    let rapid_after_feed = text.lines().find(|line| line.contains("X24.") || line.contains("X24")).expect("rapid after grip");
+    assert!(rapid_after_feed.split_whitespace().any(|word| word == "G0" || word == "G00"), "{rapid_after_feed}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn part_transfer_rejects_a_post_without_it_and_an_unknown_spindle() {
+    let clamp = event_block(Event::ChuckClamp { spindle: "sub".into(), clamp: false });
+    let sync = event_block(Event::SpindleSync { engage: true, phase_deg: Some(10.0) });
+    let run = event_block(Event::SpindleRun { spindle: "sub".into(), rpm: 1.0, reverse: false });
+    let moved = event_block(Event::SpindleMove { spindle: "sub".into(), z: 1.0, machine: false, feed: None });
+    for block in [clamp, sync, run, moved] {
+        let err = post_program(&lathe_program(vec![block], turning(None, false)), &linux_lathe(), &options()).expect_err("no transfer");
+        assert!(err.to_string().contains("post `linuxcnc_lathe` has no part transfer"), "{err}");
+    }
+    let mill = builtin("haas").expect("haas");
+    let bare = Program::try_new(
+        Some("mill".into()),
+        Vec::new(),
+        None,
+        vec![path(None, None, vec![event_block(Event::SpindleSync { engage: false, phase_deg: None })])],
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .expect("program");
+    let err = post_program(&bare, &mill, &options()).expect_err("mill");
+    assert!(err.to_string().contains("post `haas` has no part transfer"), "{err}");
+
+    let tail = [
+        Event::ChuckClamp { spindle: "tail".into(), clamp: true },
+        Event::SpindleMove { spindle: "tail".into(), z: 0.0, machine: true, feed: None },
+        Event::SpindleRun { spindle: "tail".into(), rpm: 0.0, reverse: false },
+    ];
+    for event in tail {
+        let err = post_program(&lathe_program(vec![event_block(event)], turning(None, false)), &haas_lathe(), &options()).expect_err("tail");
+        assert!(err.to_string().contains("post `haas_lathe` has no spindle `tail`"), "{err}");
+    }
+    let early = post_program(
+        &lathe_program(vec![event_block(Event::ChuckClamp { spindle: "tail".into(), clamp: false })], turning(None, false)),
+        &linux_lathe(),
+        &options(),
+    )
+    .expect_err("missing transfer wins");
+    assert!(early.to_string().contains("post `linuxcnc_lathe` has no part transfer"), "{early}");
+
+    let mut raw = haas_json();
+    raw["lathe"]["transfer"]["sync_on"] = serde_json::json!(["G199 {rpm}"]);
+    let err = load_post(&raw.to_string()).expect_err("placeholder");
+    assert!(err.to_string().contains("lathe.transfer.sync_on") && err.to_string().contains("unknown placeholder {rpm}"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["transfer"]["extra"] = serde_json::json!(true);
+    assert!(load_post(&raw.to_string()).is_err());
 }

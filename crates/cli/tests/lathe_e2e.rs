@@ -680,7 +680,7 @@ fn subspindle_posts_haas_and_returns_to_the_main_before_the_end() -> Result<(), 
         return Err(format!("sub spindle is {sub:?}"));
     }
     let bound: Vec<&str> = turning.bindings().iter().map(|binding| binding.spindle()).collect();
-    if bound != ["main", "main", "sub", "sub"] {
+    if bound != ["main", "main", "main", "sub", "sub"] {
         return Err(format!("bindings are {bound:?}"));
     }
     if turning.section().is_none() {
@@ -916,5 +916,89 @@ fn live_mill_rejects_bad_drawings_and_heads() -> Result<(), String> {
     )?;
     assert_rejects_at(&high_job, "operation across: Y ")?;
     assert_rejects_at(&high_job, "outside head travel")?;
+    Ok(())
+}
+
+#[test]
+fn transfer_and_eject_reject_a_missing_sub_block_and_an_early_sub_op() -> Result<(), String> {
+    let insert = r#"{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }"#;
+    let handoff = r#"{ "name": "handoff", "type": "transfer", "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200 }"#;
+    assert_rejects(
+        &turning_shell("", insert, handoff),
+        "campanion-lathe-transfer-missing.json",
+        "operation handoff: transfer needs a \"sub\" block",
+    )?;
+    let drop = r#"{ "name": "drop", "type": "eject" }"#;
+    assert_rejects(&turning_shell("", insert, drop), "campanion-lathe-eject-missing.json", "operation drop: eject needs a \"sub\" block")?;
+
+    let sub = r#""sub": { "max_rpm": 2000, "source": { "path": "missing.dxf" } },"#;
+    let face = r#"{ "name": "back_face", "type": "face", "tool_id": 1, "spindle": "sub", "step_z": 0.5, "feed": 100, "speed": { "rpm": 800 } }"#;
+    let early = format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 30, "length": 20, "front_allowance": 1 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        {sub}
+        "tools": [{insert}],
+        "operations": [{face}, {handoff}],
+        "clearance": 2
+    }}"#
+    );
+    assert_rejects(&early, "campanion-lathe-transfer-order.json", "operation back_face: sub-spindle op before any transfer")?;
+    let eject_first = format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 30, "length": 20, "front_allowance": 1 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        {sub}
+        "tools": [{insert}],
+        "operations": [{drop}, {handoff}],
+        "clearance": 2
+    }}"#
+    );
+    assert_rejects(&eject_first, "campanion-lathe-eject-order.json", "operation drop: sub-spindle op before any transfer")?;
+    Ok(())
+}
+
+#[test]
+fn transfer_posts_haas_with_part_off_phase_sub_face_and_eject() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/transfer.lathe.json"))?;
+    let out = temp_path("campanion-lathe-transfer.nc");
+    let _ = std::fs::remove_file(&out);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("transfer.haas_lathe.nc", &posted)?;
+    assert_in_order(
+        &posted,
+        &[
+            "M111",
+            "M145",
+            "G199 R90",
+            "G00 B5",
+            "G4 P500",
+            "G01 B-2 F200",
+            "M110",
+            "T0202",
+            "G00 B5",
+            "G198",
+            "G00 G53 B-100",
+            "G55",
+            "G14",
+            "G15",
+            "G54",
+            "M30",
+        ],
+    )?;
+    let g15 = posted.rfind("G15").ok_or("G15 missing")?;
+    let g54 = posted.rfind("G54").ok_or("G54 missing")?;
+    let end = posted.rfind("M30").ok_or("M30 missing")?;
+    if !(g15 < g54 && g54 < end) {
+        return Err(format!("G15 G54 are not before the end\n{posted}"));
+    }
     Ok(())
 }

@@ -1,7 +1,7 @@
 {
   "id": "haas_lathe",
   "name": "Haas lathe",
-  "description": "Millimetre Haas lathe dialect. Percent-delimited program O00001 with sequence numbers. Diameter mode is the control default. The safety block is G21 G18 G40 G80. Feed per minute is G98 on the following word. G99 is left out, because the IR feed is millimetres per minute and G99 would be millimetres per revolution. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is the tool and offset in two digits (T0101). Arcs are I and K, I a radius. Single-point threading is G32 with the lead on F. Home is G53 G0 X0, then G53 G0 Z0, in machine coordinates. The program ends with M30 and %. With the C axis engaged (M154, G28 H0. unwind) C is a modal word; the spindle brake is M14/M15; live tools run with P{rpm} M133/M134 and stop with M135; G112/G113 face and G107 cylinder interpolation are supported. Sub-spindle select is G55 G14; G15 G54 returns to the main. These codes are cited in `references`.",
+  "description": "Millimetre Haas lathe dialect. Percent-delimited program O00001 with sequence numbers. Diameter mode is the control default. The safety block is G21 G18 G40 G80. Feed per minute is G98 on the following word. G99 is left out, because the IR feed is millimetres per minute and G99 would be millimetres per revolution. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is the tool and offset in two digits (T0101). Arcs are I and K, I a radius. Single-point threading is G32 with the lead on F. Home is G53 G0 X0, then G53 G0 Z0, in machine coordinates. The program ends with M30 and %. With the C axis engaged (M154, G28 H0. unwind) C is a modal word; the spindle brake is M14/M15; live tools run with P{rpm} M133/M134 and stop with M135; G112/G113 face and G107 cylinder interpolation are supported. Sub-spindle select is G55 G14; G15 G54 returns to the main. These codes and part transfer are cited in `references`.",
   "references": [
     "M133/M134/M135 P<rpm> live tool fwd/rev/stop: https://www.haascnc.com/service/codes-settings.type=mcode.machine=lathe.value=M133.html",
     "M154/M155 C axis engage/disengage, G28 H0. unwinds C: https://www.haascnc.com/service/service-content/guide-procedures/lathe---m-codes.html and Haas NGC Lathe Operator's Manual (96-8910) G82/G83 live examples",
@@ -11,7 +11,12 @@
     "G107 Y0 C0 R/Q cylindrical mapping in G19, bare G107 cancels: https://www.haascnc.com/service/codes-settings.type=gcode.machine=lathe.value=G107.html",
     "Y axis, G17/G19 live milling planes, no activation code: Haas NGC Lathe Operator's Manual 6.12 / https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html",
     "G14/G15: Haas NGC lathe manual 96-8910 §7.1.8 (G14 secondary spindle swap; G14 mirrors Z automatically; cancelled by G15/M30/reset)",
-    "G55: Haas NGC lathe manual 96-8910 §7.1.72 example: G55 for secondary spindle work offset"
+    "G55: Haas NGC lathe manual 96-8910 §7.1.72 example: G55 for secondary spindle work offset",
+    "G199/G198: Haas NGC lathe manual 96-8910 §7.1.71-72 (G199 synchronous spindle control, optional R phase degrees; G198 cancel; transfer example)",
+    "M110/M111: Haas NGC lathe manual 96-8910 §8.1.35 (secondary chuck clamp/unclamp; spring part ejector acts when the jaws open)",
+    "M10/M11: Haas NGC lathe manual 96-8910 §8.1.6 (main chuck clamp/unclamp)",
+    "M143/M144/M145: Haas NGC lathe manual 96-8910 §8.1.44 (secondary spindle forward/reverse/stop, speed on P)",
+    "B axis: Haas NGC lathe manual 96-8910 §6.34 (DS lathes: the secondary spindle housing moves on the B axis)"
   ],
   "program_number": "00001",
   "units": "mm",
@@ -64,6 +69,22 @@
     "y_axis": { "letter": "Y", "face_plane": "G17", "side_plane": "G19", "turn_plane": "G18" },
     "face_interp": { "on": ["G17", "G112"], "off": ["G113", "G18"], "x_diameter": false },
     "cylinder_interp": { "on": ["G19", "M15", "G107 Y0 C0 R{radius}"], "off": ["G107", "G18"] },
-    "sub_spindle": { "spindle": "sub", "select": ["G55", "G14"], "deselect": ["G15", "G54"], "mirror_z": false }
+    "sub_spindle": { "spindle": "sub", "select": ["G55", "G14"], "deselect": ["G15", "G54"], "mirror_z": false },
+    "transfer": {
+      "spindle": "sub",
+      "clamp_main": ["M10"],
+      "unclamp_main": ["M11"],
+      "clamp_sub": ["M110"],
+      "unclamp_sub": ["M111"],
+      "sub_cw": ["M143 P{rpm}"],
+      "sub_ccw": ["M144 P{rpm}"],
+      "sub_stop": ["M145"],
+      "sync_on": ["G199"],
+      "sync_on_phase": ["G199 R{phase}"],
+      "sync_off": ["G198"],
+      "move_rapid": ["G00 B{z}"],
+      "move_feed": ["G01 B{z} F{feed}"],
+      "move_machine": ["G00 G53 B{z}"]
+    }
   }
 }

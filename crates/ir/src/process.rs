@@ -328,6 +328,8 @@ pub enum CoolantMode {
 /// or an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.
 /// `Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value
 /// at most 99999. A live-tool event does not require a turning setup.
+/// [`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]
+/// hand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
@@ -422,6 +424,48 @@ pub enum Event {
         #[serde(default)]
         radius: Option<f64>,
     },
+    /// Clamp (`true`) or unclamp (`false`) the named chuck.
+    ChuckClamp {
+        /// Spindle name.
+        spindle: String,
+        /// `true` clamps. `false` unclamps.
+        clamp: bool,
+    },
+    /// Engage or cancel synchronous spindle control.
+    ///
+    /// `phase_deg` is only allowed when `engage` is true. It is finite and in `0..360`.
+    SpindleSync {
+        /// `true` engages sync. `false` cancels it.
+        engage: bool,
+        /// Phase in degrees. Absent when sync has no phase, and when sync is cancelled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase_deg: Option<f64>,
+    },
+    /// Run or stop a spindle that is not the active binding's spindle.
+    ///
+    /// `rpm` 0 stops the spindle. `reverse` selects the reverse direction when `rpm` is above 0.
+    SpindleRun {
+        /// Spindle name.
+        spindle: String,
+        /// Revolutions per minute. Zero stops the spindle.
+        rpm: f64,
+        /// `true` runs reverse. Ignored when `rpm` is 0.
+        reverse: bool,
+    },
+    /// Move a spindle housing along Z.
+    ///
+    /// `feed` absent is a rapid. `machine` selects machine coordinates.
+    SpindleMove {
+        /// Spindle name.
+        spindle: String,
+        /// Housing position along Z, millimetres.
+        z: f64,
+        /// `true` is a machine-coordinate move.
+        machine: bool,
+        /// Feed, millimetres per minute. Absent is a rapid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed: Option<f64>,
+    },
 }
 
 impl Event {
@@ -462,6 +506,31 @@ impl Event {
             Self::CylinderInterpolation { radius } => {
                 if let Some(radius) = radius {
                     positive(*radius, "cylinder interpolation radius")?;
+                }
+            }
+            Self::ChuckClamp { spindle, .. } => {
+                required_name(spindle, "spindle name")?;
+            }
+            Self::SpindleSync { engage, phase_deg } => {
+                if let Some(phase) = phase_deg {
+                    if !engage {
+                        return Err(check::invalid("phase is only allowed when sync engages"));
+                    }
+                    let phase = finite(*phase, "phase")?;
+                    if !(0.0..360.0).contains(&phase) {
+                        return Err(check::invalid("phase must be in 0..360"));
+                    }
+                }
+            }
+            Self::SpindleRun { spindle, rpm, .. } => {
+                required_name(spindle, "spindle name")?;
+                non_negative(*rpm, "spindle rpm")?;
+            }
+            Self::SpindleMove { spindle, z, feed, .. } => {
+                required_name(spindle, "spindle name")?;
+                finite(*z, "spindle position")?;
+                if let Some(feed) = feed {
+                    positive(*feed, "spindle move feed")?;
                 }
             }
         }

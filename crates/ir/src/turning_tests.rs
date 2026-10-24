@@ -914,3 +914,71 @@ fn mill_turn_events_round_trip_and_reject_bad_spindles_and_rpm() {
     let neg_block = ClBlock::Motion(ClMotion::Linear { to: neg, feed: 10.0, role: MoveRole::Cut });
     program_with(Vec::new(), vec![path_with(None, vec![neg_block])], m10(None), None).expect("min c");
 }
+
+#[test]
+fn transfer_events_round_trip_and_reject_bad_values() {
+    let events = [
+        Event::ChuckClamp { spindle: "sub".into(), clamp: false },
+        Event::ChuckClamp { spindle: "main".into(), clamp: true },
+        Event::SpindleSync { engage: true, phase_deg: None },
+        Event::SpindleSync { engage: true, phase_deg: Some(0.0) },
+        Event::SpindleSync { engage: true, phase_deg: Some(359.5) },
+        Event::SpindleSync { engage: false, phase_deg: None },
+        Event::SpindleRun { spindle: "main".into(), rpm: 0.0, reverse: true },
+        Event::SpindleRun { spindle: "sub".into(), rpm: 1_200.0, reverse: false },
+        Event::SpindleMove { spindle: "sub".into(), z: -40.0, machine: false, feed: None },
+        Event::SpindleMove { spindle: "sub".into(), z: 5.0, machine: true, feed: Some(80.0) },
+    ];
+    for event in events {
+        let json = serde_json::to_string(&event).expect("json");
+        let back: Event = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, event, "{json}");
+        assert!(try_event(event).is_ok(), "{json}");
+    }
+    let clamp = serde_json::to_string(&Event::ChuckClamp { spindle: "sub".into(), clamp: false }).expect("json");
+    assert!(clamp.contains("\"type\":\"chuck_clamp\""), "{clamp}");
+    let sync = serde_json::to_string(&Event::SpindleSync { engage: true, phase_deg: Some(90.0) }).expect("json");
+    assert!(sync.contains("\"type\":\"spindle_sync\"") && sync.contains("\"phase_deg\":90"), "{sync}");
+    let bare = serde_json::to_string(&Event::SpindleSync { engage: false, phase_deg: None }).expect("json");
+    assert!(!bare.contains("phase_deg"), "{bare}");
+    let missing: Event = serde_json::from_str(r#"{"type":"spindle_sync","engage":true}"#).expect("default phase");
+    assert_eq!(missing, Event::SpindleSync { engage: true, phase_deg: None });
+    let null_phase: Event = serde_json::from_str(r#"{"type":"spindle_sync","engage":true,"phase_deg":null}"#).expect("null phase");
+    assert_eq!(null_phase, Event::SpindleSync { engage: true, phase_deg: None });
+    let run = serde_json::to_string(&Event::SpindleRun { spindle: "sub".into(), rpm: 0.0, reverse: false }).expect("json");
+    assert!(run.contains("\"type\":\"spindle_run\""), "{run}");
+    let moved = serde_json::to_string(&Event::SpindleMove { spindle: "sub".into(), z: 1.0, machine: false, feed: None }).expect("json");
+    assert!(moved.contains("\"type\":\"spindle_move\"") && !moved.contains("feed"), "{moved}");
+    let null_feed: Event = serde_json::from_str(r#"{"type":"spindle_move","spindle":"sub","z":1.0,"machine":false,"feed":null}"#).expect("null feed");
+    assert_eq!(null_feed, Event::SpindleMove { spindle: "sub".into(), z: 1.0, machine: false, feed: None });
+    assert!(serde_json::from_str::<Event>(r#"{"type":"chuck_clamp","spindle":"sub","clamp":true,"extra":1}"#).is_err());
+    assert!(serde_json::from_str::<Event>(r#"{"type":"spindle_sync","engage":true,"phase_deg":1.0,"extra":1}"#).is_err());
+    assert!(serde_json::from_str::<Event>(r#"{"type":"spindle_run","spindle":"main","rpm":1.0,"reverse":false,"extra":1}"#).is_err());
+    assert!(serde_json::from_str::<Event>(r#"{"type":"spindle_move","spindle":"sub","z":1.0,"machine":false,"extra":1}"#).is_err());
+
+    assert_err(try_event(Event::ChuckClamp { spindle: String::new(), clamp: true }), "spindle name is empty");
+    assert_err(try_event(Event::SpindleRun { spindle: String::new(), rpm: 1.0, reverse: false }), "spindle name is empty");
+    assert_err(try_event(Event::SpindleMove { spindle: String::new(), z: 0.0, machine: false, feed: None }), "spindle name is empty");
+    assert_err(try_event(Event::SpindleSync { engage: false, phase_deg: Some(10.0) }), "phase is only allowed when sync engages");
+    assert_err(try_event(Event::SpindleSync { engage: false, phase_deg: Some(f64::NAN) }), "phase is only allowed when sync engages");
+    assert_err(try_event(Event::SpindleSync { engage: true, phase_deg: Some(f64::NAN) }), "phase must be finite");
+    assert_err(try_event(Event::SpindleSync { engage: true, phase_deg: Some(-0.1) }), "phase must be in 0..360");
+    assert_err(try_event(Event::SpindleSync { engage: true, phase_deg: Some(360.0) }), "phase must be in 0..360");
+    assert!(try_event(Event::SpindleSync { engage: true, phase_deg: Some(0.0) }).is_ok());
+    assert_err(try_event(Event::SpindleRun { spindle: "main".into(), rpm: -1.0, reverse: false }), "spindle rpm must be >= 0");
+    assert_err(try_event(Event::SpindleRun { spindle: "main".into(), rpm: f64::NAN, reverse: false }), "spindle rpm must be finite");
+    assert!(try_event(Event::SpindleRun { spindle: "main".into(), rpm: 0.0, reverse: true }).is_ok());
+    assert_err(
+        try_event(Event::SpindleMove { spindle: "sub".into(), z: f64::INFINITY, machine: false, feed: None }),
+        "spindle position must be finite",
+    );
+    assert_err(
+        try_event(Event::SpindleMove { spindle: "sub".into(), z: 1.0, machine: false, feed: Some(0.0) }),
+        "spindle move feed must be positive",
+    );
+    assert_err(
+        try_event(Event::SpindleMove { spindle: "sub".into(), z: 1.0, machine: true, feed: Some(f64::NAN) }),
+        "spindle move feed must be finite",
+    );
+    assert!(try_event(Event::SpindleMove { spindle: "sub".into(), z: -20.0, machine: true, feed: None }).is_ok());
+}

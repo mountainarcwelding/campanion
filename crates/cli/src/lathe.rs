@@ -12,7 +12,9 @@
 //! Z 0, part toward −Z). `back_allowance` is the facing depth on the sub. An operation's
 //! `spindle` is `main` or `sub`. The stored section stays the main profile.
 //! A turning operation is one toolpath: a tool change when the tool id changes, spindle on, the
-//! moves, then spindle off. Speed is stored on the turning binding, which names the operation's
+//! moves, then spindle off. A `transfer` is one main-spindle toolpath that hands the part to the
+//! sub, optionally parting it off without a spindle stop. An `eject` stops the sub and unclamps
+//! it. Speed is stored on the turning binding, which names the operation's
 //! spindle. An indexed live drill or slot
 //! changes the tool the same way, engages C, starts the live tool, clamps the brake around each
 //! feed, then stops the live tool and disengages C. `live_flat` engages C, rapids to the flat,
@@ -80,6 +82,8 @@ const DEFAULT_FLANK_DEG: f64 = 29.5;
 const DEFAULT_FIRST_DEPTH_CAP: f64 = 0.35;
 /// Thread cycles emit rapids and synchronised moves. The path still needs a positive cut feed.
 const THREAD_RECORD_FEED: f64 = 100.0;
+/// Eject and a transfer with no cut still need a positive recorded feed. Nothing posts it.
+const EVENT_ONLY_FEED: f64 = 1.0;
 /// Flank length, millimetres, used when a face, rough or finish path is checked for gouges.
 const TURN_EDGE_MM: f64 = 4.0;
 
@@ -332,6 +336,32 @@ enum Operation {
         y_axis: bool,
         c_deg: f64,
     },
+    Transfer {
+        name: String,
+        rpm: f64,
+        phase: Option<f64>,
+        approach_z: f64,
+        grip_z: f64,
+        park_z: f64,
+        feed: f64,
+        dwell: f64,
+        part_off: Option<PartOff>,
+    },
+    Eject {
+        name: String,
+    },
+}
+
+/// Part-off nested in a transfer. Same fields as a `part` operation, without name, type or spindle.
+struct PartOff {
+    tool_id: u32,
+    z: f64,
+    to_diameter: f64,
+    chamfer: Option<f64>,
+    peck: Option<f64>,
+    clearance: f64,
+    feed: f64,
+    speed: SpindleSpeed,
 }
 
 impl Operation {
@@ -347,7 +377,9 @@ impl Operation {
             | Self::LiveDrill { name, .. }
             | Self::LiveSlot { name, .. }
             | Self::LiveFlat { name, .. }
-            | Self::LiveMill { name, .. } => name,
+            | Self::LiveMill { name, .. }
+            | Self::Transfer { name, .. }
+            | Self::Eject { name } => name,
         }
     }
 
@@ -364,6 +396,8 @@ impl Operation {
             | Self::LiveSlot { spindle, .. }
             | Self::LiveFlat { spindle, .. }
             | Self::LiveMill { spindle, .. } => *spindle,
+            Self::Transfer { .. } => WorkSpindle::Main,
+            Self::Eject { .. } => WorkSpindle::Sub,
         }
     }
 
@@ -380,6 +414,17 @@ impl Operation {
             | Self::LiveSlot { tool_id, .. }
             | Self::LiveFlat { tool_id, .. }
             | Self::LiveMill { tool_id, .. } => *tool_id,
+            Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id).unwrap_or(0),
+            Self::Eject { .. } => 0,
+        }
+    }
+
+    /// Tool the job file must name. Eject and a transfer with no part-off name none.
+    fn checked_tool(&self) -> Option<u32> {
+        match self {
+            Self::Eject { .. } => None,
+            Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id),
+            _ => Some(self.tool_id()),
         }
     }
 
@@ -396,6 +441,8 @@ impl Operation {
             | Self::LiveFlat { feed, .. }
             | Self::LiveMill { feed, .. } => *feed,
             Self::Thread { .. } => THREAD_RECORD_FEED,
+            Self::Transfer { feed, part_off, .. } => part_off.as_ref().map(|part| part.feed).unwrap_or(*feed),
+            Self::Eject { .. } => EVENT_ONLY_FEED,
         }
     }
 
@@ -409,12 +456,21 @@ impl Operation {
             | Self::Groove { speed, .. }
             | Self::Part { speed, .. }
             | Self::Drill { speed, .. } => Some(*speed),
-            Self::LiveDrill { .. } | Self::LiveSlot { .. } | Self::LiveFlat { .. } | Self::LiveMill { .. } => None,
+            Self::LiveDrill { .. } | Self::LiveSlot { .. } | Self::LiveFlat { .. } | Self::LiveMill { .. } | Self::Eject { .. } => None,
+            Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.speed),
         }
     }
 
     fn is_live(&self) -> bool {
         matches!(self, Self::LiveDrill { .. } | Self::LiveSlot { .. })
+    }
+
+    fn is_transfer(&self) -> bool {
+        matches!(self, Self::Transfer { .. })
+    }
+
+    fn is_eject(&self) -> bool {
+        matches!(self, Self::Eject { .. })
     }
 
     fn is_flat(&self) -> bool {
@@ -570,8 +626,11 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let sub_rpm = sub.as_ref().map(|block| block.max_rpm);
     let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
     for operation in &operations {
-        let Some(tool) = tools.iter().find(|tool| tool.id == operation.tool_id()) else {
-            return Err(CliError::run(format!("operation {}: missing tool {}", operation.name(), operation.tool_id())));
+        let Some(tool_id) = operation.checked_tool() else {
+            continue;
+        };
+        let Some(tool) = tools.iter().find(|tool| tool.id == tool_id) else {
+            return Err(CliError::run(format!("operation {}: missing tool {tool_id}", operation.name())));
         };
         check_tool_use(operation, tool, c_axis)?;
         check_flat(operation, tool, &head, clearance)?;
@@ -928,6 +987,15 @@ fn parse_operations(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearanc
     for item in list {
         operations.push(parse_operation(item, main_rpm, sub_rpm, clearance, &mut names)?);
     }
+    let mut saw_transfer = false;
+    for operation in &operations {
+        if operation.spindle() == WorkSpindle::Sub && !saw_transfer {
+            return Err(CliError::invalid(format!("operation {}: sub-spindle op before any transfer", operation.name())));
+        }
+        if operation.is_transfer() {
+            saw_transfer = true;
+        }
+    }
     Ok(operations)
 }
 
@@ -964,6 +1032,12 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
     }
     if op_type == "live_mill" {
         return parse_live_mill(map, names, has_sub);
+    }
+    if op_type == "transfer" {
+        return parse_transfer(map, names, has_sub, main_rpm);
+    }
+    if op_type == "eject" {
+        return parse_eject(map, names, has_sub);
     }
     let allowed: &[&str] = match op_type {
         "face" => &["name", "type", "tool_id", "spindle", "step_z", "feed", "speed"],
@@ -1156,6 +1230,79 @@ fn parse_part(
         feed,
         speed,
     })
+}
+
+fn parse_transfer(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_sub: bool, main_rpm: f64) -> Result<Operation, CliError> {
+    check_keys(map, &["name", "type", "rpm", "phase", "approach_z", "grip_z", "park_z", "feed", "dwell", "part_off"], "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    if !has_sub {
+        return Err(CliError::invalid(format!("operation {name}: transfer needs a \"sub\" block")));
+    }
+    let rpm = match optional(map, "rpm") {
+        Some(value) => non_negative(value, "rpm")?,
+        None => 0.0,
+    };
+    let phase = match optional(map, "phase") {
+        Some(value) => {
+            let phase = as_f64(value, "phase")?;
+            if !(0.0..360.0).contains(&phase) {
+                return Err(CliError::invalid("phase must be in 0..360"));
+            }
+            Some(phase)
+        }
+        None => None,
+    };
+    let part_off = match optional(map, "part_off") {
+        Some(value) => Some(parse_part_off(value, main_rpm)?),
+        None => None,
+    };
+    Ok(Operation::Transfer {
+        name,
+        rpm,
+        phase,
+        approach_z: as_f64(require(map, "approach_z")?, "approach_z")?,
+        grip_z: as_f64(require(map, "grip_z")?, "grip_z")?,
+        park_z: as_f64(require(map, "park_z")?, "park_z")?,
+        feed: positive(require(map, "feed")?, "feed")?,
+        dwell: match optional(map, "dwell") {
+            Some(value) => non_negative(value, "dwell")?,
+            None => 0.5,
+        },
+        part_off,
+    })
+}
+
+fn parse_part_off(value: &Value, main_rpm: f64) -> Result<PartOff, CliError> {
+    let map = object(value, "part_off")?;
+    check_keys(map, &["tool_id", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed"], "part_off")?;
+    Ok(PartOff {
+        tool_id: as_u32(require(map, "tool_id")?, "tool_id")?,
+        z: as_f64(require(map, "z")?, "z")?,
+        to_diameter: match optional(map, "to_diameter") {
+            Some(value) => as_f64(value, "to_diameter")?,
+            None => -0.5,
+        },
+        chamfer: optional_positive(map, "chamfer")?,
+        peck: optional_positive(map, "peck")?,
+        clearance: non_negative(require(map, "clearance")?, "clearance")?,
+        feed: positive(require(map, "feed")?, "feed")?,
+        speed: parse_speed(require(map, "speed")?, main_rpm)?,
+    })
+}
+
+fn parse_eject(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_sub: bool) -> Result<Operation, CliError> {
+    check_keys(map, &["name", "type"], "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    if !has_sub {
+        return Err(CliError::invalid(format!("operation {name}: eject needs a \"sub\" block")));
+    }
+    Ok(Operation::Eject { name })
 }
 
 fn parse_drill(map: &Map<String, Value>, name: String, spindle: WorkSpindle, tool_id: u32) -> Result<Operation, CliError> {
@@ -1649,6 +1796,10 @@ fn build_document(
             let motion = live_motion(operation)?;
             let rpm = operation.live_rpm().ok_or_else(|| CliError::run(format!("internal: operation {} has no live rpm", operation.name())))?;
             with_live_events(motion, operation.tool_id(), rpm, &mut previous)?
+        } else if operation.is_transfer() {
+            transfer_toolpath(job, active_profile, operation, &mut previous)?
+        } else if operation.is_eject() {
+            eject_toolpath(operation)?
         } else {
             let turned = turn_operation(job, active_profile, operation)?;
             if let Some(step) = sample_step
@@ -1679,8 +1830,8 @@ fn build_document(
     Ok((Document::new(program)?, gouge_lines))
 }
 
-/// Face is always outside. Rough and finish use the operation side. Thread, groove, part, drill
-/// and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
+/// Face is always outside. Rough and finish use the operation side. Thread, groove, part, drill,
+/// transfer, eject and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
 fn gouge_side(operation: &Operation) -> Option<Side> {
     match operation {
         Operation::Face { .. } => Some(Side::Outside),
@@ -1692,7 +1843,9 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
         | Operation::LiveDrill { .. }
         | Operation::LiveSlot { .. }
         | Operation::LiveFlat { .. }
-        | Operation::LiveMill { .. } => None,
+        | Operation::LiveMill { .. }
+        | Operation::Transfer { .. }
+        | Operation::Eject { .. } => None,
     }
 }
 
@@ -1787,7 +1940,7 @@ fn front_allowance(job: &LatheJob, spindle: WorkSpindle) -> Result<f64, CliError
 }
 
 fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) -> Result<TurnPath, CliError> {
-    if operation.is_live() || operation.is_mill() {
+    if operation.is_live() || operation.is_mill() || operation.is_transfer() || operation.is_eject() {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
     }
     let (insert, tip, nose_radius, _) = require_insert(job, operation)?;
@@ -1911,10 +2064,94 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
             };
             centre_drill(&params).map_err(|err| op_fail(name, err))
         }
-        Operation::LiveDrill { .. } | Operation::LiveSlot { .. } | Operation::LiveFlat { .. } | Operation::LiveMill { .. } => {
-            Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())))
-        }
+        Operation::LiveDrill { .. }
+        | Operation::LiveSlot { .. }
+        | Operation::LiveFlat { .. }
+        | Operation::LiveMill { .. }
+        | Operation::Transfer { .. }
+        | Operation::Eject { .. } => Err(CliError::run(format!("internal: operation {} has no turning path", operation.name()))),
     }
+}
+
+fn transfer_toolpath(job: &LatheJob, profile: &TurnProfile, operation: &Operation, previous: &mut Option<u32>) -> Result<ClPath, CliError> {
+    let Operation::Transfer { name, rpm, phase, approach_z, grip_z, park_z, feed, dwell, part_off } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not a transfer", operation.name())));
+    };
+    let mut blocks = vec![
+        chuck(SUB_SPINDLE, false),
+        spindle_run(SPINDLE, 0.0, false),
+        spindle_run(SUB_SPINDLE, 0.0, false),
+        ClBlock::Event(Event::SpindleSync { engage: true, phase_deg: *phase }),
+    ];
+    if *rpm > 0.0 {
+        // Jobs build the main spindle with `reversed` false, so a running handoff is forward.
+        blocks.push(spindle_run(SPINDLE, *rpm, false));
+    }
+    blocks.push(housing(SUB_SPINDLE, *approach_z, false, None));
+    blocks.push(ClBlock::Event(Event::Dwell { seconds: *dwell }));
+    blocks.push(housing(SUB_SPINDLE, *grip_z, false, Some(*feed)));
+    blocks.push(chuck(SUB_SPINDLE, true));
+    blocks.push(ClBlock::Event(Event::Dwell { seconds: *dwell }));
+    let (tool_id, cut_feed, compensation) = if let Some(part) = part_off {
+        blocks.extend(part_off_blocks(job, profile, name, part, previous)?);
+        (Some(part.tool_id), part.feed, CompensationMode::Computed)
+    } else {
+        blocks.push(chuck(SPINDLE, false));
+        (None, *feed, CompensationMode::Off)
+    };
+    blocks.push(housing(SUB_SPINDLE, *approach_z, false, None));
+    blocks.push(ClBlock::Event(Event::SpindleSync { engage: false, phase_deg: None }));
+    blocks.push(spindle_run(SPINDLE, 0.0, false));
+    blocks.push(housing(SUB_SPINDLE, *park_z, true, None));
+    if part_off.is_none() {
+        blocks.push(chuck(SPINDLE, true));
+    }
+    let feeds = Feeds::try_new(cut_feed, None, None, None, None)?;
+    Ok(ClPath::try_new(Some(name.clone()), tool_id, compensation, feeds, None, Vec::new(), blocks)?)
+}
+
+fn part_off_blocks(job: &LatheJob, profile: &TurnProfile, name: &str, part: &PartOff, previous: &mut Option<u32>) -> Result<Vec<ClBlock>, CliError> {
+    let part_op = Operation::Part {
+        name: name.to_string(),
+        spindle: WorkSpindle::Main,
+        tool_id: part.tool_id,
+        z: part.z,
+        to_diameter: part.to_diameter,
+        chamfer: part.chamfer,
+        peck: part.peck,
+        clearance: part.clearance,
+        feed: part.feed,
+        speed: part.speed,
+    };
+    let turned = turn_operation(job, profile, &part_op)?;
+    let motion = to_cl_path(&turned, Some(name.to_string()), part.tool_id, part.feed, Some(job.clearance)).map_err(|err| op_fail(name, err))?;
+    let with = with_events(motion, part.tool_id, previous)?;
+    let mut blocks = with.blocks().to_vec();
+    match blocks.pop() {
+        Some(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle })) => Ok(blocks),
+        _ => Err(CliError::run(format!("internal: operation {name} part-off did not end on spindle stop"))),
+    }
+}
+
+fn eject_toolpath(operation: &Operation) -> Result<ClPath, CliError> {
+    let Operation::Eject { name } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not an eject", operation.name())));
+    };
+    let blocks = vec![spindle_run(SUB_SPINDLE, 0.0, false), chuck(SUB_SPINDLE, false)];
+    let feeds = Feeds::try_new(EVENT_ONLY_FEED, None, None, None, None)?;
+    Ok(ClPath::try_new(Some(name.clone()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks)?)
+}
+
+fn chuck(spindle: &str, clamp: bool) -> ClBlock {
+    ClBlock::Event(Event::ChuckClamp { spindle: spindle.to_string(), clamp })
+}
+
+fn spindle_run(spindle: &str, rpm: f64, reverse: bool) -> ClBlock {
+    ClBlock::Event(Event::SpindleRun { spindle: spindle.to_string(), rpm, reverse })
+}
+
+fn housing(spindle: &str, z: f64, machine: bool, feed: Option<f64>) -> ClBlock {
+    ClBlock::Event(Event::SpindleMove { spindle: spindle.to_string(), z, machine, feed })
 }
 
 /// End radius passed to [`face`].
