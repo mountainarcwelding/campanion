@@ -794,6 +794,44 @@ fn tailstock_posts_haas_m21_m22_and_linuxcnc_rejects_it() -> Result<(), String> 
     Ok(())
 }
 
+#[test]
+fn catcher_posts_haas_m36_before_the_plunge_and_linuxcnc_rejects_it() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/catcher.lathe.json"))?;
+    let out = temp_path("campanion-lathe-catcher.nc");
+    let _ = std::fs::remove_file(&out);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("catcher.haas_lathe.nc", &posted)?;
+    let m36 = posted.find("M36").ok_or("M36 missing")?;
+    let m37 = posted[m36 + 3..].find("M37").ok_or("M37 missing")? + m36 + 3;
+    let between = &posted[m36 + 3..m37];
+    let plunge = between.lines().any(|line| {
+        let feed = line.split_whitespace().any(|word| word == "G01" || word == "G1");
+        feed && line.contains('X')
+    });
+    if !plunge {
+        return Err(format!("no G01 X between M36 and M37:\n{between}"));
+    }
+
+    let linux = temp_path("campanion-lathe-catcher-linuxcnc.nc");
+    let _ = std::fs::remove_file(&linux);
+    let output = campanion(&["lathe", &job, "-o", &path_arg(&linux)?, "--post", "linuxcnc_lathe"])?;
+    let stderr = text(&output.stderr)?;
+    let code = output.status.code();
+    if code == Some(101) || stderr.to_ascii_lowercase().contains("panicked") {
+        return Err(format!("lathe panicked ({code:?}): {stderr}"));
+    }
+    if code != Some(1) {
+        return Err(format!("exit {code:?}, expected 1\n{stderr}"));
+    }
+    let needle = "post `linuxcnc_lathe` has no parts catcher";
+    if !stderr.contains(needle) {
+        return Err(format!("stderr missing {needle}: {stderr}"));
+    }
+    Ok(())
+}
+
 const PROFILE_DXF: &str = "\
 0
 SECTION

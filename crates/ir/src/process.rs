@@ -333,6 +333,8 @@ pub enum CoolantMode {
 /// [`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is
 /// `(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold
 /// force and travel are machine settings; the event carries no position.
+/// [`Event::PartsCatcher`] moves the parts catcher into position to catch a part, or out of the
+/// work envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
@@ -484,6 +486,12 @@ pub enum Event {
         /// `true` advances the tailstock. `false` retracts it.
         engage: bool,
     },
+    /// Move the parts catcher into position to catch a part (`extend: true`) or out of the
+    /// work envelope (`false`).
+    PartsCatcher {
+        /// `true` moves the catcher in to catch a part. `false` moves it out of the work envelope.
+        extend: bool,
+    },
 }
 
 impl Event {
@@ -520,7 +528,7 @@ impl Event {
                     return Err(check::invalid("live tool rpm is above 100000"));
                 }
             }
-            Self::LiveToolOff | Self::FaceInterpolation { .. } | Self::Tailstock { .. } => {}
+            Self::LiveToolOff | Self::FaceInterpolation { .. } | Self::Tailstock { .. } | Self::PartsCatcher { .. } => {}
             Self::CylinderInterpolation { radius } => {
                 if let Some(radius) = radius {
                     positive(*radius, "cylinder interpolation radius")?;

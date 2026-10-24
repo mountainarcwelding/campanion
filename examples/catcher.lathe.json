@@ -1,0 +1,110 @@
+{
+  "format": "campanion-lathe/1",
+  "source": { "path": "shaft.dxf", "layer": "PROFILE" },
+  "units": "mm",
+  "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
+  "spindle": { "max_rpm": 3000 },
+  "parts_catcher": { "max_diameter": 76, "max_length": 102 },
+  "tools": [
+    {
+      "id": 1,
+      "station": 1,
+      "shape": "c80",
+      "nose_radius": 0.8,
+      "orientation_deg": 45,
+      "hand": "right",
+      "tip": "centre"
+    },
+    {
+      "id": 2,
+      "station": 2,
+      "shape": "groove",
+      "width": 3,
+      "nose_radius": 0.2,
+      "orientation_deg": 90,
+      "hand": "neutral",
+      "tip": "centre"
+    },
+    {
+      "id": 3,
+      "station": 3,
+      "shape": "thread",
+      "nose_radius": 0.2,
+      "orientation_deg": 60,
+      "hand": "right",
+      "tip": "centre"
+    },
+    {
+      "id": 4,
+      "station": 4,
+      "shape": "v35",
+      "nose_radius": 0.1,
+      "orientation_deg": 90,
+      "hand": "neutral",
+      "tip": "centre"
+    }
+  ],
+  "operations": [
+    { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 150, "speed": { "css": 200 } },
+    {
+      "name": "centre",
+      "type": "drill",
+      "tool_id": 4,
+      "z_start": 0,
+      "depth": 10,
+      "diameter": 4,
+      "peck": 4,
+      "feed": 80,
+      "rpm": 800
+    },
+    {
+      "name": "rough",
+      "type": "rough",
+      "tool_id": 1,
+      "side": "outside",
+      "depth_of_cut": 2.0,
+      "leave_x": 0.3,
+      "leave_z": 0.1,
+      "feed": 250,
+      "speed": { "css": 180 }
+    },
+    { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "rpm": 1500 } },
+    {
+      "name": "groove",
+      "type": "groove",
+      "tool_id": 2,
+      "side": "outside",
+      "z_left": -52,
+      "z_right": -48,
+      "bottom_diameter": 36,
+      "surface_diameter": 40,
+      "feed": 80,
+      "speed": { "rpm": 600 }
+    },
+    {
+      "name": "thread",
+      "type": "thread",
+      "tool_id": 3,
+      "side": "outside",
+      "major_diameter": 30,
+      "pitch": 2.5,
+      "z_start": -8,
+      "z_end": -28,
+      "rpm": 500
+    },
+    {
+      "name": "part",
+      "type": "part",
+      "tool_id": 2,
+      "z": -58,
+      "chamfer": 0.4,
+      "peck": 2,
+      "clearance": 2,
+      "feed": 60,
+      "speed": { "rpm": 400 },
+      "catch": true
+    }
+  ],
+  "tolerance": { "linear": 0.001, "chord": 0.01 },
+  "clearance": 2.0
+}

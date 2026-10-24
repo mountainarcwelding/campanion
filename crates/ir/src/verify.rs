@@ -365,7 +365,8 @@ fn verify_event(event: &Event, bound_spindle: Option<&str>, open: &mut Vec<Proce
         | Event::SpindleRun { .. }
         | Event::SpindleMove { .. }
         | Event::HeadIndex { .. }
-        | Event::Tailstock { .. } => {}
+        | Event::Tailstock { .. }
+        | Event::PartsCatcher { .. } => {}
     }
 }
 
