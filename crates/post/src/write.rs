@@ -1291,7 +1291,9 @@ impl<'a> Writer<'a> {
     fn spindle_run(&mut self, spindle: &str, rpm: f64, reverse: bool) -> Result<()> {
         let transfer = self.part_transfer()?;
         self.require_transfer_spindle(spindle, &transfer)?;
-        if spindle == "main" {
+        // While the sub is selected (Haas G14) the main spindle codes drive it, and the
+        // secondary-spindle codes alarm (Haas NGC lathe manual 96-8910 §7.1.8).
+        if spindle == "main" || self.on_sub() {
             return self.main_spindle_run(rpm, reverse);
         }
         if rpm == 0.0 {
