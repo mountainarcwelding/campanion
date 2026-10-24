@@ -4,6 +4,7 @@
 //! value is a built-in id. Posted text is read back and compared before it is written.
 
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -46,7 +47,43 @@ pub(crate) fn render(program: &Program, post: &PostDef, tolerance_mm: f64) -> Re
         campanion_post::read_back(&text, post).map_err(|err| CliError::run(format!("post `{}` output could not be read back: {err}", post.id())))?;
     campanion_post::compare(program, &moves, tolerance_mm, post)
         .map_err(|err| CliError::run(format!("post `{}` does not match the program within {tolerance_mm} mm: {err}", post.id())))?;
+    print_channel_balance(program)?;
     Ok(text)
+}
+
+/// One stderr line per sync segment, then a total, when any binding uses a channel other than 0.
+fn print_channel_balance(program: &Program) -> Result<(), CliError> {
+    let multi = program.turning().is_some_and(|turning| turning.bindings().iter().any(|binding| binding.channel() != 0));
+    if !multi {
+        return Ok(());
+    }
+    let segments = campanion_post::channel_balance(program);
+    let mut err = io::stderr().lock();
+    let width = segments.first().map(|segment| segment.times_s.len()).unwrap_or(0);
+    let mut sums = vec![0.0; width];
+    let mut cycle = 0.0;
+    for segment in &segments {
+        let mut line = format!("segment {}", segment.segment);
+        let mut peak = 0.0;
+        for (channel, time) in segment.times_s.iter().enumerate() {
+            let idle = segment.idle_s.get(channel).copied().unwrap_or(0.0);
+            line.push_str(&format!(" channel {channel} time_s {time:.6} idle_s {idle:.6}"));
+            if let Some(slot) = sums.get_mut(channel) {
+                *slot += *time;
+            }
+            if *time > peak {
+                peak = *time;
+            }
+        }
+        cycle += peak;
+        writeln!(err, "{line}")?;
+    }
+    let mut total = String::from("total");
+    for (channel, time) in sums.iter().enumerate() {
+        total.push_str(&format!(" channel {channel} time_s {time:.6}"));
+    }
+    writeln!(err, "{total} cycle_s {cycle:.6}")?;
+    Ok(())
 }
 
 pub(crate) fn posts_command(args: &[OsString]) -> Result<ExitCode, CliError> {

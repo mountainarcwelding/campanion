@@ -260,7 +260,10 @@ fn check_syncs(machine: &Option<Machine>, syncs: &[SyncPoint], programs: &[Chann
     if syncs.len() > check::MAX_SYNCS {
         return Err(check::invalid(format!("too many sync points: {} > {}", syncs.len(), check::MAX_SYNCS)));
     }
-    if syncs.is_empty() && !mentions_sync(programs, toolpaths) {
+    // A cutter-location sync is a lathe channel wait. It does not need a machine or an
+    // axis-space channel program. Those programs still require a sync point on the machine.
+    let axis_sync = programs.iter().any(|program| program.blocks().iter().any(|block| block.sync_id().is_some()));
+    if syncs.is_empty() && !axis_sync {
         return Ok(());
     }
     let Some(machine) = machine else {
@@ -493,11 +496,6 @@ fn vec_within(left: Vec3, right: Vec3, tol: f64) -> bool {
     let dy = left.y() - right.y();
     let dz = left.z() - right.z();
     (dx * dx + dy * dy + dz * dz).sqrt() <= tol
-}
-
-fn mentions_sync(programs: &[ChannelProgram], toolpaths: &[ClPath]) -> bool {
-    programs.iter().any(|program| program.blocks().iter().any(|block| block.sync_id().is_some()))
-        || toolpaths.iter().any(|path| path.blocks().iter().any(|block| block.sync_id().is_some()))
 }
 
 /// A finished program that stores an angle needs a rotary setup or a turning setup.

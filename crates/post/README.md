@@ -100,6 +100,28 @@ Read-back accepts these lines as pass-through. A housing move is not a part-fram
 
 `haas_lathe` uses the object above. M10/M11 are the main chuck, M110/M111 the secondary chuck (the spring ejector acts when those jaws open), M143/M144/M145 the secondary spindle with the speed on P, G199/G198 synchronous control with an optional R phase, and B the secondary housing. Those codes are cited in `references` from Haas NGC lathe manual 96-8910 §8.1.6, §8.1.35, §8.1.44, §7.1.71-72 and §6.34. `fanuc_lathe`, `linuxcnc_lathe` and `grbl_lathe` leave `transfer` unset. While the sub is selected (`sub_spindle.select`, Haas `G14`), a `SpindleRun` on the sub uses the main spindle lines (`M3`/`M4`/`M5`) instead, because Haas alarms on M143/M144/M145 under G14 (manual 96-8910 §7.1.8).
 
+### Channels
+
+`lathe.channels` is optional.
+
+```json
+{ "count": 2, "start": ["(CHANNEL {channel})"], "end": [], "wait": ["M{code}"], "wait_base": 100 }
+```
+
+`count` is at least 2. A smaller count fails to load with `channels.count must be at least 2`. `start` may use `{channel}`, written as the 1-based channel number. `wait` may use `{code}`, which is `wait_base` plus the sync id. `end` takes no placeholders.
+
+A binding whose channel is not 0 needs this block. Without it the post is rejected: `post `<id>` is single-channel; the program uses channel N`. A channel at or above `count` is `post `<id>` has no channel N`.
+
+When the block is present and the program uses another channel, the header and the lathe preamble (`mode_lines`, plane, feed mode) are written once. Each channel, from 0 up to `count - 1`, then gets its `start` lines, that channel's toolpaths in program order, and its `end` lines. Modal state, the position and the active spindle reset at each channel, so the first move of a channel writes its axes and motion word again. Line numbers continue. The footer, mill-turn shutdown, home and `program_end` are written once, after the last channel.
+
+`Event::Sync` inside a channel section writes the `wait` lines. A program whose bindings are all channel 0 keeps today's sync comment, `(sync id)`, and does not open channel sections, even when the post defines `channels`.
+
+Every channel that contains at least one toolpath must list the same sync ids in the same order. The first mismatch is `channel sync mismatch: channel A waits for [..], channel B for [..]`.
+
+`channel_balance` times each stretch between syncs with the verify time model: feed moves are `length / feed * 60` seconds, dwells add seconds, and a rapid with no feed is free. The cursor carries across a sync. `idle_s` is the slowest channel in that segment minus this channel.
+
+`generic_lathe_2ch` is a template copied from the Fanuc-style lathe post with the block above. Two-path controls use machine-specific wait M-codes and program layout; check the control manual. `haas_lathe` and `linuxcnc_lathe` have no `channels` block: they are single-channel.
+
 ### Mill-turn (C axis and live tools)
 
 A turning program can engage a spindle as a positioning C axis, clamp its brake, and run a live (driven) tool. The IR events are:
@@ -189,6 +211,8 @@ While Y is in use the writer puts `face_plane` on its own line before the first 
 X stays on `diameter_mode`. Y is never doubled. Read-back keeps Y modal when `y_axis` is set and forces Y to 0 when it is not. `G17`, `G18` and `G19` select the plane and are not moves.
 
 `haas_lathe` uses the object above. There is no Y activation code. Y axis, G17/G19 live milling planes, no activation code: Haas NGC Lathe Operator's Manual 6.12 / https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html
+
+`generic_lathe_2ch` uses the same words as `fanuc_lathe` and adds `channels`. It is a template: two-path controls use machine-specific wait M-codes and program layout; check the control manual. A single-channel program posted with it matches `fanuc_lathe`.
 
 `fanuc_lathe` is Fanuc G-code system A. The file is percent-delimited, like the Fanuc mill post: program `O0001`, sequence numbers from `N10` in steps of 10, and a maximum line length of 80. `G21` selects millimetres, `G40` cancels tool-nose compensation and `G80` cancels a canned cycle. `G18` selects the ZX plane. Feed per minute is `G98`. `G99` is left out, because that word is millimetres per revolution and the IR feed is millimetres per minute. `G90` is left out: on this control it is an outer and inner diameter cutting cycle, and `X` and `Z` are already absolute. Constant surface speed writes `G50 S{max_rpm}` and then `G96 S{surface}` (`S` is metres per minute under `G21`). Direct rpm is `G97 S{rpm}`. The spindle words are `M3`, `M4` and `M5`. The tool word is `T{tool2}{offset2}` (`T0101` for tool 1). Arcs are `I` and `K`, and `I` is a radius. The program ends with `M30` and `%`.
 

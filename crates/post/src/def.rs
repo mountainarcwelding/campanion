@@ -351,6 +351,28 @@ pub(crate) struct LatheOutput {
     /// Absent: chuck, sync, spindle-run and spindle-move events are rejected.
     #[serde(default)]
     pub(crate) transfer: Option<TransferOutput>,
+    /// Two or more channel sections. Absent: a binding whose channel is not 0 is rejected.
+    #[serde(default)]
+    pub(crate) channels: Option<ChannelsOutput>,
+}
+
+/// How a lathe post splits a program across channels.
+///
+/// `count` is at least 2. `start` may use `{channel}`, written as the 1-based channel number.
+/// `wait` may use `{code}`, which is `wait_base` plus the sync id. `end` takes no placeholders.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelsOutput {
+    /// How many channel sections this post writes. At least 2.
+    pub count: u16,
+    /// Lines before one channel's toolpaths. `{channel}` is 1-based.
+    pub start: Vec<String>,
+    /// Lines after one channel's toolpaths.
+    pub end: Vec<String>,
+    /// Lines for one [`campanion_ir::Event::Sync`]. `{code}` is `wait_base + id`.
+    pub wait: Vec<String>,
+    /// Added to the sync id to form `{code}`.
+    pub wait_base: u32,
 }
 
 /// Chuck, sync, secondary-spindle run and housing-move lines for a part transfer.
@@ -713,6 +735,14 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_templates("lathe.transfer.move_rapid", &transfer.move_rapid, LATHE_MOVE)?;
         check_templates("lathe.transfer.move_feed", &transfer.move_feed, LATHE_MOVE_FEED)?;
         check_templates("lathe.transfer.move_machine", &transfer.move_machine, LATHE_MOVE)?;
+    }
+    if let Some(channels) = &lathe.channels {
+        if channels.count < 2 {
+            return Err(field("lathe.channels.count", "channels.count must be at least 2"));
+        }
+        check_templates("lathe.channels.start", &channels.start, &["channel", "date-free!"])?;
+        check_templates("lathe.channels.end", &channels.end, LATHE_BARE)?;
+        check_templates("lathe.channels.wait", &channels.wait, &["code", "date-free!"])?;
     }
     Ok(())
 }

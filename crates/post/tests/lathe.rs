@@ -9,7 +9,7 @@ use campanion_ir::{
     LiveDirection, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program, Spindle, SpindleSpeed, Tool, TurnBinding, TurnInsert, TurnStock,
     TurningSetup, Vec3,
 };
-use campanion_post::{PostDef, PostOptions, ReadMove, builtin, compare, load_post, post_program, read_back};
+use campanion_post::{PostDef, PostOptions, ReadMove, builtin, channel_balance, compare, load_post, post_program, read_back};
 
 fn options() -> PostOptions {
     PostOptions { arc_tolerance: 0.05 }
@@ -1472,6 +1472,117 @@ fn mirror_z_negates_z_and_flips_g2_g3() {
     assert!(arc.split_whitespace().any(|word| word == "I0."), "{arc}");
     assert!(!has_word(&text, "Z-5."), "{text}");
     compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+fn sync_block(id: u32) -> ClBlock {
+    ClBlock::Event(Event::Sync { id })
+}
+
+fn multi_program(paths: Vec<(u16, Vec<ClBlock>)>) -> Program {
+    let spindle = Spindle::try_new("main", None, 0.0, 3_000.0).expect("spindle");
+    let turret = Head::try_new("turret1", vec![HeadAxis::X, HeadAxis::Z], 12, false).expect("turret");
+    let lower = Head::try_new("lower", vec![HeadAxis::X, HeadAxis::Z], 12, false).expect("lower");
+    let mut toolpaths = Vec::new();
+    let mut bindings = Vec::new();
+    for (index, (channel, blocks)) in paths.into_iter().enumerate() {
+        let head = if channel == 0 { "turret1" } else { "lower" };
+        let index = u32::try_from(index).expect("index");
+        bindings.push(TurnBinding::try_new(index, "main", head, channel).expect("binding"));
+        toolpaths.push(path(Some("op"), None, blocks));
+    }
+    let turning = TurningSetup::try_new(vec![spindle], vec![turret, lower], None, Vec::new(), bindings).expect("turning");
+    Program::try_new(Some("turn".into()), Vec::new(), None, toolpaths, Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_turning(Some(turning))
+        .expect("turning")
+}
+
+fn two_channel() -> PostDef {
+    builtin("generic_lathe_2ch").expect("generic_lathe_2ch")
+}
+
+#[test]
+fn channels_count_below_two_is_rejected() {
+    let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/generic_lathe_2ch.json")).expect("json");
+    raw["lathe"]["channels"]["count"] = serde_json::json!(1);
+    let err = load_post(&raw.to_string()).expect_err("count");
+    assert!(err.to_string().contains("channels.count must be at least 2"), "{err}");
+    assert!(two_channel().description().contains("template"), "description should say this post is a template");
+    assert!(two_channel().description().contains("check the control manual"));
+}
+
+#[test]
+fn haas_rejects_a_second_channel() {
+    let program = multi_program(vec![(1, vec![rapid(5.0, 0.0)])]);
+    let err = post_program(&program, &haas_lathe(), &options()).expect_err("channel");
+    assert!(err.to_string().contains("post `haas_lathe` is single-channel; the program uses channel 1"), "{err}");
+}
+
+#[test]
+fn two_channel_post_rejects_a_missing_channel() {
+    let program = multi_program(vec![(2, vec![rapid(5.0, 0.0)])]);
+    let err = post_program(&program, &two_channel(), &options()).expect_err("channel");
+    assert!(err.to_string().contains("post `generic_lathe_2ch` has no channel 2"), "{err}");
+}
+
+#[test]
+fn channel_sync_ids_must_match() {
+    let program = multi_program(vec![(0, vec![rapid(10.0, 0.0), sync_block(1), sync_block(2)]), (1, vec![rapid(4.0, 0.0), sync_block(1)])]);
+    let err = post_program(&program, &two_channel(), &options()).expect_err("sync");
+    assert!(err.to_string().contains("channel sync mismatch: channel 0 waits for [1, 2], channel 1 for [1]"), "{err}");
+}
+
+#[test]
+fn two_channel_layout_writes_one_header_and_wait_codes() {
+    let program = multi_program(vec![
+        (0, vec![rapid(10.0, 0.0), linear(10.0, -5.0, 100.0), sync_block(1), linear(8.0, -5.0, 100.0)]),
+        (1, vec![rapid(4.0, 0.0), linear(4.0, -2.0, 80.0), sync_block(1), linear(2.0, -2.0, 80.0)]),
+    ]);
+    let post = two_channel();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_eq!(text.matches("O0001").count(), 1, "{text}");
+    assert_eq!(text.matches("G18").count(), 1, "{text}");
+    assert_eq!(text.matches("M30").count(), 1, "{text}");
+    assert_eq!(text.matches("M101").count(), 2, "{text}");
+    assert!(text.contains("(CHANNEL 1)"), "{text}");
+    assert!(text.contains("(CHANNEL 2)"), "{text}");
+    assert!(!text.contains("(sync 1)"), "{text}");
+    let channel_1 = text.find("(CHANNEL 1)").expect("channel 1");
+    let channel_2 = text.find("(CHANNEL 2)").expect("channel 2");
+    let home = text.find("G28").expect("home");
+    assert!(channel_1 < channel_2 && channel_2 < home, "{text}");
+    let first_wait = text.find("M101").expect("wait");
+    let second_wait = text.rfind("M101").expect("wait 2");
+    assert!(channel_1 < first_wait && first_wait < channel_2 && channel_2 < second_wait, "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn single_channel_sync_stays_a_comment_on_the_two_channel_post() {
+    let program = lathe_program(vec![rapid(10.0, 0.0), sync_block(1), linear(10.0, -1.0, 50.0)], turning(None, false));
+    let post = two_channel();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(text.contains("(sync 1)"), "{text}");
+    assert!(!text.contains("CHANNEL"), "{text}");
+    assert!(!text.contains("M101"), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn channel_balance_splits_time_at_each_sync() {
+    let program = multi_program(vec![
+        (0, vec![rapid(0.0, 0.0), linear(30.0, 0.0, 60.0), sync_block(1), linear(30.0, -10.0, 60.0)]),
+        (1, vec![rapid(0.0, 0.0), linear(0.0, -12.0, 60.0), sync_block(1), linear(6.0, -12.0, 60.0)]),
+    ]);
+    let report = channel_balance(&program);
+    assert_eq!(report.len(), 2);
+    assert_eq!(report[0].segment, 0);
+    assert_eq!(report[1].segment, 1);
+    let near = |got: f64, want: f64| (got - want).abs() < 1e-9;
+    assert!(near(report[0].times_s[0], 30.0) && near(report[0].times_s[1], 12.0), "{:?}", report[0].times_s);
+    assert!(near(report[0].idle_s[0], 0.0) && near(report[0].idle_s[1], 18.0), "{:?}", report[0].idle_s);
+    assert!(near(report[1].times_s[0], 10.0) && near(report[1].times_s[1], 6.0), "{:?}", report[1].times_s);
+    assert!(near(report[1].idle_s[0], 0.0) && near(report[1].idle_s[1], 4.0), "{:?}", report[1].idle_s);
 }
 
 #[test]

@@ -90,6 +90,7 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 | `fanuc_lathe` | Fanuc lathe | - | Millimetre Fanuc lathe. Diameter mode by default, ZX plane (G18), feed per minute (G98), G50 spindle cap then G96. Home is G28 U0 W0. No rotary axis. |
 | `haas_lathe` | Haas lathe | - | Millimetre Haas lathe. Program O00001, safety block G21 G18 G40 G80, feed per minute (G98), G53 home. Sub-spindle select is G55 then G14. No rotary axis. |
 | `grbl_lathe` | grblHAL lathe | - | Millimetre grblHAL lathe. Diameter mode (G7), ZX plane (G18), feed per minute (G94). Tool change is T and M6; a manual tool change is expected. No rotary axis. |
+| `generic_lathe_2ch` | Two-channel lathe | - | Template for two channel sections. Fanuc-style words, a per-channel comment, and a sync wait of M100 plus the sync id. Two-path controls need their own wait codes and layout. |
 
 ```sh
 campanion run examples/sample.job.json -o out.ngc --post linuxcnc
