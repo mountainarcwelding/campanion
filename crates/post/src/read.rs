@@ -18,7 +18,9 @@
 //!
 //! A lathe post with `c_axis` treats that letter as a modal angle. Rapid and linear moves return
 //! it on `rotary`. `M` lines, `P` and `H` words, and `G28 H0.` are not moves. `G28 H0.` does not
-//! change the modal C word: the axis letter is `C`, not `H`.
+//! change the modal C word: the axis letter is `C`, not `H`. `$n` selects a spindle (LinuxCNC
+//! live tool `$1`) and is not a move. When `lathe.c_feed` is `inverse_time`, `G93` turns inverse
+//! time on and `lathe.feed_mode` (`G94` when that word is empty) turns it off.
 
 use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 
@@ -223,6 +225,14 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.post.rotary.as_ref().is_some_and(|rotary| rotary.off_code() == Some(code)) {
+                inverse_time = false;
+                continue;
+            }
+            if self.is_lathe_inverse_on(code) {
+                inverse_time = true;
+                continue;
+            }
+            if self.is_lathe_inverse_off(code) {
                 inverse_time = false;
                 continue;
             }
@@ -496,6 +506,14 @@ impl<'a> Parser<'a> {
         self.y_axis_letter() == Some(letter)
     }
 
+    fn is_lathe_inverse_on(&self, code: u16) -> bool {
+        self.post.lathe.as_ref().is_some_and(|lathe| lathe.c_feed_inverse()) && code == 93
+    }
+
+    fn is_lathe_inverse_off(&self, code: u16) -> bool {
+        self.post.lathe.as_ref().is_some_and(|lathe| lathe.c_feed_inverse() && lathe.c_feed_off_code() == Some(code))
+    }
+
     /// Diameter mode halves X. Without `y_axis`, Y is centreline 0. With it, Y is modal, and a
     /// letter that is not the second axis letter is read into Y.
     fn lathe_end(&self, mut end: Xyz, axes_present: [Option<f64>; 3], words: &[(char, f64)]) -> Result<Xyz> {
@@ -593,41 +611,52 @@ fn tokenize(line: &str) -> Result<Vec<(char, f64)>> {
             index += 1;
             continue;
         }
+        // LinuxCNC `$n` selects spindle n. It is not an axis and not a move.
+        if bytes[index] == b'$' {
+            index += 1;
+            let _value = take_number(line, bytes, &mut index)?;
+            continue;
+        }
         let letter = bytes[index];
         if !letter.is_ascii_alphabetic() {
             return Err(invalid("unexpected character in g-code"));
         }
         index += 1;
-        let start = index;
-        if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
-            index += 1;
-        }
-        let mut saw_digit = false;
-        let mut saw_dot = false;
-        while index < bytes.len() {
-            match bytes[index] {
-                b'0'..=b'9' => {
-                    saw_digit = true;
-                    index += 1;
-                }
-                b'.' if !saw_dot => {
-                    saw_dot = true;
-                    index += 1;
-                }
-                _ => break,
-            }
-        }
-        if !saw_digit {
-            return Err(invalid("g-code word is missing a number"));
-        }
-        let text = &line[start..index];
-        let value: f64 = text.parse().map_err(|_| invalid(format!("invalid number {text}")))?;
-        if !value.is_finite() {
-            return Err(invalid("g-code number must be finite"));
-        }
+        let value = take_number(line, bytes, &mut index)?;
         words.push(((letter as char).to_ascii_uppercase(), value));
     }
     Ok(words)
+}
+
+fn take_number(line: &str, bytes: &[u8], index: &mut usize) -> Result<f64> {
+    let start = *index;
+    if *index < bytes.len() && (bytes[*index] == b'+' || bytes[*index] == b'-') {
+        *index += 1;
+    }
+    let mut saw_digit = false;
+    let mut saw_dot = false;
+    while *index < bytes.len() {
+        match bytes[*index] {
+            b'0'..=b'9' => {
+                saw_digit = true;
+                *index += 1;
+            }
+            b'.' if !saw_dot => {
+                saw_dot = true;
+                *index += 1;
+            }
+            _ => break,
+        }
+    }
+    if !saw_digit {
+        return Err(invalid("g-code word is missing a number"));
+    }
+    let text = &line[start..*index];
+    let value: f64 = text.parse().map_err(|_| invalid(format!("invalid number {text}")))?;
+    if !value.is_finite() {
+        return Err(invalid("g-code number must be finite"));
+    }
+    Ok(value)
 }
 
 fn unique(words: &[(char, f64)], letter: char) -> Result<Option<f64>> {

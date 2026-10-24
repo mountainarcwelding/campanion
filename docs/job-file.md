@@ -681,3 +681,11 @@ Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink 
 - https://www.haascnc.com/service/codes-settings.type=mcode.machine=lathe.value=M133.html
 - https://www.haascnc.com/service/service-content/guide-procedures/lathe---m-codes.html
 - https://www.haascnc.com/service/service-content/guide-procedures/lathe---g-codes.html
+
+### LinuxCNC output
+
+`linuxcnc_lathe` needs a machine configured with spindle 1 as the live tool and a C joint. The post writes the live tool as `S<rpm> $1` and `M3 $1` or `M4 $1`, and stops it with `M5 $1`. C-axis engage, disengage and the spindle brake are left empty, because LinuxCNC does that switch in HAL or a user M-code; a custom post can fill them. There is no `G112` or `G107`. Face and cylinder cycles fall back to X and C, and a feed that changes C uses inverse time (`G93`, back to `G94` on the next move that does not change C).
+
+- https://linuxcnc.org/docs/stable/html/gcode/m-code.html
+- https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g93-g94-g95
+- https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m100-m199

@@ -165,3 +165,17 @@ pub(crate) fn inverse_minutes_feed(feed: f64, length: f64) -> Result<f64> {
     let value = feed / length;
     if value.is_finite() { Ok(value) } else { Err(invalid("inverse time feed is not finite")) }
 }
+
+/// Straight-line distance between indexed lathe tips after C rotates them into the part frame.
+///
+/// `tip[0]` is the radius and `tip[1]` is the cross-slide offset. The length is the chord, not
+/// the arc. Fallback face and cylinder moves already store part-frame tips, so they use
+/// [`geom::dist3`] on those tips instead.
+pub(crate) fn lathe_indexed_length(start: Xyz, end: Xyz, c0_deg: f64, c1_deg: f64) -> f64 {
+    geom::dist3(spin_tip(start, c0_deg), spin_tip(end, c1_deg))
+}
+
+fn spin_tip(tip: Xyz, c_deg: f64) -> Xyz {
+    let (sin, cos) = c_deg.to_radians().sin_cos();
+    [tip[0] * cos - tip[1] * sin, tip[0] * sin + tip[1] * cos, tip[2]]
+}

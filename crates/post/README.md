@@ -64,7 +64,7 @@ A turning program can engage a spindle as a positioning C axis, clamp its brake,
 
 In a turning program `Pose.rotary` is the C angle in degrees. It is finite, and its absolute value is at most 99999. A `CAxis` or `SpindleBrake` spindle must exist on the turning setup and have a C axis. The errors are `spindle NAME has no C axis` and `unknown spindle NAME`. `LiveToolOn` and `LiveToolOff` are allowed on a program that has no turning setup. A mill post rejects these mill-turn events as unsupported.
 
-`lathe.c_axis`, `lathe.brake` and `lathe.live_tool` are optional. Each line list may be empty. The top-level `references` list cites the codes (at most 32 entries, each 1 to 256 characters). Those strings are not written into the program.
+`lathe.c_axis`, `lathe.brake` and `lathe.live_tool` are optional. `c_axis.engage`, `c_axis.disengage`, `brake.clamp` and `brake.release` may be empty: an empty list writes nothing. `live_tool.forward`, `reverse` and `stop` each need at least one line. The top-level `references` list cites the codes (at most 32 entries, each 1 to 256 characters). Those strings are not written into the program.
 
 `lathe.c_axis.letter` is one uppercase ASCII letter, and not `X`, `Y`, `Z`, `I`, `J`, `K`, `F`, `S`, `T`, `M`, `G`, `N`, `O`, or `P`. Haas uses `C`. `engage` and `disengage` take no placeholders. Engage writes `engage`. Disengage writes `disengage` and clears the modal C word, so the next engage writes the angle again. While the axis is engaged, a `G0` or `G1` whose pose carries `rotary` writes `<letter><angle>` after `Z`. The angle uses the linear decimals, including the post's decimal point. The word is modal: it is written only when that formatted text changes. A pose with a C angle while the axis is not engaged is `C angle needs the C axis engaged`. A post with no `c_axis` block is `post `<id>` has no C axis`. The missing block is reported before the not-engaged error. A turning spindle `ProcessOn` while the C axis is engaged is `turning spindle start while the C axis is engaged`.
 
@@ -86,6 +86,8 @@ Read-back of native face and cylinder blocks returns the IR frame, so `compare` 
 
 `lathe.live_tool.forward` and `reverse` may use `{rpm}`. The value is rounded to a whole number and written with no decimal point, so 1500 becomes `P1500` on Haas. `stop` takes no placeholders. `feed_mode` is a bare word such as `G98`. When it is non-empty and different from `lathe.feed_mode`, it is written once, before the first live-tool start in the program. Haas `feed_mode` is already `G98`, so the live-tool block adds no extra feed word. `LiveToolOn` writes `forward` or `reverse`. `LiveToolOff` writes `stop`. A post with no `live_tool` block is `post `<id>` has no live tooling`.
 
+`lathe.c_feed` is `per_minute` (the default) or `inverse_time`. `per_minute` writes the IR feed in millimetres per minute. Haas uses Setting 102 to turn that number into a C-axis rate. `inverse_time` writes `G93` before every `G1`, `G2` or `G3` that changes C, with `F = ir_feed / length` (`1 / minutes`). `length` is the straight-line part-frame cut, the same rule as a mill rotary post, not the arc length. A fallback chord uses those part-frame tips: Cartesian on a face, and the unrolled `(x, arc length, z)` point on a cylinder. An indexed move uses the chord after C rotates the tool tip about the spindle. `F` is written on every one of those blocks. The next move that does not change C (`G0`, `G1`, `G2` or `G3`) writes `lathe.feed_mode` (`G94` when that word is empty) and returns `F` to millimetres per minute. Read-back accepts `G93` and that off word. `compare` turns `F * length` back into millimetres per minute and allows 1%. A ZX arc still has no C word, so it does not change C. Fallback arcs are `G1` chords.
+
 At the end of the program, interpolation is cancelled first, then a live tool that is still on is stopped, a clamped brake is released, and a C axis that is still engaged is disengaged. Those lines are written after the footer and before `lathe.home`.
 
 On a lathe post that has `c_axis`, read-back keeps `letter` as the modal angle and returns it on rapid and linear moves. `compare` checks it against `Pose.rotary` with the same tolerance as a rotary word (`max(0.001 deg, one step of the linear decimals)`). `M` lines, `P` and `H` words, and `G28 H0.` are not moves. `G28 H0.` does not change the modal C word, because the axis letter is `C`.
@@ -101,7 +103,27 @@ Haas codes, from the Haas code table in `haas-facts.md`:
 
 On Haas NGC the C axis also engages automatically when commanded. CAMpanion writes `M154` explicitly as the manual's live-drilling example does.
 
-`haas_lathe` carries these lines and cites them in `references`. `fanuc_lathe`, `linuxcnc_lathe` and `grbl_lathe` leave `c_axis`, `brake`, `live_tool`, `face_interp`, `cylinder_interp` and `y_axis` unset.
+`haas_lathe` carries these lines and cites them in `references`. `fanuc_lathe` and `grbl_lathe` leave `c_axis`, `brake`, `live_tool`, `face_interp`, `cylinder_interp` and `y_axis` unset.
+
+### LinuxCNC
+
+`linuxcnc_lathe` has no `face_interp` and no `cylinder_interp`. LinuxCNC has no `G112` or `G107`, so face and cylinder cycles use the writer's X/C fallback. `c_feed` is `inverse_time`: a feed that changes C is `G93`, and the next move that does not change C returns to `G94` (`lathe.feed_mode`).
+
+The live tool is spindle 1. `forward` is `S{rpm} $1` then `M3 $1`. `reverse` is `S{rpm} $1` then `M4 $1`. `stop` is `M5 $1`. `feed_mode` is empty, because the lathe is already in `G94`. `$n` selects spindle n and is not a move.
+
+```json
+"c_axis": { "letter": "C", "engage": [], "disengage": [] },
+"brake": { "clamp": [], "release": [] },
+"live_tool": { "forward": ["S{rpm} $1", "M3 $1"], "reverse": ["S{rpm} $1", "M4 $1"], "stop": ["M5 $1"], "feed_mode": "" },
+"y_axis": { "letter": "Y", "face_plane": "G17", "side_plane": "G19", "turn_plane": "G18" },
+"c_feed": "inverse_time"
+```
+
+`c_axis.engage`, `c_axis.disengage`, `brake.clamp` and `brake.release` are empty. LinuxCNC switches the spindle to a C joint and clamps the brake in HAL, or in a user M-code (`M100`–`M199`). A custom post can fill those lists. Y uses `G17` for an axial tool and `G19` for a radial tool, then `G18` for turning. There is no Y activation code.
+
+- `M3` / `M4` / `M5` with `$n` select spindle n. The live tool is spindle 1. <https://linuxcnc.org/docs/stable/html/gcode/m-code.html>
+- `G93` is inverse time. `G94` is units per minute. <https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g93-g94-g95>
+- C-axis switching and the spindle brake are machine-specific (HAL or `M100`–`M199`). <https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m100-m199>
 
 ### Y axis
 
