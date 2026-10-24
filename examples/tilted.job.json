@@ -1,0 +1,42 @@
+{
+  "format": "campanion-job/1",
+  "source": { "path": "sample.dxf", "hash": "cee9f36f5ba230a2" },
+  "units": "mm",
+  "kinematics": "table_table_bc.kin.json",
+  "tools": [
+    { "id": 1, "diameter": 6.0 }
+  ],
+  "operations": [
+    {
+      "name": "top",
+      "type": "profile",
+      "layers": ["OUTER"],
+      "side": "outside",
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 3.0,
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    },
+    {
+      "name": "tilt30",
+      "type": "profile",
+      "layers": ["INNER"],
+      "side": "on",
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 3.0,
+      "plane": { "origin": [0, 0, 0], "normal": [0, -0.5, 0.8660254037844386] },
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    },
+    {
+      "name": "side",
+      "type": "drill",
+      "layers": ["INNER"],
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 3.0,
+      "plane": { "origin": [0, -20, -5], "normal": [0, -1, 0] },
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    }
+  ]
+}

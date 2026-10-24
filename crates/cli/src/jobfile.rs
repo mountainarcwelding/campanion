@@ -90,6 +90,13 @@
 //! a finite angle in degrees, also not scaled. `index_deg` without `rotary` is an error that
 //! names the operation. With a setup and no `index_deg`, the operation runs at 0°. See
 //! `docs/job-file.md`.
+//!
+//! An optional top-level `kinematics` path, relative to the job file, loads a kinematics JSON
+//! file. `solution` is `nearest` (the default), `first_positive` or `first_negative`. An
+//! operation may set `plane` (`origin`, `normal`, optional `x_dir`). `origin` scales with
+//! `units`; the directions are normalised. A plane needs kinematics, and kinematics cannot be
+//! combined with `rotary`. A 2D operation with `plane` is planned in that view and mapped
+//! into the part frame. `surface`, `rough` and `waterline` reject `plane`. See `docs/job-file.md`.
 
 use std::fmt;
 use std::fs::File;
@@ -97,7 +104,10 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use campanion_geom::Tolerance;
-use campanion_ir::{Feeds, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, Tool as IrTool, Vec3};
+use campanion_ir::{
+    Feeds, FiveAxisSetup, Kinematics, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, SolutionPolicy, Tool as IrTool,
+    ToolPose, Vec3,
+};
 use campanion_path::{DepthEntry, ProfileSide, Tool as PathTool};
 use serde_json::{Map, Number, Value};
 
@@ -471,6 +481,7 @@ impl Finish {
 /// file omitted it. A job with a rotary setup then runs the operation at 0°. A wrap rejects
 /// `index_deg`. [`Self::cylinder_diameter`] is set only on a wrap. [`Self::u_offset`] and
 /// [`Self::v_offset`] are 0 on every other kind.
+/// [`Self::plane`] is the tilted work plane. `None` means the file omitted `plane`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -513,6 +524,41 @@ pub struct Operation {
     wrap_geom: Option<WrapGeom>,
     /// Axis window, angle step and travel. `None` except on a rotary finish.
     rotary_geom: Option<RotaryFinishGeom>,
+    /// Tilted work plane. `None` when the file omits `plane`.
+    plane: Option<WorkPlane>,
+}
+
+/// Work plane for one indexed 3+2 operation.
+///
+/// `origin` is millimetres in the part frame. `normal` and `x_dir` are unit directions.
+/// View +X is `x_dir`, view +Z is `normal`, and the view origin is `origin`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorkPlane {
+    origin: Vec3,
+    normal: Vec3,
+    x_dir: Vec3,
+}
+
+impl WorkPlane {
+    /// Unit `normal` and an in-plane unit `x_dir`.
+    pub(crate) fn new(origin: Vec3, normal: Vec3, x_dir: Vec3) -> Self {
+        Self { origin, normal, x_dir }
+    }
+
+    /// Plane origin, millimetres, part frame.
+    pub fn origin(self) -> Vec3 {
+        self.origin
+    }
+
+    /// Unit plane normal. In the part frame this is the tool axis.
+    pub fn normal(self) -> Vec3 {
+        self.normal
+    }
+
+    /// Unit view +X, lying in the plane.
+    pub fn x_dir(self) -> Vec3 {
+        self.x_dir
+    }
 }
 
 impl Operation {
@@ -703,6 +749,11 @@ impl Operation {
     pub fn rotary_travel(&self) -> Option<RotaryTravel> {
         self.rotary_geom.map(|geom| geom.travel)
     }
+
+    /// Tilted work plane. `None` when the file omits `plane`.
+    pub fn plane(&self) -> Option<WorkPlane> {
+        self.plane
+    }
 }
 
 /// A loaded `campanion-job/1` file.
@@ -710,6 +761,7 @@ impl Operation {
 /// [`Self::clearance`] and [`Self::retract`] are millimetres. They come from the optional
 /// job-level `heights` object. An omitted clearance is 5 mm and an omitted retract is 2 mm.
 /// [`Self::rotary`] is the 4th-axis table, when the file has one.
+/// [`Self::five_axis`] is the kinematics file and solution policy, when the file has one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobFile {
     path: PathBuf,
@@ -721,6 +773,7 @@ pub struct JobFile {
     clearance: f64,
     retract: f64,
     rotary: Option<RotarySetup>,
+    five_axis: Option<FiveAxisSetup>,
 }
 
 impl JobFile {
@@ -775,6 +828,11 @@ impl JobFile {
     pub fn rotary(&self) -> Option<RotarySetup> {
         self.rotary
     }
+
+    /// Five-axis kinematics and solution policy. `None` when the file omits `kinematics`.
+    pub fn five_axis(&self) -> Option<&FiveAxisSetup> {
+        self.five_axis.as_ref()
+    }
 }
 
 struct Body {
@@ -786,12 +844,13 @@ struct Body {
     clearance: f64,
     retract: f64,
     rotary: Option<RotarySetup>,
+    five_axis: Option<FiveAxisSetup>,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
 pub fn load(path: &Path) -> Result<JobFile, JobFileError> {
     let text = read_text(path)?;
-    let body = parse_text(&text)?;
+    let body = parse_text(&text, path)?;
     Ok(JobFile {
         path: path.to_path_buf(),
         source: body.source,
@@ -802,6 +861,7 @@ pub fn load(path: &Path) -> Result<JobFile, JobFileError> {
         clearance: body.clearance,
         retract: body.retract,
         rotary: body.rotary,
+        five_axis: body.five_axis,
     })
 }
 
@@ -858,7 +918,7 @@ fn read_text(path: &Path) -> Result<String, JobFileError> {
     String::from_utf8(bytes).map_err(|_| JobFileError::invalid(format!("{} is not valid UTF-8", path.display())))
 }
 
-fn parse_text(text: &str) -> Result<Body, JobFileError> {
+fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     let value: Value = serde_json::from_str(text).map_err(|err| JobFileError::Json { message: err.to_string() })?;
     let map = object(&value, "job").map_err(from_cli)?;
     let tag = match optional(map, "format") {
@@ -866,13 +926,26 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
         None => return Err(JobFileError::invalid("missing format tag")),
     };
     check_format(tag)?;
-    check_keys(map, &["format", "source", "units", "tolerance", "heights", "tools", "operations", "rotary"], "job").map_err(from_cli)?;
+    check_keys(map, &["format", "source", "units", "tolerance", "heights", "tools", "operations", "rotary", "kinematics", "solution"], "job")
+        .map_err(from_cli)?;
     let units = parse_units(require(map, "units").map_err(from_cli)?)?;
     let scale = units.mm_per_unit();
     let source = parse_source(require(map, "source").map_err(from_cli)?)?;
     let tolerance = parse_tolerance(optional(map, "tolerance"), scale)?;
     let (clearance, retract) = parse_heights(optional(map, "heights"), scale)?;
     let rotary = parse_rotary(optional(map, "rotary"), scale)?;
+    let kinematics = match optional(map, "kinematics") {
+        Some(value) => Some(load_kinematics(job_path, value)?),
+        None => None,
+    };
+    let solution_set = optional(map, "solution").is_some();
+    let policy = parse_solution(optional(map, "solution"))?;
+    if solution_set && kinematics.is_none() {
+        return Err(JobFileError::invalid("solution needs a kinematics file"));
+    }
+    if kinematics.is_some() && rotary.is_some() {
+        return Err(JobFileError::invalid("kinematics and rotary cannot be combined"));
+    }
     let tools = parse_tools(require(map, "tools").map_err(from_cli)?, scale)?;
     let operations = parse_operations(require(map, "operations").map_err(from_cli)?, scale, &tools)?;
     if rotary.is_none()
@@ -890,8 +963,19 @@ fn parse_text(text: &str) -> Result<Body, JobFileError> {
     {
         return Err(JobFileError::invalid(format!("operation `{}`: rotary finish needs a rotary setup", operation.name())));
     }
+    if let Some(operation) = operations.iter().find(|operation| operation.plane().is_some())
+        && kinematics.is_none()
+    {
+        return Err(JobFileError::invalid(format!("operation `{}`: plane needs a kinematics file", operation.name())));
+    }
+    if let Some(kinematics) = &kinematics {
+        for operation in &operations {
+            check_reachable(kinematics, policy, operation)?;
+        }
+    }
     check_mesh_source(&source, &operations, &tools)?;
-    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary })
+    let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
+    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary, five_axis })
 }
 
 /// An STL part only accepts `surface`, `rough`, `waterline` and `rotary_finish`. Each only accepts an STL part.
@@ -1193,6 +1277,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "u_max",
             "angle_step_deg",
             "direction",
+            "plane",
         ],
         "operation",
     )
@@ -1201,20 +1286,21 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let name = required_name(as_str(name_value, "operation name").map_err(from_cli)?, "operation name").map_err(from_cli)?;
     let index_deg = parse_index_deg(optional(map, "index_deg"))?;
     let kind = parse_kind(map)?;
+    let plane = take_plane(&name, map, &kind, index_deg.is_some(), scale)?;
     if matches!(kind, OperationKind::Surface) {
-        return Ok(with_index(finish_surface(name, map, scale, tools)?, index_deg));
+        return Ok(attach_plane(with_index(finish_surface(name, map, scale, tools)?, index_deg), plane));
     }
     if matches!(kind, OperationKind::Rough) {
-        return Ok(with_index(finish_rough(name, map, scale, tools)?, index_deg));
+        return Ok(attach_plane(with_index(finish_rough(name, map, scale, tools)?, index_deg), plane));
     }
     if matches!(kind, OperationKind::Waterline) {
-        return Ok(with_index(finish_waterline(name, map, scale, tools)?, index_deg));
+        return Ok(attach_plane(with_index(finish_waterline(name, map, scale, tools)?, index_deg), plane));
     }
     if matches!(kind, OperationKind::Wrap) {
-        return finish_wrap(name, map, scale, tools);
+        return Ok(attach_plane(finish_wrap(name, map, scale, tools)?, plane));
     }
     if matches!(kind, OperationKind::RotaryFinish) {
-        return finish_rotary(name, map, scale, tools);
+        return Ok(attach_plane(finish_rotary(name, map, scale, tools)?, plane));
     }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
@@ -1290,6 +1376,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         index_deg,
         wrap_geom: None,
         rotary_geom: None,
+        plane,
     })
 }
 
@@ -1402,6 +1489,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         index_deg: None,
         wrap_geom: None,
         rotary_geom: None,
+        plane: None,
     })
 }
 
@@ -1521,6 +1609,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         index_deg: None,
         wrap_geom: None,
         rotary_geom: None,
+        plane: None,
     })
 }
 
@@ -1639,6 +1728,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         index_deg: None,
         wrap_geom: None,
         rotary_geom: None,
+        plane: None,
     })
 }
 
@@ -1728,6 +1818,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         index_deg: None,
         wrap_geom: Some(WrapGeom { diameter, u_offset, v_offset }),
         rotary_geom: None,
+        plane: None,
     })
 }
 
@@ -1843,6 +1934,7 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         index_deg: None,
         wrap_geom: None,
         rotary_geom: Some(RotaryFinishGeom { u_min, u_max, angle_step_deg, travel }),
+        plane: None,
     })
 }
 
@@ -2420,10 +2512,212 @@ fn array<'a>(value: &'a Value, what: &str, max: usize) -> Result<&'a Vec<Value>,
     Ok(list)
 }
 
+/// A component this close to zero, or to ±X, is treated as that direction.
+const PLANE_DIR_EPS: f64 = 1e-9;
+
+fn op_invalid(name: &str, detail: impl fmt::Display) -> JobFileError {
+    JobFileError::invalid(format!("operation `{name}`: {detail}"))
+}
+
+fn named_field(name: &str, err: JobFileError) -> JobFileError {
+    match err {
+        JobFileError::Invalid { message } => {
+            let detail = message.strip_prefix("invalid input: ").unwrap_or(message.as_str());
+            if detail.starts_with("operation `") { JobFileError::Invalid { message } } else { op_invalid(name, detail) }
+        }
+        other => other,
+    }
+}
+
+fn take_plane(name: &str, map: &Map<String, Value>, kind: &OperationKind, indexed: bool, scale: f64) -> Result<Option<WorkPlane>, JobFileError> {
+    let Some(value) = optional(map, "plane") else {
+        return Ok(None);
+    };
+    if let Some(type_name) = unsupported_plane(kind) {
+        return Err(op_invalid(name, format!("plane is not supported on {type_name}")));
+    }
+    if indexed {
+        return Err(op_invalid(name, "plane and index_deg cannot be combined"));
+    }
+    Ok(Some(parse_plane(name, value, scale)?))
+}
+
+fn unsupported_plane(kind: &OperationKind) -> Option<&'static str> {
+    match kind {
+        OperationKind::Wrap => Some("wrap"),
+        OperationKind::RotaryFinish => Some("rotary_finish"),
+        OperationKind::Surface => Some("surface"),
+        OperationKind::Rough => Some("rough"),
+        OperationKind::Waterline => Some("waterline"),
+        _ => None,
+    }
+}
+
+fn attach_plane(mut operation: Operation, plane: Option<WorkPlane>) -> Operation {
+    operation.plane = plane;
+    operation
+}
+
+fn parse_plane(name: &str, value: &Value, scale: f64) -> Result<WorkPlane, JobFileError> {
+    let map = object(value, "plane").map_err(|err| named_field(name, from_cli(err)))?;
+    check_keys(map, &["origin", "normal", "x_dir"], "plane").map_err(|err| named_field(name, from_cli(err)))?;
+    let origin = parse_plane_origin(name, require(map, "origin").map_err(|err| named_field(name, from_cli(err)))?, scale)?;
+    let normal = plane_normal(name, require(map, "normal").map_err(|err| named_field(name, from_cli(err)))?)?;
+    let raw_x = match optional(map, "x_dir") {
+        Some(value) => plane_vector(name, value, "plane x_dir")?,
+        None => default_plane_x(normal),
+    };
+    let x_dir = match unit_direction(project_onto_plane(raw_x, normal)) {
+        Ok(direction) => direction,
+        Err(PlaneDirError::NotFinite) => return Err(op_invalid(name, "plane x_dir must be finite")),
+        Err(PlaneDirError::Zero) => return Err(op_invalid(name, "plane x_dir is parallel to the normal")),
+    };
+    Ok(WorkPlane { origin, normal, x_dir })
+}
+
+fn parse_plane_origin(name: &str, value: &Value, scale: f64) -> Result<Vec3, JobFileError> {
+    let list = array(value, "plane origin", 3).map_err(|err| named_field(name, err))?;
+    if list.len() != 3 {
+        return Err(op_invalid(name, "plane origin must be exactly 3 numbers"));
+    }
+    let mut coords = [0.0; 3];
+    for (slot, item) in coords.iter_mut().zip(list.iter()) {
+        let scaled = scale_f64(item, scale, "plane origin").map_err(|err| named_field(name, err))?;
+        *slot = finite_height(scaled, "plane origin").map_err(|err| named_field(name, err))?;
+    }
+    Vec3::new(coords[0], coords[1], coords[2]).map_err(|err| JobFileError::Invalid { message: err.to_string() })
+}
+
+fn plane_normal(name: &str, value: &Value) -> Result<Vec3, JobFileError> {
+    let raw = plane_vector(name, value, "plane normal")?;
+    match unit_direction(raw) {
+        Ok(direction) => Ok(direction),
+        Err(PlaneDirError::NotFinite) => Err(op_invalid(name, "plane normal must be finite")),
+        Err(PlaneDirError::Zero) => Err(op_invalid(name, "plane normal is zero")),
+    }
+}
+
+/// Direction components. Not scaled by `units`.
+fn plane_vector(name: &str, value: &Value, what: &str) -> Result<Vec3, JobFileError> {
+    let list = array(value, what, 3).map_err(|err| named_field(name, err))?;
+    if list.len() != 3 {
+        return Err(op_invalid(name, format!("{what} must be exactly 3 numbers")));
+    }
+    let mut coords = [0.0; 3];
+    for (slot, item) in coords.iter_mut().zip(list.iter()) {
+        let number = as_f64(item, what).map_err(|err| named_field(name, from_cli(err)))?;
+        if !number.is_finite() {
+            return Err(op_invalid(name, format!("{what} must be finite")));
+        }
+        *slot = number;
+    }
+    Vec3::new(coords[0], coords[1], coords[2]).map_err(|err| JobFileError::Invalid { message: err.to_string() })
+}
+
+fn default_plane_x(normal: Vec3) -> Vec3 {
+    let seed = if near_pm_x(normal) { Vec3::Y } else { Vec3::X };
+    project_onto_plane(seed, normal)
+}
+
+fn near_pm_x(normal: Vec3) -> bool {
+    let to_pos = hypot3(normal.x() - 1.0, normal.y(), normal.z());
+    let to_neg = hypot3(normal.x() + 1.0, normal.y(), normal.z());
+    to_pos <= PLANE_DIR_EPS || to_neg <= PLANE_DIR_EPS
+}
+
+fn project_onto_plane(vector: Vec3, normal: Vec3) -> Vec3 {
+    let along = vector.x() * normal.x() + vector.y() * normal.y() + vector.z() * normal.z();
+    match Vec3::new(vector.x() - normal.x() * along, vector.y() - normal.y() * along, vector.z() - normal.z() * along) {
+        Ok(projected) => projected,
+        Err(_) => Vec3::ZERO,
+    }
+}
+
+enum PlaneDirError {
+    Zero,
+    NotFinite,
+}
+
+fn unit_direction(vector: Vec3) -> Result<Vec3, PlaneDirError> {
+    let length_sq = vector.x() * vector.x() + vector.y() * vector.y() + vector.z() * vector.z();
+    if !length_sq.is_finite() {
+        return Err(PlaneDirError::NotFinite);
+    }
+    let length = length_sq.sqrt();
+    if length <= PLANE_DIR_EPS {
+        return Err(PlaneDirError::Zero);
+    }
+    Vec3::new(vector.x() / length, vector.y() / length, vector.z() / length).map_err(|_| PlaneDirError::NotFinite)
+}
+
+fn hypot3(x: f64, y: f64, z: f64) -> f64 {
+    (x * x + y * y + z * z).sqrt()
+}
+
+fn load_kinematics(job_path: &Path, value: &Value) -> Result<Kinematics, JobFileError> {
+    let relative = as_str(value, "kinematics").map_err(from_cli)?;
+    if relative.is_empty() {
+        return Err(JobFileError::invalid("kinematics: path is empty"));
+    }
+    let dir = job_path.parent().unwrap_or(Path::new(""));
+    let path = dir.join(relative);
+    let text = read_kinematics(&path)?;
+    Kinematics::from_json(&text).map_err(|err| JobFileError::invalid(format!("kinematics: {}", kinematics_detail(err))))
+}
+
+fn read_kinematics(path: &Path) -> Result<String, JobFileError> {
+    let file = File::open(path).map_err(|err| JobFileError::invalid(format!("kinematics: {}: {err}", path.display())))?;
+    if let Ok(meta) = file.metadata()
+        && meta.len() > MAX_JSON_BYTES as u64
+    {
+        return Err(JobFileError::invalid(format!("kinematics: {} is larger than {MAX_JSON_BYTES} bytes", path.display())));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| JobFileError::invalid(format!("kinematics: {}: {err}", path.display())))?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(JobFileError::invalid(format!("kinematics: {} is larger than {MAX_JSON_BYTES} bytes", path.display())));
+    }
+    String::from_utf8(bytes).map_err(|_| JobFileError::invalid(format!("kinematics: {} is not valid UTF-8", path.display())))
+}
+
+fn kinematics_detail(err: campanion_ir::IrError) -> String {
+    match err {
+        campanion_ir::IrError::InvalidInput(message) => message,
+        other => other.to_string(),
+    }
+}
+
+fn parse_solution(value: Option<&Value>) -> Result<SolutionPolicy, JobFileError> {
+    let Some(value) = value else {
+        return Ok(SolutionPolicy::Nearest);
+    };
+    match as_str(value, "solution").map_err(from_cli)? {
+        "nearest" => Ok(SolutionPolicy::Nearest),
+        "first_positive" => Ok(SolutionPolicy::FirstPositive),
+        "first_negative" => Ok(SolutionPolicy::FirstNegative),
+        _ => Err(JobFileError::invalid("solution must be \"nearest\", \"first_positive\" or \"first_negative\"")),
+    }
+}
+
+fn check_reachable(kinematics: &Kinematics, policy: SolutionPolicy, operation: &Operation) -> Result<(), JobFileError> {
+    let (tip, axis) = match operation.plane() {
+        Some(plane) => (plane.origin(), plane.normal()),
+        None => (Vec3::ZERO, Vec3::Z),
+    };
+    kinematics.choose(&ToolPose { tip, axis }, 0.0, policy.choice([0.0, 0.0])).map_err(|err| op_invalid(operation.name(), kinematics_detail(err)))?;
+    Ok(())
+}
+
 fn at_index(kind: &str, index: usize, err: JobFileError) -> JobFileError {
     match err {
         JobFileError::Invalid { message } => {
             let detail = message.strip_prefix("invalid input: ").unwrap_or(message.as_str());
+            // A plane error already names the operation. Keep that text.
+            if detail.starts_with("operation `") {
+                return JobFileError::Invalid { message };
+            }
             JobFileError::invalid(format!("{kind} {index}: {detail}"))
         }
         other => other,
@@ -2468,8 +2762,10 @@ enum DotFold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use campanion_ir::{SolutionPolicy, Vec3};
     use campanion_path::Tool as PathTool;
     use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const EMPTY_HASH: &str = "cbf29ce484222325";
@@ -4483,5 +4779,157 @@ mod tests {
             let err = load(&write_job(&format!("wrap-bad-{index}"), text)).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
+    }
+
+    fn invalid_detail(err: &JobFileError) -> String {
+        let text = err.to_string();
+        text.strip_prefix("invalid input: ").unwrap_or(&text).to_string()
+    }
+
+    fn write_beside(job: &Path, name: &str, text: &str) {
+        fs::write(job.parent().expect("job dir").join(name), text).expect("beside");
+    }
+
+    fn example_kinematics() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/table_table_bc.kin.json");
+        fs::read_to_string(path).expect("example kinematics")
+    }
+
+    fn profile_op(name: &str, extra: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1{extra},"feeds":{{"cut":1}}}}"#
+        )
+    }
+
+    fn kin_job(units: &str, kinematics: &str, solution: &str, rotary: &str, ops: &str) -> String {
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"{units}"{kinematics}{solution}{rotary},"tools":[{{"id":1,"diameter":6}}],"operations":[{ops}]}}"#
+        )
+    }
+
+    #[test]
+    fn kinematics_and_a_tilted_plane_load() {
+        let kin = example_kinematics();
+        let flat = profile_op("flat", r#","plane":{"origin":[1,2,3],"normal":[0,0,2]}"#);
+        let side = profile_op("side", r#","plane":{"origin":[0,0,0],"normal":[1,0,0],"x_dir":[0,4,0]}"#);
+        let plain = profile_op("plain", "");
+        let text =
+            kin_job("inch", r#","kinematics":"table_table_bc.kin.json""#, r#","solution":"first_positive""#, "", &format!("{flat},{side},{plain}"));
+        let path = write_job("kin-plane", &text);
+        write_beside(&path, "table_table_bc.kin.json", &kin);
+        let job = load(&path).expect("load");
+        let setup = job.five_axis().expect("five axis");
+        assert_eq!(setup.policy, SolutionPolicy::FirstPositive);
+        assert_eq!(setup.kinematics.name, "table_table_bc");
+        let flat = job.operations()[0].plane().expect("flat");
+        near(flat.origin().x(), 25.4);
+        near(flat.origin().y(), 50.8);
+        near(flat.origin().z(), 76.2);
+        assert_eq!(flat.normal(), Vec3::Z);
+        assert_eq!(flat.x_dir(), Vec3::X);
+        let side = job.operations()[1].plane().expect("side");
+        assert_eq!(side.normal(), Vec3::X);
+        assert_eq!(side.x_dir(), Vec3::Y);
+        assert!(job.operations()[2].plane().is_none());
+
+        let omitted = kin_job("mm", r#","kinematics":"table_table_bc.kin.json""#, "", "", &profile_op("plain", ""));
+        let path = write_job("kin-default-solution", &omitted);
+        write_beside(&path, "table_table_bc.kin.json", &kin);
+        assert_eq!(load(&path).expect("default").five_axis().expect("setup").policy, SolutionPolicy::Nearest);
+
+        let negative = kin_job("mm", r#","kinematics":"table_table_bc.kin.json""#, r#","solution":"first_negative""#, "", &profile_op("plain", ""));
+        let path = write_job("kin-negative", &negative);
+        write_beside(&path, "table_table_bc.kin.json", &kin);
+        assert_eq!(load(&path).expect("negative").five_axis().expect("setup").policy, SolutionPolicy::FirstNegative);
+    }
+
+    #[test]
+    fn kinematics_and_plane_errors_name_the_failure() {
+        let op = profile_op("outer", "");
+        let missing = kin_job("mm", r#","kinematics":"missing.kin.json""#, "", "", &op);
+        let err = load(&write_job("kin-missing", &missing)).expect_err("missing");
+        assert!(invalid_detail(&err).starts_with("kinematics: "), "{err}");
+
+        let bad = kin_job("mm", r#","kinematics":"bad.kin.json""#, "", "", &op);
+        let path = write_job("kin-bad-json", &bad);
+        write_beside(&path, "bad.kin.json", "{");
+        let err = load(&path).expect_err("json");
+        assert!(invalid_detail(&err).starts_with("kinematics: "), "{err}");
+
+        let solution = kin_job("mm", "", r#","solution":"nearest""#, "", &op);
+        let err = load(&write_job("solution-without-kin", &solution)).expect_err("solution");
+        assert_eq!(invalid_detail(&err), "solution needs a kinematics file");
+
+        let both =
+            kin_job("mm", r#","kinematics":"table_table_bc.kin.json""#, "", r#","rotary":{"axis":"a","center":[0,0,0],"direction":"positive"}"#, &op);
+        let path = write_job("kin-and-rotary", &both);
+        write_beside(&path, "table_table_bc.kin.json", &example_kinematics());
+        let err = load(&path).expect_err("combined");
+        assert_eq!(invalid_detail(&err), "kinematics and rotary cannot be combined");
+
+        let needs = kin_job("mm", "", "", "", &profile_op("outer", r#","plane":{"origin":[0,0,0],"normal":[0,0,1]}"#));
+        let err = load(&write_job("plane-needs-kin", &needs)).expect_err("plane");
+        assert_eq!(invalid_detail(&err), "operation `outer`: plane needs a kinematics file");
+
+        let zero = kin_job("mm", "", "", "", &profile_op("outer", r#","plane":{"origin":[0,0,0],"normal":[0,0,0]}"#));
+        let err = load(&write_job("plane-zero", &zero)).expect_err("zero");
+        assert_eq!(invalid_detail(&err), "operation `outer`: plane normal is zero");
+
+        let parallel = kin_job("mm", "", "", "", &profile_op("outer", r#","plane":{"origin":[0,0,0],"normal":[0,0,1],"x_dir":[0,0,2]}"#));
+        let err = load(&write_job("plane-parallel", &parallel)).expect_err("parallel");
+        assert_eq!(invalid_detail(&err), "operation `outer`: plane x_dir is parallel to the normal");
+
+        let indexed = kin_job("mm", "", "", "", &profile_op("outer", r#","index_deg":10,"plane":{"origin":[0,0,0],"normal":[0,0,1]}"#));
+        let err = load(&write_job("plane-index", &indexed)).expect_err("index");
+        assert_eq!(invalid_detail(&err), "operation `outer`: plane and index_deg cannot be combined");
+
+        let wrap = kin_job(
+            "mm",
+            "",
+            "",
+            "",
+            r#"{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":40,"plane":{"origin":[0,0,0],"normal":[0,0,1]},"feeds":{"cut":1}}"#,
+        );
+        let err = load(&write_job("plane-wrap", &wrap)).expect_err("wrap");
+        assert_eq!(invalid_detail(&err), "operation `letters`: plane is not supported on wrap");
+
+        let finish = kin_job(
+            "mm",
+            "",
+            "",
+            "",
+            r#"{"name":"spin","type":"rotary_finish","tool_id":1,"plane":{"origin":[0,0,0],"normal":[0,0,1]},"feeds":{"cut":1}}"#,
+        );
+        let err = load(&write_job("plane-rotary-finish", &finish)).expect_err("rotary finish");
+        assert_eq!(invalid_detail(&err), "operation `spin`: plane is not supported on rotary_finish");
+
+        let surface = kin_job(
+            "mm",
+            "",
+            "",
+            "",
+            r#"{"name":"cap","type":"surface","tool_id":1,"stepover":1,"plane":{"origin":[0,0,0],"normal":[0,0,1]},"feeds":{"cut":1}}"#,
+        );
+        let err = load(&write_job("plane-surface", &surface)).expect_err("surface");
+        assert_eq!(invalid_detail(&err), "operation `cap`: plane is not supported on surface");
+
+        let tilt = kin_job(
+            "mm",
+            r#","kinematics":"table_table_bc.kin.json""#,
+            "",
+            "",
+            &profile_op("tilt", r#","plane":{"origin":[1,2,3],"normal":[0,0,-1]}"#),
+        );
+        let path = write_job("plane-past-b", &tilt);
+        write_beside(&path, "table_table_bc.kin.json", &example_kinematics());
+        let err = load(&path).expect_err("limits");
+        assert_eq!(invalid_detail(&err), "operation `tilt`: tool axis (0.000000, 0.000000, -1.000000) is outside the rotary limits");
+
+        let tight = r#"{"name":"tight_b","rotaries":[{"letter":"B","carrier":"table","axis":{"x":0.0,"y":1.0,"z":0.0},"pivot":{"x":0.0,"y":0.0,"z":0.0},"limits":{"min_deg":10.0,"max_deg":20.0}},{"letter":"C","carrier":"table","axis":{"x":0.0,"y":0.0,"z":1.0},"pivot":{"x":0.0,"y":0.0,"z":0.0}}]}"#;
+        let upright = kin_job("mm", r#","kinematics":"tight.kin.json""#, "", "", &profile_op("inner", ""));
+        let path = write_job("plane-plus-z", &upright);
+        write_beside(&path, "tight.kin.json", tight);
+        let err = load(&path).expect_err("plus z");
+        assert_eq!(invalid_detail(&err), "operation `inner`: tool axis (0.000000, 0.000000, 1.000000) is outside the rotary limits");
     }
 }

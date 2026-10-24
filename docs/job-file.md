@@ -402,6 +402,54 @@ Zs is the greater of the job safe height and the swept radius plus the rapid cle
 
 A post with no `rotary` field rejects a program that contains any rotary angle, with `post `<id>` does not support a rotary axis`. A setup whose poses carry no angle still posts. LinuxCNC, Fanuc and Haas write axis A: machine `X` `Y` `Z` from `part_to_machine`, and inverse-time feed (`G93`, back to `G94` when the angle holds) when a feed changes the angle. Mach3 writes axis A and keeps the IR feed number (degrees per minute). Grbl, plasma and the Grbl laser post have no rotary axis. The length used for inverse time is the straight-line distance between the part-frame tips; see the post crate README.
 
+## Kinematics and tilted planes (3+2)
+
+`kinematics` is a path, relative to the job file's directory, of a kinematics JSON file. `solution` chooses the inverse solution a later post keeps. `campanion run` plans profile, pocket, drill, engrave, face and chamfer in the work plane and writes those toolpaths in the part frame.
+
+```json
+"kinematics": "table_table_bc.kin.json",
+"solution": "nearest"
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `kinematics` | no | Path of the kinematics file, relative to the job file. Loaded with the IR parser. Cannot be combined with `rotary`. |
+| `solution` | no | `nearest` (the default), `first_positive` or `first_negative`. Requires `kinematics`. |
+
+An operation may set `plane`. View +X is `x_dir`, view +Z is `normal`, and the view origin is `origin`. View +Y is the right-handed cross product of those two axes. The drawing is read in that view, with no geometry change, and planned with the same 2D operations as a flat job. Each pose is then mapped into the part frame: the tip is the view point placed on the frame, and the tool axis is the plane normal. The pose carries no rotary angle. An arc whose plane normal maps onto XY, ZX or YZ stays an arc. Any other arc is replaced by lines within the job chord tolerance.
+
+When the next operation's frame differs (the origin or an axis differs by more than 1e-9), the planner appends a rapid to the operation being left and prepends a rapid to the next one. Each rapid keeps the tool's view X and Y and moves to the job clearance measured along that frame's normal. The rapid's tool axis is that frame's normal. The first operation that sets `plane` gets only the approach rapid. An operation that omits `plane` uses the part axes: origin at zero, view +X along part +X, view +Z along part +Z.
+
+```json
+"plane": { "origin": [0, 0, 0], "normal": [0, 1, 0], "x_dir": [1, 0, 0] }
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `origin` | yes | `[x, y, z]` of the plane origin. A length in `units`. |
+| `normal` | yes | `[i, j, k]` tool axis in the part frame. A direction, not scaled. Stored as a unit vector. |
+| `x_dir` | no | `[i, j, k]` view +X. A direction, not scaled. Stored as a unit vector in the plane. Omitted, part +X is projected onto the plane. When the normal is within 1e-9 of ±X, part +Y is projected instead. |
+
+`plane` needs `kinematics`. It cannot be combined with `index_deg`. It is not supported on `wrap`, `rotary_finish`, `surface`, `rough` or `waterline`. On load, every operation is checked against the kinematics: a plane uses its origin and normal, and an operation without a plane uses tool axis +Z. A job with kinematics and no plane is planned in the part frame, and the program stores the five-axis setup.
+
+Load failures:
+
+- `kinematics: ` followed by the read or parse error
+- `solution needs a kinematics file`
+- `kinematics and rotary cannot be combined`
+- `operation `<name>`: plane needs a kinematics file`
+- `operation `<name>`: plane normal is zero`
+- `operation `<name>`: plane x_dir is parallel to the normal`
+- `operation `<name>`: plane and index_deg cannot be combined`
+- `operation `<name>`: plane is not supported on wrap`
+- `operation `<name>`: plane is not supported on rotary_finish`
+- `operation `<name>`: plane is not supported on surface`
+- `operation `<name>`: plane is not supported on rough`
+- `operation `<name>`: plane is not supported on waterline`
+- `operation `<name>`: ` followed by the kinematics error when that pose is not reachable
+
+`examples/tilted.job.json` profiles `examples/sample.dxf` flat, profiles it again on a 30° plane, and drills a side plane. A post still writes a tool axis of part +Z. A tilted axis fails with `post `<id>` has no tilted-plane output`.
+
 ## Limits
 
 Hostile numbers and sizes fail the load instead of being passed on:

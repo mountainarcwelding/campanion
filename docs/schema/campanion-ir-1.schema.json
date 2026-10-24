@@ -358,6 +358,21 @@
       ],
       "type": "object"
     },
+    "Carrier": {
+      "description": "Which slide carries a rotary joint.",
+      "oneOf": [
+        {
+          "const": "table",
+          "description": "The joint moves the work. Its pivot is in machine coordinates at zero angles.",
+          "type": "string"
+        },
+        {
+          "const": "head",
+          "description": "The joint moves the tool. Its pivot is relative to the gauge point at zero head angles.",
+          "type": "string"
+        }
+      ]
+    },
     "Channel": {
       "additionalProperties": false,
       "description": "A group of axes that move together: one head, spindle or turret.",
@@ -1256,6 +1271,25 @@
       ],
       "type": "object"
     },
+    "FiveAxisSetup": {
+      "additionalProperties": false,
+      "description": "Kinematics and the rule that picks one inverse solution.\n\nPosts run the inverse. The part-frame toolpaths do not store joint angles.",
+      "properties": {
+        "kinematics": {
+          "$ref": "#/$defs/Kinematics",
+          "description": "One or two rotary joints and the spindle direction."
+        },
+        "policy": {
+          "$ref": "#/$defs/SolutionPolicy",
+          "description": "How to pick one inverse solution."
+        }
+      },
+      "required": [
+        "kinematics",
+        "policy"
+      ],
+      "type": "object"
+    },
     "Hand": {
       "description": "Which way the cutting edge faces along the spindle.",
       "oneOf": [
@@ -1443,6 +1477,37 @@
       "required": [
         "direction",
         "offset"
+      ],
+      "type": "object"
+    },
+    "Kinematics": {
+      "additionalProperties": false,
+      "description": "One or two rotary joints and the spindle direction at zero head angles.",
+      "properties": {
+        "name": {
+          "description": "Non-empty name. It is quoted in validation errors.",
+          "type": "string"
+        },
+        "rotaries": {
+          "description": "Outer joint first within each [`Carrier`]. One or two entries.",
+          "items": {
+            "$ref": "#/$defs/RotaryJoint"
+          },
+          "type": "array"
+        },
+        "spindle_axis": {
+          "$ref": "#/$defs/Vec3",
+          "default": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 1.0
+          },
+          "description": "Tool axis at zero head angles. Defaults to +Z. Normalised on load."
+        }
+      },
+      "required": [
+        "name",
+        "rotaries"
       ],
       "type": "object"
     },
@@ -1724,6 +1789,17 @@
           },
           "type": "array"
         },
+        "five_axis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FiveAxisSetup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Five-axis kinematics. Absent on a 3-axis or rotary-table program."
+        },
         "machine": {
           "anyOf": [
             {
@@ -1819,6 +1895,49 @@
         }
       ]
     },
+    "RotaryJoint": {
+      "additionalProperties": false,
+      "description": "One rotary joint. `letter` is `A`, `B` or `C`.\n\n`axis` is normalised on load. Rotation is right-handed about it. `pivot` is a point on the\naxis line. See the module docs for which frame that point is written in.",
+      "properties": {
+        "axis": {
+          "$ref": "#/$defs/Vec3",
+          "description": "Rotation axis. Stored as a unit vector after [`Kinematics::from_json`]."
+        },
+        "carrier": {
+          "$ref": "#/$defs/Carrier",
+          "description": "Table (work) or head (tool)."
+        },
+        "letter": {
+          "description": "`A`, `B` or `C`.",
+          "maxLength": 1,
+          "minLength": 1,
+          "type": "string"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RotaryLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inclusive travel limits in degrees. Absent means the joint is unlimited."
+        },
+        "pivot": {
+          "$ref": "#/$defs/Vec3",
+          "description": "A point on the axis line. See the module docs for the frame."
+        }
+      },
+      "required": [
+        "letter",
+        "carrier",
+        "axis",
+        "pivot"
+      ],
+      "type": "object"
+    },
     "RotaryLimits": {
       "additionalProperties": false,
       "description": "Inclusive travel limits for a machine A/B angle, in degrees. `min_deg` is strictly less than\n`max_deg`. Stored angles may exceed 360; the limits apply to that stored value.",
@@ -1868,6 +1987,26 @@
         "direction"
       ],
       "type": "object"
+    },
+    "SolutionPolicy": {
+      "description": "Which inverse solution a five-axis program keeps.\n\n[`Self::choice`] turns the policy into the [`Choice`] [`Kinematics::choose`] takes.",
+      "oneOf": [
+        {
+          "const": "nearest",
+          "description": "[`Choice::Nearest`] using the previous joint angles.",
+          "type": "string"
+        },
+        {
+          "const": "first_positive",
+          "description": "[`Choice::FirstPositive`].",
+          "type": "string"
+        },
+        {
+          "const": "first_negative",
+          "description": "[`Choice::FirstNegative`].",
+          "type": "string"
+        }
+      ]
     },
     "Spindle": {
       "additionalProperties": false,

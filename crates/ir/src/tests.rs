@@ -13,7 +13,7 @@ use crate::motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, 
 use crate::process::{CoolantMode, Event, ParamValue, ProcessKind, ProcessParams, Tool};
 use crate::program::{Document, Program, SyncPoint};
 use crate::rotary::{RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, machine_to_part};
-use crate::{FORMAT_MAJOR, FORMAT_TAG, IrError, MAX_AXES, check_format, json_schema};
+use crate::{FORMAT_MAJOR, FORMAT_TAG, FiveAxisSetup, IrError, Kinematics, MAX_AXES, SolutionPolicy, check_format, json_schema};
 
 #[test]
 fn ir_constants_and_error_display() {
@@ -336,9 +336,11 @@ fn old_ir_files_load_and_reserialize_byte_identically() {
         let doc = Document::from_json(&original).unwrap_or_else(|err| panic!("{rel}: {err}"));
         assert!(doc.program().rotary().is_none(), "{rel} should have no rotary setup");
         assert!(doc.program().turning().is_none(), "{rel} should have no turning setup");
+        assert!(doc.program().five_axis().is_none(), "{rel} should have no five-axis setup");
         let json = doc.to_json().expect("json");
         assert!(!json.contains("\"rotary\""), "{rel} gained a rotary field");
         assert!(!json.contains("\"turning\""), "{rel} gained a turning field");
+        assert!(!json.contains("\"five_axis\""), "{rel} gained a five_axis field");
         let original_value: serde_json::Value = serde_json::from_str(&original).expect("original value");
         let written_value: serde_json::Value = serde_json::from_str(&json).expect("written value");
         assert_eq!(written_value, original_value, "{rel}");
@@ -372,6 +374,42 @@ fn rotary_pose_with_inconsistent_tool_axis_is_rejected() {
     let err = Program::try_new(None, Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), Some(setup)).expect_err("axis");
     assert!(err.to_string().contains("block 0"), "{err}");
     assert!(err.to_string().contains("tool axis"), "{err}");
+}
+
+#[test]
+fn five_axis_round_trips_and_rejects_a_rotary_setup() {
+    let kinematics = Kinematics::from_json(include_str!("../kinematics/table_table_bc.json")).expect("kinematics");
+    let setup = FiveAxisSetup { kinematics, policy: SolutionPolicy::FirstPositive };
+    let pose = Pose::new(Vec3::X, Vec3::X).expect("tilted");
+    let program = Program::try_new(Some("tilt".into()), Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_five_axis(setup.clone())
+        .expect("five axis");
+    assert_eq!(program.five_axis().map(|item| &item.policy), Some(&SolutionPolicy::FirstPositive));
+    assert_eq!(program.five_axis().map(|item| item.kinematics.name.as_str()), Some("table_table_bc"));
+    let doc = Document::new(program).expect("document");
+    round_trip(&doc);
+    let kept = doc.program().toolpaths()[0].blocks().iter().any(|block| match block {
+        ClBlock::Motion(ClMotion::Rapid { to, .. }) => to.rotary().is_none() && to.axis() == Vec3::X,
+        _ => false,
+    });
+    assert!(kept);
+    let json = doc.to_json().expect("json");
+    assert!(json.contains("\"five_axis\":{"));
+    assert!(json.contains("\"policy\":\"first_positive\""));
+    assert!(!json.contains("\"rotary\""));
+
+    let rotary = RotarySetup::new(RotaryAxisKind::A, Vec3::ZERO, RotaryDirection::Positive, None).expect("rotary");
+    let with_rotary = Program::try_new(None, Vec::new(), None, Vec::new(), Vec::new(), Vec::new(), Some(rotary)).expect("rotary program");
+    let err = with_rotary.with_five_axis(setup.clone()).expect_err("both");
+    assert_eq!(err.to_string(), "invalid input: a program cannot have both a rotary setup and five-axis kinematics");
+    let again = Program::try_new(None, Vec::new(), None, Vec::new(), Vec::new(), Vec::new(), None)
+        .expect("bare")
+        .with_five_axis(setup)
+        .expect("five axis")
+        .with_rotary(Some(rotary));
+    let err = again.expect_err("rotary after five axis");
+    assert_eq!(err.to_string(), "invalid input: a program cannot have both a rotary setup and five-axis kinematics");
 }
 
 #[test]

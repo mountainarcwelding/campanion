@@ -121,6 +121,15 @@ fn rotary_angles_need_a_post_that_names_the_axis() {
 }
 
 #[test]
+fn tilted_tool_axis_has_no_post_output() {
+    let axis = Vec3::new(0.0, -1.0, 0.0).expect("axis");
+    let to = Pose::new(Vec3::new(1.0, 2.0, 3.0).expect("tip"), axis).expect("pose");
+    let program = program(vec![ClBlock::Motion(ClMotion::Rapid { to, feed: None })]);
+    let err = post_program(&program, &builtin("haas").expect("haas"), &options()).expect_err("tilt");
+    assert!(err.to_string().contains("post `haas` has no tilted-plane output"), "{err}");
+}
+
+#[test]
 fn builtins_load_and_match_ids() {
     assert_eq!(
         builtin_ids(),

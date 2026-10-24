@@ -4,7 +4,7 @@ A kinematics file describes one or two rotary joints and the spindle direction a
 
 The files in `crates/ir/kinematics/` are illustrative examples. They are not a description of any real machine.
 
-`Kinematics` is not stored on a toolpath document. Load one with `Kinematics::from_json`.
+Load a kinematics file with `Kinematics::from_json`. A program may store that model on `five_axis` with a `SolutionPolicy`: `nearest`, `first_positive` or `first_negative`. `SolutionPolicy::choice` maps the policy onto `Choice`. A program cannot store both a rotary setup and five-axis kinematics.
 
 ## Frames
 
