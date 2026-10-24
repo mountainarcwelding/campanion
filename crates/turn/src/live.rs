@@ -1,7 +1,8 @@
-//! Indexed live-tool drilling and slotting.
+//! Indexed live-tool drilling, slotting, and a radial flat.
 //!
-//! The spindle is a positioning C axis. These functions do not interpolate C, and they do not
-//! use a Y axis. C changes only on a rapid at the clearance point, while the brake is released.
+//! Drill and slot do not interpolate C and do not use a Y axis. C changes only on a rapid at
+//! the clearance point, while the brake is released. [`live_flat`] mills one flat with a radial
+//! endmill: the tool axis is +X, passes run in Y, and C stays fixed.
 //! Coordinates are the tool centre: Z along the spindle, positive away from the chuck, and X as
 //! a radius. A front hole's tip stops at `z_start - depth`. An OD hole's tip stops at radius
 //! `diameter / 2 - depth`. No drill-point allowance is added.
@@ -369,6 +370,196 @@ impl Builder {
     }
 }
 
+/// Parameters for [`live_flat`].
+///
+/// The tool is a radial endmill. Its face cuts a flat at radius [`Self::across`]. Passes run in
+/// Y. Z steps by `stepover * tool_diameter`. Radial steps move from the stock radius down to
+/// `across`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveFlatParams {
+    /// C angle in degrees. The flat is indexed, not wrapped.
+    pub c_deg: f64,
+    /// Stock diameter at the flat, millimetres.
+    pub stock_diameter: f64,
+    /// Distance from the spindle centre to the finished flat. `0 < across < stock_diameter / 2`.
+    pub across: f64,
+    /// Z of the first station.
+    pub z_from: f64,
+    /// Z of the last station. Either order. Equal values are one station.
+    pub z_to: f64,
+    /// Width of the flat along Y. `None` is the full chord at `across`.
+    pub width: Option<f64>,
+    /// Radial thickness of one pass. `None` is one pass at `across`.
+    pub step_down: Option<f64>,
+    /// Z step as a fraction of the live-tool diameter, in `(0, 1]`.
+    pub stepover: f64,
+    /// Live-tool diameter. The Y path extends past the flat by half of this.
+    pub tool_diameter: f64,
+    /// Gap outside the stock radius for the approach rapid. `>= 0`.
+    pub clearance: f64,
+}
+
+/// One step of a [`live_flat`] path. The caller adds the C-axis, brake and live-tool events.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FlatStep {
+    /// Rapid at Y = 0, outside the stock, with the indexed C.
+    Rapid { x: f64, y: f64, z: f64, c_deg: f64 },
+    /// Linear feed. C stays at the rapid's angle.
+    Feed { x: f64, y: f64, z: f64, c_deg: f64 },
+}
+
+impl FlatStep {
+    /// Tool-centre radius.
+    pub fn x(self) -> f64 {
+        match self {
+            Self::Rapid { x, .. } | Self::Feed { x, .. } => x,
+        }
+    }
+
+    /// Tool-centre Y.
+    pub fn y(self) -> f64 {
+        match self {
+            Self::Rapid { y, .. } | Self::Feed { y, .. } => y,
+        }
+    }
+
+    /// Tool-centre Z.
+    pub fn z(self) -> f64 {
+        match self {
+            Self::Rapid { z, .. } | Self::Feed { z, .. } => z,
+        }
+    }
+
+    /// Indexed C, degrees.
+    pub fn c_deg(self) -> f64 {
+        match self {
+            Self::Rapid { c_deg, .. } | Self::Feed { c_deg, .. } => c_deg,
+        }
+    }
+}
+
+/// Radial flat. The first step is the approach rapid. The rest are feeds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlatPath {
+    /// Steps in cut order.
+    pub steps: Vec<FlatStep>,
+}
+
+/// Mill a flat with a radial endmill.
+///
+/// The approach rapid is at radius `stock/2 + clearance`, Y = 0, Z = `z_from`. Feeds then move
+/// Y to one side of the flat in the air, feed X in at that side, and zigzag Y across the flat.
+/// Z steps from `z_from` to `z_to`, and the Z direction reverses on the next radial pass. The
+/// path ends with rapids out to the clearance radius and back to Y = 0.
+pub fn live_flat(params: &LiveFlatParams) -> Result<FlatPath> {
+    check_flat(params)?;
+    let radius = params.stock_diameter * 0.5;
+    let depth = radius - params.across;
+    let radial_step = params.step_down.unwrap_or(depth);
+    let levels = pass_depths(depth, radial_step)?;
+    let radii: Vec<f64> = levels.iter().map(|level| radius - *level).collect();
+    let chord = 2.0 * (radius * radius - params.across * params.across).sqrt();
+    if !chord.is_finite() {
+        return Err(invalid("flat chord is not finite"));
+    }
+    let width = params.width.unwrap_or(chord);
+    if !(width.is_finite() && width > 0.0) {
+        return Err(invalid("width must be positive"));
+    }
+    let tool_radius = params.tool_diameter * 0.5;
+    let y_lo = -(width * 0.5 + tool_radius);
+    let y_hi = width * 0.5 + tool_radius;
+    let z_step = params.stepover * params.tool_diameter;
+    let stations = z_stations(params.z_from, params.z_to, z_step)?;
+    let x_clear = radius + params.clearance;
+    let c = params.c_deg;
+    let mut steps = Vec::new();
+    push_flat(&mut steps, true, x_clear, 0.0, params.z_from, c)?;
+    push_flat(&mut steps, false, x_clear, y_lo, params.z_from, c)?;
+    let mut x = x_clear;
+    let mut y = y_lo;
+    let mut z = params.z_from;
+    let mut going_positive = true;
+    let mut z_forward = true;
+    for cut_radius in radii {
+        let order: Vec<f64> = if z_forward { stations.clone() } else { stations.iter().rev().copied().collect() };
+        for station in order {
+            if (z - station).abs() > RADIUS_EPS {
+                push_flat(&mut steps, false, x, y, station, c)?;
+                z = station;
+            }
+            if (x - cut_radius).abs() > RADIUS_EPS {
+                push_flat(&mut steps, false, cut_radius, y, z, c)?;
+                x = cut_radius;
+            }
+            let y_target = if going_positive { y_hi } else { y_lo };
+            if (y - y_target).abs() > RADIUS_EPS {
+                push_flat(&mut steps, false, x, y_target, z, c)?;
+                y = y_target;
+            }
+            going_positive = !going_positive;
+        }
+        z_forward = !z_forward;
+    }
+    // Retract clear of the bar, then bring Y back to the centreline before the turret indexes.
+    push_flat(&mut steps, true, x_clear, y, z, c)?;
+    push_flat(&mut steps, true, x_clear, 0.0, z, c)?;
+    Ok(FlatPath { steps })
+}
+
+fn check_flat(params: &LiveFlatParams) -> Result<()> {
+    check_c(params.c_deg)?;
+    positive(params.stock_diameter, "diameter")?;
+    positive(params.across, "across")?;
+    let radius = params.stock_diameter * 0.5;
+    if params.across >= radius - RADIUS_EPS {
+        return Err(invalid("across must be below half the diameter"));
+    }
+    finite(params.z_from, "z_from")?;
+    finite(params.z_to, "z_to")?;
+    if let Some(width) = params.width {
+        positive(width, "width")?;
+    }
+    if let Some(step) = params.step_down {
+        positive(step, "step down")?;
+    }
+    if !(params.stepover.is_finite() && params.stepover > 0.0 && params.stepover <= 1.0) {
+        return Err(invalid("stepover fraction must be in (0, 1]"));
+    }
+    positive(params.tool_diameter, "tool diameter")?;
+    non_negative(params.clearance, "clearance")?;
+    Ok(())
+}
+
+/// `z_from`, then steps of `step` toward `z_to`, ending exactly on `z_to`.
+fn z_stations(from: f64, to: f64, step: f64) -> Result<Vec<f64>> {
+    if (to - from).abs() <= RADIUS_EPS {
+        return Ok(vec![from]);
+    }
+    let span = (to - from).abs();
+    let depths = pass_depths(span, step)?;
+    let dir = if to > from { 1.0 } else { -1.0 };
+    let mut stations = Vec::with_capacity(depths.len() + 1);
+    stations.push(from);
+    for depth in depths {
+        stations.push(from + dir * depth);
+    }
+    Ok(stations)
+}
+
+fn push_flat(steps: &mut Vec<FlatStep>, rapid: bool, x: f64, y: f64, z: f64, c: f64) -> Result<()> {
+    if steps.len() >= MAX_MOVES {
+        return Err(invalid(format!("too many moves: limit is {MAX_MOVES}")));
+    }
+    if steps.last().is_some_and(|step| (step.x() - x).abs() <= RADIUS_EPS && (step.y() - y).abs() <= RADIUS_EPS && (step.z() - z).abs() <= RADIUS_EPS)
+    {
+        return Ok(());
+    }
+    let step = if rapid { FlatStep::Rapid { x, y, z, c_deg: c } } else { FlatStep::Feed { x, y, z, c_deg: c } };
+    steps.push(step);
+    Ok(())
+}
+
 fn invalid(message: impl Into<String>) -> TurnError {
     ops::invalid(message)
 }
@@ -387,7 +578,10 @@ fn non_negative(value: f64, what: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LiveDrillParams, LiveFace, LiveSlotParams, LiveStation, LiveStep, MAX_LIVE_POSITIONS, live_drill, live_slot};
+    use super::{
+        FlatStep, LiveDrillParams, LiveFace, LiveFlatParams, LiveSlotParams, LiveStation, LiveStep, MAX_LIVE_POSITIONS, live_drill, live_flat,
+        live_slot,
+    };
 
     fn front_hole(c: f64, radius: f64) -> LiveStation {
         LiveStation { c_deg: c, at: radius }
@@ -728,5 +922,65 @@ mod tests {
         })
         .expect_err("peck");
         assert!(message(&peck).contains("peck must be positive"), "{peck}");
+    }
+
+    fn sample_flat() -> LiveFlatParams {
+        LiveFlatParams {
+            c_deg: 90.0,
+            stock_diameter: 40.0,
+            across: 18.0,
+            z_from: -10.0,
+            z_to: -10.0,
+            width: None,
+            step_down: None,
+            stepover: 0.6,
+            tool_diameter: 8.0,
+            clearance: 2.0,
+        }
+    }
+
+    #[test]
+    fn flat_approaches_on_the_centreline_then_cuts_across_y() {
+        let path = live_flat(&sample_flat()).expect("flat");
+        let radius = 20.0_f64;
+        let chord = 2.0 * (radius * radius - 18.0 * 18.0).sqrt();
+        let y_lo = -(chord * 0.5 + 4.0);
+        let y_hi = chord * 0.5 + 4.0;
+        assert_eq!(
+            path.steps,
+            vec![
+                FlatStep::Rapid { x: 22.0, y: 0.0, z: -10.0, c_deg: 90.0 },
+                FlatStep::Feed { x: 22.0, y: y_lo, z: -10.0, c_deg: 90.0 },
+                FlatStep::Feed { x: 18.0, y: y_lo, z: -10.0, c_deg: 90.0 },
+                FlatStep::Feed { x: 18.0, y: y_hi, z: -10.0, c_deg: 90.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn flat_steps_radially_and_zigzags_z() {
+        let mut params = sample_flat();
+        params.step_down = Some(1.0);
+        params.z_to = -14.8;
+        params.stepover = 0.6;
+        let path = live_flat(&params).expect("flat");
+        let feeds: Vec<_> = path.steps.iter().filter(|step| matches!(step, FlatStep::Feed { .. })).copied().collect();
+        assert!(feeds.iter().any(|step| (step.x() - 19.0).abs() < 1e-9), "missing the shallow radius");
+        assert!(feeds.iter().any(|step| (step.x() - 18.0).abs() < 1e-9 && (step.z() - -14.8).abs() < 1e-9));
+        let ys: Vec<f64> = feeds.iter().map(|step| step.y()).collect();
+        assert!(ys.iter().any(|y| *y > 0.0) && ys.iter().any(|y| *y < 0.0));
+    }
+
+    #[test]
+    fn flat_rejects_an_across_outside_the_bar() {
+        let mut params = sample_flat();
+        params.across = 20.0;
+        let err = live_flat(&params).expect_err("across");
+        assert!(message(&err).contains("across must be below half the diameter"), "{err}");
+        params.across = 18.0;
+        params.width = Some(30.0);
+        let wide = live_flat(&params).expect("wide");
+        let y = wide.steps.iter().map(|step| step.y().abs()).fold(0.0, f64::max);
+        assert!(y > 15.0, "{y}");
     }
 }

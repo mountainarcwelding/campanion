@@ -4,7 +4,8 @@
 //!
 //! - Z is the spindle axis. +Z points away from the chuck, toward the tailstock and the tool.
 //! - X is a radius in millimetres, never a diameter. It may be negative when a face crosses the
-//!   spindle axis (the tip is past centre). Y is 0 for XZ work.
+//!   spindle axis (the tip is past centre). Y is 0 for XZ work. A head that lists Y may move off
+//!   that plane while C is engaged and the pose carries a C angle.
 //! - Diameter mode is a post setting only ([`TurningSetup::diameter_mode`]). The IR never stores
 //!   a diameter in X.
 //! - The pose axis is not interpreted for XZ turning moves. Callers pass [`crate::Vec3::Z`]

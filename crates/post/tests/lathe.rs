@@ -258,7 +258,7 @@ fn a_lathe_pose_off_the_xz_plane_is_rejected() {
     let unbound = TurningSetup::single(None, 3_000.0).expect("turning");
     let off = lathe_program(vec![ClBlock::Motion(ClMotion::Rapid { to: yz(10.0, 0.01, 1.0), feed: None })], unbound);
     let err = post_program(&off, &linux_lathe(), &options()).expect_err("y");
-    assert!(err.to_string().contains("lathe pose y must be 0"), "{err}");
+    assert!(err.to_string().contains("post `linuxcnc_lathe` has no Y axis"), "{err}");
 
     let edge = lathe_program(vec![ClBlock::Motion(ClMotion::Rapid { to: yz(10.0, 1e-6, 1.0), feed: None })], turning(None, false));
     post_program(&edge, &linux_lathe(), &options()).expect("on the limit");
@@ -631,17 +631,41 @@ fn linear_c(x: f64, z: f64, c: f64, feed: f64) -> ClBlock {
 }
 
 fn millturn_setup() -> TurningSetup {
+    millturn_head(vec![HeadAxis::X, HeadAxis::Z])
+}
+
+fn millturn_y_setup() -> TurningSetup {
+    millturn_head(vec![HeadAxis::X, HeadAxis::Y, HeadAxis::Z])
+}
+
+fn millturn_head(axes: Vec<HeadAxis>) -> TurningSetup {
     let spindle = Spindle::try_new("main", Some(0), 0.0, 3_000.0).expect("spindle");
-    let head = Head::try_new("turret1", vec![HeadAxis::X, HeadAxis::Z], 12, true).expect("head");
+    let head = Head::try_new("turret1", axes, 12, true).expect("head");
     let binding = TurnBinding::try_new(0, "main", "turret1", 0).expect("binding");
     TurningSetup::try_new(vec![spindle], vec![head], None, Vec::new(), vec![binding]).expect("turning")
 }
 
+fn radial_pose(x: f64, y: f64, z: f64, c: f64) -> Pose {
+    Pose::new(Vec3::new(x, y, z).expect("tip"), Vec3::X).expect("pose").with_rotary(c).expect("c")
+}
+
+fn axial_pose(x: f64, y: f64, z: f64, c: f64) -> Pose {
+    Pose::new(Vec3::new(x, y, z).expect("tip"), Vec3::Z).expect("pose").with_rotary(c).expect("c")
+}
+
 fn millturn_program(blocks: Vec<ClBlock>) -> Program {
+    millturn_on(blocks, millturn_setup())
+}
+
+fn millturn_y_program(blocks: Vec<ClBlock>) -> Program {
+    millturn_on(blocks, millturn_y_setup())
+}
+
+fn millturn_on(blocks: Vec<ClBlock>, setup: TurningSetup) -> Program {
     let tool = Tool::try_new(1, Some("live".into()), None, None).expect("tool");
     Program::try_new(Some("millturn".into()), vec![tool], None, vec![path(None, Some(1), blocks)], Vec::new(), Vec::new(), None)
         .expect("program")
-        .with_turning(Some(millturn_setup()))
+        .with_turning(Some(setup))
         .expect("turning")
 }
 
@@ -689,6 +713,96 @@ fn haas_millturn_writes_c_brake_and_live_tool_and_reads_back() {
     assert_eq!(text.matches("G98").count(), 1, "{text}");
     assert!(!text.contains("haascnc.com"), "{text}");
     compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn haas_y_axis_writes_g19_y_and_restores_g18() {
+    let blocks = vec![
+        ClBlock::Event(Event::ToolChange { tool_id: 1 }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Motion(ClMotion::Rapid { to: radial_pose(20.0, 0.0, 2.0, 90.0), feed: None }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, 5.0, -4.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::LiveToolOff),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = millturn_y_program(blocks);
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let golden = include_str!("golden/millturn_y.haas_lathe.nc");
+    assert_eq!(text, golden);
+    let side = text.find("G19").expect("g19");
+    let y_word = text.find("Y-5.").expect("y");
+    let restored = text.rfind("G18").expect("g18");
+    assert!(side < y_word && y_word < restored, "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn haas_axial_xy_arc_writes_g17_and_reads_back() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Motion(ClMotion::Rapid { to: axial_pose(10.0, 0.0, -5.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: axial_pose(0.0, 10.0, -5.0, 0.0),
+            plane: Plane::Xy,
+            center: Vec3::new(0.0, 0.0, -5.0).expect("centre"),
+            sense: ArcSense::Ccw,
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = millturn_y_program(blocks);
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(text.contains("G17"), "{text}");
+    assert!(text.contains("Y10."), "{text}");
+    assert!(text.contains("G18"), "{text}");
+    let g17 = text.find("G17").expect("g17");
+    let g18 = text.rfind("G18").expect("g18");
+    assert!(g17 < text.find("Y10.").expect("y") && text.find("Y10.").expect("y") < g18, "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn c_and_y_cannot_change_in_one_move() {
+    let line = millturn_y_program(vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Motion(ClMotion::Rapid { to: radial_pose(20.0, 0.0, 0.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, 4.0, 0.0, 45.0), feed: 80.0, role: MoveRole::Cut }),
+    ]);
+    let err = post_program(&line, &haas_lathe(), &options()).expect_err("line");
+    assert!(err.to_string().contains("C and Y in one move"), "{err}");
+
+    let arc = millturn_y_program(vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Motion(ClMotion::Rapid { to: axial_pose(10.0, 0.0, -5.0, 0.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: axial_pose(0.0, 10.0, -5.0, 30.0),
+            plane: Plane::Xy,
+            center: Vec3::new(0.0, 0.0, -5.0).expect("centre"),
+            sense: ArcSense::Ccw,
+            feed: 80.0,
+            role: MoveRole::Cut,
+        }),
+    ]);
+    let err = post_program(&arc, &haas_lathe(), &options()).expect_err("arc");
+    assert!(err.to_string().contains("C and Y in one move"), "{err}");
+}
+
+#[test]
+fn fanuc_lathe_has_no_y_axis() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, 3.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+    ];
+    let err = post_program(&millturn_y_program(blocks), &builtin("fanuc_lathe").expect("fanuc"), &options()).expect_err("y");
+    assert!(err.to_string().contains("post `fanuc_lathe` has no Y axis"), "{err}");
 }
 
 #[test]

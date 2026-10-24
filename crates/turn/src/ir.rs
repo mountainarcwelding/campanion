@@ -1,6 +1,6 @@
 //! Cutter-location conversion for a programmed lathe path.
 //!
-//! Poses use a radius in X and the spindle coordinate in Z. Y is 0. The tool axis is
+//! Poses use a radius in X and the spindle coordinate in Z. Y is 0 on these XZ paths. The tool axis is
 //! [`campanion_ir::Vec3::Z`] because a pose requires a unit axis; turning does not read it.
 
 use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Plane, Pose, Vec3};

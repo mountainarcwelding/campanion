@@ -10,13 +10,14 @@ use crate::machine::{Channel, Machine};
 use crate::motion::{AxisBlock, ChannelProgram, ClBlock, ClMotion, ClPath};
 use crate::process::{Event, Tool};
 use crate::rotary::{RotarySetup, machine_to_part};
-use crate::turning::TurningSetup;
+use crate::turning::{HeadAxis, TurningSetup};
 use crate::{FORMAT_TAG, Result, check_format};
 
 /// How close a pose tool axis must be to the part-frame image of machine +Z at that rotary angle.
 const ROTARY_AXIS_TOL: f64 = 1e-6;
 
-/// Slack for a turning pose. |Y| may be at most this. X may be negative when a face crosses the axis.
+/// Slack for a turning pose on a head with no Y axis. X may be negative when a face crosses the axis.
+/// A head that carries [`HeadAxis::Y`] may leave the XZ plane by more than this while its C axis is engaged.
 const TURNING_PLANE_TOL: f64 = 1e-6;
 
 /// Channels that must arrive together. A sync event waits on this id.
@@ -387,7 +388,7 @@ fn check_turning(turning: &TurningSetup, toolpaths: &[ClPath], tool_ids: &BTreeS
         let Some(path) = bound_path(toolpaths, index) else {
             return Err(check::invalid(format!("turning binding toolpath {index} is outside 0..{}", toolpaths.len())));
         };
-        check_turning_poses(index, path)?;
+        check_turning_poses(turning, index, path)?;
     }
     Ok(())
 }
@@ -427,14 +428,30 @@ fn bound_path(toolpaths: &[ClPath], index: u32) -> Option<&ClPath> {
     usize::try_from(index).ok().and_then(|index| toolpaths.get(index))
 }
 
-fn check_turning_poses(index: u32, path: &ClPath) -> Result<()> {
+/// `|Y|` above [`TURNING_PLANE_TOL`] needs a head with [`HeadAxis::Y`] and an engaged C axis.
+///
+/// The pose must also name that C angle. Successive Y moves may use different angles. C and Y
+/// changing in one block is a post error, not an IR error. Arcs in XY and YZ are ordinary
+/// motions: this check only looks at the tip.
+fn check_turning_poses(turning: &TurningSetup, index: u32, path: &ClPath) -> Result<()> {
+    let head_has_y =
+        turning.binding_for(index).and_then(|binding| turning.head(binding.head())).is_some_and(|head| head.axes().contains(&HeadAxis::Y));
+    let mut c_engaged = false;
     for (block_i, block) in path.blocks().iter().enumerate() {
+        if let ClBlock::Event(Event::CAxis { engage, .. }) = block {
+            c_engaged = *engage;
+        }
         let Some(pose) = block_pose(block) else {
             continue;
         };
-        let tip = pose.tip();
-        if tip.y().abs() > TURNING_PLANE_TOL {
+        if pose.tip().y().abs() <= TURNING_PLANE_TOL {
+            continue;
+        }
+        if !head_has_y {
             return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose Y is not zero")));
+        }
+        if !c_engaged || pose.rotary().is_none() {
+            return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose Y needs an engaged C axis")));
         }
     }
     Ok(())

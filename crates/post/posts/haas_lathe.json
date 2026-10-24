@@ -6,7 +6,8 @@
     "M133/M134/M135 P<rpm> live tool fwd/rev/stop: https://www.haascnc.com/service/codes-settings.type=mcode.machine=lathe.value=M133.html",
     "M154/M155 C axis engage/disengage, G28 H0. unwinds C: https://www.haascnc.com/service/service-content/guide-procedures/lathe---m-codes.html and Haas NGC Lathe Operator's Manual (96-8910) G82/G83 live examples",
     "M14/M15 main spindle brake: Haas NGC Lathe Operator's Manual M-code list",
-    "C axis, H incremental C, Setting 102 C feed: https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html"
+    "C axis, H incremental C, Setting 102 C feed: https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html",
+    "Y axis, G17/G19 live milling planes, no activation code: Haas NGC Lathe Operator's Manual 6.12 / https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html"
   ],
   "program_number": "00001",
   "units": "mm",
@@ -55,6 +56,7 @@
     "thread": { "code": "G32", "lead_word": "F" },
     "c_axis": { "letter": "C", "engage": ["M154", "G28 H0."], "disengage": ["M155"] },
     "brake": { "clamp": ["M14"], "release": ["M15"] },
-    "live_tool": { "forward": ["P{rpm} M133"], "reverse": ["P{rpm} M134"], "stop": ["M135"], "feed_mode": "G98" }
+    "live_tool": { "forward": ["P{rpm} M133"], "reverse": ["P{rpm} M134"], "stop": ["M135"], "feed_mode": "G98" },
+    "y_axis": { "letter": "Y", "face_plane": "G17", "side_plane": "G19", "turn_plane": "G18" }
   }
 }

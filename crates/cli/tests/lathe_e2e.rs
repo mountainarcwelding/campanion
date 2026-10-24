@@ -483,3 +483,91 @@ fn live_jobs_reject_a_missing_c_axis_a_wrong_tool_and_bad_geometry() -> Result<(
     assert_rejects(&too_deep, "campanion-lathe-live-depth.json", "depth exceeds the surface radius")?;
     Ok(())
 }
+
+fn flat_shell(head: &str, operation: &str) -> String {
+    let head_field = if head.is_empty() { String::new() } else { format!("\"head\": {head},") };
+    format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 40, "length": 30, "front_allowance": 0 }},
+        "spindle": {{ "max_rpm": 3000, "c_axis": true }},
+        {head_field}
+        "tools": [{{ "id": 1, "station": 1, "live": "radial", "kind": "endmill", "diameter": 8 }}],
+        "operations": [{operation}],
+        "clearance": 2
+    }}"#
+    )
+}
+
+const FLAT_OP: &str = r#"{ "name": "od_flat", "type": "live_flat", "tool_id": 1, "c": 90, "diameter": 40, "across": 18, "z_from": -10, "z_to": -10, "rpm": 1800, "feed": 120 }"#;
+
+#[test]
+fn millturn_flat_posts_haas_y_axis() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/millturn_flat.lathe.json"))?;
+    let out = temp_path("campanion-lathe-millturn-flat.nc");
+    let ir = temp_path("campanion-lathe-millturn-flat.ir.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "haas_lathe", "--ir", &path_arg(&ir)?])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("millturn_flat.haas_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["M154", "C90.", "M14", "P1800 M133", "G19", "Y", "M135", "M15", "G18", "M155"])?;
+
+    let ir_text = std::fs::read_to_string(&ir).map_err(|err| err.to_string())?;
+    let doc = campanion_ir::Document::from_json(&ir_text).map_err(|err| err.to_string())?;
+    let program = doc.program();
+    let turning = program.turning().ok_or("turning setup is missing")?;
+    let head = turning.heads().first().ok_or("head is missing")?;
+    if !head.axes().contains(&campanion_ir::HeadAxis::Y) {
+        return Err(format!("head axes are {:?}", head.axes()));
+    }
+    let path = program.toolpaths().iter().find(|path| path.name() == Some("od_flat")).ok_or("od_flat path is missing")?;
+    let off_centre = path.blocks().iter().any(|block| match block {
+        campanion_ir::ClBlock::Motion(campanion_ir::ClMotion::Rapid { to, .. } | campanion_ir::ClMotion::Linear { to, .. }) => {
+            to.tip().y().abs() > 1e-6
+        }
+        _ => false,
+    });
+    if !off_centre {
+        return Err("od_flat stays on the centreline".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn live_flat_rejects_a_head_without_y_and_travel_past_the_limits() -> Result<(), String> {
+    let missing = flat_shell("", FLAT_OP);
+    assert_rejects(&missing, "campanion-lathe-flat-no-head.json", "operation od_flat: head has no Y axis")?;
+    let disabled = flat_shell(r#"{ "y_axis": false }"#, FLAT_OP);
+    assert_rejects(&disabled, "campanion-lathe-flat-y-off.json", "operation od_flat: head has no Y axis")?;
+    let short = flat_shell(r#"{ "y_axis": true, "y_min": -1, "y_max": 1 }"#, FLAT_OP);
+    assert_rejects(&short, "campanion-lathe-flat-travel.json", "outside head travel")?;
+    Ok(())
+}
+
+#[test]
+fn live_flat_fanuc_post_has_no_y_axis() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/millturn_flat.lathe.json"))?;
+    let out = temp_path("campanion-lathe-millturn-flat-fanuc.nc");
+    let _ = std::fs::remove_file(&out);
+    let output = campanion(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "fanuc_lathe"])?;
+    let stderr = text(&output.stderr)?;
+    let code = output.status.code();
+    if code == Some(101) || stderr.to_ascii_lowercase().contains("panicked") {
+        return Err(format!("lathe panicked ({code:?}): {stderr}"));
+    }
+    if code != Some(1) {
+        return Err(format!("exit {code:?}, expected 1\n{stderr}"));
+    }
+    if !stderr.contains("post `fanuc_lathe` has no Y axis") {
+        return Err(format!("stderr missing the Y-axis post error: {stderr}"));
+    }
+    if out.exists() {
+        return Err(format!("failed job wrote {}", out.display()));
+    }
+    Ok(())
+}
