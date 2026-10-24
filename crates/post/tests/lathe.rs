@@ -735,6 +735,8 @@ fn millturn_rejects_c_without_engage_spindle_while_engaged_and_missing_blocks() 
         Event::SpindleBrake { spindle: "main".into(), clamp: false },
         Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Reverse },
         Event::LiveToolOff,
+        Event::FaceInterpolation { on: true },
+        Event::CylinderInterpolation { radius: Some(20.0) },
     ];
     for event in events {
         let err = post_program(&mill_program(event), &mill, &options()).expect_err("mill");
@@ -847,4 +849,198 @@ fn post_rejects_a_bad_c_axis_letter_and_references_that_are_too_long() {
     raw["references"] = serde_json::json!(vec!["cited".to_string(); 33]);
     let err = load_post(&raw.to_string()).expect_err("count");
     assert!(err.to_string().contains("at most 32"), "{err}");
+}
+
+const FACE_Z: f64 = -1.0;
+
+/// 20×20 square with 2 mm corner arcs on the face, centred at (12, 0).
+///
+/// A centre at (10, 0) would put the left side on x = 0 and cross the spindle axis.
+/// Bounds are x = 2..22, y = -10..10. The path starts at (4, -10) and walks counter-clockwise.
+fn face_square() -> Vec<ClBlock> {
+    let line = |x, y| ClBlock::Motion(ClMotion::Linear { to: yz(x, y, FACE_Z), feed: 100.0, role: MoveRole::Cut });
+    let arc = |x, y, cx, cy| {
+        ClBlock::Motion(ClMotion::Arc {
+            to: yz(x, y, FACE_Z),
+            plane: Plane::Xy,
+            center: Vec3::new(cx, cy, FACE_Z).expect("centre"),
+            sense: ArcSense::Ccw,
+            feed: 100.0,
+            role: MoveRole::Cut,
+        })
+    };
+    vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Event(Event::FaceInterpolation { on: true }),
+        ClBlock::Motion(ClMotion::Rapid { to: yz(4.0, -10.0, FACE_Z), feed: None }),
+        line(20.0, -10.0),
+        arc(22.0, -8.0, 20.0, -8.0),
+        line(22.0, 8.0),
+        arc(20.0, 10.0, 20.0, 8.0),
+        line(4.0, 10.0),
+        arc(2.0, 8.0, 4.0, 8.0),
+        line(2.0, -8.0),
+        arc(4.0, -10.0, 4.0, -8.0),
+        ClBlock::Event(Event::FaceInterpolation { on: false }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ]
+}
+
+fn section_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+    let from = text.find(start).unwrap_or(text.len());
+    let rest = &text[from + start.len()..];
+    let to = rest.find(end).unwrap_or(rest.len());
+    &rest[..to]
+}
+
+fn c_angles(text: &str) -> Vec<f64> {
+    text.split_whitespace()
+        .filter_map(|word| {
+            let rest = word.strip_prefix('C')?;
+            rest.chars().next().filter(|ch| ch.is_ascii_digit() || *ch == '-' || *ch == '.')?;
+            rest.parse().ok()
+        })
+        .collect()
+}
+
+fn load_temp_post(value: &serde_json::Value, name: &str) -> PostDef {
+    let path = std::env::temp_dir().join(format!("campanion-{name}-{}.json", std::process::id()));
+    std::fs::write(&path, value.to_string()).expect("write temp post");
+    let text = std::fs::read_to_string(&path).expect("read temp post");
+    let loaded = load_post(&text);
+    std::fs::remove_file(&path).expect("remove temp post");
+    loaded.expect("load temp post")
+}
+
+fn haas_without_face() -> PostDef {
+    let mut raw = haas_json();
+    raw["lathe"].as_object_mut().expect("lathe").remove("face_interp");
+    load_temp_post(&raw, "haas-lathe-face-fallback")
+}
+
+#[test]
+fn haas_face_interpolation_writes_xy_arcs_and_reads_back() {
+    let program = millturn_program(face_square());
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let golden = include_str!("golden/millturn_face.haas_lathe.nc");
+    assert_eq!(text, golden);
+    let body = section_between(&text, "G112", "G113");
+    assert!(body.contains("G17") || text.contains("G17"), "{text}");
+    assert!(body.split_whitespace().any(|word| word == "G2" || word == "G3"), "{body}");
+    assert!(text.contains("G112") && text.contains("G113"), "{text}");
+    let c_words: Vec<_> = body
+        .split_whitespace()
+        .filter(|word| word.strip_prefix('C').is_some_and(|rest| rest.starts_with(|ch: char| ch.is_ascii_digit() || ch == '-' || ch == '.')))
+        .collect();
+    assert!(c_words.is_empty(), "C word inside G112..G113: {c_words:?}\n{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let kept = read_back("G112\nG1 X4. Y-10. Z-1. F100\n", &post).expect("face frame");
+    let ReadMove::Linear { end, .. } = &kept[0] else { panic!("expected a feed, got {kept:?}") };
+    assert!((end[0] - 4.0).abs() < 1e-9 && (end[1] + 10.0).abs() < 1e-9, "{end:?}");
+}
+
+#[test]
+fn haas_cylinder_interpolation_writes_g107_and_reads_back() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) }),
+        ClBlock::Motion(ClMotion::Rapid { to: yz(20.0, -5.0, -10.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -10.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -20.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::CylinderInterpolation { radius: None }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = millturn_program(blocks);
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let golden = include_str!("golden/millturn_wrap.haas_lathe.nc");
+    assert_eq!(text, golden);
+    assert!(text.contains("G107 Y0 C0 R20."), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let held = read_back("G0 X10. Z0. C45.\nG107 Y0 C0 R20.\nG1 X40. Y5. Z-10. F100\n", &post).expect("wrap");
+    let ReadMove::Linear { end, rotary, .. } = &held[1] else { panic!("expected a feed, got {held:?}") };
+    assert_eq!(*rotary, Some(45.0));
+    assert!((end[0] - 20.0).abs() < 1e-9 && (end[1] - 5.0).abs() < 1e-9, "{end:?}");
+}
+
+#[test]
+fn face_fallback_writes_continuous_c_and_a_centre_crossing_errors() {
+    let program = millturn_program(face_square());
+    let post = haas_without_face();
+    let text = post_program(&program, &post, &options()).expect("fallback");
+    assert!(!text.contains("G112") && !text.contains("G113"), "{text}");
+    assert!(!text.split_whitespace().any(|word| word == "G2" || word == "G3"), "{text}");
+    assert!(text.split_whitespace().all(|word| !word.starts_with('Y')), "{text}");
+    let angles = c_angles(&text);
+    assert!(angles.len() >= 2, "{text}");
+    for pair in angles.windows(2) {
+        let delta = (pair[1] - pair[0]).abs();
+        assert!(delta <= 180.0 + 1e-3, "C jumped {delta} in {angles:?}");
+    }
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let crossing = millturn_program(vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Event(Event::FaceInterpolation { on: true }),
+        ClBlock::Motion(ClMotion::Rapid { to: yz(5.0, 0.0, FACE_Z), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(-5.0, 0.0, FACE_Z), feed: 80.0, role: MoveRole::Cut }),
+    ]);
+    let message = "face path crosses the spindle centre; split it or use a post with face interpolation";
+    let native = post_program(&crossing, &haas_lathe(), &options()).expect_err("native centre");
+    assert!(native.to_string().contains(message), "{native}");
+    let polar = post_program(&crossing, &post, &options()).expect_err("fallback centre");
+    assert!(polar.to_string().contains(message), "{polar}");
+}
+
+#[test]
+fn interpolation_rejects_a_disengaged_c_axis_a_y_move_and_an_xy_arc() {
+    let haas = haas_lathe();
+    let bare = post_program(&millturn_program(vec![ClBlock::Event(Event::FaceInterpolation { on: true })]), &haas, &options()).expect_err("face");
+    assert!(bare.to_string().contains("face interpolation needs the C axis engaged"), "{bare}");
+
+    let fanuc = builtin("fanuc_lathe").expect("fanuc_lathe");
+    let no_axis = post_program(&millturn_program(vec![ClBlock::Event(Event::FaceInterpolation { on: true })]), &fanuc, &options()).expect_err("no c");
+    let no_axis_text = no_axis.to_string();
+    assert!(no_axis_text.contains("post `fanuc_lathe` has no C axis"), "{no_axis_text}");
+    assert!(!no_axis_text.contains("needs the C axis engaged"), "{no_axis_text}");
+
+    let good = path(None, None, vec![ClBlock::Motion(ClMotion::Rapid { to: xz(10.0, 0.0), feed: None })]);
+    let off_plane = path(None, None, vec![ClBlock::Motion(ClMotion::Rapid { to: yz(10.0, 2.0, 0.0), feed: None })]);
+    let drifted = Program::try_new(Some("millturn".into()), Vec::new(), None, vec![good, off_plane], Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_turning(Some(millturn_setup()))
+        .expect("turning");
+    let y_err = post_program(&drifted, &haas, &options()).expect_err("y");
+    assert!(y_err.to_string().contains("lathe pose y must be 0"), "{y_err}");
+
+    let arc = millturn_program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: xz(10.0, -1.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: yz(12.0, 0.0, -1.0),
+            plane: Plane::Xy,
+            center: Vec3::new(11.0, 0.0, -1.0).expect("centre"),
+            sense: ArcSense::Ccw,
+            feed: 50.0,
+            role: MoveRole::Cut,
+        }),
+    ]);
+    let arc_err = post_program(&arc, &haas, &options()).expect_err("xy");
+    assert!(arc_err.to_string().contains("lathe arc must be in the zx plane"), "{arc_err}");
+}
+
+#[test]
+fn interpolation_rejects_a_clamped_spindle_brake() {
+    let haas = haas_lathe();
+    for event in [Event::FaceInterpolation { on: true }, Event::CylinderInterpolation { radius: Some(20.0) }] {
+        let program = millturn_program(vec![
+            ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+            ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+            ClBlock::Event(event),
+        ]);
+        let err = post_program(&program, &haas, &options()).expect_err("clamped");
+        assert!(err.to_string().contains("interpolation with the spindle brake clamped"), "{err}");
+    }
 }

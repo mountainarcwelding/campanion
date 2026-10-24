@@ -20,6 +20,7 @@ mod def;
 mod error;
 mod fmt;
 mod geom;
+mod interp;
 mod read;
 mod rotary;
 mod write;

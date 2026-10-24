@@ -20,9 +20,10 @@
 //!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
-//! `{offset2}` and `{date-free!}`, each only on the lines that name that value. `c_axis`,
-//! `brake` and `live_tool` are optional mill-turn blocks. Live-tool `{rpm}` is a whole number.
-//! `references` cites the codes and is never written to the program.
+//! `{offset2}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
+//! `cylinder_interp` are optional mill-turn blocks. Live-tool `{rpm}` is a whole number.
+//! Cylinder `on` lines may use `{radius}` and `{diameter}`. `references` cites the codes and is
+//! never written to the program.
 
 use std::collections::BTreeMap;
 
@@ -41,6 +42,7 @@ const LATHE_BARE: &[&str] = &["date-free!"];
 const LATHE_CSS: &[&str] = &["surface", "max_rpm", "date-free!"];
 const LATHE_RPM: &[&str] = &["rpm", "date-free!"];
 const LATHE_TOOL: &[&str] = &["tool", "tool2", "offset2", "date-free!"];
+const LATHE_CYLINDER: &[&str] = &["radius", "diameter", "date-free!"];
 
 /// How circular moves are written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,6 +318,14 @@ pub(crate) struct LatheOutput {
     /// Driven tool. Absent: a live-tool event is rejected.
     #[serde(default)]
     pub(crate) live_tool: Option<LiveToolOutput>,
+    /// Cartesian XY to XC face interpolation. Absent: a face event falls back to X and C when
+    /// `c_axis` is set.
+    #[serde(default)]
+    pub(crate) face_interp: Option<FaceInterpOutput>,
+    /// Y to C cylinder interpolation. Absent: a cylinder event falls back to X and C when
+    /// `c_axis` is set.
+    #[serde(default)]
+    pub(crate) cylinder_interp: Option<CylInterpOutput>,
 }
 
 /// Engage and disengage a spindle as a positioning axis.
@@ -361,6 +371,34 @@ pub(crate) struct LiveToolOutput {
     pub(crate) stop: Vec<String>,
     /// Feed-mode word for live tooling, such as `G98`.
     pub(crate) feed_mode: String,
+}
+
+/// Cartesian face interpolation.
+///
+/// `on` and `off` take no placeholders. `x_diameter` selects whether X words in this mode are
+/// diameters. Haas G112 writes a radius, so `x_diameter` is false there.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FaceInterpOutput {
+    /// Written when face interpolation turns on.
+    pub(crate) on: Vec<String>,
+    /// Written when face interpolation turns off.
+    pub(crate) off: Vec<String>,
+    /// When true, X is a diameter. When false, X is the Cartesian radius stored on the pose.
+    pub(crate) x_diameter: bool,
+}
+
+/// Cylindrical interpolation along an unrolled circumference.
+///
+/// `on` may use `{radius}` and `{diameter}`, both formatted as linear numbers. `off` takes no
+/// placeholders.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CylInterpOutput {
+    /// Written when cylinder interpolation turns on.
+    pub(crate) on: Vec<String>,
+    /// Written when cylinder interpolation turns off.
+    pub(crate) off: Vec<String>,
 }
 
 fn default_z_mode() -> String {
@@ -512,6 +550,14 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_templates("lathe.live_tool.reverse", &live.reverse, LATHE_RPM)?;
         check_templates("lathe.live_tool.stop", &live.stop, LATHE_BARE)?;
         check_templates("lathe.live_tool.feed_mode", std::slice::from_ref(&live.feed_mode), LATHE_BARE)?;
+    }
+    if let Some(face) = &lathe.face_interp {
+        check_templates("lathe.face_interp.on", &face.on, LATHE_BARE)?;
+        check_templates("lathe.face_interp.off", &face.off, LATHE_BARE)?;
+    }
+    if let Some(cylinder) = &lathe.cylinder_interp {
+        check_templates("lathe.cylinder_interp.on", &cylinder.on, LATHE_CYLINDER)?;
+        check_templates("lathe.cylinder_interp.off", &cylinder.off, LATHE_BARE)?;
     }
     Ok(())
 }

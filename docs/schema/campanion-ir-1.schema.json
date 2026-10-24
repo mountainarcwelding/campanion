@@ -728,7 +728,7 @@
       ]
     },
     "Event": {
-      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.",
+      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -1014,6 +1014,48 @@
           "properties": {
             "type": {
               "const": "live_tool_off",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cartesian face interpolation. While on, a pose tip (x, y, z) is a point on the part face\nframe: x, y Cartesian about the spindle axis, z axial. Poses carry no rotary. Arcs may use\n[`crate::Plane::Xy`].",
+          "properties": {
+            "on": {
+              "description": "`true` selects the face frame. `false` leaves it.",
+              "type": "boolean"
+            },
+            "type": {
+              "const": "face_interpolation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "on"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cylinder interpolation. While on (`radius` Some, > 0), tip.x is the radius of the tool tip,\ntip.y is the distance unrolled along the circumference at `radius` (C degrees = y / radius\nin radians), z axial. Arcs may use [`crate::Plane::Yz`]. `None` turns it off.",
+          "properties": {
+            "radius": {
+              "default": null,
+              "description": "Mapping radius in millimetres. Absent or `None` leaves cylinder interpolation.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "cylinder_interpolation",
               "type": "string"
             }
           },

@@ -16,7 +16,8 @@ use crate::{FORMAT_TAG, Result, check_format};
 /// How close a pose tool axis must be to the part-frame image of machine +Z at that rotary angle.
 const ROTARY_AXIS_TOL: f64 = 1e-6;
 
-/// Slack for a turning pose. |Y| may be at most this. X may be negative when a face crosses the axis.
+/// Slack for a turning pose outside face and cylinder interpolation. |Y| may be at most this.
+/// X may be negative when a face crosses the axis.
 const TURNING_PLANE_TOL: f64 = 1e-6;
 
 /// Channels that must arrive together. A sync event waits on this id.
@@ -428,12 +429,29 @@ fn bound_path(toolpaths: &[ClPath], index: u32) -> Option<&ClPath> {
 }
 
 fn check_turning_poses(index: u32, path: &ClPath) -> Result<()> {
+    let mut face = false;
+    let mut cylinder = false;
     for (block_i, block) in path.blocks().iter().enumerate() {
+        match block {
+            ClBlock::Event(Event::FaceInterpolation { on }) => {
+                face = *on;
+                if *on {
+                    cylinder = false;
+                }
+            }
+            ClBlock::Event(Event::CylinderInterpolation { radius }) => {
+                cylinder = radius.is_some();
+                if cylinder {
+                    face = false;
+                }
+            }
+            _ => {}
+        }
         let Some(pose) = block_pose(block) else {
             continue;
         };
-        let tip = pose.tip();
-        if tip.y().abs() > TURNING_PLANE_TOL {
+        // Face and cylinder frames use Y. Outside those modes a turning pose stays in the XZ plane.
+        if !face && !cylinder && pose.tip().y().abs() > TURNING_PLANE_TOL {
             return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose Y is not zero")));
         }
     }
