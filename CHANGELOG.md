@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.8.1 — 2026-10-24
+
+Safety patch. Do not run mill drill output from v0.1.0–v0.8.0, or surface output from v0.3.0–v0.8.0 whose job clearance is below the top of the STL model; regenerate it with 0.8.1.
+
 ### Fixed
 
 - Mill `drill` no longer rapids to the hole bottom. Each hole is now a rapid to clearance and to the R plane (job retract height), a plunge feed to depth (pecking when `step_down` is less than `depth`), an optional `dwell`, and a rapid out. Every release from v0.1.0 to v0.8.0 rapided to depth; do not run mill drill output from those versions.
