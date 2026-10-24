@@ -34,7 +34,8 @@ use crate::rotary::{self};
 /// Rotary moves are mapped back with [`campanion_ir::machine_to_part`]. The tip uses `tol`. The
 /// angle uses `max(0.001 deg, format resolution)`. A feed is checked in the mode that was
 /// written: inverse time against `1 / minutes` from the part-frame tip distance, and
-/// degrees-per-minute or surface against the IR feed.
+/// degrees-per-minute or surface against the IR feed. A lathe `c_feed` of `inverse_time` recovers
+/// millimetres per minute as `F * length` and allows 1%.
 pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) -> Result<()> {
     if !(tol.is_finite() && tol >= 0.0) {
         return Err(invalid("tolerance must be finite and >= 0"));
@@ -60,7 +61,7 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
     for path in program.toolpaths() {
         for block in path.blocks() {
             if let ClBlock::Event(event) = block {
-                note_interp(event, post, &mut cart, &mut prev_c);
+                note_interp(event, post, &mut cart, &mut prev_c, &mut prev_angle);
                 continue;
             }
             let ClBlock::Motion(motion) = block else { continue };
@@ -94,8 +95,21 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                     }
                 }
                 ClMotion::Linear { feed, .. } => {
-                    let length = part.map(|start| geom::dist3(start, part_end)).unwrap_or(0.0);
-                    let feed_check = Some(FeedCheck { ir_feed: *feed, inverse: expect_inverse(post, rotating), length });
+                    let c_inverse = lathe_c_inverse(post) && rotating;
+                    let length = if c_inverse {
+                        match part {
+                            Some(start) => {
+                                let c0 = prev_angle.unwrap_or(0.0);
+                                let c1 = end_angle.unwrap_or(c0);
+                                rotary::lathe_indexed_length(start, part_end, c0, c1)
+                            }
+                            None => 0.0,
+                        }
+                    } else {
+                        part.map(|start| geom::dist3(start, part_end)).unwrap_or(0.0)
+                    };
+                    let feed_check =
+                        Some(FeedCheck { ir_feed: *feed, inverse: expect_inverse(post, rotating) || c_inverse, length, within_percent: c_inverse });
                     if rotating || !skip_z_only(post, written, written_end, false)? {
                         take_line(
                             &motions,
@@ -198,9 +212,13 @@ impl InterpTrack {
     }
 }
 
-fn note_interp(event: &Event, post: &PostDef, cart: &mut InterpTrack, prev_c: &mut f64) {
+fn note_interp(event: &Event, post: &PostDef, cart: &mut InterpTrack, prev_c: &mut f64, prev_angle: &mut Option<f64>) {
     match event {
-        Event::CAxis { engage: true, .. } => *prev_c = 0.0,
+        Event::CAxis { engage: true, .. } => {
+            *prev_c = 0.0;
+            // Engage unwinds C, matching the writer. The next indexed length starts at 0.
+            *prev_angle = Some(0.0);
+        }
         Event::FaceInterpolation { on: true } => {
             let native = post.lathe.as_ref().is_some_and(|lathe| lathe.face_interp.is_some());
             *cart = InterpTrack::Face { native };
@@ -265,6 +283,8 @@ fn consume_fallback(
     post: &PostDef,
 ) -> Result<f64> {
     let target = interp::chained_polar(frame, &curve, prev_c)?;
+    let mut prev_cart = curve_start_point(&curve);
+    let mut prev_read_c = if *cursor > 0 { move_angle(moves[*cursor - 1]).unwrap_or(prev_c) } else { prev_c };
     let mut guard = 0u32;
     loop {
         let Some(mv) = moves.get(*cursor).copied() else {
@@ -291,9 +311,20 @@ fn consume_fallback(
         if !on_polar_curve(cart, curve, tol) {
             return Err(invalid(format!("motion {index}: point is off the interpolation path")));
         }
-        if !rapid && let Some(feed) = feed {
-            check_feed_number(got_feed, feed, post.decimals.feed, index)?;
+        if !rapid && let Some(ir_feed) = feed {
+            let changed = (c - prev_read_c).abs() > 1e-6;
+            let want_inverse = changed && lathe_c_inverse(post);
+            if move_inverse(mv) != want_inverse {
+                return Err(invalid(format!("motion {index}: feed mode differs")));
+            }
+            if want_inverse {
+                check_recovered_feed(got_feed, geom::dist3(prev_cart, cart), ir_feed, index)?;
+            } else {
+                check_feed_number(got_feed, ir_feed, post.decimals.feed, index)?;
+            }
         }
+        prev_cart = cart;
+        prev_read_c = c;
         let dist_end = geom::dist3(cart, end_tip);
         let next_closer =
             moves.get(*cursor).is_some_and(|next| fallback_tip(next, frame).is_some_and(|point| geom::dist3(point, end_tip) + 1e-9 < dist_end));
@@ -333,6 +364,8 @@ struct FeedCheck {
     inverse: bool,
     /// Straight-line distance between the part-frame tips. Used when `inverse` is set.
     length: f64,
+    /// Lathe C inverse time: `F * length` is millimetres per minute, within 1%.
+    within_percent: bool,
 }
 
 struct LineCheck<'a> {
@@ -379,10 +412,45 @@ fn take_line(
         if got_inverse != feed.inverse {
             return Err(invalid(format!("motion {index}: feed mode differs")));
         }
-        let expected = if feed.inverse { rotary::inverse_minutes_feed(feed.ir_feed, feed.length)? } else { feed.ir_feed };
-        check_feed_number(got_feed, expected, check.feed_decimals, index)?;
+        if feed.within_percent {
+            check_recovered_feed(got_feed, feed.length, feed.ir_feed, index)?;
+        } else {
+            let expected = if feed.inverse { rotary::inverse_minutes_feed(feed.ir_feed, feed.length)? } else { feed.ir_feed };
+            check_feed_number(got_feed, expected, check.feed_decimals, index)?;
+        }
     }
     Ok(())
+}
+
+fn lathe_c_inverse(post: &PostDef) -> bool {
+    post.lathe.as_ref().is_some_and(|lathe| lathe.c_feed_inverse())
+}
+
+/// Recover the IR feed from an inverse-time `F` and allow 1%.
+fn check_recovered_feed(got: Option<f64>, length: f64, ir_feed: f64, index: usize) -> Result<()> {
+    let Some(got) = got else {
+        return Err(invalid(format!("motion {index}: missing feed")));
+    };
+    if !(got.is_finite() && got > 0.0) {
+        return Err(invalid(format!("motion {index}: feed must be positive")));
+    }
+    if !(length.is_finite() && length > 1e-9) {
+        return Err(invalid(format!("motion {index}: inverse time feed needs a positive distance between part-frame tips")));
+    }
+    let recovered = got * length;
+    let limit = ir_feed.abs() * 0.01;
+    if (recovered - ir_feed).abs() > limit {
+        return Err(invalid(format!("motion {index}: feed {recovered} mm/min differs from {ir_feed} by more than 1%")));
+    }
+    Ok(())
+}
+
+fn curve_start_point(curve: &PolarCurve) -> Xyz {
+    match curve {
+        PolarCurve::Point { end } => *end,
+        PolarCurve::Line { start, .. } => *start,
+        PolarCurve::Arc { start, .. } => *start,
+    }
 }
 
 struct CurveCheck<'a> {

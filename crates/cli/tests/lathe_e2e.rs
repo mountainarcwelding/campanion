@@ -538,6 +538,42 @@ fn millturn_flat_posts_haas_y_axis() -> Result<(), String> {
 }
 
 #[test]
+fn millturn_posts_linuxcnc_live_drill_and_slot() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/millturn.lathe.json"))?;
+    let out = temp_path("campanion-lathe-millturn-linuxcnc.nc");
+    let ir = temp_path("campanion-lathe-millturn-linuxcnc.ir.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "linuxcnc_lathe", "--ir", &path_arg(&ir)?])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("millturn.linuxcnc_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["S2500 $1", "M3 $1", "M5 $1", "S1800 $1", "M3 $1", "M5 $1"])?;
+    if posted.contains("G93") || posted.contains("G112") || posted.contains("G107") {
+        return Err(format!("indexed live cycle wrote inverse time or a native interpolation code\n{posted}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn millturn_flat_posts_linuxcnc_y_axis() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/millturn_flat.lathe.json"))?;
+    let out = temp_path("campanion-lathe-millturn-flat-linuxcnc.nc");
+    let ir = temp_path("campanion-lathe-millturn-flat-linuxcnc.ir.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "linuxcnc_lathe", "--ir", &path_arg(&ir)?])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("millturn_flat.linuxcnc_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["S1800 $1", "M3 $1", "G19", "Y", "M5 $1", "G18"])?;
+    if posted.contains("G93") || posted.contains("G112") || posted.contains("G107") {
+        return Err(format!("Y flat wrote inverse time or a native interpolation code\n{posted}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn live_flat_rejects_a_head_without_y_and_travel_past_the_limits() -> Result<(), String> {
     let missing = flat_shell("", FLAT_OP);
     assert_rejects(&missing, "campanion-lathe-flat-no-head.json", "operation od_flat: head has no Y axis")?;

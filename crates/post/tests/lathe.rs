@@ -257,8 +257,9 @@ fn a_lathe_pose_off_the_xz_plane_is_rejected() {
     // An unbound path is still a lathe program. The IR only checks Y on a bound toolpath.
     let unbound = TurningSetup::single(None, 3_000.0).expect("turning");
     let off = lathe_program(vec![ClBlock::Motion(ClMotion::Rapid { to: yz(10.0, 0.01, 1.0), feed: None })], unbound);
-    let err = post_program(&off, &linux_lathe(), &options()).expect_err("y");
-    assert!(err.to_string().contains("post `linuxcnc_lathe` has no Y axis"), "{err}");
+    let fanuc = builtin("fanuc_lathe").expect("fanuc_lathe");
+    let err = post_program(&off, &fanuc, &options()).expect_err("y");
+    assert!(err.to_string().contains("post `fanuc_lathe` has no Y axis"), "{err}");
 
     let edge = lathe_program(vec![ClBlock::Motion(ClMotion::Rapid { to: yz(10.0, 1e-6, 1.0), feed: None })], turning(None, false));
     post_program(&edge, &linux_lathe(), &options()).expect("on the limit");
@@ -1086,6 +1087,7 @@ fn face_fallback_writes_continuous_c_and_a_centre_crossing_errors() {
     let post = haas_without_face();
     let text = post_program(&program, &post, &options()).expect("fallback");
     assert!(!text.contains("G112") && !text.contains("G113"), "{text}");
+    assert!(!text.contains("G93"), "{text}");
     assert!(!text.split_whitespace().any(|word| word == "G2" || word == "G3"), "{text}");
     assert!(text.split_whitespace().all(|word| !word.starts_with('Y')), "{text}");
     let angles = c_angles(&text);
@@ -1143,6 +1145,175 @@ fn interpolation_rejects_a_disengaged_c_axis_a_y_move_and_an_xy_arc() {
     ]);
     let arc_err = post_program(&arc, &haas, &options()).expect_err("xy");
     assert!(arc_err.to_string().contains("lathe arc must be in the zx plane"), "{arc_err}");
+}
+
+fn assert_post_golden(name: &str, text: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden").join(name);
+    if std::env::var("UPDATE_GOLDEN").ok().as_deref() == Some("1") {
+        std::fs::write(&path, text).expect("write golden");
+        return;
+    }
+    let message = format!("read {}", path.display());
+    let expected = std::fs::read_to_string(&path).expect(&message);
+    assert_eq!(text, expected, "golden {name}");
+}
+
+fn assert_no_native_interp(text: &str) {
+    assert!(!text.contains("G112") && !text.contains("G107"), "{text}");
+}
+
+#[test]
+fn linuxcnc_millturn_writes_spindle_select_and_reads_back() {
+    let blocks = vec![
+        ClBlock::Event(Event::ToolChange { tool_id: 1 }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(20.0, 2.0, 0.0),
+        ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        linear_c(20.0, -5.0, 0.0, 100.0),
+        rapid_c(20.0, 2.0, 0.0),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+        rapid_c(20.0, 2.0, 90.0),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        linear_c(20.0, -5.0, 90.0, 100.0),
+        rapid_c(20.0, 2.0, 90.0),
+        ClBlock::Event(Event::LiveToolOff),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = millturn_program(blocks);
+    let post = linux_lathe();
+    assert!(post.description().contains("custom post can fill them"), "{}", post.description());
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_post_golden("millturn.linuxcnc_lathe.nc", &text);
+    assert!(text.contains("S1500 $1"), "{text}");
+    assert!(text.contains("M3 $1") && text.contains("M5 $1"), "{text}");
+    assert!(!text.contains("G93"), "{text}");
+    assert!(!text.contains("M154") && !text.contains("M155"), "{text}");
+    assert_no_native_interp(&text);
+    let parked = read_back("S1500 $1\nM3 $1\nM5 $1\n", &post).expect("spindle select");
+    assert_eq!(parked.len(), 2, "{parked:?}");
+    assert!(parked.iter().all(|move_| matches!(move_, ReadMove::Other { .. })), "{parked:?}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn linuxcnc_face_fallback_writes_inverse_time_and_reads_back() {
+    let program = millturn_program(face_square());
+    let post = linux_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_post_golden("millturn_face.linuxcnc_lathe.nc", &text);
+    assert!(text.contains("G93"), "{text}");
+    assert_no_native_interp(&text);
+    assert!(!text.split_whitespace().any(|word| word == "G2" || word == "G3"), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn linuxcnc_cylinder_fallback_writes_inverse_time_and_reads_back() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) }),
+        ClBlock::Motion(ClMotion::Rapid { to: yz(20.0, -5.0, -10.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -10.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -20.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::CylinderInterpolation { radius: None }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = millturn_program(blocks);
+    let post = linux_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_post_golden("millturn_wrap.linuxcnc_lathe.nc", &text);
+    assert!(text.contains("G93"), "{text}");
+    let g93 = text.find("G93").expect("g93");
+    assert!(text[g93..].contains("G94"), "{text}");
+    assert_no_native_interp(&text);
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn linuxcnc_y_axis_writes_g19_and_live_spindle() {
+    let blocks = vec![
+        ClBlock::Event(Event::ToolChange { tool_id: 1 }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Motion(ClMotion::Rapid { to: radial_pose(20.0, 0.0, 2.0, 90.0), feed: None }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, 5.0, -4.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::LiveToolOff),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = millturn_y_program(blocks);
+    let post = linux_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_post_golden("millturn_y.linuxcnc_lathe.nc", &text);
+    assert!(text.contains("M3 $1") && text.contains("M5 $1"), "{text}");
+    assert!(text.contains("G19"), "{text}");
+    assert!(!text.contains("G93"), "{text}");
+    assert_no_native_interp(&text);
+    let side = text.find("G19").expect("g19");
+    let y_word = text.find("Y-5.").expect("y");
+    let restored = text.rfind("G18").expect("g18");
+    assert!(side < y_word && y_word < restored, "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn linuxcnc_indexed_c_move_uses_inverse_time_then_returns_to_per_minute() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(20.0, 2.0, 0.0),
+        linear_c(20.0, 2.0, 90.0, 100.0),
+        linear_c(20.0, -5.0, 90.0, 100.0),
+    ];
+    let program = millturn_program(blocks);
+    let post = linux_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(text.contains("G93"), "{text}");
+    assert!(text.contains("F3.5355"), "{text}");
+    let g93 = text.find("G93").expect("g93");
+    let after = &text[g93..];
+    let g94 = after.find("G94").expect("return to G94");
+    assert!(after[g94..].contains("F100.0000"), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn live_tool_lines_cannot_be_empty_and_c_feed_is_named() {
+    let mut raw = lathe_json();
+    raw["lathe"]["live_tool"]["forward"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty forward");
+    assert!(err.to_string().contains("lathe.live_tool.forward") && err.to_string().contains("needs at least one line"), "{err}");
+
+    raw = lathe_json();
+    raw["lathe"]["live_tool"]["stop"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty stop");
+    assert!(err.to_string().contains("lathe.live_tool.stop"), "{err}");
+
+    raw = lathe_json();
+    raw["lathe"]["c_feed"] = serde_json::json!("rpm");
+    let err = load_post(&raw.to_string()).expect_err("c feed");
+    assert!(err.to_string().contains("lathe.c_feed") && err.to_string().contains("must be per_minute or inverse_time"), "{err}");
+
+    raw = lathe_json();
+    raw["lathe"]["c_axis"]["engage"] = serde_json::json!([]);
+    raw["lathe"]["brake"]["clamp"] = serde_json::json!([]);
+    let post = post_from(raw);
+    let text = post_program(
+        &millturn_program(vec![
+            ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+            ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+            rapid_c(20.0, 2.0, 0.0),
+        ]),
+        &post,
+        &options(),
+    )
+    .expect("empty lists");
+    assert!(text.contains("C0.0000"), "{text}");
+    assert!(!text.contains("M154") && !text.contains("M14"), "{text}");
 }
 
 #[test]

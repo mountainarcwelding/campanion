@@ -12,6 +12,9 @@
 //! with a C word. Arc offsets stay in the radius frame: `I` along X, `J` along Y, `K` along Z.
 //! Face interpolation writes Cartesian X Y Z (and XY arcs). Cylinder interpolation writes X Y Z
 //! with Y unrolled (and YZ arcs). Without those post blocks the same poses are split into X and C.
+//! When `lathe.c_feed` is `inverse_time`, a `G1`, `G2` or `G3` that changes C is `G93` with
+//! `F = 1 / minutes` from the part-frame cut length. The next move that does not change C returns
+//! to `lathe.feed_mode` (`G94` when that word is empty).
 
 use campanion_ir::{
     ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, LiveDirection, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind,
@@ -244,6 +247,10 @@ impl<'a> Writer<'a> {
         let Some(lathe) = self.post.lathe.clone() else {
             return Ok(());
         };
+        // Home is a G0 that does not change C. Inverse time ends before that move.
+        if !lathe.home.is_empty() {
+            self.leave_lathe_inverse()?;
+        }
         self.templates("lathe.home", &lathe.home, &[("date-free!", "")])
     }
 
@@ -301,6 +308,7 @@ impl<'a> Writer<'a> {
     /// `<code> X.. Z.. <lead_word><lead>`. The code is never modal. The next G0 or G1 is written
     /// in full. When the lead word is `F`, the modal feed is cleared so the next feed repeats it.
     fn thread_move(&mut self, to: Pose, lead: f64) -> Result<()> {
+        self.leave_lathe_inverse()?;
         self.require_rpm_binding()?;
         let lathe = self.post.lathe.as_ref().ok_or_else(|| unsupported(format!("post `{}` does not support threading", self.post.id())))?;
         let thread =
@@ -488,6 +496,10 @@ impl<'a> Writer<'a> {
         helix: bool,
         angle: Option<f64>,
     ) -> Result<()> {
+        // A lathe arc does not carry a C word, so it does not change C.
+        if self.turning.is_some() {
+            self.leave_lathe_inverse()?;
+        }
         let start = self.curve_start()?;
         if !self.post.planes {
             let fixed = self.plane.unwrap_or(Plane::Xy);
@@ -599,6 +611,7 @@ impl<'a> Writer<'a> {
         }
         let rotating = rotary::angle_changes(self.angle, posted.angle);
         let c_moves = self.c_text_changes(posted.c)?;
+        let c_turns = self.c_value_changes(posted.c)?;
         if self.omit_z_only(code, posted.xyz)? && !rotating && !c_moves {
             self.pos = Some(self.round_xyz(posted.xyz)?);
             self.exact = Some(posted.xyz);
@@ -609,7 +622,7 @@ impl<'a> Writer<'a> {
             }
             return Ok(());
         }
-        let (feed, force) = self.resolve_feed(code, feed, &posted, rotating)?;
+        let (feed, force) = self.resolve_feed(code, feed, &posted, rotating, c_turns)?;
         let mut words = Vec::new();
         if !(self.post.modal_motion && self.linear == Some(code)) {
             words.push(code.to_string());
@@ -637,18 +650,27 @@ impl<'a> Writer<'a> {
     /// tips (millimetres) and `feed` is the IR feed (millimetres per minute). That is `1 / T`
     /// with `T` in minutes. `degrees_per_minute` and `surface` write the IR feed unchanged.
     /// A feed that keeps the angle stays in millimetres per minute, which means leaving inverse
-    /// time before the block. Rapids do not change the feed mode.
-    fn resolve_feed(&mut self, code: &str, feed: Option<f64>, posted: &Posted, rotating: bool) -> Result<(Option<f64>, bool)> {
+    /// time before the block. Mill rapids do not change the feed mode.
+    ///
+    /// A lathe `c_feed` of `inverse_time` uses the same `F` for a `G1` that changes C. Fallback
+    /// moves measure the Cartesian part tip. Indexed moves measure the chord after C rotates the
+    /// tip. A `G0`, `G2` or `G3` that does not change C, and a `G1` that does not, returns to
+    /// `lathe.feed_mode`.
+    fn resolve_feed(&mut self, code: &str, feed: Option<f64>, posted: &Posted, rotating: bool, c_turns: bool) -> Result<(Option<f64>, bool)> {
         if code == "G0" {
+            if !c_turns {
+                self.leave_lathe_inverse()?;
+            }
             return Ok((feed, false));
         }
         let Some(feed) = feed else {
             return Ok((None, false));
         };
-        let inverse = self.post.rotary.as_ref().is_some_and(|rotary| rotary.mode() == RotaryFeedMode::InverseTime);
-        if rotating && inverse {
-            let start = self.part_tip.ok_or_else(|| invalid("inverse time feed needs a prior position"))?;
-            let value = rotary::inverse_minutes_feed(feed, geom::dist3(start, posted.part))?;
+        let mill_inverse = rotating && self.post.rotary.as_ref().is_some_and(|rotary| rotary.mode() == RotaryFeedMode::InverseTime);
+        let c_inverse = c_turns && self.lathe_c_inverse();
+        if mill_inverse || c_inverse {
+            let length = if c_inverse { self.lathe_cut_length(posted)? } else { self.part_length(posted)? };
+            let value = rotary::inverse_minutes_feed(feed, length)?;
             self.enter_inverse()?;
             Ok((Some(value), true))
         } else {
@@ -657,16 +679,31 @@ impl<'a> Writer<'a> {
         }
     }
 
+    fn part_length(&self, posted: &Posted) -> Result<f64> {
+        let start = self.part_tip.ok_or_else(|| invalid("inverse time feed needs a prior position"))?;
+        Ok(geom::dist3(start, posted.part))
+    }
+
+    /// Part-frame cut length for a C move. Fallback tips are already Cartesian.
+    fn lathe_cut_length(&self, posted: &Posted) -> Result<f64> {
+        let start = self.part_tip.ok_or_else(|| invalid("inverse time feed needs a prior position"))?;
+        if self.interp_fallback() {
+            return Ok(geom::dist3(start, posted.part));
+        }
+        let c0 = self.c_continuous.unwrap_or(0.0);
+        let c1 = posted.c.unwrap_or(c0);
+        Ok(rotary::lathe_indexed_length(start, posted.part, c0, c1))
+    }
+
+    fn lathe_c_inverse(&self) -> bool {
+        self.post.lathe.as_ref().is_some_and(|lathe| lathe.c_feed_inverse())
+    }
+
     fn enter_inverse(&mut self) -> Result<()> {
         if self.inverse_time {
             return Ok(());
         }
-        let code = self
-            .post
-            .rotary
-            .as_ref()
-            .and_then(|rotary| rotary.inverse_time_on.clone())
-            .ok_or_else(|| invalid("inverse time mode needs inverse_time_on"))?;
+        let code = self.inverse_on_word()?;
         self.emit_line(&code)?;
         self.inverse_time = true;
         self.feed = None;
@@ -677,16 +714,39 @@ impl<'a> Writer<'a> {
         if !self.inverse_time {
             return Ok(());
         }
-        let code = self
-            .post
-            .rotary
-            .as_ref()
-            .and_then(|rotary| rotary.inverse_time_off.clone())
-            .ok_or_else(|| invalid("inverse time mode needs inverse_time_off"))?;
+        let code = self.inverse_off_word()?;
         self.emit_line(&code)?;
         self.inverse_time = false;
         self.feed = None;
         Ok(())
+    }
+
+    /// Leave inverse time on a lathe post. A mill post keeps the mode a rapid already had.
+    fn leave_lathe_inverse(&mut self) -> Result<()> {
+        if self.lathe_c_inverse() {
+            self.leave_inverse()?;
+        }
+        Ok(())
+    }
+
+    fn inverse_on_word(&self) -> Result<String> {
+        if self.lathe_c_inverse() {
+            return Ok("G93".to_string());
+        }
+        self.post.rotary.as_ref().and_then(|rotary| rotary.inverse_time_on.clone()).ok_or_else(|| invalid("inverse time mode needs inverse_time_on"))
+    }
+
+    fn inverse_off_word(&self) -> Result<String> {
+        if let Some(lathe) = self.post.lathe.as_ref()
+            && lathe.c_feed_inverse()
+        {
+            return Ok(lathe.c_feed_off_word());
+        }
+        self.post
+            .rotary
+            .as_ref()
+            .and_then(|rotary| rotary.inverse_time_off.clone())
+            .ok_or_else(|| invalid("inverse time mode needs inverse_time_off"))
     }
 
     fn push_rotary(&self, words: &mut Vec<String>, angle: Option<f64>) -> Result<()> {
@@ -1580,6 +1640,23 @@ impl<'a> Writer<'a> {
         };
         let text = self.format_axis(angle, self.post.decimals.linear)?;
         Ok(self.c_modal.as_deref() != Some(text.as_str()))
+    }
+
+    /// True when the formatted C angle differs from the continuous angle already tracked.
+    ///
+    /// The first word after engage can introduce `C0` without the axis moving. Inverse time
+    /// follows this value, not the mere presence of the word.
+    fn c_value_changes(&self, angle: Option<f64>) -> Result<bool> {
+        if self.turning.is_none() || !self.c_engaged {
+            return Ok(false);
+        }
+        let Some(angle) = angle else {
+            return Ok(false);
+        };
+        let prev = self.c_continuous.unwrap_or(0.0);
+        let prev_text = self.format_axis(prev, self.post.decimals.linear)?;
+        let next_text = self.format_axis(angle, self.post.decimals.linear)?;
+        Ok(prev_text != next_text)
     }
 
     /// `<letter><angle>` after Z. Modal on the formatted linear-decimal text.

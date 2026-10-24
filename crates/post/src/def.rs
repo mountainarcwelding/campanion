@@ -21,9 +21,11 @@
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
 //! `{offset2}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
-//! `cylinder_interp` are optional mill-turn blocks. Live-tool `{rpm}` is a whole number.
-//! Cylinder `on` lines may use `{radius}` and `{diameter}`. `references` cites the codes and is
-//! never written to the program.
+//! `cylinder_interp` are optional mill-turn blocks. `c_axis.engage`, `c_axis.disengage`,
+//! `brake.clamp` and `brake.release` may be empty; an empty list writes nothing. Live-tool
+//! `forward`, `reverse` and `stop` must not be empty. Live-tool `{rpm}` is a whole number.
+//! `c_feed` is `per_minute` or `inverse_time`. Cylinder `on` lines may use `{radius}` and
+//! `{diameter}`. `references` cites the codes and is never written to the program.
 
 use std::collections::BTreeMap;
 
@@ -329,6 +331,29 @@ pub(crate) struct LatheOutput {
     /// Cross axis for live milling. Absent: a pose with Y off the centreline is rejected.
     #[serde(default)]
     pub(crate) y_axis: Option<YAxisOutput>,
+    /// Feed for a `G1`/`G2`/`G3` that changes C. `per_minute` writes the IR feed. `inverse_time`
+    /// writes `G93` and `F = 1 / minutes`.
+    #[serde(default = "default_c_feed")]
+    pub(crate) c_feed: String,
+}
+
+fn default_c_feed() -> String {
+    "per_minute".to_string()
+}
+
+impl LatheOutput {
+    pub(crate) fn c_feed_inverse(&self) -> bool {
+        self.c_feed == "inverse_time"
+    }
+
+    /// Word that leaves inverse time. Empty `feed_mode` means `G94`.
+    pub(crate) fn c_feed_off_word(&self) -> String {
+        if self.feed_mode.is_empty() { "G94".to_string() } else { self.feed_mode.clone() }
+    }
+
+    pub(crate) fn c_feed_off_code(&self) -> Option<u16> {
+        g_code_number(&self.c_feed_off_word())
+    }
 }
 
 /// Y-axis live milling on a lathe.
@@ -353,7 +378,7 @@ pub(crate) struct YAxisOutput {
 /// Engage and disengage a spindle as a positioning axis.
 ///
 /// `letter` is the modal word on `G0` and `G1` while the axis is engaged. `engage` and
-/// `disengage` take no placeholders.
+/// `disengage` take no placeholders and may be empty. An empty list writes nothing.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CAxisOutput {
@@ -367,7 +392,7 @@ pub(crate) struct CAxisOutput {
 
 /// Clamp or release the spindle brake.
 ///
-/// Both line lists take no placeholders.
+/// Both line lists take no placeholders and may be empty. An empty list writes nothing.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BrakeOutput {
@@ -379,9 +404,10 @@ pub(crate) struct BrakeOutput {
 
 /// Start and stop a live (driven) tool.
 ///
-/// `forward` and `reverse` may use `{rpm}`, written as a whole number. `stop` and `feed_mode`
-/// take no placeholders. `feed_mode` is written once before the first start when it is non-empty
-/// and differs from [`LatheOutput::feed_mode`].
+/// `forward`, `reverse` and `stop` must each contain at least one line. `forward` and `reverse`
+/// may use `{rpm}`, written as a whole number. `stop` and `feed_mode` take no placeholders.
+/// `feed_mode` is written once before the first start when it is non-empty and differs from
+/// [`LatheOutput::feed_mode`].
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LiveToolOutput {
@@ -558,8 +584,12 @@ fn check_lathe(post: &PostDef) -> Result<()> {
     if let Some(thread) = &lathe.thread {
         check_thread_output(thread)?;
     }
+    if !matches!(lathe.c_feed.as_str(), "per_minute" | "inverse_time") {
+        return Err(field("lathe.c_feed", "must be per_minute or inverse_time"));
+    }
     if let Some(c_axis) = &lathe.c_axis {
         check_c_letter(&c_axis.letter)?;
+        // Empty engage or disengage writes nothing. LinuxCNC fills these in HAL or a user M-code.
         check_templates("lathe.c_axis.engage", &c_axis.engage, LATHE_BARE)?;
         check_templates("lathe.c_axis.disengage", &c_axis.disengage, LATHE_BARE)?;
     }
@@ -568,6 +598,9 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_templates("lathe.brake.release", &brake.release, LATHE_BARE)?;
     }
     if let Some(live) = &lathe.live_tool {
+        require_lines("lathe.live_tool.forward", &live.forward)?;
+        require_lines("lathe.live_tool.reverse", &live.reverse)?;
+        require_lines("lathe.live_tool.stop", &live.stop)?;
         check_templates("lathe.live_tool.forward", &live.forward, LATHE_RPM)?;
         check_templates("lathe.live_tool.reverse", &live.reverse, LATHE_RPM)?;
         check_templates("lathe.live_tool.stop", &live.stop, LATHE_BARE)?;
@@ -587,6 +620,13 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_plane_word("lathe.y_axis.face_plane", &y_axis.face_plane)?;
         check_plane_word("lathe.y_axis.side_plane", &y_axis.side_plane)?;
         check_plane_word("lathe.y_axis.turn_plane", &y_axis.turn_plane)?;
+    }
+    Ok(())
+}
+
+fn require_lines(field_name: &str, lines: &[String]) -> Result<()> {
+    if lines.is_empty() {
+        return Err(field(field_name, "needs at least one line"));
     }
     Ok(())
 }
