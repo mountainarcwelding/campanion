@@ -6,6 +6,10 @@
 
 - `haas_lathe` writes G99 before G32 thread passes and G98 after them. Haas requires feed per revolution for G32; earlier versions wrote the thread passes under G98.
 
+### Changed
+
+- Docs and error messages call the tilting milling head a "tilting B head", so it is not confused with the linear B axis of Haas ST tailstocks and DS secondary spindles.
+
 ## 0.8.2 — 2026-10-24
 
 ### Fixed

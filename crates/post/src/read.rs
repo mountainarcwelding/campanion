@@ -118,7 +118,7 @@ struct Parser<'a> {
     cyl_mode: bool,
     /// True after a `sub_spindle.select` line, until a `deselect` line.
     on_sub: bool,
-    /// Current B-head angle, degrees. A channel start returns it to 0.
+    /// Current tilting-B-head angle, degrees. A channel start returns it to 0.
     b_deg: f64,
     /// True after the thread feed word (`G99` on Haas) until `lathe.feed_mode`.
     thread_feed_on: bool,

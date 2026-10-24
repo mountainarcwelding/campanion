@@ -31,14 +31,14 @@
 //! the mapping radius. A head that carries Y may also leave that plane while its C axis is
 //! engaged and the pose names a fixed C angle. Diameter mode is a post setting
 //! only; the IR never stores diameters in X. The pose axis is not interpreted for ordinary XZ
-//! turning moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis. A B-head
+//! turning moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis. A tilting-B-head
 //! toolpath replaces that axis with `(cos B, 0, sin B)` and records the angle on [`Event::HeadIndex`].
 //! A single-point
 //! thread is [`ClMotion::Thread`]: a straight move whose `lead` is millimetres per spindle
 //! revolution. It is valid only when the program has a turning setup.
 //!
 //! Spindles are named (`main`, and further names such as `sub`). Each has its own optional C axis and a
-//! work-zero offset along Z. A head, a turret or a B-axis head, carries X and Z and optionally Y
+//! work-zero offset along Z. A head, a turret or a tilting B head, carries X and Z and optionally Y
 //! and B. Every turning toolpath has a binding that names its spindle, head and channel. An M10
 //! lathe uses one spindle `main`, one head `turret1` and channel 0. Live tooling, Y, B and a
 //! second spindle fit in these types: spindles and heads are lists, and the extra axes and flags

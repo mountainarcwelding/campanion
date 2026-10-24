@@ -1312,7 +1312,7 @@
     },
     "Head": {
       "additionalProperties": false,
-      "description": "A turret or a B-axis head.\n\n`stations` is the number of tool pockets, from 1 to 256. `live_tooling` is true when the\nhead can drive a spinning tool. Axes always include X and Z. Y and B are optional. The same\nstruct is a plain turret today and a Y/B live head later.",
+      "description": "A turret or a tilting B head.\n\n`stations` is the number of tool pockets, from 1 to 256. `live_tooling` is true when the\nhead can drive a spinning tool. Axes always include X and Z. Y and B are optional. The same\nstruct is a plain turret today and a Y/B live head later.",
       "properties": {
         "axes": {
           "items": {
@@ -1342,7 +1342,7 @@
       "type": "object"
     },
     "HeadAxis": {
-      "description": "Axis a turning head can carry.\n\nX and Z are required. Y and B are optional, so a later live-tool or B-axis head uses this\nsame enum.",
+      "description": "Axis a turning head can carry.\n\nX and Z are required. Y and B are optional, so a later live-tool or tilting B head uses this\nsame enum.",
       "oneOf": [
         {
           "const": "x",

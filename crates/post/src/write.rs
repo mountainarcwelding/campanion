@@ -210,7 +210,7 @@ struct Writer<'a> {
     channel_inverse: bool,
     /// Sync events write the post's wait lines.
     multi_channel: bool,
-    /// Current B-head angle, degrees. Starts at 0 and resets with each channel.
+    /// Current tilting-B-head angle, degrees. Starts at 0 and resets with each channel.
     b_deg: f64,
     /// Five-axis kinematics, when the program has them and this post writes 3+2.
     five: Option<&'a FiveAxisSetup>,
@@ -1555,8 +1555,8 @@ impl<'a> Writer<'a> {
     /// Index B. A post with no `b_head` block cannot write the event.
     fn head_index(&mut self, b_deg: f64) -> Result<()> {
         let index = {
-            let lathe = self.post.lathe.as_ref().ok_or_else(|| unsupported(format!("post `{}` has no B head", self.post.id())))?;
-            let b_head = lathe.b_head.as_ref().ok_or_else(|| unsupported(format!("post `{}` has no B head", self.post.id())))?;
+            let lathe = self.post.lathe.as_ref().ok_or_else(|| unsupported(format!("post `{}` has no tilting B head", self.post.id())))?;
+            let b_head = lathe.b_head.as_ref().ok_or_else(|| unsupported(format!("post `{}` has no tilting B head", self.post.id())))?;
             b_head.index.clone()
         };
         if !b_deg.is_finite() {

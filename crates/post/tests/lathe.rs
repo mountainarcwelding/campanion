@@ -1715,7 +1715,7 @@ fn part_transfer_rejects_a_post_without_it_and_an_unknown_spindle() {
 fn haas_lathe_rejects_a_b_head_index() {
     let program = lathe_program(vec![ClBlock::Event(Event::HeadIndex { head: "turret1".into(), b_deg: 30.0 })], turning(None, false));
     let err = post_program(&program, &builtin("haas_lathe").expect("haas"), &options()).expect_err("b head");
-    assert_eq!(err.to_string(), "not supported: post `haas_lathe` has no B head");
+    assert_eq!(err.to_string(), "not supported: post `haas_lathe` has no tilting B head");
 }
 
 #[test]

@@ -21,7 +21,7 @@
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
 //! `{offset2}`, `{phase}`, `{z}`, `{feed}`, `{b}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
-//! `cylinder_interp` are optional mill-turn blocks. `b_head` is an optional B-head block. `transfer` is an optional part-transfer block. `c_axis.engage`, `c_axis.disengage`,
+//! `cylinder_interp` are optional mill-turn blocks. `b_head` is an optional tilting-B-head block. `transfer` is an optional part-transfer block. `c_axis.engage`, `c_axis.disengage`,
 //! `brake.clamp` and `brake.release` may be empty; an empty list writes nothing. Live-tool
 //! `forward`, `reverse` and `stop` must not be empty. Live-tool `{rpm}` is a whole number.
 //! `c_feed` is `per_minute` or `inverse_time`. Cylinder `on` lines may use `{radius}` and
@@ -362,7 +362,7 @@ pub(crate) struct LatheOutput {
     /// Two or more channel sections. Absent: a binding whose channel is not 0 is rejected.
     #[serde(default)]
     pub(crate) channels: Option<ChannelsOutput>,
-    /// B head. Absent: a [`campanion_ir::Event::HeadIndex`] is rejected.
+    /// Tilting B head. Absent: a [`campanion_ir::Event::HeadIndex`] is rejected.
     ///
     /// `index` may use `{b}`, written with the signed lathe number format. `mode` `tip` writes the
     /// tool tip. `mode` `pivot` adds `pivot_length * ((cos B - 1), sin B)` to `(radius, Z)` while
@@ -371,7 +371,7 @@ pub(crate) struct LatheOutput {
     pub(crate) b_head: Option<BHeadOutput>,
 }
 
-/// Lines that index a B head, and how X and Z relate to the tool tip.
+/// Lines that index a tilting B head, and how X and Z relate to the tool tip.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BHeadOutput {

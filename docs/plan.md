@@ -200,7 +200,7 @@ profiles are in). That item moves to M11 Part A, first in v0.7.0.
 
 ### M11: 5-axis and advanced turning (in progress)
 Aimed at mill-turn machines in the class of the Haas ST and DS lines: live tooling with C and
-Y, sub-spindle work and part transfer, synchronised channels, and B-axis heads. Simultaneous
+Y, sub-spindle work and part transfer, synchronised channels, and tilting B heads. Simultaneous
 5-axis milling (indexed 3+2 first, then continuous with tool-axis control and collision checks)
 belongs here too.
 
@@ -235,12 +235,12 @@ Part B: sub-spindle and channels
    (wait codes as post data), and a balance/timing report. Single-channel posts reject
    multichannel programs.
 
-Part C: B-axis heads and 5-axis milling
-8. **Kinematics as data:** a B head on a mill-turn and table-table/head-table 5-axis mills:
+Part C: Tilting B heads and 5-axis milling
+8. **Kinematics as data:** a tilting B head on a mill-turn and table-table/head-table 5-axis mills:
    pivot lengths, axis limits, solution choice. Forward/inverse kinematics with property tests.
 9. **Indexed 3+2:** tilted work planes (G68.2 or the LinuxCNC equivalent, or explicit rotated
    coordinates), any 2.5D/3-axis op on a tilted plane, with a reachability and limit check.
-10. **Angled turning and boring with a B head** (insert orientation follows B).
+10. **Angled turning and boring with a tilting B head** (insert orientation follows B).
 
 Haas ST/DS lathe completion (ahead of items 11–13; checked against the Haas NGC lathe operator's manual):
 - **H1. Threading feed mode and tailstock:** `haas_lathe` writes G99 around G32 thread passes (Haas
@@ -337,7 +337,7 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-23: M10 done (v0.6.1) except the STEP section, which moves to M11 v0.7.0. M11 broken
   down into Parts A–C. Mill-turn posts: Haas first, then LinuxCNC. 5-axis milling stays in M11.
 - 2026-10-24: M11 Part C items 8–10 released as v0.8.0 (kinematics, indexed 3+2 with Haas G254
-  and LinuxCNC machine-coordinate posts, B-head turning). Deferred mesh ops on tilted planes to a
+  and LinuxCNC machine-coordinate posts, tilting-B-head turning). Deferred mesh ops on tilted planes to a
   follow-up to keep v0.8.0 small.
 - 2026-10-24: v0.8.1 is a safety patch: mill drill feeds to depth from the R plane instead of
   rapiding (v0.1.0–v0.8.0), surface rapids stay above the model top (v0.3.0–v0.8.0), and a rapid

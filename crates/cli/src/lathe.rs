@@ -140,7 +140,7 @@ impl WorkSpindle {
     }
 }
 
-/// Optional Y travel and an optional B head on turret `turret1`.
+/// Optional Y travel and an optional tilting B head on turret `turret1`.
 struct LatheHead {
     y_axis: bool,
     y_min: Option<f64>,
@@ -2234,7 +2234,7 @@ fn normalise_orientation(mut degrees: f64) -> f64 {
     degrees
 }
 
-/// Pose axis `(cos B, 0, sin B)` on a turning path when the job has a B head.
+/// Pose axis `(cos B, 0, sin B)` on a turning path when the job has a tilting B head.
 fn apply_b_axis(job: &LatheJob, path: ClPath, b_deg: f64) -> Result<ClPath, CliError> {
     if job.head.b_axis.is_none() {
         return Ok(path);
