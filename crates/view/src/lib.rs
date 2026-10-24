@@ -12,10 +12,18 @@
 //! index angles or the continuous angle range. A turning setup is an XZ half-section: Z to the
 //! right, radius upward. Stroke points are `(tip.z, tip.x)`, ZX arcs are tessellated in that
 //! plane, and [`LathePreview`] carries the stock, the finished section, and the removed region.
+//! A turning program whose setup names a `sub` spindle also carries a [`Scene::timeline`].
+//! Playback position is millimetres along [`Scene::total_length`]. Each [`TimelineStep`] holds the
+//! chuck, speed and direction of `main` and `sub`, whether the spindles are synchronised, and the
+//! last sub-housing Z. The preview draws that record as two lanes under the playback slider: green
+//! while a spindle runs, grey while it is stopped, a red outline while its chuck is open, and a
+//! band across both lanes while sync is on. A cursor marks the playhead, and the label is
+//! [`timeline_text`] for the step in force. A sub move in work coordinates also draws a short tick
+//! at that Z on the half-section.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAxisKind, RotarySetup, TurningSetup};
+use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAxisKind, RotarySetup, SpindleSpeed, TurningSetup};
 
 /// Motions whose XY travel is at or below this (millimetres) are vertical feeds.
 ///
@@ -212,6 +220,52 @@ pub struct Label {
     pub text: String,
 }
 
+/// Chuck and rotation of one spindle on the two-spindle timeline.
+///
+/// `clamped` defaults to closed. `rpm` of 0 means the spindle is stopped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpindleLane {
+    /// Chuck closed when true. A new lane starts clamped.
+    pub clamped: bool,
+    /// Revolutions per minute. Zero means stopped.
+    pub rpm: f64,
+    /// Reverse direction while `rpm` is above zero.
+    pub reverse: bool,
+}
+
+impl Default for SpindleLane {
+    /// Closed chuck, spindle stopped, forward direction.
+    fn default() -> Self {
+        Self { clamped: true, rpm: 0.0, reverse: false }
+    }
+}
+
+/// Spindle state from one playback position onward.
+///
+/// `position` is millimetres along [`Scene::total_length`]. The step stays in force until the
+/// next step. [`timeline_text`] is the one-line label for this state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineStep {
+    /// Playback distance, millimetres, where this state starts.
+    pub position: f64,
+    /// Toolpath index in program order.
+    pub toolpath: usize,
+    /// Binding spindle of that toolpath. Empty when the toolpath has no binding.
+    pub active: String,
+    /// Main spindle chuck and speed.
+    pub main: SpindleLane,
+    /// Sub spindle chuck and speed.
+    pub sub: SpindleLane,
+    /// Synchronous spindle control is engaged.
+    pub sync: bool,
+    /// Sync phase in degrees. `None` when sync is off or the engage event named no phase.
+    pub phase_deg: Option<f64>,
+    /// Last sub-housing Z from [`Event::SpindleMove`], work or machine as that event gave it.
+    pub sub_z: Option<f64>,
+    /// [`TimelineStep::sub_z`] is a machine coordinate when true.
+    pub sub_z_machine: bool,
+}
+
 /// Everything the plan preview draws and measures for one program.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
@@ -236,6 +290,9 @@ pub struct Scene {
     pub rotary: Option<RotaryPreview>,
     /// XZ half-section when the program is a turning program. `None` for a mill program.
     pub lathe: Option<LathePreview>,
+    /// Two-spindle state along playback. Empty for a mill program and for a turning program
+    /// whose setup has no spindle named `sub`.
+    pub timeline: Vec<TimelineStep>,
 }
 
 /// Parse a program and build its preview scene.
@@ -275,6 +332,13 @@ pub fn load_scene(json: &str, arc_tol: f64) -> Result<Scene, String> {
 /// right and radius points up. The stored height of each point is Y (0 on XZ work), which keeps
 /// the polyline length equal to the tool travel. Arcs and helices in [`Plane::Zx`] are tessellated
 /// in that plane; other planes stay a chord. [`LathePreview`] is set from the turning setup.
+///
+/// When that setup names a `sub` spindle, [`Scene::timeline`] starts with one step at position 0
+/// and gains another step each time an event or a new toolpath changes the spindle state. The
+/// position is the tool travel so far, in millimetres. A mill program, and a lathe with no `sub`
+/// spindle, keep the timeline empty. `ProcessOn` runs the toolpath's bound spindle at the binding
+/// speed (constant surface speed uses that binding's maximum rpm) or at 1 rpm when the binding
+/// names no speed. `ProcessOff` stops that spindle.
 pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     let tol = sanitize_tol(arc_tol);
     let lathe_mode = doc.program().turning().is_some();
@@ -284,9 +348,13 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     let mut path_z = ZRangeAcc::new();
     let mut cursor: Option<Placed> = None;
     let mut samples = Vec::new();
+    let mut timeline = TimelineAcc::maybe(doc);
 
     for (toolpath, path) in doc.program().toolpaths().iter().enumerate() {
         scene.names.push(path.name().unwrap_or("").to_string());
+        if let Some(timeline) = timeline.as_mut() {
+            timeline.start_toolpath(toolpath, scene.total_length);
+        }
         let mut labeled = false;
         for block in path.blocks() {
             match block {
@@ -326,7 +394,12 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
                     );
                     cursor = Some(Placed { at: end, angle: end_angle });
                 }
-                ClBlock::Event(event) => record_event(&mut scene, toolpath, event, cursor.as_ref().map(|placed| placed.at), lathe_mode),
+                ClBlock::Event(event) => {
+                    record_event(&mut scene, toolpath, event, cursor.as_ref().map(|placed| placed.at), lathe_mode);
+                    if let Some(timeline) = timeline.as_mut() {
+                        timeline.on_event(event, scene.total_length);
+                    }
+                }
             }
         }
     }
@@ -339,6 +412,9 @@ pub fn build_scene(doc: &Document, arc_tol: f64) -> Scene {
     }
     if let Some(setup) = doc.program().turning() {
         scene.lathe = lathe_preview(setup, path_z.finish());
+    }
+    if let Some(timeline) = timeline {
+        scene.timeline = timeline.finish();
     }
     scene
 }
@@ -489,6 +565,91 @@ pub fn visible(scene: &Scene, position: f64) -> Vec<Stroke> {
         break;
     }
     out
+}
+
+/// Last timeline step whose start is at or before `position`.
+///
+/// A step at `position + 1e-9` still counts, so the step that begins on the queried sample is
+/// included. `None` when the scene has no timeline, or when every step starts later than
+/// `position`. A non-finite `position` returns `None`.
+pub fn timeline_at(scene: &Scene, position: f64) -> Option<&TimelineStep> {
+    if !position.is_finite() {
+        return None;
+    }
+    scene.timeline.iter().rev().find(|step| step.position <= position + LEN_EPS_MM)
+}
+
+/// One-line label for a timeline step.
+///
+/// Fields are separated by ` | `. Each lane is `clamped` or `unclamped`, then `stopped` or
+/// `{rpm} rpm` (`rpm reverse` when the spindle runs in reverse). Sync is `sync off`, `sync`, or
+/// `sync R{phase}` when the engage event named a phase. A recorded sub-housing move adds
+/// `sub Z{z}`, plus ` machine` when that move was in machine coordinates. The toolpath is
+/// `toolpath {index} on {spindle}`, or `toolpath {index}` when the toolpath has no binding.
+/// The index is the 0-based program index. Whole numbers drop the fraction.
+///
+/// ```text
+/// main: clamped, 600 rpm | sub: clamped, stopped | sync R90 | sub Z5 | toolpath 3 on main
+/// ```
+pub fn timeline_text(step: &TimelineStep) -> String {
+    let mut parts = Vec::with_capacity(5);
+    parts.push(lane_text("main", step.main));
+    parts.push(lane_text("sub", step.sub));
+    parts.push(sync_text(step));
+    if let Some(housing) = sub_z_text(step) {
+        parts.push(housing);
+    }
+    parts.push(toolpath_text(step));
+    parts.join(" | ")
+}
+
+fn lane_text(name: &str, lane: SpindleLane) -> String {
+    let chuck = if lane.clamped { "clamped" } else { "unclamped" };
+    if !(lane.rpm.is_finite() && lane.rpm > 0.0) {
+        return format!("{name}: {chuck}, stopped");
+    }
+    let speed = format_compact(lane.rpm);
+    if lane.reverse { format!("{name}: {chuck}, {speed} rpm reverse") } else { format!("{name}: {chuck}, {speed} rpm") }
+}
+
+fn sync_text(step: &TimelineStep) -> String {
+    if !step.sync {
+        return "sync off".to_string();
+    }
+    match step.phase_deg.filter(|phase| phase.is_finite()) {
+        Some(phase) => format!("sync R{}", format_compact(phase)),
+        None => "sync".to_string(),
+    }
+}
+
+fn sub_z_text(step: &TimelineStep) -> Option<String> {
+    let z = step.sub_z.filter(|value| value.is_finite())?;
+    let mut text = format!("sub Z{}", format_compact(z));
+    if step.sub_z_machine {
+        text.push_str(" machine");
+    }
+    Some(text)
+}
+
+fn toolpath_text(step: &TimelineStep) -> String {
+    if step.active.is_empty() { format!("toolpath {}", step.toolpath) } else { format!("toolpath {} on {}", step.toolpath, step.active) }
+}
+
+/// Whole numbers drop the fraction (`600`, `-20`). Other values keep up to four decimal places.
+fn format_compact(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let rounded = value.round();
+    if (value - rounded).abs() <= 1e-6 && rounded.abs() <= 1.0e9 {
+        let whole = if rounded == 0.0 { 0.0 } else { rounded };
+        return format!("{whole:.0}");
+    }
+    let mut text = format!("{value:.4}");
+    while text.contains('.') && (text.ends_with('0') || text.ends_with('.')) {
+        text.pop();
+    }
+    text
 }
 
 /// Plan position of the tool at `position` millimetres along the scene.
@@ -961,6 +1122,7 @@ fn empty_scene() -> Scene {
         names: Vec::new(),
         rotary: None,
         lathe: None,
+        timeline: Vec::new(),
     }
 }
 
@@ -1040,6 +1202,216 @@ fn record_event(scene: &mut Scene, toolpath: usize, event: &Event, cursor: Optio
         Event::ProcessOff { .. } | Event::Dwell { .. } => {}
         _ => {}
     }
+}
+
+/// Spindle named by one turning binding, and the rpm [`Event::ProcessOn`] should show.
+struct BoundLane {
+    spindle: String,
+    /// Direct rpm, or the maximum rpm of a constant-surface-speed binding. `None` means 1 rpm.
+    rpm: Option<f64>,
+}
+
+/// Walks a two-spindle program and keeps a step only when the state changes.
+struct TimelineAcc {
+    bounds: Vec<Option<BoundLane>>,
+    state: TimelineState,
+    steps: Vec<TimelineStep>,
+}
+
+/// Mutable spindle record. Copied into a [`TimelineStep`] when it changes.
+struct TimelineState {
+    toolpath: usize,
+    active: String,
+    main: SpindleLane,
+    sub: SpindleLane,
+    sync: bool,
+    phase_deg: Option<f64>,
+    sub_z: Option<f64>,
+    sub_z_machine: bool,
+}
+
+impl TimelineAcc {
+    /// `None` for a mill program and for a lathe whose setup has no spindle named `sub`.
+    fn maybe(doc: &Document) -> Option<Self> {
+        let turning = doc.program().turning()?;
+        turning.spindle("sub")?;
+        let bounds = binding_lanes(doc);
+        let mut acc = Self {
+            bounds,
+            state: TimelineState {
+                toolpath: 0,
+                active: String::new(),
+                main: SpindleLane::default(),
+                sub: SpindleLane::default(),
+                sync: false,
+                phase_deg: None,
+                sub_z: None,
+                sub_z_machine: false,
+            },
+            steps: Vec::new(),
+        };
+        acc.state.active = acc.spindle_name(0);
+        acc.push(0.0);
+        Some(acc)
+    }
+
+    fn finish(self) -> Vec<TimelineStep> {
+        self.steps
+    }
+
+    fn start_toolpath(&mut self, index: usize, position: f64) {
+        self.state.toolpath = index;
+        self.state.active = self.spindle_name(index);
+        self.push(position);
+    }
+
+    fn on_event(&mut self, event: &Event, position: f64) {
+        self.apply(event);
+        self.push(position);
+    }
+
+    fn spindle_name(&self, index: usize) -> String {
+        self.bounds.get(index).and_then(Option::as_ref).map(|bound| bound.spindle.clone()).unwrap_or_default()
+    }
+
+    /// Binding rpm when it names one. Otherwise 1, which means "running" without a programmed speed.
+    fn process_rpm(&self) -> f64 {
+        let Some(bound) = self.bounds.get(self.state.toolpath).and_then(Option::as_ref) else {
+            return 1.0;
+        };
+        match bound.rpm {
+            Some(rpm) if rpm.is_finite() && rpm > 0.0 => rpm,
+            _ => 1.0,
+        }
+    }
+
+    fn apply(&mut self, event: &Event) {
+        match event {
+            Event::ChuckClamp { spindle, clamp } => {
+                if let Some(lane) = lane_mut(&mut self.state, spindle) {
+                    lane.clamped = *clamp;
+                }
+            }
+            Event::SpindleSync { engage, phase_deg } => {
+                self.state.sync = *engage;
+                let phase = if *engage { *phase_deg } else { None };
+                self.state.phase_deg = phase.filter(|value| value.is_finite());
+            }
+            Event::SpindleRun { spindle, rpm, reverse } => {
+                if let Some(lane) = lane_mut(&mut self.state, spindle) {
+                    if rpm.is_finite() && *rpm > 0.0 {
+                        lane.rpm = *rpm;
+                        lane.reverse = *reverse;
+                    } else {
+                        lane.rpm = 0.0;
+                        lane.reverse = false;
+                    }
+                }
+            }
+            Event::SpindleMove { spindle, z, machine, .. } if spindle == "sub" && z.is_finite() => {
+                self.state.sub_z = Some(*z);
+                self.state.sub_z_machine = *machine;
+            }
+            Event::ProcessOn { .. } => {
+                let rpm = self.process_rpm();
+                if let Some(lane) = active_lane(&mut self.state) {
+                    lane.rpm = rpm;
+                }
+            }
+            Event::ProcessOff { .. } => {
+                if let Some(lane) = active_lane(&mut self.state) {
+                    lane.rpm = 0.0;
+                    lane.reverse = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn snapshot(&self, position: f64) -> TimelineStep {
+        TimelineStep {
+            position,
+            toolpath: self.state.toolpath,
+            active: self.state.active.clone(),
+            main: self.state.main,
+            sub: self.state.sub,
+            sync: self.state.sync,
+            phase_deg: self.state.phase_deg,
+            sub_z: self.state.sub_z,
+            sub_z_machine: self.state.sub_z_machine,
+        }
+    }
+
+    fn push(&mut self, position: f64) {
+        let position = if position.is_finite() && position > 0.0 { position } else { 0.0 };
+        let step = self.snapshot(position);
+        if self.steps.last().is_some_and(|prev| same_timeline(prev, &step)) {
+            return;
+        }
+        self.steps.push(step);
+    }
+}
+
+fn binding_lanes(doc: &Document) -> Vec<Option<BoundLane>> {
+    let Some(turning) = doc.program().turning() else {
+        return Vec::new();
+    };
+    let mut lanes = Vec::with_capacity(doc.program().toolpaths().len());
+    for (index, _) in doc.program().toolpaths().iter().enumerate() {
+        let lane = u32::try_from(index).ok().and_then(|index| turning.binding_for(index)).map(|binding| {
+            let rpm = match binding.speed() {
+                Some(SpindleSpeed::Rpm { rpm }) => Some(rpm),
+                Some(SpindleSpeed::Css { max_rpm, .. }) => Some(max_rpm),
+                None => None,
+            };
+            BoundLane { spindle: binding.spindle().to_string(), rpm }
+        });
+        lanes.push(lane);
+    }
+    lanes
+}
+
+fn lane_mut<'a>(state: &'a mut TimelineState, name: &str) -> Option<&'a mut SpindleLane> {
+    let which = match name {
+        "main" => LaneId::Main,
+        "sub" => LaneId::Sub,
+        _ => LaneId::Other,
+    };
+    match which {
+        LaneId::Main => Some(&mut state.main),
+        LaneId::Sub => Some(&mut state.sub),
+        LaneId::Other => None,
+    }
+}
+
+fn active_lane(state: &mut TimelineState) -> Option<&mut SpindleLane> {
+    let which = match state.active.as_str() {
+        "main" => LaneId::Main,
+        "sub" => LaneId::Sub,
+        _ => LaneId::Other,
+    };
+    match which {
+        LaneId::Main => Some(&mut state.main),
+        LaneId::Sub => Some(&mut state.sub),
+        LaneId::Other => None,
+    }
+}
+
+enum LaneId {
+    Main,
+    Sub,
+    Other,
+}
+
+fn same_timeline(left: &TimelineStep, right: &TimelineStep) -> bool {
+    left.toolpath == right.toolpath
+        && left.active == right.active
+        && left.main == right.main
+        && left.sub == right.sub
+        && left.sync == right.sync
+        && left.phase_deg == right.phase_deg
+        && left.sub_z == right.sub_z
+        && left.sub_z_machine == right.sub_z_machine
 }
 
 fn motion_pose(motion: &ClMotion) -> &campanion_ir::Pose {
@@ -1798,9 +2170,9 @@ fn span_quad(z0: f64, z1: f64, span: ProfileSpan) -> Option<Vec<[f64; 2]>> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::{
-        Label, Playback, Projection, RotarySample, RotarySpan, Stroke, StrokeKind, View, angle_color, angle_legend, build_scene, find_system_font,
-        format_angle_deg, height_color, load_scene, merge_labels, polyline_length_3d, project, projected_bounds, rotary_axis_endpoints,
-        rotary_overlay, rotary_span, stroke_kind, tessellate_arc, tool_position, visible,
+        Label, Playback, Projection, RotarySample, RotarySpan, SpindleLane, Stroke, StrokeKind, TimelineStep, View, angle_color, angle_legend,
+        build_scene, find_system_font, format_angle_deg, height_color, load_scene, merge_labels, polyline_length_3d, project, projected_bounds,
+        rotary_axis_endpoints, rotary_overlay, rotary_span, stroke_kind, tessellate_arc, timeline_at, timeline_text, tool_position, visible,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -1965,6 +2337,7 @@ mod tests {
             names: vec!["path".to_string()],
             rotary: None,
             lathe: None,
+            timeline: Vec::new(),
         }
     }
 
@@ -2015,6 +2388,7 @@ mod tests {
             names: Vec::new(),
             rotary: None,
             lathe: None,
+            timeline: Vec::new(),
         };
         let shown = visible(&bend, 15.0);
         assert_eq!(shown.len(), 1);
@@ -2045,6 +2419,7 @@ mod tests {
             names: Vec::new(),
             rotary: None,
             lathe: None,
+            timeline: Vec::new(),
         };
         let half = visible(&ramp, length * 0.5);
         assert_eq!(half.len(), 1);
@@ -2296,6 +2671,7 @@ mod tests {
             names: Vec::new(),
             rotary: None,
             lathe: None,
+            timeline: Vec::new(),
         };
         assert!(projected_bounds(&empty, Projection::Top).is_none());
         assert!(projected_bounds(&empty, Projection::Iso).is_none());
@@ -2708,5 +3084,159 @@ mod tests {
         let (min, max) = projected_bounds(&scene, Projection::Top).expect("bounds");
         assert!(min[0] <= -60.0 + 1e-6, "stock Z must be inside the fit, {min:?}");
         assert!(max[1] >= 25.0 - 1e-6, "stock radius must be inside the fit, {max:?}");
+        assert!(scene.timeline.is_empty(), "turn.ir.json has no sub spindle");
+    }
+
+    #[test]
+    fn timeline_text_lists_lanes_sync_housing_and_toolpath() {
+        let step = TimelineStep {
+            position: 12.0,
+            toolpath: 3,
+            active: "main".into(),
+            main: SpindleLane { clamped: true, rpm: 600.0, reverse: false },
+            sub: SpindleLane::default(),
+            sync: true,
+            phase_deg: Some(90.0),
+            sub_z: Some(5.0),
+            sub_z_machine: false,
+        };
+        assert_eq!(timeline_text(&step), "main: clamped, 600 rpm | sub: clamped, stopped | sync R90 | sub Z5 | toolpath 3 on main");
+
+        let parked = TimelineStep {
+            sub_z: Some(80.0),
+            sub_z_machine: true,
+            sub: SpindleLane { clamped: false, rpm: 250.0, reverse: true },
+            active: String::new(),
+            ..step
+        };
+        assert_eq!(timeline_text(&parked), "main: clamped, 600 rpm | sub: unclamped, 250 rpm reverse | sync R90 | sub Z80 machine | toolpath 3");
+    }
+
+    #[test]
+    fn two_spindle_timeline_follows_a_transfer_and_stays_empty_without_a_sub() {
+        use campanion_ir::{
+            ClBlock, ClMotion, ClPath, CompensationMode, Document, Event, Feeds, Head, HeadAxis, MoveRole, ProcessKind, ProcessParams, Program,
+            Spindle, SpindleSpeed, TurnBinding, TurnStock, TurningSetup,
+        };
+
+        let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
+        let path =
+            |name: &str, blocks| ClPath::try_new(Some(name.to_string()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let rapid = |x, z| ClBlock::Motion(ClMotion::Rapid { to: pose(x, 0.0, z), feed: None });
+        let cut = |x, z| ClBlock::Motion(ClMotion::Linear { to: pose(x, 0.0, z), feed: 80.0, role: MoveRole::Cut });
+        let on = ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() });
+        let off = ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle });
+        let clamp = |spindle: &str, closed| ClBlock::Event(Event::ChuckClamp { spindle: spindle.to_string(), clamp: closed });
+        let run = |spindle: &str, rpm, reverse| ClBlock::Event(Event::SpindleRun { spindle: spindle.to_string(), rpm, reverse });
+        let sync = |engage, phase_deg| ClBlock::Event(Event::SpindleSync { engage, phase_deg });
+        let housing = |z, machine| ClBlock::Event(Event::SpindleMove { spindle: "sub".into(), z, machine, feed: None });
+
+        // Main cut, a transfer of events, then a sub cut. Travel is along Z so lengths are the Z deltas:
+        // 5 mm before the main process starts, 40 mm of main cut, a 30 mm rapid, then 15 mm on the sub.
+        let main_cut = path("main_cut", vec![rapid(15.0, 5.0), cut(15.0, 0.0), on.clone(), cut(15.0, -40.0), off.clone()]);
+        let transfer = path(
+            "transfer",
+            vec![
+                clamp("sub", false),
+                run("main", 0.0, false),
+                run("sub", 250.0, true),
+                sync(true, Some(90.0)),
+                housing(-20.0, false),
+                clamp("sub", true),
+                sync(false, None),
+                run("sub", 0.0, false),
+                housing(80.0, true),
+            ],
+        );
+        let sub_cut = path("sub_cut", vec![rapid(15.0, -10.0), on, cut(15.0, -25.0), off]);
+
+        let bind = |index, spindle, rpm: Option<f64>| {
+            let binding = TurnBinding::try_new(index, spindle, "turret1", 0).expect("binding");
+            let speed = rpm.map(|rpm| SpindleSpeed::rpm(rpm).expect("rpm"));
+            binding.with_speed(speed).expect("speed")
+        };
+        let setup = TurningSetup::try_new(
+            vec![Spindle::try_new("main", None, 0.0, 3_000.0).expect("main"), Spindle::try_new("sub", None, 0.0, 2_500.0).expect("sub")],
+            vec![Head::try_new("turret1", vec![HeadAxis::X, HeadAxis::Z], 12, false).expect("head")],
+            Some(TurnStock::bar(30.0, 40.0).expect("bar")),
+            Vec::new(),
+            vec![bind(0, "main", Some(600.0)), bind(1, "main", None), bind(2, "sub", None)],
+        )
+        .expect("setup");
+        let program = Program::try_new(Some("transfer".into()), Vec::new(), None, vec![main_cut, transfer, sub_cut], Vec::new(), Vec::new(), None)
+            .expect("program")
+            .with_turning(Some(setup))
+            .expect("turning");
+        let scene = build_scene(&Document::new(program).expect("document"), 0.05);
+
+        assert!(scene.lathe.is_some());
+        assert_close(scene.total_length, 90.0);
+        let dump = scene.timeline.iter().map(|step| format!("{} {}", step.position, timeline_text(step))).collect::<Vec<_>>().join("\n");
+        assert_eq!(scene.timeline.len(), 15, "{dump}");
+        for pair in scene.timeline.windows(2) {
+            assert!(pair[1].position + 1e-9 >= pair[0].position, "positions must not go backwards:\n{dump}");
+        }
+
+        let start = timeline_at(&scene, 0.0).expect("start");
+        assert_eq!(start.position, 0.0);
+        assert_eq!(start.main.rpm, 0.0);
+        assert_eq!(start.toolpath, 0);
+        assert_eq!(start.active, "main");
+        assert!(start.main.clamped && start.sub.clamped);
+        assert!(!start.sync);
+        assert!(start.sub_z.is_none());
+
+        // The main process starts after the 5 mm approach, so the middle of that cut is still running.
+        let middle = timeline_at(&scene, 25.0).expect("middle");
+        assert_eq!(middle.toolpath, 0);
+        assert_close(middle.main.rpm, 600.0);
+        assert!(!middle.main.reverse);
+        assert_eq!(middle.sub.rpm, 0.0);
+
+        let synced = scene.timeline.iter().find(|step| step.sync && step.sub_z == Some(-20.0)).expect("approach under sync");
+        assert_eq!(synced.phase_deg, Some(90.0));
+        assert!(!synced.sub.clamped);
+        assert!(synced.sub.reverse);
+        assert_close(synced.sub.rpm, 250.0);
+        assert!(!synced.sub_z_machine);
+
+        let parked = scene.timeline.iter().rev().find(|step| step.toolpath == 1).expect("transfer");
+        assert!(parked.sub.clamped, "sub is clamped once the handoff finishes");
+        assert!(!parked.sync, "sync is off at the end of the transfer");
+        assert!(parked.phase_deg.is_none());
+        assert_eq!(parked.sub_z, Some(80.0));
+        assert!(parked.sub_z_machine);
+        assert_eq!(parked.sub.rpm, 0.0);
+        assert_eq!(parked.main.rpm, 0.0);
+
+        let end = timeline_at(&scene, scene.total_length).expect("end");
+        assert_eq!(end.toolpath, 2);
+        assert_eq!(end.active, "sub");
+        assert!(end.sub.clamped);
+        assert!(!end.sync);
+        assert_eq!(end.sub_z, Some(80.0));
+        assert_eq!(end.sub.rpm, 0.0);
+        assert_eq!(end.main.rpm, 0.0);
+        // The sub binding names no speed, so the cut runs at the 1 rpm sentinel.
+        let sub_cut_step = timeline_at(&scene, 80.0).expect("sub cut");
+        assert_close(sub_cut_step.sub.rpm, 1.0);
+        assert_eq!(sub_cut_step.active, "sub");
+
+        let mill_blocks = vec![rapid(0.0, 0.0), cut(10.0, 0.0)];
+        let mill_path = path("mill", mill_blocks);
+        let mill = Program::try_new(None, Vec::new(), None, vec![mill_path], Vec::new(), Vec::new(), None).expect("mill");
+        let mill = build_scene(&Document::new(mill).expect("document"), 0.05);
+        assert!(mill.lathe.is_none());
+        assert!(mill.timeline.is_empty(), "a mill program has no spindle timeline");
+
+        let main_only = TurningSetup::single(Some(TurnStock::bar(20.0, 30.0).expect("bar")), 3_000.0).expect("main only");
+        let main_path = path("only", vec![rapid(10.0, 1.0), cut(10.0, -10.0)]);
+        let main_only = Program::try_new(None, Vec::new(), None, vec![main_path], Vec::new(), Vec::new(), None)
+            .expect("program")
+            .with_turning(Some(main_only))
+            .expect("turning");
+        let main_only = build_scene(&Document::new(main_only).expect("document"), 0.05);
+        assert!(main_only.lathe.is_some());
+        assert!(main_only.timeline.is_empty(), "a lathe with no sub spindle has no timeline");
     }
 }

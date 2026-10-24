@@ -17,8 +17,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use campanion_view::{
-    LathePreview, Playback, Projection, RotaryPreview, Scene, Stroke, StrokeKind, View, angle_color, angle_legend, find_system_font, height_color,
-    load_scene, project, projected_bounds, tool_position, visible,
+    LathePreview, Playback, Projection, RotaryPreview, Scene, SpindleLane, Stroke, StrokeKind, TimelineStep, View, angle_color, angle_legend,
+    find_system_font, height_color, load_scene, project, projected_bounds, timeline_at, timeline_text, tool_position, visible,
 };
 use eframe::egui;
 
@@ -54,6 +54,18 @@ const PART_FILL: egui::Color32 = egui::Color32::from_rgb(70, 130, 180);
 const PART_OUTLINE: egui::Color32 = egui::Color32::from_rgb(186, 214, 232);
 /// Spindle centre line, drawn on top of the section.
 const LATHE_AXIS: egui::Color32 = egui::Color32::from_rgb(236, 236, 236);
+/// A spindle that is turning on the timeline strip.
+const LANE_RUNNING: egui::Color32 = egui::Color32::from_rgb(46, 160, 90);
+/// A spindle that is stopped on the timeline strip.
+const LANE_STOPPED: egui::Color32 = egui::Color32::from_rgb(110, 114, 122);
+/// Outline of a lane whose chuck is open.
+const LANE_OPEN: egui::Color32 = egui::Color32::from_rgb(210, 64, 64);
+/// Band drawn across both lanes while the spindles are synchronised.
+fn sync_band() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(90, 170, 255, 90)
+}
+/// Work-coordinate mark for the sub housing on the half-section.
+const SUB_TICK: egui::Color32 = egui::Color32::from_rgb(255, 196, 60);
 
 fn main() -> ExitCode {
     match try_main() {
@@ -400,6 +412,9 @@ impl ViewerApp {
                 }
                 ui.label(self.status_text());
             });
+            if !self.scene.timeline.is_empty() {
+                draw_timeline(ui, &self.scene, self.playback.position, self.has_font);
+            }
         });
     }
 
@@ -471,6 +486,7 @@ impl ViewerApp {
         draw_axes(painter, &self.view, rect, projection);
         if let Some(lathe) = &self.scene.lathe {
             draw_lathe(painter, &self.view, rect, lathe, self.has_font);
+            draw_sub_tick(painter, &self.view, rect, &self.scene, self.playback.position, self.has_font);
         } else if let Some(rotary) = &self.scene.rotary {
             draw_rotary_axis(painter, &self.view, rect, rotary, projection, self.has_font);
         }
@@ -704,6 +720,146 @@ fn draw_lathe(painter: &egui::Painter, view: &View, rect: egui::Rect, lathe: &La
         egui::FontId::proportional(14.0),
         LABEL_COLOR,
     );
+}
+
+/// Two lanes under the playback slider. X is playback position over [`Scene::total_length`].
+///
+/// Lane 1 is `main` and lane 2 is `sub`. A running spindle is green and a stopped spindle is grey.
+/// An open chuck is a red outline. Sync tints both lanes. The cursor sits on the playhead, and the
+/// line under the lanes is [`timeline_text`] for the step in force.
+fn draw_timeline(ui: &mut egui::Ui, scene: &Scene, position: f64, has_font: bool) {
+    const STRIP_H: f32 = 64.0;
+    const NAME_W: f32 = 48.0;
+    const LABEL_H: f32 = 18.0;
+    let width = ui.available_width().max(1.0);
+    let (response, painter) = ui.allocate_painter(egui::vec2(width, STRIP_H), egui::Sense::hover());
+    let rect = response.rect;
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(18, 20, 24));
+
+    let plot = egui::Rect::from_min_max(egui::pos2(rect.min.x + NAME_W, rect.min.y + 4.0), egui::pos2(rect.max.x - 8.0, rect.max.y - LABEL_H));
+    if plot.width() < 1.0 || plot.height() < 2.0 {
+        return;
+    }
+    let lane_h = plot.height() * 0.5;
+    let main_rect = egui::Rect::from_min_size(plot.min, egui::vec2(plot.width(), lane_h));
+    let sub_rect = egui::Rect::from_min_size(egui::pos2(plot.min.x, plot.min.y + lane_h), egui::vec2(plot.width(), lane_h));
+    let total = finite_total(scene.total_length);
+    let span = if total > LENGTH_EPS_MM { total } else { 1.0 };
+    draw_timeline_segments(&painter, plot, main_rect, sub_rect, &scene.timeline, span);
+
+    let head = if total > LENGTH_EPS_MM { finite_nonneg_pos(position).min(total) } else { 0.0 };
+    let cursor_x = timeline_x(plot, head, span);
+    painter.line_segment([egui::pos2(cursor_x, plot.min.y), egui::pos2(cursor_x, plot.max.y)], egui::Stroke::new(1.5, TOOL_COLOR));
+
+    if !has_font {
+        return;
+    }
+    let _ = painter.text(
+        egui::pos2(rect.min.x + 6.0, main_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "main",
+        egui::FontId::proportional(12.0),
+        LABEL_COLOR,
+    );
+    let _ = painter.text(
+        egui::pos2(rect.min.x + 6.0, sub_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "sub",
+        egui::FontId::proportional(12.0),
+        LABEL_COLOR,
+    );
+    if let Some(step) = timeline_at(scene, position) {
+        let _ = painter.text(
+            egui::pos2(rect.min.x + 8.0, rect.max.y - 2.0),
+            egui::Align2::LEFT_BOTTOM,
+            timeline_text(step),
+            egui::FontId::proportional(12.0),
+            LABEL_COLOR,
+        );
+    }
+}
+
+fn draw_timeline_segments(painter: &egui::Painter, plot: egui::Rect, main_rect: egui::Rect, sub_rect: egui::Rect, steps: &[TimelineStep], span: f64) {
+    for (index, step) in steps.iter().enumerate() {
+        let start = step.position.max(0.0);
+        let end = match steps.get(index + 1) {
+            Some(next) => next.position.max(0.0),
+            None => span,
+        };
+        if end <= start + LENGTH_EPS_MM {
+            continue;
+        }
+        let x0 = timeline_x(plot, start, span);
+        let x1 = timeline_x(plot, end, span);
+        if x1 <= x0 {
+            continue;
+        }
+        paint_lane(painter, main_rect, x0, x1, step.main);
+        paint_lane(painter, sub_rect, x0, x1, step.sub);
+        if step.sync {
+            let band = egui::Rect::from_min_max(egui::pos2(x0, main_rect.min.y), egui::pos2(x1, sub_rect.max.y));
+            painter.rect_filled(band, 0.0, sync_band());
+        }
+        if !step.main.clamped {
+            stroke_rect(painter, lane_segment(main_rect, x0, x1), egui::Stroke::new(1.5, LANE_OPEN));
+        }
+        if !step.sub.clamped {
+            stroke_rect(painter, lane_segment(sub_rect, x0, x1), egui::Stroke::new(1.5, LANE_OPEN));
+        }
+    }
+}
+
+fn paint_lane(painter: &egui::Painter, lane_rect: egui::Rect, x0: f32, x1: f32, lane: SpindleLane) {
+    let fill = if lane.rpm.is_finite() && lane.rpm > 0.0 { LANE_RUNNING } else { LANE_STOPPED };
+    painter.rect_filled(lane_segment(lane_rect, x0, x1), 0.0, fill);
+}
+
+fn lane_segment(lane_rect: egui::Rect, x0: f32, x1: f32) -> egui::Rect {
+    let inset = 1.0;
+    egui::Rect::from_min_max(egui::pos2(x0, lane_rect.min.y + inset), egui::pos2(x1, lane_rect.max.y - inset))
+}
+
+fn stroke_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let top_left = rect.min;
+    let bottom_right = rect.max;
+    let top_right = egui::pos2(bottom_right.x, top_left.y);
+    let bottom_left = egui::pos2(top_left.x, bottom_right.y);
+    painter.line_segment([top_left, top_right], stroke);
+    painter.line_segment([top_right, bottom_right], stroke);
+    painter.line_segment([bottom_right, bottom_left], stroke);
+    painter.line_segment([bottom_left, top_left], stroke);
+}
+
+fn timeline_x(plot: egui::Rect, position: f64, span: f64) -> f32 {
+    let span = if span.is_finite() && span > LENGTH_EPS_MM { span } else { 1.0 };
+    let t = if position.is_finite() { (position / span).clamp(0.0, 1.0) } else { 0.0 };
+    plot.min.x + plot.width() * t as f32
+}
+
+fn finite_nonneg_pos(position: f64) -> f64 {
+    if position.is_finite() && position > 0.0 { position } else { 0.0 }
+}
+
+/// Short vertical mark at a work-coordinate sub-housing Z. Machine moves are not on this section.
+fn draw_sub_tick(painter: &egui::Painter, view: &View, rect: egui::Rect, scene: &Scene, position: f64, has_font: bool) {
+    let Some(step) = timeline_at(scene, position) else {
+        return;
+    };
+    let Some(z) = step.sub_z else {
+        return;
+    };
+    if step.sub_z_machine || !z.is_finite() {
+        return;
+    }
+    let Some(origin) = to_screen_pos(view, rect, [z, 0.0], 0.0, Projection::Top) else {
+        return;
+    };
+    let top = origin + egui::vec2(0.0, -16.0);
+    painter.line_segment([origin, top], egui::Stroke::new(2.0, SUB_TICK));
+    if !has_font {
+        return;
+    }
+    let _ = painter.text(top + egui::vec2(4.0, 0.0), egui::Align2::LEFT_BOTTOM, "sub", egui::FontId::proportional(12.0), SUB_TICK);
 }
 
 fn fill_lathe_polygon(painter: &egui::Painter, view: &View, rect: egui::Rect, polygon: &[[f64; 2]], fill: egui::Color32) {
@@ -1106,6 +1262,7 @@ mod tests {
             names,
             rotary,
             lathe: None,
+            timeline: Vec::new(),
         }
     }
 
