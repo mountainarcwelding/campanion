@@ -30,12 +30,11 @@
     },
     {
       "name": "side",
-      "type": "profile",
+      "type": "drill",
       "layers": ["INNER"],
-      "side": "on",
       "tool_id": 1,
-      "depth": 1.0,
-      "step_down": 1.0,
+      "depth": 3.0,
+      "step_down": 3.0,
       "plane": { "origin": [0, -20, -5], "normal": [0, -1, 0] },
       "feeds": { "cut": 1000.0, "plunge": 300.0 }
     }
