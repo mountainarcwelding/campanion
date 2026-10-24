@@ -135,10 +135,12 @@ fn builtins_load_and_match_ids() {
         builtin_ids(),
         &[
             "linuxcnc",
+            "linuxcnc_5ax",
             "grbl",
             "mach3",
             "fanuc",
             "haas",
+            "haas_umc",
             "plasma",
             "grbl_laser",
             "linuxcnc_lathe",
@@ -187,10 +189,10 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("fanuc").expect("fanuc").max_line_length(), Some(80));
     assert_eq!(builtin("haas").expect("haas").linear_decimals(), 3);
     assert_eq!(builtin("haas").expect("haas").max_line_length(), Some(80));
-    for id in ["fanuc", "haas", "fanuc_lathe", "haas_lathe", "generic_lathe_2ch"] {
+    for id in ["fanuc", "haas", "haas_umc", "fanuc_lathe", "haas_lathe", "generic_lathe_2ch"] {
         assert!(builtin(id).expect(id).decimal_point, "{id}");
     }
-    for id in ["linuxcnc", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"] {
+    for id in ["linuxcnc", "linuxcnc_5ax", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"] {
         assert!(!builtin(id).expect(id).decimal_point, "{id}");
     }
     assert!(builtin("centroid").is_none());

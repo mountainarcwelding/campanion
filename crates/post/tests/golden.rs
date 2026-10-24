@@ -31,7 +31,7 @@ fn posts_for(program: &Program, rotary_only: bool) -> Result<Vec<&'static str>, 
     let mut ids = Vec::new();
     for id in builtin_ids() {
         let post = builtin(id).ok_or_else(|| format!("missing {id}"))?;
-        if post.is_lathe() {
+        if post.is_lathe() || post.has_five_axis() {
             continue;
         }
         let include = if rotary_only {

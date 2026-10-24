@@ -167,3 +167,37 @@ fn tilted_job_maps_axes_and_retracts_between_frames() -> Result<(), String> {
     }
     Ok(())
 }
+
+fn assert_golden(name: &str, actual: &str) -> Result<(), String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden").join(name);
+    if std::env::var("UPDATE_GOLDEN").ok().as_deref() == Some("1") {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        std::fs::write(&path, actual).map_err(|err| format!("write {}: {err}", path.display()))?;
+        return Ok(());
+    }
+    let expected = std::fs::read_to_string(&path).map_err(|err| format!("read {}: {err} (set UPDATE_GOLDEN=1 to create)", path.display()))?;
+    if actual != expected {
+        return Err(format!("golden mismatch for {} (set UPDATE_GOLDEN=1 to regenerate)", path.display()));
+    }
+    Ok(())
+}
+
+#[test]
+fn tilted_job_posts_haas_umc_and_linuxcnc_5ax() -> Result<(), String> {
+    let root = workspace_root()?;
+    for (post, golden) in [("haas_umc", "tilted.haas_umc.nc"), ("linuxcnc_5ax", "tilted.linuxcnc_5ax.nc")] {
+        let ngc = temp_path(&format!("campanion-tilted-{post}.nc"));
+        let arg = path_arg(&ngc)?;
+        let output = campanion(&root, &["run", "examples/tilted.job.json", "-o", &arg, "--post", post])?;
+        let stderr = output_text(&output.stderr)?;
+        let stdout = output_text(&output.stdout)?;
+        if output.status.code() != Some(0) {
+            return Err(format!("{post} exit {:?} stdout {stdout} stderr {stderr}", output.status.code()));
+        }
+        let text = std::fs::read_to_string(&ngc).map_err(|err| format!("read {post}: {err}"))?;
+        assert_golden(golden, &text)?;
+    }
+    Ok(())
+}

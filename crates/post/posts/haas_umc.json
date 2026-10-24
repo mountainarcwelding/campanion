@@ -1,0 +1,55 @@
+{
+  "id": "haas_umc",
+  "name": "Haas UMC",
+  "description": "Millimetre Haas mill dialect for indexed 3+2. Percent-delimited program O00001, sequence numbers, incremental IJK arcs and helices, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. G254 is the dynamic work offset and G255 cancels it. The kinematics file must match the machine. This output has not been proven on a machine.",
+  "references": [
+    "G254/G255: B and C positioning only; invoke after rotary motion; X and Y in one block then Z; cancel with G255 before any rotary motion; G53 not affected. https://www.haascnc.com/service/codes-settings.type=gcode.machine=mill.value=G254.html",
+    "G53 machine-coordinate move, not affected by G254: https://www.haascnc.com/service/codes-settings.type=gcode.machine=mill.value=G53.html"
+  ],
+  "program_number": "00001",
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 3, "feed": 3, "dwell": 3 },
+  "trailing_zeros": false,
+  "decimal_point": true,
+  "header": [
+    "%",
+    "O{program_number}",
+    "({program_name})",
+    "G21 G90 G17 G40 G49 G80"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "ms" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6", "G43 H{tool}"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M30", "%"],
+  "max_line_length": 80,
+  "axis_letters": "XYZ",
+  "rotary": {
+    "axes": ["a"],
+    "decimals": 3,
+    "feed_mode": "inverse_time",
+    "inverse_time_on": "G93",
+    "inverse_time_off": "G94"
+  },
+  "five_axis": {
+    "mode": "work",
+    "decimals": 3,
+    "retract": ["G53 G00 Z0."],
+    "index": ["G00 {rotaries}"],
+    "on": ["G254"],
+    "off": ["G255"]
+  }
+}

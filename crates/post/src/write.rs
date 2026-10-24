@@ -17,11 +17,11 @@
 //! to `lathe.feed_mode` (`G94` when that word is empty).
 
 use campanion_ir::{
-    ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, LiveDirection, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind,
-    RotarySetup, SpindleSpeed, TurningSetup, Vec3, part_to_machine,
+    Carrier, Choice, ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, FiveAxisSetup, LiveDirection, Plane, Pose, ProcessKind,
+    ProcessParams, Program, RotaryAxisKind, RotarySetup, SpindleSpeed, ToolPose, TurningSetup, Vec3, part_to_machine,
 };
 
-use crate::def::{ArcMode, PostDef, ProcessWords, RotaryFeedMode};
+use crate::def::{ArcMode, FiveAxisMode, PostDef, ProcessWords, RotaryFeedMode};
 use crate::error::{Result, invalid, unsupported};
 use crate::fmt::{format_dim, format_fixed, xy_text_eq};
 use crate::geom::{self, Xyz};
@@ -51,7 +51,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     check_rotary_program(program, post)?;
     check_tilted_plane(program, post)?;
     let sections = crate::balance::channel_sections(program, post)?;
-    let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning());
+    let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning(), program.five_axis());
     let name = sanitize(program.name().unwrap_or(""));
     let number = post.program_number.clone().unwrap_or_default();
     let header_vars = [("program_name", name.as_str()), ("program_number", number.as_str()), ("date-free!", "")];
@@ -82,6 +82,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     writer.finish_mill_turn()?;
     writer.deselect_sub_at_end()?;
     writer.lathe_home()?;
+    writer.finish_five_axis()?;
     writer.templates("program_end", &post.program_end, &header_vars)?;
     Ok(writer.out)
 }
@@ -209,10 +210,30 @@ struct Writer<'a> {
     multi_channel: bool,
     /// Current B-head angle, degrees. Starts at 0 and resets with each channel.
     b_deg: f64,
+    /// Five-axis kinematics, when the program has them and this post writes 3+2.
+    five: Option<&'a FiveAxisSetup>,
+    /// Rotary angles last indexed, degrees, in kinematics order. Starts at `[0, 0]`.
+    rotary_angles: [f64; 2],
+    /// Part-frame tool axis last indexed. Starts at +Z.
+    tool_axis: Vec3,
+    /// Tool axis locked for the toolpath in progress.
+    path_axis: Vec3,
+    /// True after `five_axis.on` (possibly empty) until `five_axis.off`.
+    frame_active: bool,
+    /// The next motion is the first one after an index: rapid X Y, then rapid Z.
+    split_next: bool,
+    /// True after the first motion of a five-axis program has been indexed.
+    five_started: bool,
 }
 
 impl<'a> Writer<'a> {
-    fn new(post: &'a PostDef, options: &'a PostOptions, setup: Option<RotarySetup>, turning: Option<&'a TurningSetup>) -> Self {
+    fn new(
+        post: &'a PostDef,
+        options: &'a PostOptions,
+        setup: Option<RotarySetup>,
+        turning: Option<&'a TurningSetup>,
+        five: Option<&'a FiveAxisSetup>,
+    ) -> Self {
         let plane = if post.planes { header_plane(&post.header) } else { header_plane(&post.header).or(Some(Plane::Xy)) };
         let inverse_time = header_inverse(post);
         Self {
@@ -251,6 +272,13 @@ impl<'a> Writer<'a> {
             channel_inverse: inverse_time,
             multi_channel: false,
             b_deg: 0.0,
+            five: if post.five_axis.is_some() { five } else { None },
+            rotary_angles: [0.0, 0.0],
+            tool_axis: Vec3::Z,
+            path_axis: Vec3::Z,
+            frame_active: false,
+            split_next: false,
+            five_started: false,
         }
     }
 
@@ -364,16 +392,124 @@ impl<'a> Writer<'a> {
         if let Some(name) = path.name() {
             self.comment(&format!("toolpath {}", sanitize(name)))?;
         }
+        let mut first_motion = true;
         for block in path.blocks() {
             match block {
-                ClBlock::Motion(motion) => self.motion(motion)?,
+                ClBlock::Motion(motion) => {
+                    if self.five.is_some() {
+                        self.prepare_indexed(index, motion, first_motion)?;
+                    }
+                    first_motion = false;
+                    self.motion(motion)?;
+                }
                 ClBlock::Event(event) => self.event(event)?,
             }
         }
         Ok(())
     }
 
+    /// Index when this is the first five-axis toolpath or the tool axis changed.
+    ///
+    /// Every later pose in the toolpath must keep that axis. 3+2 positions the rotaries, then cuts.
+    fn prepare_indexed(&mut self, index: u32, motion: &ClMotion, first: bool) -> Result<()> {
+        let pose = motion_pose(motion);
+        if first {
+            if !self.five_started || axis_apart(pose.axis(), self.tool_axis) {
+                self.index_to(Some(pose), true)?;
+            }
+            self.five_started = true;
+            self.path_axis = pose.axis();
+        } else if axis_apart(pose.axis(), self.path_axis) {
+            return Err(invalid(format!("toolpath {index} changes tool axis inside a 3+2 move")));
+        }
+        Ok(())
+    }
+
+    /// `off` (when a frame is active), `retract`, `index`, then `on` when `approach` is set.
+    ///
+    /// `pose` is the part-frame tip and axis to solve. `None` indexes every rotary back to 0.
+    fn index_to(&mut self, pose: Option<Pose>, approach: bool) -> Result<()> {
+        let spec = self.post.five_axis.clone().ok_or_else(|| invalid("five axis output is missing"))?;
+        if self.frame_active {
+            self.templates("five_axis.off", &spec.off, &[("date-free!", "")])?;
+        }
+        self.templates("five_axis.retract", &spec.retract, &[("date-free!", "")])?;
+        let angles = if let Some(pose) = pose {
+            let setup = self.five.ok_or_else(|| invalid("program has tilted tool axes but no kinematics"))?;
+            let tool = ToolPose { tip: pose.tip(), axis: pose.axis() };
+            let joints = setup.kinematics.choose(&tool, 0.0, setup.policy.choice(self.rotary_angles)).map_err(|err| invalid(err.to_string()))?;
+            self.tool_axis = pose.axis();
+            joints.angles
+        } else {
+            self.tool_axis = Vec3::Z;
+            [0.0, 0.0]
+        };
+        self.rotary_angles = angles;
+        let words = self.rotary_words(angles)?;
+        self.templates("five_axis.index", &spec.index, &[("rotaries", words.as_str()), ("date-free!", "")])?;
+        if approach {
+            self.templates("five_axis.on", &spec.on, &[("date-free!", "")])?;
+        }
+        self.frame_active = approach;
+        self.split_next = approach;
+        Ok(())
+    }
+
+    /// Cancel an active frame, retract, and index the rotaries to zero before program end.
+    fn finish_five_axis(&mut self) -> Result<()> {
+        if !self.frame_active {
+            return Ok(());
+        }
+        self.index_to(None, false)
+    }
+
+    /// `{rotaries}` in kinematics order, for example `B30. C45.`.
+    fn rotary_words(&self, angles: [f64; 2]) -> Result<String> {
+        let setup = self.five.ok_or_else(|| invalid("program has tilted tool axes but no kinematics"))?;
+        let spec = self.post.five_axis.as_ref().ok_or_else(|| invalid("five axis output is missing"))?;
+        let mut words = Vec::new();
+        for (index, joint) in setup.kinematics.rotaries.iter().enumerate() {
+            let angle = angle_at(angles, index);
+            let text = self.format_axis(angle, spec.decimals)?;
+            words.push(format!("{}{text}", joint.letter));
+        }
+        Ok(words.join(" "))
+    }
+
+    /// Written XYZ while a 3+2 frame is active.
+    ///
+    /// Work mode is `R_table(angles) * tip` about the origin, pivots ignored. Machine mode is the
+    /// gauge point from [`Kinematics::choose`](campanion_ir::Kinematics::choose) at tool length 0.
+    fn frame_xyz(&self, tip: Vec3) -> Result<Xyz> {
+        let spec = self.post.five_axis.as_ref().ok_or_else(|| invalid("five axis output is missing"))?;
+        let setup = self.five.ok_or_else(|| invalid("program has tilted tool axes but no kinematics"))?;
+        match spec.mode {
+            FiveAxisMode::Work => {
+                let point = table_about_origin(&setup.kinematics, self.rotary_angles, tip);
+                Ok([point.x(), point.y(), point.z()])
+            }
+            FiveAxisMode::Machine => {
+                let tool = ToolPose { tip, axis: self.tool_axis };
+                let joints = setup.kinematics.choose(&tool, 0.0, Choice::Nearest(self.rotary_angles)).map_err(|err| invalid(err.to_string()))?;
+                Ok([joints.xyz.x(), joints.xyz.y(), joints.xyz.z()])
+            }
+        }
+    }
+
+    /// Image of a part-frame offset under the active frame's linear map.
+    fn frame_offset(&self, origin: Vec3, offset: Vec3) -> Result<Vec3> {
+        let base = vec3_of(self.frame_xyz(origin)?)?;
+        let shifted = Vec3::new(origin.x() + offset.x(), origin.y() + offset.y(), origin.z() + offset.z()).map_err(|err| invalid(err.to_string()))?;
+        let image = vec3_of(self.frame_xyz(shifted)?)?;
+        Vec3::new(image.x() - base.x(), image.y() - base.y(), image.z() - base.z()).map_err(|err| invalid(err.to_string()))
+    }
+
     fn motion(&mut self, motion: &ClMotion) -> Result<()> {
+        if self.split_next {
+            self.split_next = false;
+            let posted = self.posted_end(motion_pose(motion))?;
+            return self.rapid_xy_then_z(posted);
+        }
         if !matches!(self.cart, CartMode::Off) && matches!(motion, ClMotion::Thread { .. }) {
             return Err(invalid("thread move during interpolation"));
         }
@@ -441,6 +577,10 @@ impl<'a> Writer<'a> {
 
     fn posted_end(&self, to: Pose) -> Result<Posted> {
         let part = tip(to);
+        if self.frame_active {
+            let xyz = self.frame_xyz(vec3_of(part)?)?;
+            return Ok(Posted { xyz, part, angle: None, c: None, axis: to.axis() });
+        }
         if self.turning.is_some() {
             if !matches!(self.cart, CartMode::Off) {
                 self.reject_interp_rotary(to)?;
@@ -479,6 +619,9 @@ impl<'a> Writer<'a> {
     /// can emit that arc. Any other rotary arc is chorded at [`PostOptions::arc_tolerance`]
     /// before the points are mapped with [`part_to_machine`].
     fn arc(&mut self, to: Pose, plane: Plane, center: Xyz, sense: campanion_ir::ArcSense, sweep: Option<f64>, feed: f64) -> Result<()> {
+        if self.frame_active {
+            return self.framed_arc(to, plane, center, sense, sweep, feed);
+        }
         if self.turning.is_some() {
             if matches!(self.cart, CartMode::Off) {
                 self.prepare_lathe_motion(tip(to), to.rotary(), to.axis(), LatheKind::Arc(plane))?;
@@ -544,6 +687,90 @@ impl<'a> Writer<'a> {
             }
         }
         self.linearise_rotary(part_start, part_end, center, plane, sense, sweep, start_angle, end_angle, feed)
+    }
+
+    /// Arc mapped into the active 3+2 frame. A cardinal image stays an arc.
+    fn framed_arc(&mut self, to: Pose, plane: Plane, center: Xyz, sense: campanion_ir::ArcSense, sweep: Option<f64>, feed: f64) -> Result<()> {
+        let part_start = self.part_tip.ok_or_else(|| invalid("arc needs a prior position"))?;
+        let part_end = tip(to);
+        let helical = sweep.is_some();
+        let sweep = if let Some(sweep) = sweep {
+            geom::same_radius(part_start, part_end, center, plane, 0.0)?;
+            if !(sweep.is_finite() && sweep > 0.0) {
+                return Err(invalid("helix sweep must be positive"));
+            }
+            if sweep > std::f64::consts::TAU * 10_000.0 {
+                return Err(invalid("helix has more than 10000 turns"));
+            }
+            sweep
+        } else {
+            geom::arc_sweep(part_start, part_end, center, plane, sense, 0.0)?
+        };
+        let normal = self.frame_offset(vec3_of(center)?, rotary::plane_normal(plane))?;
+        let Some(normal) = unit_direction(normal) else {
+            return Err(invalid("arc plane normal is zero"));
+        };
+        if let Some((mach_plane, flipped)) = rotary::principal_plane(normal) {
+            let sense = if flipped { rotary::flip_sense(sense) } else { sense };
+            let end = self.frame_xyz(vec3_of(part_end)?)?;
+            let center_m = self.frame_xyz(vec3_of(center)?)?;
+            let start_m = self.exact.ok_or_else(|| invalid("arc needs a prior position"))?;
+            let (_, _, start_axial) = geom::plane_uv(mach_plane, start_m);
+            let (_, _, end_axial) = geom::plane_uv(mach_plane, end);
+            let moves_axial = helical || (end_axial - start_axial).abs() > 1e-9;
+            if self.can_emit_arc(mach_plane, moves_axial) {
+                self.circular(sense, mach_plane, end, center_m, sweep, feed, helical, None)?;
+                self.part_tip = Some(part_end);
+                return Ok(());
+            }
+        } else if !(self.options.arc_tolerance.is_finite() && self.options.arc_tolerance > 0.0) {
+            return Err(invalid("arc is not in a cardinal plane after the 3+2 rotation"));
+        }
+        self.linearise_framed(part_start, part_end, center, plane, sense, sweep, feed)
+    }
+
+    fn linearise_framed(
+        &mut self,
+        start: Xyz,
+        end: Xyz,
+        center: Xyz,
+        plane: Plane,
+        sense: campanion_ir::ArcSense,
+        sweep: f64,
+        feed: f64,
+    ) -> Result<()> {
+        let radius = geom::in_plane_len(plane, start, center);
+        let segments = geom::chord_segments(sweep, radius, self.options.arc_tolerance)?;
+        let axis = self.tool_axis;
+        for index in 1..=segments {
+            let t = if index == segments { 1.0 } else { f64::from(index) / f64::from(segments) };
+            let part = geom::point_at(start, end, center, plane, sense, sweep, t, true);
+            let xyz = self.frame_xyz(vec3_of(part)?)?;
+            self.linear_move("G1", Posted { xyz, part, angle: None, c: None, axis }, Some(feed))?;
+        }
+        Ok(())
+    }
+
+    /// First move after an index. Haas G254 wants X and Y in one block and Z in the next.
+    fn rapid_xy_then_z(&mut self, posted: Posted) -> Result<()> {
+        let letters: Vec<char> = self.post.axis_letters.chars().collect();
+        let (Some(&lx), Some(&ly), Some(&lz)) = (letters.first(), letters.get(1), letters.get(2)) else {
+            return Err(invalid("axis letters are missing"));
+        };
+        let rounded = self.round_xyz(posted.xyz)?;
+        let x = self.format_axis(rounded[0], self.post.decimals.linear)?;
+        let y = self.format_axis(rounded[1], self.post.decimals.linear)?;
+        let z = self.format_axis(rounded[2], self.post.decimals.linear)?;
+        self.emit_words(&["G0".to_string(), format!("{lx}{x}"), format!("{ly}{y}")])?;
+        self.linear = Some("G0");
+        self.emit_words(&["G0".to_string(), format!("{lz}{z}")])?;
+        self.linear = Some("G0");
+        self.pos = Some(rounded);
+        self.exact = Some(posted.xyz);
+        self.part_tip = Some(posted.part);
+        self.angle = None;
+        self.force_axes = false;
+        Ok(())
     }
 
     fn can_emit_arc(&self, plane: Plane, helical: bool) -> bool {
@@ -2474,13 +2701,26 @@ fn motion_pose(motion: &ClMotion) -> Pose {
     }
 }
 
-/// A tilted mill axis has no rotary angle and no turning setup. Posts still write part +Z only.
+/// A tilted mill axis needs `five_axis` on the post and kinematics on the program.
 fn check_tilted_plane(program: &Program, post: &PostDef) -> Result<()> {
     if program.turning().is_some() || program.rotary().is_some() {
         return Ok(());
     }
-    if tool_axis_tilted(program) {
-        return Err(unsupported(format!("post `{}` has no tilted-plane output", post.id())));
+    let tilted = tool_axis_tilted(program);
+    let Some(spec) = &post.five_axis else {
+        if tilted {
+            return Err(unsupported(format!("post `{}` has no tilted-plane output", post.id())));
+        }
+        return Ok(());
+    };
+    let Some(setup) = program.five_axis() else {
+        if tilted {
+            return Err(invalid("program has tilted tool axes but no kinematics"));
+        }
+        return Ok(());
+    };
+    if spec.mode == FiveAxisMode::Work && setup.kinematics.rotaries.iter().any(|joint| joint.carrier == Carrier::Head) {
+        return Err(unsupported(format!("post `{}` work mode needs table rotaries only", post.id())));
     }
     Ok(())
 }
@@ -2493,11 +2733,65 @@ fn block_axis_tilted(block: &ClBlock) -> bool {
     let ClBlock::Motion(motion) = block else {
         return false;
     };
-    let axis = motion_pose(motion).axis();
-    let dx = axis.x();
-    let dy = axis.y();
-    let dz = axis.z() - 1.0;
+    axis_apart(motion_pose(motion).axis(), Vec3::Z)
+}
+
+fn axis_apart(a: Vec3, b: Vec3) -> bool {
+    let dx = a.x() - b.x();
+    let dy = a.y() - b.y();
+    let dz = a.z() - b.z();
     dx * dx + dy * dy + dz * dz > 1e-18
+}
+
+fn angle_at(angles: [f64; 2], index: usize) -> f64 {
+    match index {
+        0 => angles[0],
+        1 => angles[1],
+        _ => 0.0,
+    }
+}
+
+fn vec3_of(point: Xyz) -> Result<Vec3> {
+    Vec3::new(point[0], point[1], point[2]).map_err(|err| invalid(err.to_string()))
+}
+
+/// Table rotations about the origin, outer joint last. Pivots are ignored.
+fn table_about_origin(kinematics: &campanion_ir::Kinematics, angles: [f64; 2], mut point: Vec3) -> Vec3 {
+    let mut table = Vec::new();
+    for (index, joint) in kinematics.rotaries.iter().enumerate() {
+        if joint.carrier == Carrier::Table {
+            table.push((index, joint.axis));
+        }
+    }
+    for (index, axis) in table.into_iter().rev() {
+        point = rotate_about_origin(axis, point, angle_at(angles, index));
+    }
+    point
+}
+
+/// Right-handed rotation of `point` about a unit `axis` through the origin.
+fn rotate_about_origin(axis: Vec3, point: Vec3, angle_deg: f64) -> Vec3 {
+    let Some(axis) = unit_direction(axis) else {
+        return point;
+    };
+    let theta = angle_deg.to_radians();
+    let (sin, cos) = theta.sin_cos();
+    let along = axis.x() * point.x() + axis.y() * point.y() + axis.z() * point.z();
+    let cx = axis.y() * point.z() - axis.z() * point.y();
+    let cy = axis.z() * point.x() - axis.x() * point.z();
+    let cz = axis.x() * point.y() - axis.y() * point.x();
+    let x = point.x() * cos + cx * sin + axis.x() * along * (1.0 - cos);
+    let y = point.y() * cos + cy * sin + axis.y() * along * (1.0 - cos);
+    let z = point.z() * cos + cz * sin + axis.z() * along * (1.0 - cos);
+    Vec3::new(x, y, z).unwrap_or(point)
+}
+
+fn unit_direction(v: Vec3) -> Option<Vec3> {
+    let len = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    if !len.is_finite() || len < 1e-12 {
+        return None;
+    }
+    Vec3::new(v.x() / len, v.y() / len, v.z() / len).ok()
 }
 
 fn check_rotary_program(program: &Program, post: &PostDef) -> Result<()> {

@@ -36,10 +36,12 @@ pub use def::{ChannelsOutput, PostDef, load_post};
 pub use error::{PostError, Result};
 
 const LINUXCNC_JSON: &str = include_str!("../posts/linuxcnc.json");
+const LINUXCNC_5AX_JSON: &str = include_str!("../posts/linuxcnc_5ax.json");
 const GRBL_JSON: &str = include_str!("../posts/grbl.json");
 const MACH3_JSON: &str = include_str!("../posts/mach3.json");
 const FANUC_JSON: &str = include_str!("../posts/fanuc.json");
 const HAAS_JSON: &str = include_str!("../posts/haas.json");
+const HAAS_UMC_JSON: &str = include_str!("../posts/haas_umc.json");
 const PLASMA_JSON: &str = include_str!("../posts/plasma.json");
 const GRBL_LASER_JSON: &str = include_str!("../posts/grbl_laser.json");
 const LINUXCNC_LATHE_JSON: &str = include_str!("../posts/linuxcnc_lathe.json");
@@ -52,10 +54,12 @@ const GENERIC_LATHE_2CH_JSON: &str = include_str!("../posts/generic_lathe_2ch.js
 pub fn builtin_ids() -> &'static [&'static str] {
     &[
         "linuxcnc",
+        "linuxcnc_5ax",
         "grbl",
         "mach3",
         "fanuc",
         "haas",
+        "haas_umc",
         "plasma",
         "grbl_laser",
         "linuxcnc_lathe",
@@ -70,10 +74,12 @@ pub fn builtin_ids() -> &'static [&'static str] {
 pub fn builtin(id: &str) -> Option<PostDef> {
     let json = match id {
         "linuxcnc" => LINUXCNC_JSON,
+        "linuxcnc_5ax" => LINUXCNC_5AX_JSON,
         "grbl" => GRBL_JSON,
         "mach3" => MACH3_JSON,
         "fanuc" => FANUC_JSON,
         "haas" => HAAS_JSON,
+        "haas_umc" => HAAS_UMC_JSON,
         "plasma" => PLASMA_JSON,
         "grbl_laser" => GRBL_LASER_JSON,
         "linuxcnc_lathe" => LINUXCNC_LATHE_JSON,
