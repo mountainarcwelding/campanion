@@ -8,17 +8,22 @@
 //!
 //! Z = 0 is the finished front face. `stock.front_allowance` is how far the blank sticks out in
 //! +Z; facing cuts that down to 0. The stock record itself still occupies Z in `[-length, 0]`.
+//! The optional `sub` block is a second spindle. Its profile uses that same frame (back face at
+//! Z 0, part toward −Z). `back_allowance` is the facing depth on the sub. An operation's
+//! `spindle` is `main` or `sub`. The stored section stays the main profile.
 //! A turning operation is one toolpath: a tool change when the tool id changes, spindle on, the
-//! moves, then spindle off. Speed is stored on the turning binding. An indexed live drill or slot
+//! moves, then spindle off. Speed is stored on the turning binding, which names the operation's
+//! spindle. An indexed live drill or slot
 //! changes the tool the same way, engages C, starts the live tool, clamps the brake around each
 //! feed, then stops the live tool and disengages C. `live_flat` engages C, rapids to the flat,
 //! clamps, then starts the live tool, and mills in Y. That binding stores no spindle speed. The IR
-//! stores the finished section on the turning setup, sampled from the profile at the job chord
-//! tolerance.
+//! stores the main finished section on the turning setup, sampled from the main profile at the
+//! job chord tolerance.
 //!
 //! `campanion_ir::verify` runs before anything is written. Issues are printed and the process
-//! exits 1. Face, rough and finish paths are checked against the finished section for insert and
-//! holder gouges. A gouge is printed and the process exits 1. Nothing is written in either case.
+//! exits 1. Face, rough and finish paths are checked against that spindle's finished profile for
+//! insert and holder gouges. A sub operation uses the sub profile. A gouge is printed and the
+//! process exits 1. Nothing is written in either case.
 //! `--post` writes that dialect instead of the test-sink NGC and compares the read-back
 //! at the job chord tolerance. A mismatch exits 1 and nothing is written. ZX arcs in the test
 //! sink are `G18`. The test sink does not write synchronised thread moves, so a job that threads
@@ -61,6 +66,7 @@ const MAX_TOOL_DIAMETER_MM: f64 = 1.0e6;
 const LIVE_TOOL_FIELDS: &str = "id, station, live, kind, diameter, point_angle_deg, max_rpm";
 const HEAD: &str = "turret1";
 const SPINDLE: &str = "main";
+const SUB_SPINDLE: &str = "sub";
 /// [`TurningSetup::single`] builds a 12-station turret.
 const STATIONS: u32 = 12;
 /// Radial depth of a metric 60° thread, as a fraction of the pitch.
@@ -88,12 +94,37 @@ struct LatheJob {
     front_allowance: f64,
     max_rpm: f64,
     c_axis: bool,
+    /// Second spindle. Its profile is drawn in the sub frame: back face at Z 0, part toward −Z.
+    sub: Option<SubBlock>,
     head: LatheHead,
     tools: Vec<LatheTool>,
     operations: Vec<Operation>,
     linear: f64,
     chord: f64,
     clearance: f64,
+}
+
+/// Optional sub-spindle. Stock diameter and length come from the main stock.
+struct SubBlock {
+    max_rpm: f64,
+    source: Source,
+    back_allowance: f64,
+}
+
+/// Which work spindle an operation cuts on. The default in the job file is main.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkSpindle {
+    Main,
+    Sub,
+}
+
+impl WorkSpindle {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Sub => "sub",
+        }
+    }
 }
 
 /// Optional Y travel on turret `turret1`. Limits are required when `y_axis` is true.
@@ -163,6 +194,7 @@ impl ToolBody {
 enum Operation {
     Face {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         step_z: f64,
         feed: f64,
@@ -170,6 +202,7 @@ enum Operation {
     },
     Rough {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         side: Side,
         depth_of_cut: f64,
@@ -180,6 +213,7 @@ enum Operation {
     },
     Finish {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         side: Side,
         leave_x: f64,
@@ -189,6 +223,7 @@ enum Operation {
     },
     Thread {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         side: Side,
         major_diameter: f64,
@@ -205,6 +240,7 @@ enum Operation {
     },
     Groove {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         side: Side,
         z_left: f64,
@@ -221,6 +257,7 @@ enum Operation {
     },
     Part {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         z: f64,
         to_diameter: f64,
@@ -232,6 +269,7 @@ enum Operation {
     },
     Drill {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         z_start: f64,
         depth: f64,
@@ -245,6 +283,7 @@ enum Operation {
     },
     LiveDrill {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         rpm: f64,
         feed: f64,
@@ -252,6 +291,7 @@ enum Operation {
     },
     LiveSlot {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         rpm: f64,
         feed: f64,
@@ -259,6 +299,7 @@ enum Operation {
     },
     LiveFlat {
         name: String,
+        spindle: WorkSpindle,
         tool_id: u32,
         rpm: f64,
         feed: f64,
@@ -286,6 +327,21 @@ impl Operation {
             | Self::LiveDrill { name, .. }
             | Self::LiveSlot { name, .. }
             | Self::LiveFlat { name, .. } => name,
+        }
+    }
+
+    fn spindle(&self) -> WorkSpindle {
+        match self {
+            Self::Face { spindle, .. }
+            | Self::Rough { spindle, .. }
+            | Self::Finish { spindle, .. }
+            | Self::Thread { spindle, .. }
+            | Self::Groove { spindle, .. }
+            | Self::Part { spindle, .. }
+            | Self::Drill { spindle, .. }
+            | Self::LiveDrill { spindle, .. }
+            | Self::LiveSlot { spindle, .. }
+            | Self::LiveFlat { spindle, .. } => *spindle,
         }
     }
 
@@ -367,7 +423,11 @@ pub fn lathe(args: &[OsString]) -> Result<ExitCode, CliError> {
     let text = read_text(&args.job)?;
     let job = parse_job(&text)?;
     let profile = load_profile(&args.job, &job, args.up_axis)?;
-    let (doc, gouges) = build_document(&args.job, &job, &profile)?;
+    let sub_profile = match &job.sub {
+        Some(sub) => Some(load_source(&args.job, &sub.source, job.linear, args.up_axis)?),
+        None => None,
+    };
+    let (doc, gouges) = build_document(&args.job, &job, &profile, sub_profile.as_ref())?;
     if !gouges.is_empty() {
         let mut err_out = io::stderr().lock();
         for line in &gouges {
@@ -462,7 +522,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let map = object(&value, "job")?;
     let tag = as_str(require(map, "format")?, "format tag")?;
     check_format(tag)?;
-    check_keys(map, &["format", "source", "units", "stock", "spindle", "head", "tools", "operations", "tolerance", "clearance"], "job")?;
+    check_keys(map, &["format", "source", "units", "stock", "spindle", "sub", "head", "tools", "operations", "tolerance", "clearance"], "job")?;
     let units = as_str(require(map, "units")?, "units")?;
     if units != "mm" {
         return Err(CliError::invalid(format!("units must be mm, not `{units}`")));
@@ -470,11 +530,16 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let source = parse_source(require(map, "source")?)?;
     let (stock, front_allowance) = parse_stock(require(map, "stock")?)?;
     let (max_rpm, c_axis) = parse_spindle(require(map, "spindle")?)?;
+    let sub = match optional(map, "sub") {
+        Some(value) => Some(parse_sub(value)?),
+        None => None,
+    };
     let head = parse_head(optional(map, "head"))?;
     let tools = parse_tools(require(map, "tools")?)?;
     let (linear, chord) = parse_tolerance(optional(map, "tolerance"))?;
     let clearance = non_negative(require(map, "clearance")?, "clearance")?;
-    let operations = parse_operations(require(map, "operations")?, max_rpm, clearance)?;
+    let sub_rpm = sub.as_ref().map(|block| block.max_rpm);
+    let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
     for operation in &operations {
         let Some(tool) = tools.iter().find(|tool| tool.id == operation.tool_id()) else {
             return Err(CliError::run(format!("operation {}: missing tool {}", operation.name(), operation.tool_id())));
@@ -482,7 +547,22 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         check_tool_use(operation, tool, c_axis)?;
         check_flat(operation, tool, &head, clearance)?;
     }
-    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, head, tools, operations, linear, chord, clearance })
+    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, sub, head, tools, operations, linear, chord, clearance })
+}
+
+fn parse_sub(value: &Value) -> Result<SubBlock, CliError> {
+    let map = object(value, "sub")?;
+    check_keys(map, &["max_rpm", "source", "back_allowance"], "sub")?;
+    let max_rpm = positive(require(map, "max_rpm")?, "max_rpm")?;
+    if max_rpm > MAX_SPINDLE_RPM {
+        return Err(CliError::invalid(format!("sub max_rpm must be at most {MAX_SPINDLE_RPM}")));
+    }
+    let source = parse_source(require(map, "source")?)?;
+    let back_allowance = match optional(map, "back_allowance") {
+        Some(value) => non_negative(value, "back_allowance")?,
+        None => 0.0,
+    };
+    Ok(SubBlock { max_rpm, source, back_allowance })
 }
 
 fn parse_head(value: Option<&Value>) -> Result<LatheHead, CliError> {
@@ -798,33 +878,64 @@ fn programmed_tip(insert: &Insert, tip: &str) -> Result<TipPoint, CliError> {
     }
 }
 
-fn parse_operations(value: &Value, max_rpm: f64, clearance: f64) -> Result<Vec<Operation>, CliError> {
+fn parse_operations(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance: f64) -> Result<Vec<Operation>, CliError> {
     let list = array(value, "operations", MAX_OPERATIONS)?;
     let mut names = BTreeSet::new();
     let mut operations = Vec::with_capacity(list.len());
     for item in list {
-        operations.push(parse_operation(item, max_rpm, clearance, &mut names)?);
+        operations.push(parse_operation(item, main_rpm, sub_rpm, clearance, &mut names)?);
     }
     Ok(operations)
 }
 
-fn parse_operation(value: &Value, max_rpm: f64, clearance: f64, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
+fn parse_work_spindle(map: &Map<String, Value>, name: &str, has_sub: bool, live: bool) -> Result<WorkSpindle, CliError> {
+    let text = match optional(map, "spindle") {
+        Some(value) => as_str(value, "spindle")?,
+        None => "main",
+    };
+    match text {
+        "main" => Ok(WorkSpindle::Main),
+        "sub" if live => Err(CliError::invalid(format!("operation {name}: live tooling on the sub-spindle is not supported"))),
+        "sub" if !has_sub => Err(CliError::invalid(format!("operation {name}: spindle sub needs a \"sub\" block"))),
+        "sub" => Ok(WorkSpindle::Sub),
+        other => Err(CliError::invalid(format!("operation {name}: unknown spindle `{other}`"))),
+    }
+}
+
+fn speed_cap(spindle: WorkSpindle, main_rpm: f64, sub_rpm: Option<f64>) -> Result<f64, CliError> {
+    match spindle {
+        WorkSpindle::Main => Ok(main_rpm),
+        WorkSpindle::Sub => sub_rpm.ok_or_else(|| CliError::run("internal: sub spindle is missing")),
+    }
+}
+
+fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance: f64, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
     let map = object(value, "operation")?;
     let op_type = as_str(require(map, "type")?, "operation type")?;
+    let has_sub = sub_rpm.is_some();
+    if op_type == "live_mill" {
+        let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+        if !names.insert(name.clone()) {
+            return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+        }
+        parse_work_spindle(map, &name, has_sub, true)?;
+        return Err(CliError::invalid(format!("unknown operation type `{op_type}`")));
+    }
     if op_type == "live_drill" || op_type == "live_slot" {
-        return parse_live_operation(map, op_type, clearance, names);
+        return parse_live_operation(map, op_type, clearance, names, has_sub);
     }
     if op_type == "live_flat" {
-        return parse_live_flat(map, names);
+        return parse_live_flat(map, names, has_sub);
     }
     let allowed: &[&str] = match op_type {
-        "face" => &["name", "type", "tool_id", "step_z", "feed", "speed"],
-        "rough" => &["name", "type", "tool_id", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed"],
-        "finish" => &["name", "type", "tool_id", "side", "feed", "speed", "leave_x", "leave_z"],
+        "face" => &["name", "type", "tool_id", "spindle", "step_z", "feed", "speed"],
+        "rough" => &["name", "type", "tool_id", "spindle", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed"],
+        "finish" => &["name", "type", "tool_id", "spindle", "side", "feed", "speed", "leave_x", "leave_z"],
         "thread" => &[
             "name",
             "type",
             "tool_id",
+            "spindle",
             "side",
             "major_diameter",
             "pitch",
@@ -842,6 +953,7 @@ fn parse_operation(value: &Value, max_rpm: f64, clearance: f64, names: &mut BTre
             "name",
             "type",
             "tool_id",
+            "spindle",
             "side",
             "z_left",
             "z_right",
@@ -855,8 +967,10 @@ fn parse_operation(value: &Value, max_rpm: f64, clearance: f64, names: &mut BTre
             "feed",
             "speed",
         ],
-        "part" => &["name", "type", "tool_id", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed"],
-        "drill" => &["name", "type", "tool_id", "z_start", "depth", "diameter", "peck", "retract", "point_angle_deg", "through", "feed", "rpm"],
+        "part" => &["name", "type", "tool_id", "spindle", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed"],
+        "drill" => {
+            &["name", "type", "tool_id", "spindle", "z_start", "depth", "diameter", "peck", "retract", "point_angle_deg", "through", "feed", "rpm"]
+        }
         other => return Err(CliError::invalid(format!("unknown operation type `{other}`"))),
     };
     check_keys(map, allowed, "operation")?;
@@ -864,15 +978,18 @@ fn parse_operation(value: &Value, max_rpm: f64, clearance: f64, names: &mut BTre
     if !names.insert(name.clone()) {
         return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
     }
+    let spindle = parse_work_spindle(map, &name, has_sub, false)?;
     let tool_id = as_u32(require(map, "tool_id")?, "tool_id")?;
+    let cap = speed_cap(spindle, main_rpm, sub_rpm)?;
     match op_type {
         "face" | "rough" | "finish" | "groove" | "part" => {
             let feed = positive(require(map, "feed")?, "feed")?;
-            let speed = parse_speed(require(map, "speed")?, max_rpm)?;
+            let speed = parse_speed(require(map, "speed")?, cap)?;
             match op_type {
-                "face" => Ok(Operation::Face { name, tool_id, step_z: positive(require(map, "step_z")?, "step_z")?, feed, speed }),
+                "face" => Ok(Operation::Face { name, spindle, tool_id, step_z: positive(require(map, "step_z")?, "step_z")?, feed, speed }),
                 "rough" => Ok(Operation::Rough {
                     name,
+                    spindle,
                     tool_id,
                     side: parse_side(as_str(require(map, "side")?, "side")?)?,
                     depth_of_cut: positive(require(map, "depth_of_cut")?, "depth_of_cut")?,
@@ -883,6 +1000,7 @@ fn parse_operation(value: &Value, max_rpm: f64, clearance: f64, names: &mut BTre
                 }),
                 "finish" => Ok(Operation::Finish {
                     name,
+                    spindle,
                     tool_id,
                     side: parse_side(as_str(require(map, "side")?, "side")?)?,
                     leave_x: optional_non_negative(map, "leave_x")?.unwrap_or(0.0),
@@ -890,18 +1008,18 @@ fn parse_operation(value: &Value, max_rpm: f64, clearance: f64, names: &mut BTre
                     feed,
                     speed,
                 }),
-                "groove" => parse_groove(map, name, tool_id, feed, speed),
-                "part" => parse_part(map, name, tool_id, feed, speed),
+                "groove" => parse_groove(map, name, spindle, tool_id, feed, speed),
+                "part" => parse_part(map, name, spindle, tool_id, feed, speed),
                 _ => Err(CliError::invalid(format!("unknown operation type `{op_type}`"))),
             }
         }
-        "thread" => parse_thread(map, name, tool_id),
-        "drill" => parse_drill(map, name, tool_id),
+        "thread" => parse_thread(map, name, spindle, tool_id),
+        "drill" => parse_drill(map, name, spindle, tool_id),
         other => Err(CliError::invalid(format!("unknown operation type `{other}`"))),
     }
 }
 
-fn parse_thread(map: &Map<String, Value>, name: String, tool_id: u32) -> Result<Operation, CliError> {
+fn parse_thread(map: &Map<String, Value>, name: String, spindle: WorkSpindle, tool_id: u32) -> Result<Operation, CliError> {
     let pitch = positive(require(map, "pitch")?, "pitch")?;
     let depth = match optional(map, "depth") {
         Some(value) => positive(value, "depth")?,
@@ -917,6 +1035,7 @@ fn parse_thread(map: &Map<String, Value>, name: String, tool_id: u32) -> Result<
     };
     Ok(Operation::Thread {
         name,
+        spindle,
         tool_id,
         side: parse_side(as_str(require(map, "side")?, "side")?)?,
         major_diameter: positive(require(map, "major_diameter")?, "major_diameter")?,
@@ -939,7 +1058,14 @@ fn parse_thread(map: &Map<String, Value>, name: String, tool_id: u32) -> Result<
     })
 }
 
-fn parse_groove(map: &Map<String, Value>, name: String, tool_id: u32, feed: f64, speed: SpindleSpeed) -> Result<Operation, CliError> {
+fn parse_groove(
+    map: &Map<String, Value>,
+    name: String,
+    spindle: WorkSpindle,
+    tool_id: u32,
+    feed: f64,
+    speed: SpindleSpeed,
+) -> Result<Operation, CliError> {
     let stepover_frac = match optional(map, "stepover_frac") {
         Some(value) => as_f64(value, "stepover_frac")?,
         None => 0.8,
@@ -949,6 +1075,7 @@ fn parse_groove(map: &Map<String, Value>, name: String, tool_id: u32, feed: f64,
     }
     Ok(Operation::Groove {
         name,
+        spindle,
         tool_id,
         side: parse_side(as_str(require(map, "side")?, "side")?)?,
         z_left: as_f64(require(map, "z_left")?, "z_left")?,
@@ -968,9 +1095,17 @@ fn parse_groove(map: &Map<String, Value>, name: String, tool_id: u32, feed: f64,
     })
 }
 
-fn parse_part(map: &Map<String, Value>, name: String, tool_id: u32, feed: f64, speed: SpindleSpeed) -> Result<Operation, CliError> {
+fn parse_part(
+    map: &Map<String, Value>,
+    name: String,
+    spindle: WorkSpindle,
+    tool_id: u32,
+    feed: f64,
+    speed: SpindleSpeed,
+) -> Result<Operation, CliError> {
     Ok(Operation::Part {
         name,
+        spindle,
         tool_id,
         z: as_f64(require(map, "z")?, "z")?,
         to_diameter: match optional(map, "to_diameter") {
@@ -985,13 +1120,14 @@ fn parse_part(map: &Map<String, Value>, name: String, tool_id: u32, feed: f64, s
     })
 }
 
-fn parse_drill(map: &Map<String, Value>, name: String, tool_id: u32) -> Result<Operation, CliError> {
+fn parse_drill(map: &Map<String, Value>, name: String, spindle: WorkSpindle, tool_id: u32) -> Result<Operation, CliError> {
     let point_angle_deg = match optional(map, "point_angle_deg") {
         Some(value) => as_f64(value, "point_angle_deg")?,
         None => 118.0,
     };
     Ok(Operation::Drill {
         name,
+        spindle,
         tool_id,
         z_start: match optional(map, "z_start") {
             Some(value) => as_f64(value, "z_start")?,
@@ -1014,13 +1150,27 @@ fn parse_drill(map: &Map<String, Value>, name: String, tool_id: u32) -> Result<O
     })
 }
 
-fn parse_live_operation(map: &Map<String, Value>, op_type: &str, clearance: f64, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
+fn parse_live_operation(
+    map: &Map<String, Value>,
+    op_type: &str,
+    clearance: f64,
+    names: &mut BTreeSet<String>,
+    has_sub: bool,
+) -> Result<Operation, CliError> {
     let face = parse_live_face(as_str(require(map, "face")?, "face")?)?;
     let allowed: &[&str] = match (op_type, face) {
-        ("live_drill", LiveFace::Front) => &["name", "type", "tool_id", "face", "positions", "depth", "peck", "retract", "rpm", "feed", "z_start"],
-        ("live_drill", LiveFace::Od) => &["name", "type", "tool_id", "face", "positions", "depth", "peck", "retract", "rpm", "feed", "diameter"],
-        ("live_slot", LiveFace::Front) => &["name", "type", "tool_id", "face", "c", "from", "to", "depth", "step_down", "rpm", "feed", "z_start"],
-        ("live_slot", LiveFace::Od) => &["name", "type", "tool_id", "face", "c", "from", "to", "depth", "step_down", "rpm", "feed", "diameter"],
+        ("live_drill", LiveFace::Front) => {
+            &["name", "type", "tool_id", "spindle", "face", "positions", "depth", "peck", "retract", "rpm", "feed", "z_start"]
+        }
+        ("live_drill", LiveFace::Od) => {
+            &["name", "type", "tool_id", "spindle", "face", "positions", "depth", "peck", "retract", "rpm", "feed", "diameter"]
+        }
+        ("live_slot", LiveFace::Front) => {
+            &["name", "type", "tool_id", "spindle", "face", "c", "from", "to", "depth", "step_down", "rpm", "feed", "z_start"]
+        }
+        ("live_slot", LiveFace::Od) => {
+            &["name", "type", "tool_id", "spindle", "face", "c", "from", "to", "depth", "step_down", "rpm", "feed", "diameter"]
+        }
         _ => return Err(CliError::invalid(format!("unknown operation type `{op_type}`"))),
     };
     check_keys(map, allowed, "operation")?;
@@ -1028,6 +1178,7 @@ fn parse_live_operation(map: &Map<String, Value>, op_type: &str, clearance: f64,
     if !names.insert(name.clone()) {
         return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
     }
+    let spindle = parse_work_spindle(map, &name, has_sub, true)?;
     let tool_id = as_u32(require(map, "tool_id")?, "tool_id")?;
     let depth = positive(require(map, "depth")?, "depth")?;
     let rpm = parse_live_rpm(require(map, "rpm")?)?;
@@ -1052,7 +1203,7 @@ fn parse_live_operation(map: &Map<String, Value>, op_type: &str, clearance: f64,
                 diameter,
             };
             live_drill(&params).map_err(|err| geometry_err(&name, err))?;
-            Ok(Operation::LiveDrill { name, tool_id, rpm, feed, params })
+            Ok(Operation::LiveDrill { name, spindle, tool_id, rpm, feed, params })
         }
         "live_slot" => {
             let step_down = match optional(map, "step_down") {
@@ -1071,22 +1222,23 @@ fn parse_live_operation(map: &Map<String, Value>, op_type: &str, clearance: f64,
                 diameter,
             };
             live_slot(&params).map_err(|err| geometry_err(&name, err))?;
-            Ok(Operation::LiveSlot { name, tool_id, rpm, feed, params })
+            Ok(Operation::LiveSlot { name, spindle, tool_id, rpm, feed, params })
         }
         _ => Err(CliError::invalid(format!("unknown operation type `{op_type}`"))),
     }
 }
 
-fn parse_live_flat(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
+fn parse_live_flat(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_sub: bool) -> Result<Operation, CliError> {
     check_keys(
         map,
-        &["name", "type", "tool_id", "c", "diameter", "across", "z_from", "z_to", "width", "step_down", "stepover", "rpm", "feed"],
+        &["name", "type", "tool_id", "spindle", "c", "diameter", "across", "z_from", "z_to", "width", "step_down", "stepover", "rpm", "feed"],
         "operation",
     )?;
     let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
     if !names.insert(name.clone()) {
         return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
     }
+    let spindle = parse_work_spindle(map, &name, has_sub, true)?;
     let stepover = match optional(map, "stepover") {
         Some(value) => as_f64(value, "stepover")?,
         None => 0.6,
@@ -1096,6 +1248,7 @@ fn parse_live_flat(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Re
     }
     Ok(Operation::LiveFlat {
         name,
+        spindle,
         tool_id: as_u32(require(map, "tool_id")?, "tool_id")?,
         rpm: parse_live_rpm(require(map, "rpm")?)?,
         feed: positive(require(map, "feed")?, "feed")?,
@@ -1268,21 +1421,25 @@ fn parse_tolerance(value: Option<&Value>) -> Result<(f64, f64), CliError> {
 }
 
 fn load_profile(job_path: &Path, job: &LatheJob, up_axis: crate::step::UpAxis) -> Result<TurnProfile, CliError> {
-    let path = resolve_source(job_path, &job.source.path);
-    match &job.source.kind {
+    load_source(job_path, &job.source, job.linear, up_axis)
+}
+
+fn load_source(job_path: &Path, source: &Source, linear: f64, up_axis: crate::step::UpAxis) -> Result<TurnProfile, CliError> {
+    let path = resolve_source(job_path, &source.path);
+    match &source.kind {
         SourceKind::Dxf { layer } => {
             let text = read_text(&path)?;
-            TurnProfile::from_dxf(&text, layer.as_deref(), job.linear).map_err(show)
+            TurnProfile::from_dxf(&text, layer.as_deref(), linear).map_err(show)
         }
         SourceKind::Svg { layer: None } => {
             let text = read_text(&path)?;
-            TurnProfile::from_svg(&text, job.linear).map_err(show)
+            TurnProfile::from_svg(&text, linear).map_err(show)
         }
         SourceKind::Svg { layer: Some(layer) } => {
             let text = read_text(&path)?;
-            let tolerance = Tolerance::new(job.linear, Tolerance::DEFAULT_ANGULAR_RAD).map_err(show)?;
+            let tolerance = Tolerance::new(linear, Tolerance::DEFAULT_ANGULAR_RAD).map_err(show)?;
             let drawing = import_svg(&text, &ImportOptions::new(tolerance)).map_err(show)?;
-            TurnProfile::from_drawing(&drawing, Some(layer), job.linear).map_err(show)
+            TurnProfile::from_drawing(&drawing, Some(layer), linear).map_err(show)
         }
         SourceKind::Stl { axis, step } => {
             let bytes = crate::run::read_bytes(&path)?;
@@ -1292,7 +1449,7 @@ fn load_profile(job_path: &Path, job: &LatheJob, up_axis: crate::step::UpAxis) -
         SourceKind::Step { body } => {
             let cli = crate::step::find_cli().ok_or_else(crate::step::missing_cli_error)?;
             let text = crate::step::section_to_dxf(&cli, &path, body.as_deref(), up_axis)?;
-            TurnProfile::from_section_dxf(&text, job.linear).map_err(show)
+            TurnProfile::from_section_dxf(&text, linear).map_err(show)
         }
     }
 }
@@ -1304,7 +1461,12 @@ fn resolve_source(job: &Path, relative: &str) -> PathBuf {
     }
 }
 
-fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Result<(Document, Vec<String>), CliError> {
+fn build_document(
+    job_path: &Path,
+    job: &LatheJob,
+    profile: &TurnProfile,
+    sub_profile: Option<&TurnProfile>,
+) -> Result<(Document, Vec<String>), CliError> {
     let stock = turn_stock(&job.stock)?;
     let points = profile.to_polyline_points(job.chord).into_iter().map(|point| [point.x(), point.y()]).collect();
     let mut setup = turning_setup(job, stock)?.with_section(Some(TurnSection::try_new(points)?))?;
@@ -1319,15 +1481,23 @@ fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Res
     }
     let check = job.operations.iter().any(|operation| gouge_side(operation).is_some());
     let sample_step = if check { Some(crate::gouge::sample_step_for(job.chord)?) } else { None };
-    let section: Vec<(f64, f64)> = if sample_step.is_some() {
-        profile.to_polyline_points(job.chord).into_iter().map(|point| (point.x(), point.y())).collect()
-    } else {
-        Vec::new()
+    let section = sampled_section(profile, job.chord, sample_step.is_some());
+    let sub_section = match (sample_step, sub_profile) {
+        (Some(_), Some(sub)) => sampled_section(sub, job.chord, true),
+        _ => Vec::new(),
     };
     let mut gouge_lines = Vec::new();
     let mut toolpaths = Vec::with_capacity(job.operations.len());
     let mut previous: Option<u32> = None;
     for (index, operation) in job.operations.iter().enumerate() {
+        let active_profile = match operation.spindle() {
+            WorkSpindle::Main => profile,
+            WorkSpindle::Sub => sub_profile.ok_or_else(|| CliError::run("internal: sub profile is missing"))?,
+        };
+        let gouge_section = match operation.spindle() {
+            WorkSpindle::Main => section.as_slice(),
+            WorkSpindle::Sub => sub_section.as_slice(),
+        };
         let toolpath = if operation.is_flat() {
             flat_toolpath(job, operation, &mut previous)?
         } else if operation.is_live() {
@@ -1335,18 +1505,18 @@ fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Res
             let rpm = operation.live_rpm().ok_or_else(|| CliError::run(format!("internal: operation {} has no live rpm", operation.name())))?;
             with_live_events(motion, operation.tool_id(), rpm, &mut previous)?
         } else {
-            let turned = turn_operation(job, profile, operation)?;
+            let turned = turn_operation(job, active_profile, operation)?;
             if let Some(step) = sample_step
                 && let Some(side) = gouge_side(operation)
             {
-                gouge_lines.extend(turn_gouges(job, operation, index, &turned, side, &section, step)?);
+                gouge_lines.extend(turn_gouges(job, operation, index, &turned, side, gouge_section, step)?);
             }
             let motion = to_cl_path(&turned, Some(operation.name().to_string()), operation.tool_id(), operation.feed(), Some(job.clearance))
                 .map_err(|err| op_fail(operation.name(), err))?;
             with_events(motion, operation.tool_id(), &mut previous)?
         };
         toolpaths.push(toolpath);
-        let binding = TurnBinding::try_new(index as u32, SPINDLE, HEAD, 0)?.with_speed(operation.turning_speed())?;
+        let binding = TurnBinding::try_new(index as u32, operation.spindle().name(), HEAD, 0)?.with_speed(operation.turning_speed())?;
         setup = setup.with_binding(binding)?;
     }
     let tools = job
@@ -1380,20 +1550,32 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
     }
 }
 
-/// Spindle `main` with C axis id 0 when the job asks for it. The head is `turret1`, X and Z,
-/// plus Y when `head.y_axis` is true, 12 stations. `live_tooling` is set when any tool is live.
-/// A plain turning job keeps [`TurningSetup::single`], which has no C axis, no Y and no live tooling.
+fn sampled_section(profile: &TurnProfile, chord: f64, sample: bool) -> Vec<(f64, f64)> {
+    if !sample {
+        return Vec::new();
+    }
+    profile.to_polyline_points(chord).into_iter().map(|point| (point.x(), point.y())).collect()
+}
+
+/// Spindle `main`, plus spindle `sub` when the job has a sub block. C axis id 0 when the job
+/// asks for it. The head is `turret1`, X and Z, plus Y when `head.y_axis` is true, 12 stations.
+/// `live_tooling` is set when any tool is live. A plain turning job with no sub keeps
+/// [`TurningSetup::single`], which has no C axis, no Y and no live tooling. The sub spindle has
+/// no C axis, work zero 0 and is not reversed. Stock geometry is the main blank either way.
 fn turning_setup(job: &LatheJob, stock: TurnStock) -> Result<TurningSetup, CliError> {
     let live_tooling = job.tools.iter().any(|tool| tool.body.is_live());
-    if !job.c_axis && !live_tooling && !job.head.y_axis {
+    if !job.c_axis && !live_tooling && !job.head.y_axis && job.sub.is_none() {
         return Ok(TurningSetup::single(Some(stock), job.max_rpm)?);
     }
     let c_axis = if job.c_axis { Some(0) } else { None };
-    let spindle = Spindle::try_new(SPINDLE, c_axis, 0.0, job.max_rpm)?;
+    let mut spindles = vec![Spindle::try_new(SPINDLE, c_axis, 0.0, job.max_rpm)?];
+    if let Some(sub) = &job.sub {
+        spindles.push(Spindle::try_new(SUB_SPINDLE, None, 0.0, sub.max_rpm)?);
+    }
     let stations = u16::try_from(STATIONS).map_err(|_| CliError::run("turret station count is out of range"))?;
     let axes = if job.head.y_axis { vec![HeadAxis::X, HeadAxis::Y, HeadAxis::Z] } else { vec![HeadAxis::X, HeadAxis::Z] };
     let head = Head::try_new(HEAD, axes, stations, live_tooling)?;
-    Ok(TurningSetup::try_new(vec![spindle], vec![head], Some(stock), Vec::new(), Vec::new())?)
+    Ok(TurningSetup::try_new(spindles, vec![head], Some(stock), Vec::new(), Vec::new())?)
 }
 
 fn turn_gouges(
@@ -1450,6 +1632,14 @@ fn require_insert<'a>(job: &'a LatheJob, operation: &Operation) -> Result<(&'a I
     }
 }
 
+/// Facing depth for this spindle. The sub uses `back_allowance` and the same stock diameters.
+fn front_allowance(job: &LatheJob, spindle: WorkSpindle) -> Result<f64, CliError> {
+    match spindle {
+        WorkSpindle::Main => Ok(job.front_allowance),
+        WorkSpindle::Sub => job.sub.as_ref().map(|block| block.back_allowance).ok_or_else(|| CliError::run("internal: sub spindle is missing")),
+    }
+}
+
 fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) -> Result<TurnPath, CliError> {
     if operation.is_live() {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
@@ -1458,9 +1648,9 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
     let turn_tool = TurnTool { nose_radius, tip };
     let stock = turn_stock(&job.stock)?;
     match operation {
-        Operation::Face { name, step_z, .. } => {
+        Operation::Face { name, spindle, step_z, .. } => {
             let params = FaceParams {
-                stock_front_z: job.front_allowance,
+                stock_front_z: front_allowance(job, *spindle)?,
                 final_z: 0.0,
                 step_z: *step_z,
                 from_radius: stock.outer_radius(),

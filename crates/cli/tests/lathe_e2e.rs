@@ -607,3 +607,84 @@ fn live_flat_fanuc_post_has_no_y_axis() -> Result<(), String> {
     }
     Ok(())
 }
+
+fn turning_shell(extra: &str, tools: &str, operation: &str) -> String {
+    format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 30, "length": 20, "front_allowance": 1 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        {extra}
+        "tools": [{tools}],
+        "operations": [{operation}],
+        "clearance": 2
+    }}"#
+    )
+}
+
+#[test]
+fn sub_spindle_job_rejects_a_missing_block_live_tooling_and_an_unknown_name() -> Result<(), String> {
+    let insert = r#"{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }"#;
+    let face = r#"{ "name": "back_face", "type": "face", "tool_id": 1, "spindle": "sub", "step_z": 0.5, "feed": 100, "speed": { "rpm": 800 } }"#;
+    assert_rejects(&turning_shell("", insert, face), "campanion-lathe-sub-missing.json", "operation back_face: spindle sub needs a \"sub\" block")?;
+
+    let axial = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6 }"#;
+    let holes = r#"{ "name": "holes", "type": "live_drill", "tool_id": 2, "spindle": "sub", "face": "front", "z_start": 0, "positions": [{ "c": 0, "r": 10 }], "depth": 5, "rpm": 1000, "feed": 80 }"#;
+    assert_rejects(
+        &turning_shell("", axial, holes),
+        "campanion-lathe-sub-live.json",
+        "operation holes: live tooling on the sub-spindle is not supported",
+    )?;
+    let sub = r#""sub": { "max_rpm": 2000, "source": { "path": "missing.dxf" } },"#;
+    assert_rejects(
+        &turning_shell(sub, axial, holes),
+        "campanion-lathe-sub-live-block.json",
+        "operation holes: live tooling on the sub-spindle is not supported",
+    )?;
+    let mill = r#"{ "name": "mill", "type": "live_mill", "spindle": "sub" }"#;
+    assert_rejects(
+        &turning_shell("", "", mill),
+        "campanion-lathe-sub-live-mill.json",
+        "operation mill: live tooling on the sub-spindle is not supported",
+    )?;
+
+    let tail = r#"{ "name": "back_face", "type": "face", "tool_id": 1, "spindle": "tail", "step_z": 0.5, "feed": 100, "speed": { "rpm": 800 } }"#;
+    assert_rejects(&turning_shell("", insert, tail), "campanion-lathe-sub-tail.json", "operation back_face: unknown spindle `tail`")?;
+    Ok(())
+}
+
+#[test]
+fn subspindle_posts_haas_and_returns_to_the_main_before_the_end() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/subspindle.lathe.json"))?;
+    let out = temp_path("campanion-lathe-subspindle.nc");
+    let ir = temp_path("campanion-lathe-subspindle.ir.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "haas_lathe", "--ir", &path_arg(&ir)?])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("subspindle.haas_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["T0101", "G50 S3000", "Z0.9", "G55", "G14", "T0202", "G50 S2500", "Z0.65", "G15", "G54", "G53 G0 X0", "M30"])?;
+
+    let ir_text = std::fs::read_to_string(&ir).map_err(|err| err.to_string())?;
+    let doc = campanion_ir::Document::from_json(&ir_text).map_err(|err| err.to_string())?;
+    let turning = doc.program().turning().ok_or("turning setup is missing")?;
+    let names: Vec<&str> = turning.spindles().iter().map(|spindle| spindle.name()).collect();
+    if names != ["main", "sub"] {
+        return Err(format!("spindles are {names:?}"));
+    }
+    let sub = turning.spindle("sub").ok_or("sub spindle is missing")?;
+    if sub.c_axis().is_some() || sub.reversed() || (sub.max_rpm() - 2_500.0).abs() > 1e-6 || sub.work_zero_z().abs() > 1e-9 {
+        return Err(format!("sub spindle is {sub:?}"));
+    }
+    let bound: Vec<&str> = turning.bindings().iter().map(|binding| binding.spindle()).collect();
+    if bound != ["main", "main", "sub", "sub"] {
+        return Err(format!("bindings are {bound:?}"));
+    }
+    if turning.section().is_none() {
+        return Err("main section is missing".into());
+    }
+    Ok(())
+}

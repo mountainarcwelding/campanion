@@ -37,6 +37,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - `examples/shaft.lathe.json` faces, roughs and finishes the stepped shaft in `examples/shaft.dxf`. See [Lathe jobs](docs/job-file.md#lathe-jobs).
 - `examples/millturn.lathe.json` indexes C for a front live drill and an OD live slot on that shaft (no Y, no interpolation).
 - `examples/millturn_flat.lathe.json` mills one indexed flat on that shaft with the Y axis (Haas `G19`; no interpolation).
+- `examples/subspindle.lathe.json` faces and finishes a short bar on the main spindle, then the same half-profile on the sub (Haas `G55` `G14`, then `G15` `G54`).
 
 ```sh
 cargo run -p campanion-cli -- lathe examples/shaft.lathe.json -o out.ngc --ir out.json --post linuxcnc_lathe
@@ -85,7 +86,7 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 | `grbl_laser` | Grbl laser | - | Grbl laser mode. Dynamic power M4 S{power} (0..1 scaled to S0..S1000), Z words and Z-only rapids omitted. No rotary axis. |
 | `linuxcnc_lathe` | LinuxCNC lathe | - | Millimetre LinuxCNC lathe. Diameter mode (G7), ZX plane (G18), constant surface speed (G96) and direct rpm (G97). No rotary axis. |
 | `fanuc_lathe` | Fanuc lathe | - | Millimetre Fanuc lathe. Diameter mode by default, ZX plane (G18), feed per minute (G98), G50 spindle cap then G96. Home is G28 U0 W0. No rotary axis. |
-| `haas_lathe` | Haas lathe | - | Millimetre Haas lathe. Program O00001, safety block G21 G18 G40 G80, feed per minute (G98), G53 home. No rotary axis. |
+| `haas_lathe` | Haas lathe | - | Millimetre Haas lathe. Program O00001, safety block G21 G18 G40 G80, feed per minute (G98), G53 home. Sub-spindle select is G55 then G14. No rotary axis. |
 | `grbl_lathe` | grblHAL lathe | - | Millimetre grblHAL lathe. Diameter mode (G7), ZX plane (G18), feed per minute (G94). Tool change is T and M6; a manual tool change is expected. No rotary axis. |
 
 ```sh

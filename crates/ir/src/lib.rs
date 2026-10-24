@@ -35,7 +35,7 @@
 //! thread is [`ClMotion::Thread`]: a straight move whose `lead` is millimetres per spindle
 //! revolution. It is valid only when the program has a turning setup.
 //!
-//! Spindles are named (`main` now, a sub-spindle later). Each has its own optional C axis and a
+//! Spindles are named (`main`, and further names such as `sub`). Each has its own optional C axis and a
 //! work-zero offset along Z. A head, a turret or a B-axis head, carries X and Z and optionally Y
 //! and B. Every turning toolpath has a binding that names its spindle, head and channel. An M10
 //! lathe uses one spindle `main`, one head `turret1` and channel 0. Live tooling, Y, B and a

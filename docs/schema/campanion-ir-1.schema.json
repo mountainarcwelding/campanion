@@ -1727,7 +1727,7 @@
     },
     "Spindle": {
       "additionalProperties": false,
-      "description": "One lathe spindle.\n\n`name` is unique on the setup (`main` now, a sub-spindle later). `c_axis` is that spindle's\nC axis as a machine axis id, when the machine has one. `work_zero_z` is the work-zero offset\nalong Z, in millimetres. Stock Z is measured from that zero.",
+      "description": "One lathe spindle.\n\n`name` is unique on the setup (`main`, and further names such as `sub`). `c_axis` is that spindle's\nC axis as a machine axis id, when the machine has one. `work_zero_z` is the work-zero offset\nalong Z, in millimetres. Stock Z is measured from that zero.",
       "properties": {
         "c_axis": {
           "format": "uint8",
