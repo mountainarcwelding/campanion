@@ -38,6 +38,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - `examples/millturn.lathe.json` indexes C for a front live drill and an OD live slot on that shaft (no Y, no interpolation).
 - `examples/millturn_flat.lathe.json` mills one indexed flat on that shaft with the Y axis (Haas `G19`; no interpolation).
 - `examples/subspindle.lathe.json` faces and finishes a short bar on the main spindle, then the same half-profile on the sub (Haas `G55` `G14`, then `G15` `G54`).
+- `examples/millturn_face.lathe.json` mills a front-face pocket from a drawing (Haas `G112`); `live_mill` also wraps an OD profile with cylinder interpolation (`G107`).
 
 ```sh
 cargo run -p campanion-cli -- lathe examples/shaft.lathe.json -o out.ngc --ir out.json --post linuxcnc_lathe

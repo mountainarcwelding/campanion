@@ -1,0 +1,36 @@
+{
+  "format": "campanion-lathe/1",
+  "source": { "path": "shaft.dxf", "layer": "PROFILE" },
+  "units": "mm",
+  "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
+  "spindle": { "max_rpm": 4000, "c_axis": true },
+  "tools": [
+    {
+      "id": 1,
+      "station": 1,
+      "live": "axial",
+      "kind": "endmill",
+      "diameter": 4,
+      "max_rpm": 8000
+    }
+  ],
+  "operations": [
+    {
+      "name": "face_pocket",
+      "type": "live_mill",
+      "tool_id": 1,
+      "face": "front",
+      "drawing": "millturn_face.dxf",
+      "layer": "POCKET",
+      "strategy": "pocket",
+      "depth": 2,
+      "step_down": 1,
+      "stepover": 0.4,
+      "z_start": 0,
+      "rpm": 3000,
+      "feed": 200
+    }
+  ],
+  "tolerance": { "linear": 0.001, "chord": 0.01 },
+  "clearance": 2.0
+}

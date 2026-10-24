@@ -688,3 +688,233 @@ fn subspindle_posts_haas_and_returns_to_the_main_before_the_end() -> Result<(), 
     }
     Ok(())
 }
+
+const PROFILE_DXF: &str = "\
+0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LINE
+8
+PROFILE
+10
+0.0
+20
+15.0
+11
+-30.0
+21
+15.0
+0
+ENDSEC
+0
+EOF
+";
+
+fn fixture_text(name: &str) -> Result<String, String> {
+    let root = workspace_root()?;
+    std::fs::read_to_string(root.join("crates/cli/tests/fixtures").join(name)).map_err(|err| err.to_string())
+}
+
+fn write_tree(dir_name: &str, files: &[(&str, &str)], job_name: &str, job: &str) -> Result<PathBuf, String> {
+    let dir = temp_path(dir_name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    for (name, body) in files {
+        std::fs::write(dir.join(name), body).map_err(|err| format!("write {name}: {err}"))?;
+    }
+    let job_path = dir.join(job_name);
+    std::fs::write(&job_path, job).map_err(|err| err.to_string())?;
+    Ok(job_path)
+}
+
+fn post_lathe(job: &Path, out_name: &str) -> Result<String, String> {
+    let out = temp_path(out_name);
+    let _ = std::fs::remove_file(&out);
+    run_ok(&["lathe", &path_arg(job)?, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    std::fs::read_to_string(&out).map_err(|err| err.to_string())
+}
+
+fn assert_rejects_at(job: &Path, needle: &str) -> Result<(), String> {
+    let out = job.with_extension("out.nc");
+    let _ = std::fs::remove_file(&out);
+    let output = campanion(&["lathe", &path_arg(job)?, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    let stderr = text(&output.stderr)?;
+    let code = output.status.code();
+    if code == Some(101) || stderr.to_ascii_lowercase().contains("panicked") {
+        return Err(format!("lathe panicked ({code:?}): {stderr}"));
+    }
+    if code != Some(1) {
+        return Err(format!("exit {code:?}, expected 1\n{stderr}"));
+    }
+    if !stderr.contains(needle) {
+        return Err(format!("stderr missing {needle}: {stderr}"));
+    }
+    if out.exists() {
+        return Err(format!("failed job wrote {}", out.display()));
+    }
+    Ok(())
+}
+
+/// A C word is `C` followed by a number. `G112` and comments are not C words.
+fn assert_no_c_word_between(text: &str) -> Result<(), String> {
+    let Some(start) = text.find("G112") else {
+        return Err(format!("missing G112\n{text}"));
+    };
+    let after = &text[start + "G112".len()..];
+    let Some(end) = after.find("G113") else {
+        return Err(format!("missing G113\n{text}"));
+    };
+    let span = &after[..end];
+    for token in span.split_whitespace() {
+        let mut chars = token.chars();
+        if chars.next() == Some('C') && chars.next().is_some_and(|ch| ch.is_ascii_digit() || ch == '+' || ch == '-' || ch == '.') {
+            return Err(format!("C word {token} between G112 and G113\n{span}"));
+        }
+    }
+    Ok(())
+}
+
+fn mill_shell(head: &str, tool: &str, operation: &str) -> String {
+    let head_field = if head.is_empty() { String::new() } else { format!("\"head\": {head},") };
+    format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 50, "length": 40, "front_allowance": 0 }},
+        "spindle": {{ "max_rpm": 4000, "c_axis": true }},
+        {head_field}
+        "tools": [{tool}],
+        "operations": [{operation}],
+        "tolerance": {{ "linear": 0.001, "chord": 0.01 }},
+        "clearance": 2
+    }}"#
+    )
+}
+
+const AXIAL_MILL: &str = r#"{ "id": 1, "station": 1, "live": "axial", "kind": "endmill", "diameter": 4 }"#;
+const RADIAL_MILL: &str = r#"{ "id": 1, "station": 1, "live": "radial", "kind": "endmill", "diameter": 6 }"#;
+
+fn lathe_with_profile(tool: &str, head: &str, operation: &str) -> String {
+    let head_field = if head.is_empty() { String::new() } else { format!("\"head\": {head},") };
+    format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "profile.dxf", "layer": "PROFILE" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 50, "length": 40, "front_allowance": 0 }},
+        "spindle": {{ "max_rpm": 4000, "c_axis": true }},
+        {head_field}
+        "tools": [{tool}],
+        "operations": [{operation}],
+        "tolerance": {{ "linear": 0.001, "chord": 0.01 }},
+        "clearance": 2
+    }}"#
+    )
+}
+
+#[test]
+fn millturn_face_posts_haas_g112_without_c() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = root.join("examples/millturn_face.lathe.json");
+    let posted = post_lathe(&job, "campanion-lathe-millturn-face.nc")?;
+    assert_golden("millturn_face.haas_lathe.nc", &posted)?;
+    if !posted.contains("G112") || !posted.contains("G113") {
+        return Err(format!("face pocket is missing G112/G113\n{posted}"));
+    }
+    assert_no_c_word_between(&posted)?;
+    Ok(())
+}
+
+#[test]
+fn millturn_od_posts_haas_g107() -> Result<(), String> {
+    let slot = fixture_text("od_slot.dxf")?;
+    let op = r#"{ "name": "od_wrap", "type": "live_mill", "tool_id": 1, "face": "od", "drawing": "od_slot.dxf", "layer": "SLOT", "strategy": "profile", "side": "on", "depth": 1.5, "diameter": 40, "rpm": 2000, "feed": 150 }"#;
+    let job = lathe_with_profile(RADIAL_MILL, "", op);
+    let path = write_tree("campanion-lathe-mill-od", &[("profile.dxf", PROFILE_DXF), ("od_slot.dxf", &slot)], "millturn_od.json", &job)?;
+    let posted = post_lathe(&path, "campanion-lathe-millturn-od.nc")?;
+    assert_golden("millturn_od.haas_lathe.nc", &posted)?;
+    let marker = "G107 Y0 C0 R20.";
+    let Some(at) = posted.find(marker) else {
+        return Err(format!("missing {marker}\n{posted}"));
+    };
+    if !posted[at + marker.len()..].contains("G107") {
+        return Err(format!("G107 was not cancelled\n{posted}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn millturn_y_axis_mills_across_the_centre() -> Result<(), String> {
+    let drawing = fixture_text("y_cross.dxf")?;
+    let op = r#"{ "name": "across", "type": "live_mill", "tool_id": 1, "face": "front", "drawing": "y_cross.dxf", "layer": "CROSS", "strategy": "profile", "side": "on", "depth": 1, "z_start": 0, "y_axis": true, "c": 30, "rpm": 2500, "feed": 180 }"#;
+    let job = lathe_with_profile(AXIAL_MILL, r#"{ "y_axis": true, "y_min": -50.8, "y_max": 50.8 }"#, op);
+    let path = write_tree("campanion-lathe-mill-y", &[("profile.dxf", PROFILE_DXF), ("y_cross.dxf", &drawing)], "millturn_y.json", &job)?;
+    let posted = post_lathe(&path, "campanion-lathe-millturn-y.nc")?;
+    assert_golden("millturn_y.haas_lathe.nc", &posted)?;
+    if posted.contains("G112") {
+        return Err(format!("y-axis mill posted face interpolation\n{posted}"));
+    }
+    for needle in ["Y", "C30.", "X-"] {
+        if !posted.contains(needle) {
+            return Err(format!("missing {needle}\n{posted}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn live_mill_rejects_bad_drawings_and_heads() -> Result<(), String> {
+    let c_early = r#"{ "name": "face_pocket", "type": "live_mill", "tool_id": 1, "face": "front", "drawing": "face.dxf", "strategy": "pocket", "depth": 1, "z_start": 0, "c": 10, "rpm": 1000, "feed": 100 }"#;
+    assert_rejects(&mill_shell("", AXIAL_MILL, c_early), "campanion-lathe-mill-c.json", "c is only valid when y_axis is true")?;
+
+    let needs_head = r#"{ "name": "across", "type": "live_mill", "tool_id": 1, "face": "front", "drawing": "face.dxf", "strategy": "profile", "side": "on", "depth": 1, "z_start": 0, "y_axis": true, "rpm": 1000, "feed": 100 }"#;
+    assert_rejects(&mill_shell("", AXIAL_MILL, needs_head), "campanion-lathe-mill-no-y.json", "operation across: y_axis needs head.y_axis")?;
+
+    let side = r#"{ "name": "face_pocket", "type": "live_mill", "tool_id": 1, "face": "front", "drawing": "face.dxf", "strategy": "pocket", "side": "outside", "depth": 1, "z_start": 0, "rpm": 1000, "feed": 100 }"#;
+    assert_rejects(&mill_shell("", AXIAL_MILL, side), "campanion-lathe-mill-side.json", "unknown operation field `side`")?;
+
+    let open = fixture_text("open_path.dxf")?;
+    let open_op = r#"{ "name": "face_pocket", "type": "live_mill", "tool_id": 1, "face": "front", "drawing": "open_path.dxf", "layer": "OPEN", "strategy": "pocket", "depth": 1, "z_start": 0, "rpm": 1000, "feed": 100 }"#;
+    let open_job = write_tree(
+        "campanion-lathe-mill-open",
+        &[("profile.dxf", PROFILE_DXF), ("open_path.dxf", &open)],
+        "mill_open.json",
+        &lathe_with_profile(AXIAL_MILL, "", open_op),
+    )?;
+    assert_rejects_at(&open_job, "operation face_pocket: drawing has no closed contour")?;
+
+    let wide = fixture_text("wide_wrap.dxf")?;
+    let wide_op = r#"{ "name": "od_wrap", "type": "live_mill", "tool_id": 1, "face": "od", "drawing": "wide_wrap.dxf", "layer": "WRAP", "strategy": "profile", "side": "on", "depth": 1, "diameter": 40, "rpm": 1000, "feed": 100 }"#;
+    let wide_job = write_tree(
+        "campanion-lathe-mill-wrap",
+        &[("profile.dxf", PROFILE_DXF), ("wide_wrap.dxf", &wide)],
+        "mill_wrap.json",
+        &lathe_with_profile(RADIAL_MILL, "", wide_op),
+    )?;
+    assert_rejects_at(&wide_job, "operation od_wrap: drawing wraps past one turn")?;
+
+    let high = fixture_text("y_high.dxf")?;
+    let high_op = r#"{ "name": "across", "type": "live_mill", "tool_id": 1, "face": "front", "drawing": "y_high.dxf", "layer": "HIGH", "strategy": "profile", "side": "on", "depth": 1, "z_start": 0, "y_axis": true, "rpm": 1000, "feed": 100 }"#;
+    let high_job = write_tree(
+        "campanion-lathe-mill-high",
+        &[("profile.dxf", PROFILE_DXF), ("y_high.dxf", &high)],
+        "mill_high.json",
+        &lathe_with_profile(AXIAL_MILL, r#"{ "y_axis": true, "y_min": -10, "y_max": 10 }"#, high_op),
+    )?;
+    assert_rejects_at(&high_job, "operation across: Y ")?;
+    assert_rejects_at(&high_job, "outside head travel")?;
+    Ok(())
+}

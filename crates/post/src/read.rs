@@ -453,6 +453,8 @@ impl<'a> Parser<'a> {
     /// A line that also carries G0/G1/G2/G3 (or the thread code) is motion and is left alone.
     /// `G19` in a cylinder `on` template is a plane select unless the mapping word is on that
     /// same line. `G107` with `{radius}` or `{diameter}` enters; a bare `G107` cancels.
+    /// `G17` in a face `on` template is the plane Y-axis milling also uses. It does not enter
+    /// face mode when the template names another G code, so X stays a diameter until `G112`.
     fn take_interpolation(&mut self, words: &[(char, f64)], g_codes: &[u16]) -> Result<bool> {
         if g_codes.iter().any(|code| is_motion_g(*code, self.thread_code())) {
             return Ok(false);
@@ -462,7 +464,7 @@ impl<'a> Parser<'a> {
         };
         let mut consumed = false;
         if let Some(face) = &lathe.face_interp {
-            let on = g_hits(g_codes, &face.on);
+            let on = face_on_hit(g_codes, &face.on);
             let off = g_hits(g_codes, &face.off);
             if on && !off {
                 self.face_mode = true;
@@ -768,6 +770,26 @@ fn template_g_codes(lines: &[String]) -> Vec<u16> {
 fn g_hits(g_codes: &[u16], lines: &[String]) -> bool {
     let needles = template_g_codes(lines);
     g_codes.iter().any(|code| needles.contains(code))
+}
+
+/// Face interpolation on. A plane word is not enough when the template also names a mode word.
+///
+/// Haas writes `G17` before `G112`, and the same `G17` before a real Y move. Only `G112` makes
+/// X a radius. A template that is only a plane select still enters on that plane.
+fn face_on_hit(g_codes: &[u16], lines: &[String]) -> bool {
+    let needles = template_g_codes(lines);
+    let shares_plane = needles.iter().any(|code| is_plane_select(*code));
+    let has_mode = needles.iter().any(|code| !is_plane_select(*code));
+    g_codes.iter().any(|code| {
+        if shares_plane && has_mode && is_plane_select(*code) {
+            return false;
+        }
+        needles.contains(code)
+    })
+}
+
+fn is_plane_select(code: u16) -> bool {
+    matches!(code, 17..=19)
 }
 
 /// Letter that carries `{radius}` or `{diameter}` in a cylinder `on` template.
