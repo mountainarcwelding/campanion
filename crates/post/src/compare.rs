@@ -537,6 +537,7 @@ fn consume_curve(
             end_of(mv)
         };
         let point = project(part_point, drop_z);
+        let mut block_arc: Option<Xyz> = None;
         match mv {
             ReadMove::Rapid { .. } => return Err(invalid(format!("motion {index}: arc was posted as a rapid"))),
             ReadMove::Arc { sense: got, center: got_center, radius, .. } => {
@@ -567,6 +568,7 @@ fn consume_curve(
                     *got_center
                 };
                 let got_center = project(got_center, drop_z);
+                block_arc = Some(got_center);
                 let centre_tol = if radius.is_some() { radius_centre_limit(prev, point, center, plane, tol) } else { tol };
                 if !centre_ok(got_center, center, plane, radius.is_some(), centre_tol) {
                     return Err(invalid(format!("motion {index}: arc centre differs")));
@@ -579,7 +581,12 @@ fn consume_curve(
             return Err(invalid(format!("motion {index}: point is off the arc")));
         }
         check_curve_feed(mv, prev_part, part_point, prev_angle, angle, &check, tol, index)?;
-        acc += travel(prev, point, center, plane, sense, sweep - acc, tol);
+        acc += match block_arc {
+            // A chord within tol cannot tell a short step from the long way round; the block's own
+            // centre and sense can. Longer chords keep the program-centre angle.
+            Some(read_center) if geom::in_plane_len(plane, prev, point) <= tol.max(1e-9) => controller_sweep(prev, point, read_center, plane, sense),
+            _ => travel(prev, point, center, plane, sense, sweep - acc, tol),
+        };
         prev = point;
         prev_part = part_point;
         prev_angle = angle;
@@ -587,8 +594,8 @@ fn consume_curve(
         let slack = if radius <= 1e-12 { 1e-3 } else { 1e-3_f64.max(tol / radius) };
         // Both programmed ends lie on this posted point when the chord rounded away.
         // A line there cannot cut a circle; an equal-endpoint arc was rejected above.
-        // Past a half circle the writer still posts that chord, and travel ignores the long way.
-        let unresolved = geom::dist3(point, start) <= tol && (matches!(mv, ReadMove::Linear { .. }) || sweep > std::f64::consts::PI);
+        // Only an arc the writer can drop to a line: at most a half circle.
+        let unresolved = matches!(mv, ReadMove::Linear { .. }) && geom::dist3(point, start) <= tol && sweep <= std::f64::consts::PI + 1e-9;
         if geom::dist3(point, end) <= tol && (acc + slack >= sweep || unresolved) {
             if acc > sweep + 0.25 {
                 return Err(invalid(format!("motion {index}: arc travelled too far")));
@@ -686,6 +693,14 @@ fn travel(prev: Xyz, point: Xyz, center: Xyz, plane: Plane, sense: ArcSense, rem
     } else {
         forward_from(prev, point, center, plane, sense)
     }
+}
+
+/// The sweep a controller cuts for one arc block: equal endpoints are a full circle.
+fn controller_sweep(start: Xyz, point: Xyz, center: Xyz, plane: Plane, sense: ArcSense) -> f64 {
+    if geom::in_plane_len(plane, start, point) <= 1e-9 {
+        return std::f64::consts::TAU;
+    }
+    geom::forward_delta(geom::angle_of(plane, start, center), geom::angle_of(plane, point, center), matches!(sense, ArcSense::Ccw))
 }
 
 fn forward_from(start: Xyz, point: Xyz, center: Xyz, plane: Plane, sense: ArcSense) -> f64 {
@@ -990,5 +1005,66 @@ mod tests {
         let moves = read_back(&join_lines(&kept), &post).expect("read");
         let err = super::compare(&program, &moves, 1e-3, &post).expect_err("missing arc");
         assert!(err.to_string().contains("motion 1"), "{err}");
+    }
+
+    #[test]
+    fn missing_near_full_arc_is_rejected() {
+        let radius = 5.0;
+        let sweep = std::f64::consts::TAU - 0.0015;
+        let end_x = radius * sweep.cos();
+        let end_y = radius * sweep.sin();
+        let program = program_of(vec![
+            ClBlock::Motion(ClMotion::Rapid { to: tip(radius, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: tip(end_x, end_y, 0.0),
+                plane: Plane::Xy,
+                center: Vec3::ZERO,
+                sense: ArcSense::Ccw,
+                feed: 100.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ]);
+        let post = linux();
+        let text = post_program(&program, &post, &options()).expect("post");
+        let moves = read_back(&text, &post).expect("read");
+        super::compare(&program, &moves, 0.01, &post).expect("compare");
+        let kept: Vec<&str> = text.lines().filter(|line| !arc_line(line)).collect();
+        assert!(kept.len() < text.lines().count(), "{text}");
+        let moves = read_back(&join_lines(&kept), &post).expect("read");
+        super::compare(&program, &moves, 0.01, &post).expect_err("missing arc");
+    }
+
+    #[test]
+    fn long_way_arc_block_counts_its_sweep() {
+        let x = -22.774264601009403;
+        let y = 46.61343560944223;
+        let radius = 0.010427771318676952_f64;
+        let sweep = 5.80245671977469_f64;
+        let center_x = x - radius;
+        let end_x = center_x + radius * sweep.cos();
+        let end_y = y + radius * sweep.sin();
+        let program = program_of(vec![
+            ClBlock::Motion(ClMotion::Rapid { to: tip(x, y, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: tip(end_x, end_y, 0.0),
+                plane: Plane::Xy,
+                center: Vec3::new(center_x, y, 0.0).expect("center"),
+                sense: ArcSense::Ccw,
+                feed: 100.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ]);
+        let post = linux();
+        let text = post_program(&program, &post, &options()).expect("post");
+        let arc_lines: Vec<&str> = text.lines().filter(|line| arc_line(line)).collect();
+        assert_eq!(arc_lines.len(), 1, "{text}");
+        let moves = read_back(&text, &post).expect("read");
+        super::compare(&program, &moves, 0.01, &post).expect("compare");
+        let flipped = text.replacen("G3", "G2", 1);
+        assert_ne!(flipped, text, "{text}");
+        let moves = read_back(&flipped, &post).expect("read");
+        super::compare(&program, &moves, 0.01, &post).expect_err("opposite sense");
     }
 }
