@@ -52,127 +52,140 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
     };
     let motions: Vec<&ReadMove> = moves.iter().filter(|move_| is_motion(move_)).collect();
     let mut cursor = 0usize;
-    let mut part: Option<Xyz> = None;
-    let mut written: Option<Xyz> = None;
-    let mut prev_angle: Option<f64> = None;
-    let mut prev_c = 0.0;
-    let mut cart = InterpTrack::Off;
     let mut index = 0usize;
-    for path in program.toolpaths() {
-        for block in path.blocks() {
-            if let ClBlock::Event(event) = block {
-                note_interp(event, post, &mut cart, &mut prev_c, &mut prev_angle);
-                continue;
-            }
-            let ClBlock::Motion(motion) = block else { continue };
-            let end_pose = pose_of(motion);
-            let end_angle = end_pose.rotary();
-            let part_end = tip(end_pose);
-            if let Some(frame) = cart.fallback() {
-                let (rapid, feed, curve) = fallback_curve(motion, part, index)?;
-                prev_c = consume_fallback(&motions, &mut cursor, frame, curve, part_end, prev_c, rapid, feed, tol, angle_tol, index, post)?;
-                part = Some(part_end);
-                written = Some(part_end);
-                prev_angle = end_angle;
-                index += 1;
-                continue;
-            }
-            let written_end = written_tip(setup, end_pose)?;
-            let rotating = rotary::angle_changes(prev_angle, end_angle);
-            match motion {
-                ClMotion::Rapid { .. } => {
-                    if rotating || !skip_z_only(post, written, written_end, true)? {
-                        take_line(
-                            &motions,
-                            &mut cursor,
-                            true,
-                            part_end,
-                            tol,
-                            index,
-                            drop_z,
-                            LineCheck { setup, angle: end_angle, angle_tol, feed: None, feed_decimals: post.decimals.feed },
-                        )?;
-                    }
+    let groups = match crate::balance::channel_sections(program, post)? {
+        Some(sections) => sections.into_iter().map(|section| section.paths).collect::<Vec<_>>(),
+        None => vec![(0..program.toolpaths().len()).collect()],
+    };
+    for group in groups {
+        let mut part: Option<Xyz> = None;
+        let mut written: Option<Xyz> = None;
+        let mut prev_angle: Option<f64> = None;
+        let mut prev_c = 0.0;
+        let mut cart = InterpTrack::Off;
+        for path_index in group {
+            let Some(path) = program.toolpaths().get(path_index) else {
+                return Err(invalid("toolpath index is out of range"));
+            };
+            for block in path.blocks() {
+                if let ClBlock::Event(event) = block {
+                    note_interp(event, post, &mut cart, &mut prev_c, &mut prev_angle);
+                    continue;
                 }
-                ClMotion::Linear { feed, .. } => {
-                    let c_inverse = lathe_c_inverse(post) && rotating;
-                    let length = if c_inverse {
-                        match part {
-                            Some(start) => {
-                                let c0 = prev_angle.unwrap_or(0.0);
-                                let c1 = end_angle.unwrap_or(c0);
-                                rotary::lathe_indexed_length(start, part_end, c0, c1)
-                            }
-                            None => 0.0,
+                let ClBlock::Motion(motion) = block else { continue };
+                let end_pose = pose_of(motion);
+                let end_angle = end_pose.rotary();
+                let part_end = tip(end_pose);
+                if let Some(frame) = cart.fallback() {
+                    let (rapid, feed, curve) = fallback_curve(motion, part, index)?;
+                    prev_c = consume_fallback(&motions, &mut cursor, frame, curve, part_end, prev_c, rapid, feed, tol, angle_tol, index, post)?;
+                    part = Some(part_end);
+                    written = Some(part_end);
+                    prev_angle = end_angle;
+                    index += 1;
+                    continue;
+                }
+                let written_end = written_tip(setup, end_pose)?;
+                let rotating = rotary::angle_changes(prev_angle, end_angle);
+                match motion {
+                    ClMotion::Rapid { .. } => {
+                        if rotating || !skip_z_only(post, written, written_end, true)? {
+                            take_line(
+                                &motions,
+                                &mut cursor,
+                                true,
+                                part_end,
+                                tol,
+                                index,
+                                drop_z,
+                                LineCheck { setup, angle: end_angle, angle_tol, feed: None, feed_decimals: post.decimals.feed },
+                            )?;
                         }
-                    } else {
-                        part.map(|start| geom::dist3(start, part_end)).unwrap_or(0.0)
-                    };
-                    let feed_check =
-                        Some(FeedCheck { ir_feed: *feed, inverse: expect_inverse(post, rotating) || c_inverse, length, within_percent: c_inverse });
-                    if rotating || !skip_z_only(post, written, written_end, false)? {
-                        take_line(
+                    }
+                    ClMotion::Linear { feed, .. } => {
+                        let c_inverse = lathe_c_inverse(post) && rotating;
+                        let length = if c_inverse {
+                            match part {
+                                Some(start) => {
+                                    let c0 = prev_angle.unwrap_or(0.0);
+                                    let c1 = end_angle.unwrap_or(c0);
+                                    rotary::lathe_indexed_length(start, part_end, c0, c1)
+                                }
+                                None => 0.0,
+                            }
+                        } else {
+                            part.map(|start| geom::dist3(start, part_end)).unwrap_or(0.0)
+                        };
+                        let feed_check = Some(FeedCheck {
+                            ir_feed: *feed,
+                            inverse: expect_inverse(post, rotating) || c_inverse,
+                            length,
+                            within_percent: c_inverse,
+                        });
+                        if rotating || !skip_z_only(post, written, written_end, false)? {
+                            take_line(
+                                &motions,
+                                &mut cursor,
+                                false,
+                                part_end,
+                                tol,
+                                index,
+                                drop_z,
+                                LineCheck { setup, angle: end_angle, angle_tol, feed: feed_check, feed_decimals: post.decimals.feed },
+                            )?;
+                        }
+                    }
+                    ClMotion::Arc { plane, center, sense, feed, .. } => {
+                        let start = part.ok_or_else(|| invalid(format!("motion {index}: arc needs a prior position")))?;
+                        let center = xyz(*center);
+                        let sweep = geom::arc_sweep(start, part_end, center, *plane, *sense, 0.0)?;
+                        consume_curve(
                             &motions,
                             &mut cursor,
-                            false,
+                            start,
                             part_end,
+                            center,
+                            *plane,
+                            *sense,
+                            sweep,
                             tol,
                             index,
                             drop_z,
-                            LineCheck { setup, angle: end_angle, angle_tol, feed: feed_check, feed_decimals: post.decimals.feed },
+                            CurveCheck { setup, start_angle: prev_angle, end_angle, ir_feed: *feed, angle_tol, post },
                         )?;
                     }
+                    ClMotion::Helix { plane, center, sense, sweep, feed, .. } => {
+                        let start = part.ok_or_else(|| invalid(format!("motion {index}: helix needs a prior position")))?;
+                        let center = xyz(*center);
+                        consume_curve(
+                            &motions,
+                            &mut cursor,
+                            start,
+                            part_end,
+                            center,
+                            *plane,
+                            *sense,
+                            *sweep,
+                            tol,
+                            index,
+                            drop_z,
+                            CurveCheck { setup, start_angle: prev_angle, end_angle, ir_feed: *feed, angle_tol, post },
+                        )?;
+                    }
+                    ClMotion::Thread { lead, .. } => {
+                        take_thread(&motions, &mut cursor, part_end, *lead, tol, index, drop_z, post, end_angle, angle_tol, setup)?;
+                    }
                 }
-                ClMotion::Arc { plane, center, sense, feed, .. } => {
-                    let start = part.ok_or_else(|| invalid(format!("motion {index}: arc needs a prior position")))?;
-                    let center = xyz(*center);
-                    let sweep = geom::arc_sweep(start, part_end, center, *plane, *sense, 0.0)?;
-                    consume_curve(
-                        &motions,
-                        &mut cursor,
-                        start,
-                        part_end,
-                        center,
-                        *plane,
-                        *sense,
-                        sweep,
-                        tol,
-                        index,
-                        drop_z,
-                        CurveCheck { setup, start_angle: prev_angle, end_angle, ir_feed: *feed, angle_tol, post },
-                    )?;
+                part = Some(part_end);
+                written = Some(written_end);
+                prev_angle = end_angle;
+                if program.turning().is_some()
+                    && let Some(angle) = end_angle
+                {
+                    prev_c = angle;
                 }
-                ClMotion::Helix { plane, center, sense, sweep, feed, .. } => {
-                    let start = part.ok_or_else(|| invalid(format!("motion {index}: helix needs a prior position")))?;
-                    let center = xyz(*center);
-                    consume_curve(
-                        &motions,
-                        &mut cursor,
-                        start,
-                        part_end,
-                        center,
-                        *plane,
-                        *sense,
-                        *sweep,
-                        tol,
-                        index,
-                        drop_z,
-                        CurveCheck { setup, start_angle: prev_angle, end_angle, ir_feed: *feed, angle_tol, post },
-                    )?;
-                }
-                ClMotion::Thread { lead, .. } => {
-                    take_thread(&motions, &mut cursor, part_end, *lead, tol, index, drop_z, post, end_angle, angle_tol, setup)?;
-                }
+                index += 1;
             }
-            part = Some(part_end);
-            written = Some(written_end);
-            prev_angle = end_angle;
-            if program.turning().is_some()
-                && let Some(angle) = end_angle
-            {
-                prev_c = angle;
-            }
-            index += 1;
         }
     }
     if cursor != motions.len() {

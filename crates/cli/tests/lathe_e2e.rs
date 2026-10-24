@@ -337,6 +337,76 @@ fn assert_golden(name: &str, actual: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn channel_must_be_zero_or_one() -> Result<(), String> {
+    let body = r#"{
+        "format": "campanion-lathe/1",
+        "source": { "path": "missing.dxf" },
+        "units": "mm",
+        "stock": { "kind": "bar", "diameter": 20, "length": 10, "front_allowance": 1 },
+        "spindle": { "max_rpm": 1000 },
+        "tools": [{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }],
+        "operations": [
+            { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 100, "speed": { "rpm": 1000 }, "channel": 2 }
+        ],
+        "clearance": 1
+    }"#;
+    assert_rejects(body, "channel-two.json", "operation face: channel must be 0 or 1")?;
+    let fractional = body.replace("\"channel\": 2", "\"channel\": 1.5");
+    assert_rejects(&fractional, "channel-fraction.json", "operation face: channel must be 0 or 1")?;
+    let wait = r#"{
+        "format": "campanion-lathe/1",
+        "source": { "path": "missing.dxf" },
+        "units": "mm",
+        "stock": { "kind": "bar", "diameter": 20, "length": 10, "front_allowance": 1 },
+        "spindle": { "max_rpm": 1000 },
+        "tools": [],
+        "operations": [ { "name": "sync", "type": "wait", "channel": 0 } ],
+        "clearance": 1
+    }"#;
+    assert_rejects(wait, "wait-channel.json", "unknown operation field `channel`")
+}
+
+#[test]
+fn two_channel_job_posts_and_prints_balance() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/two_channel.lathe.json"))?;
+    let out = temp_path("two_channel.generic_lathe_2ch.nc");
+    let _ = std::fs::remove_file(&out);
+    let output = run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "generic_lathe_2ch"])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("two_channel.generic_lathe_2ch.nc", &posted)?;
+    let stderr = text(&output.stderr)?;
+    if !stderr.contains("segment 0 channel 0 time_s") || !stderr.contains("channel 1 time_s") || !stderr.contains("cycle_s") {
+        return Err(format!("balance report missing:\n{stderr}"));
+    }
+    assert_in_order(
+        &posted,
+        &[
+            "%",
+            "O0001",
+            "G21",
+            "G18",
+            "(CHANNEL 1)",
+            "(toolpath face)",
+            "(toolpath rough)",
+            "M101",
+            "(toolpath finish)",
+            "(CHANNEL 2)",
+            "(toolpath drill)",
+            "M101",
+            "(toolpath groove)",
+            "G28",
+            "M30",
+            "%",
+        ],
+    )?;
+    if posted.matches("O0001").count() != 1 || posted.matches("M30").count() != 1 || posted.matches("(CHANNEL 1)").count() != 1 {
+        return Err(format!("channel layout is not one header and one section each:\n{posted}"));
+    }
+    Ok(())
+}
+
 fn assert_in_order(text: &str, needles: &[&str]) -> Result<(), String> {
     let mut from = 0;
     for needle in needles {

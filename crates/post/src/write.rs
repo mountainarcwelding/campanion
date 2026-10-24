@@ -49,15 +49,32 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     check_thread_support(program, post)?;
     check_lathe_program(program, post)?;
     check_rotary_program(program, post)?;
+    let sections = crate::balance::channel_sections(program, post)?;
     let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning());
     let name = sanitize(program.name().unwrap_or(""));
     let number = post.program_number.clone().unwrap_or_default();
     let header_vars = [("program_name", name.as_str()), ("program_number", number.as_str()), ("date-free!", "")];
     writer.templates("header", &post.header, &header_vars)?;
     writer.begin_lathe()?;
-    for (index, path) in program.toolpaths().iter().enumerate() {
-        let index = u32::try_from(index).map_err(|_| invalid("too many toolpaths"))?;
-        writer.toolpath(index, path)?;
+    if let Some(sections) = sections {
+        writer.begin_channels();
+        for section in sections {
+            writer.reset_for_channel();
+            writer.channel_mark(section.channel, false)?;
+            for index in section.paths {
+                let Some(path) = program.toolpaths().get(index) else {
+                    return Err(invalid("toolpath index is out of range"));
+                };
+                let index = u32::try_from(index).map_err(|_| invalid("too many toolpaths"))?;
+                writer.toolpath(index, path)?;
+            }
+            writer.channel_mark(section.channel, true)?;
+        }
+    } else {
+        for (index, path) in program.toolpaths().iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| invalid("too many toolpaths"))?;
+            writer.toolpath(index, path)?;
+        }
     }
     writer.stop_processes()?;
     writer.templates("footer", &post.footer, &header_vars)?;
@@ -183,11 +200,18 @@ struct Writer<'a> {
     thc_phase: ThcPhase,
     last_speed: String,
     last_power: String,
+    /// Plane after [`Self::begin_lathe`]. Each channel restores it without writing it again.
+    channel_plane: Option<Plane>,
+    /// Inverse-time flag after [`Self::begin_lathe`].
+    channel_inverse: bool,
+    /// Sync events write the post's wait lines.
+    multi_channel: bool,
 }
 
 impl<'a> Writer<'a> {
     fn new(post: &'a PostDef, options: &'a PostOptions, setup: Option<RotarySetup>, turning: Option<&'a TurningSetup>) -> Self {
         let plane = if post.planes { header_plane(&post.header) } else { header_plane(&post.header).or(Some(Plane::Xy)) };
+        let inverse_time = header_inverse(post);
         Self {
             post,
             options,
@@ -207,7 +231,7 @@ impl<'a> Writer<'a> {
             live_feed_written: false,
             y_modal: None,
             mill_plane: None,
-            inverse_time: header_inverse(post),
+            inverse_time,
             setup,
             turning,
             path_index: 0,
@@ -220,7 +244,69 @@ impl<'a> Writer<'a> {
             thc_phase: ThcPhase::Idle,
             last_speed: String::new(),
             last_power: "0".to_string(),
+            channel_plane: plane,
+            channel_inverse: inverse_time,
+            multi_channel: false,
         }
+    }
+
+    /// Remember the preamble so each channel starts from it, and write syncs as wait lines.
+    fn begin_channels(&mut self) {
+        self.multi_channel = true;
+        self.channel_plane = self.plane;
+        self.channel_inverse = self.inverse_time;
+    }
+
+    /// Drop modal and position state. The output buffer and line numbers continue.
+    fn reset_for_channel(&mut self) {
+        self.pos = None;
+        self.exact = None;
+        self.part_tip = None;
+        self.angle = None;
+        self.c_engaged = false;
+        self.c_continuous = None;
+        self.c_modal = None;
+        self.cart = CartMode::Off;
+        self.force_axes = false;
+        self.polar_count = 0;
+        self.brake_clamped = false;
+        self.live_on = false;
+        self.live_feed_written = false;
+        self.y_modal = None;
+        self.mill_plane = None;
+        self.inverse_time = self.channel_inverse;
+        self.path_index = 0;
+        self.active_spindle = "main".to_string();
+        self.plane = self.channel_plane;
+        self.linear = None;
+        self.feed = None;
+        self.on.clear();
+        self.thc_phase = ThcPhase::Idle;
+        self.last_speed.clear();
+        self.last_power = "0".to_string();
+    }
+
+    /// `start` when `end` is false, otherwise `end`. `{channel}` is 1-based.
+    fn channel_mark(&mut self, channel: u16, end: bool) -> Result<()> {
+        let Some(channels) = self.post.lathe.as_ref().and_then(|lathe| lathe.channels.clone()) else {
+            return Err(invalid("channel sections need a channels block"));
+        };
+        let label = u32::from(channel).saturating_add(1).to_string();
+        if end {
+            self.templates("lathe.channels.end", &channels.end, &[("date-free!", "")])
+        } else {
+            self.templates("lathe.channels.start", &channels.start, &[("channel", label.as_str()), ("date-free!", "")])
+        }
+    }
+
+    /// `{code}` is `wait_base + id`.
+    fn write_sync_wait(&mut self, id: u32) -> Result<()> {
+        let Some(channels) = self.post.lathe.as_ref().and_then(|lathe| lathe.channels.clone()) else {
+            return self.comment(&format!("sync {id}"));
+        };
+        let code = channels.wait_base.checked_add(id).ok_or_else(|| invalid("sync wait code overflows"))?;
+        let code = code.to_string();
+        self.templates("lathe.channels.wait", &channels.wait, &[("code", code.as_str()), ("date-free!", "")])
     }
 
     /// Diameter or radius mode, the ZX plane, and the feed-mode word. Once, after the header.
@@ -1121,7 +1207,13 @@ impl<'a> Writer<'a> {
             Event::Comment { text } => self.comment(text),
             Event::Probe { .. } => self.comment("probe"),
             Event::Custom { name, .. } => self.comment(&format!("custom {}", sanitize(name))),
-            Event::Sync { id } => self.comment(&format!("sync {id}")),
+            Event::Sync { id } => {
+                if self.multi_channel {
+                    self.write_sync_wait(*id)
+                } else {
+                    self.comment(&format!("sync {id}"))
+                }
+            }
             Event::CAxis { .. }
             | Event::SpindleBrake { .. }
             | Event::LiveToolOn { .. }

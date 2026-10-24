@@ -124,7 +124,20 @@ fn rotary_angles_need_a_post_that_names_the_axis() {
 fn builtins_load_and_match_ids() {
     assert_eq!(
         builtin_ids(),
-        &["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser", "linuxcnc_lathe", "fanuc_lathe", "haas_lathe", "grbl_lathe",]
+        &[
+            "linuxcnc",
+            "grbl",
+            "mach3",
+            "fanuc",
+            "haas",
+            "plasma",
+            "grbl_laser",
+            "linuxcnc_lathe",
+            "fanuc_lathe",
+            "haas_lathe",
+            "grbl_lathe",
+            "generic_lathe_2ch",
+        ]
     );
     for id in builtin_ids() {
         let post = builtin(id).expect(id);
@@ -165,7 +178,7 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("fanuc").expect("fanuc").max_line_length(), Some(80));
     assert_eq!(builtin("haas").expect("haas").linear_decimals(), 3);
     assert_eq!(builtin("haas").expect("haas").max_line_length(), Some(80));
-    for id in ["fanuc", "haas", "fanuc_lathe", "haas_lathe"] {
+    for id in ["fanuc", "haas", "fanuc_lathe", "haas_lathe", "generic_lathe_2ch"] {
         assert!(builtin(id).expect(id).decimal_point, "{id}");
     }
     for id in ["linuxcnc", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"] {

@@ -1,0 +1,58 @@
+{
+  "id": "generic_lathe_2ch",
+  "name": "Two-channel lathe",
+  "description": "Template for a two-channel lathe. Two-path controls use machine-specific wait M-codes and program layout; check the control manual. Fanuc-style millimetre dialect: percent-delimited program O0001, sequence numbers, diameter mode by default, G18, G98, G50 then G96, G32 threading, G28 U0 W0 home, and M30. Each channel starts with a comment. A sync wait is M plus 100 plus the sync id. This file is a template, not a finished control post.",
+  "program_number": "0001",
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 3, "feed": 3, "dwell": 3 },
+  "trailing_zeros": false,
+  "decimal_point": true,
+  "header": [
+    "%",
+    "O{program_number}",
+    "({program_name})",
+    "G21 G40 G80"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "ms" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M30", "%"],
+  "max_line_length": 80,
+  "axis_letters": "XYZ",
+  "lathe": {
+    "diameter_mode": true,
+    "mode_lines": [],
+    "plane": "G18",
+    "feed_mode": "G98",
+    "css": ["G50 S{max_rpm}", "G96 S{surface}"],
+    "rpm": ["G97 S{rpm}"],
+    "spindle_cw": ["M3"],
+    "spindle_ccw": ["M4"],
+    "spindle_off": ["M5"],
+    "tool_change": ["T{tool2}{offset2}"],
+    "arc_flip": false,
+    "home": ["G28 U0 W0"],
+    "thread": { "code": "G32", "lead_word": "F" },
+    "channels": {
+      "count": 2,
+      "start": ["(CHANNEL {channel})"],
+      "end": [],
+      "wait": ["M{code}"],
+      "wait_base": 100
+    }
+  }
+}
