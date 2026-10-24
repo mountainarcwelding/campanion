@@ -1,6 +1,6 @@
 use campanion_ir::{
-    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind,
-    RotaryDirection, RotarySetup, Tool, Vec3, machine_to_part, part_to_machine,
+    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, Head, HeadAxis, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program,
+    RotaryAxisKind, RotaryDirection, RotarySetup, Spindle, SpindleSpeed, Tool, TurnBinding, TurningSetup, Vec3, machine_to_part, part_to_machine,
 };
 
 use crate::{PostOptions, builtin, builtin_ids, compare, load_post, post_program, read_back};
@@ -1235,4 +1235,118 @@ fn long_lines_are_rejected() {
     let blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(100.0, 0.0, 0.0), feed: None })];
     let err = post_program(&program(blocks), &post, &options()).expect_err("length");
     assert!(err.to_string().contains("max_line_length"), "{err}");
+}
+
+fn haas_lathe() -> crate::PostDef {
+    builtin("haas_lathe").expect("haas_lathe")
+}
+
+fn xz_pose(x: f64, z: f64) -> Pose {
+    pose(x, 0.0, z)
+}
+
+fn thread_block(x: f64, z: f64, lead: f64) -> ClBlock {
+    ClBlock::Motion(ClMotion::Thread { to: xz_pose(x, z), lead })
+}
+
+fn named_lathe_path(name: &str, blocks: Vec<ClBlock>) -> ClPath {
+    ClPath::try_new(
+        Some(name.into()),
+        None,
+        CompensationMode::Off,
+        Feeds::try_new(100.0, None, None, None, None).expect("feeds"),
+        None,
+        Vec::new(),
+        blocks,
+    )
+    .expect("path")
+}
+
+fn rpm_binding(toolpath: u32) -> TurnBinding {
+    TurnBinding::try_new(toolpath, "main", "turret1", 0).expect("binding").with_speed(Some(SpindleSpeed::rpm(800.0).expect("rpm"))).expect("speed")
+}
+
+fn lathe_program(paths: Vec<ClPath>) -> Program {
+    let spindle = Spindle::try_new("main", None, 0.0, 3_000.0).expect("spindle");
+    let head = Head::try_new("turret1", vec![HeadAxis::X, HeadAxis::Z], 12, false).expect("head");
+    let bindings = (0..paths.len()).map(|index| rpm_binding(u32::try_from(index).expect("index"))).collect();
+    let setup = TurningSetup::try_new(vec![spindle], vec![head], None, Vec::new(), bindings).expect("turning");
+    Program::try_new(Some("thread".into()), Vec::new(), None, paths, Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_turning(Some(setup))
+        .expect("lathe")
+}
+
+fn code_on(line: &str, code: &str) -> bool {
+    line.split_whitespace().any(|token| token == code)
+}
+
+/// One G99 before the first G32 of a run, then G98 before the next G1, with no G1 between them.
+#[test]
+fn haas_thread_run_writes_g99_before_g32_and_g98_before_the_next_g1() {
+    let program = lathe_program(vec![named_lathe_path(
+        "pass",
+        vec![
+            ClBlock::Motion(ClMotion::Linear { to: xz_pose(11.0, 1.0), feed: 100.0, role: MoveRole::Cut }),
+            thread_block(9.0, -12.0, 2.5),
+            ClBlock::Motion(ClMotion::Rapid { to: xz_pose(11.0, -12.0), feed: None }),
+            thread_block(9.0, -20.0, 2.5),
+            ClBlock::Motion(ClMotion::Linear { to: xz_pose(8.0, -21.0), feed: 80.0, role: MoveRole::Cut }),
+        ],
+    )]);
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let lines: Vec<&str> = text.lines().collect();
+    let g99: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| code_on(line, "G99")).map(|(index, _)| index).collect();
+    assert_eq!(g99.len(), 1, "{text}");
+    let g32: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| code_on(line, "G32")).map(|(index, _)| index).collect();
+    assert!(g32.len() >= 2, "{text}");
+    assert!(g99[0] < g32[0], "{text}");
+    let g1_after = lines.iter().enumerate().skip(g32[0]).find(|(_, line)| code_on(line, "G1")).map(|(index, _)| index).expect("g1 after thread");
+    let g98 = lines[g99[0] + 1..g1_after].iter().position(|line| code_on(line, "G98")).map(|index| g99[0] + 1 + index).expect("g98");
+    assert!(lines[g99[0] + 1..g98].iter().all(|line| !code_on(line, "G1")), "{text}");
+    assert!(g32.iter().all(|index| *index < g98), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+/// A toolpath that ends on a thread or a rapid still writes G98 before the next toolpath.
+#[test]
+fn haas_thread_feed_is_restored_before_the_next_toolpath() {
+    let post = haas_lathe();
+    for end_on_rapid in [false, true] {
+        let mut blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: xz_pose(11.0, 1.0), feed: None }), thread_block(9.0, -12.0, 2.5)];
+        if end_on_rapid {
+            blocks.push(ClBlock::Motion(ClMotion::Rapid { to: xz_pose(11.0, 1.0), feed: None }));
+        }
+        let program = lathe_program(vec![
+            named_lathe_path("pass", blocks),
+            named_lathe_path("next", vec![ClBlock::Motion(ClMotion::Linear { to: xz_pose(8.0, -13.0), feed: 80.0, role: MoveRole::Cut })]),
+        ]);
+        let text = post_program(&program, &post, &options()).expect("post");
+        let lines: Vec<&str> = text.lines().collect();
+        let g99: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| code_on(line, "G99")).map(|(index, _)| index).collect();
+        assert_eq!(g99.len(), 1, "{text}");
+        let next = lines.iter().position(|line| line.contains("(toolpath next)")).expect("next toolpath");
+        assert!(g99[0] < next, "{text}");
+        let g98 = lines[g99[0] + 1..next].iter().rposition(|line| code_on(line, "G98")).map(|index| g99[0] + 1 + index).expect("g98");
+        assert!(lines[g99[0] + 1..g98].iter().all(|line| !code_on(line, "G1")), "{text}");
+        compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+    }
+}
+
+#[test]
+fn thread_feed_mode_needs_lathe_feed_mode() {
+    let mut raw: serde_json::Value = serde_json::from_str(include_str!("../posts/haas_lathe.json")).expect("json");
+    raw["lathe"]["feed_mode"] = serde_json::json!("");
+    raw["lathe"]["thread"]["feed_mode"] = serde_json::json!("G99");
+    let err = load_post(&raw.to_string()).expect_err("empty feed mode");
+    let text = err.to_string();
+    assert!(text.contains("lathe.thread.feed_mode"), "{text}");
+    assert!(text.contains("needs lathe.feed_mode to return to"), "{text}");
+}
+
+#[test]
+fn reader_rejects_a_feed_move_in_haas_thread_feed_mode() {
+    let err = read_back("G99\nG1 X10. Z-1. F100.\n", &haas_lathe()).expect_err("feed");
+    assert!(err.to_string().contains("feed move in thread feed mode"), "{err}");
 }

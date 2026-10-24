@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `haas_lathe` writes G99 before G32 thread passes and G98 after them. Haas requires feed per revolution for G32; earlier versions wrote the thread passes under G98.
+
 ## 0.8.2 — 2026-10-24
 
 ### Fixed

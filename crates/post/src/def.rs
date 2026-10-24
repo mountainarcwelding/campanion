@@ -279,6 +279,10 @@ pub(crate) struct ThreadOutput {
     pub(crate) code: String,
     /// Word letter carrying the lead, for example `K` or `F`.
     pub(crate) lead_word: String,
+    /// Feed-mode word written before the first thread move of a run, such as `G99`, and left
+    /// with `lathe.feed_mode` before the next feed move or at the end of the toolpath. Empty: none.
+    #[serde(default)]
+    pub(crate) feed_mode: String,
 }
 
 /// How a lathe post writes X, spindle speed, tool changes and the ZX plane.
@@ -717,7 +721,7 @@ fn check_lathe(post: &PostDef) -> Result<()> {
     check_templates("lathe.tool_change", &lathe.tool_change, LATHE_TOOL)?;
     check_templates("lathe.home", &lathe.home, LATHE_BARE)?;
     if let Some(thread) = &lathe.thread {
-        check_thread_output(thread)?;
+        check_thread_output(thread, lathe)?;
     }
     if !matches!(lathe.c_feed.as_str(), "per_minute" | "inverse_time") {
         return Err(field("lathe.c_feed", "must be per_minute or inverse_time"));
@@ -857,7 +861,7 @@ fn check_references(refs: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn check_thread_output(thread: &ThreadOutput) -> Result<()> {
+fn check_thread_output(thread: &ThreadOutput, lathe: &LatheOutput) -> Result<()> {
     if g_code_number(&thread.code).is_none() {
         return Err(field("lathe.thread.code", "must be a G code such as G33"));
     }
@@ -867,6 +871,18 @@ fn check_thread_output(thread: &ThreadOutput) -> Result<()> {
     };
     if chars.next().is_some() || !letter.is_ascii_uppercase() {
         return Err(field("lathe.thread.lead_word", "must be one uppercase ASCII letter"));
+    }
+    if !thread.feed_mode.is_empty() {
+        check_templates("lathe.thread.feed_mode", std::slice::from_ref(&thread.feed_mode), LATHE_BARE)?;
+        if g_code_number(&thread.feed_mode).is_none() {
+            return Err(field("lathe.thread.feed_mode", "must be a G code such as G99"));
+        }
+        if lathe.feed_mode.is_empty() {
+            return Err(field("lathe.thread.feed_mode", "needs lathe.feed_mode to return to"));
+        }
+        if thread.feed_mode == lathe.feed_mode {
+            return Err(field("lathe.thread.feed_mode", "must differ from lathe.feed_mode"));
+        }
     }
     Ok(())
 }
