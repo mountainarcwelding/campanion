@@ -1314,6 +1314,7 @@ fn live_tool_lines_cannot_be_empty_and_c_feed_is_named() {
     .expect("empty lists");
     assert!(text.contains("C0.0000"), "{text}");
     assert!(!text.contains("M154") && !text.contains("M14"), "{text}");
+}
 
 fn index_of(text: &str, needle: &str) -> usize {
     let found = text.find(needle);
