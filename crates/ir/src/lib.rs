@@ -37,8 +37,11 @@
 //! and B. Every turning toolpath has a binding that names its spindle, head and channel. An M10
 //! lathe uses one spindle `main`, one head `turret1` and channel 0. Live tooling, Y, B and a
 //! second spindle fit in these types: spindles and heads are lists, and the extra axes and flags
-//! are optional fields. Bar and tube stock runs from the finished front face at Z = 0 back to
-//! Z = -length. Facing allowance comes from the operation, not from the stock value.
+//! are optional fields. In a turning program [`Pose::rotary`] is the C angle in degrees (finite,
+//! absolute value at most 99999). [`Event::CAxis`] engages that spindle as a positioning axis,
+//! [`Event::SpindleBrake`] clamps it, and [`Event::LiveToolOn`] starts the driven tool. A live-tool
+//! event does not require a turning setup. Bar and tube stock runs from the finished front face at
+//! Z = 0 back to Z = -length. Facing allowance comes from the operation, not from the stock value.
 //! The IR stores the finished section on the turning setup when one is recorded.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -62,7 +65,7 @@ pub use geom::{ArcSense, Plane, Pose, Vec3};
 pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
 pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};
-pub use process::{CoolantMode, Event, ParamValue, ProcessKind, ProcessParams, Tool};
+pub use process::{CoolantMode, Event, LiveDirection, ParamValue, ProcessKind, ProcessParams, Tool};
 pub use program::{Document, Program, SyncPoint};
 pub use rotary::{
     RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, index_angle_for_axis, machine_to_part, part_to_machine, rotate_point, rotate_vector,

@@ -28,8 +28,8 @@
 //!   not written.
 //! - Comments use parentheses. Parentheses in the source text are removed. Line breaks in that
 //!   text become spaces.
-//! - Coolant, probe, custom and sync events are comments, so the block order stays visible.
-//!   They are not machine codes.
+//! - Coolant, probe, custom, sync, C-axis, spindle-brake and live-tool events are comments, so
+//!   the block order stays visible. They are not machine codes.
 //! - Every coordinate, offset, feed and dwell is written with four digits after the decimal point.
 //!   A number that would print as `-0.0000`, including a negative zero and a value that rounds to
 //!   zero at that precision, is written as `0.0000`.
@@ -43,7 +43,7 @@ use crate::check::invalid;
 use crate::geom::{ArcSense, Plane, Vec3};
 use crate::machine::{AxisLetter, AxisName, Machine};
 use crate::motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath};
-use crate::process::{CoolantMode, Event, ProcessKind};
+use crate::process::{CoolantMode, Event, LiveDirection, ProcessKind};
 use crate::program::Program;
 use crate::{AXIS_LETTER_COUNT, IrError, Result};
 
@@ -339,6 +339,22 @@ impl Writer {
                 if label.is_empty() { self.line("(custom)") } else { self.line(&format!("(custom {label})")) }
             }
             Event::Sync { id } => self.line(&format!("(sync {id})")),
+            Event::CAxis { spindle, engage } => {
+                let verb = if *engage { "engage" } else { "disengage" };
+                self.line(&format!("(c axis {verb} {})", strip_parens(spindle)));
+            }
+            Event::SpindleBrake { spindle, clamp } => {
+                let verb = if *clamp { "clamp" } else { "release" };
+                self.line(&format!("(spindle brake {verb} {})", strip_parens(spindle)));
+            }
+            Event::LiveToolOn { rpm, direction } => {
+                let verb = match direction {
+                    LiveDirection::Forward => "forward",
+                    LiveDirection::Reverse => "reverse",
+                };
+                self.line(&format!("(live tool {verb} {rpm})"));
+            }
+            Event::LiveToolOff => self.line("(live tool off)"),
         }
         Ok(())
     }

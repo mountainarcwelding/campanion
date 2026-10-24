@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::check::{self, optional_name};
 use crate::geom::{Pose, Vec3};
 use crate::machine::{Channel, Machine};
-use crate::motion::{ChannelProgram, ClBlock, ClMotion, ClPath};
+use crate::motion::{AxisBlock, ChannelProgram, ClBlock, ClMotion, ClPath};
 use crate::process::{Event, Tool};
 use crate::rotary::{RotarySetup, machine_to_part};
 use crate::turning::TurningSetup;
@@ -88,8 +88,9 @@ impl Program {
         rotary: Option<RotarySetup>,
     ) -> Result<Self> {
         let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary, turning: None };
-        // A thread move is legal on this intermediate. [`Self::with_turning`] and [`Document::new`]
-        // reject it when the finished program still has no turning setup.
+        // A thread move, and a pose angle that a later [`Self::with_turning`] reads as C, are legal
+        // on this intermediate. [`Self::with_turning`] and [`Document::new`] reject a thread, or an
+        // angle, when the finished program still has neither a turning setup nor a rotary setup.
         program.check_structure()?;
         Ok(program)
     }
@@ -145,6 +146,7 @@ impl Program {
     pub(crate) fn check(&self) -> Result<()> {
         self.check_structure()?;
         self.check_threads_need_turning()?;
+        check_angles_need_a_setup(self)?;
         Ok(())
     }
 
@@ -160,7 +162,7 @@ impl Program {
         if let Some(setup) = self.rotary {
             setup.check()?;
         }
-        check_rotary_poses(self.rotary.as_ref(), &self.toolpaths)?;
+        check_rotary_poses(self.rotary.as_ref(), self.turning.is_some(), &self.toolpaths)?;
         if let Some(turning) = &self.turning {
             turning.check()?;
         }
@@ -185,6 +187,7 @@ impl Program {
         }
         if let Some(turning) = &self.turning {
             check_turning(turning, &self.toolpaths, &tool_ids, self.machine.as_ref())?;
+            check_spindle_modes(turning, &self.toolpaths, &self.channel_programs)?;
         }
         check_channels(&self.machine, &self.channel_programs, &tool_ids)?;
         check_syncs(&self.machine, &self.syncs, &self.channel_programs, &self.toolpaths)?;
@@ -312,7 +315,7 @@ fn check_syncs(machine: &Option<Machine>, syncs: &[SyncPoint], programs: &[Chann
     Ok(())
 }
 
-fn check_rotary_poses(setup: Option<&RotarySetup>, toolpaths: &[ClPath]) -> Result<()> {
+fn check_rotary_poses(setup: Option<&RotarySetup>, turning: bool, toolpaths: &[ClPath]) -> Result<()> {
     for (path_i, path) in toolpaths.iter().enumerate() {
         for (block_i, block) in path.blocks().iter().enumerate() {
             let Some(pose) = block_pose(block) else {
@@ -321,8 +324,16 @@ fn check_rotary_poses(setup: Option<&RotarySetup>, toolpaths: &[ClPath]) -> Resu
             let Some(angle) = pose.rotary() else {
                 continue;
             };
+            if turning {
+                if angle.abs() > 99_999.0 {
+                    return Err(check::invalid(format!("toolpath {path_i} block {block_i} C angle {angle} is outside -99999..=99999")));
+                }
+                continue;
+            }
+            // `try_new` has no turning setup yet. [`check_angles_need_a_setup`] rejects an angle on
+            // a finished program that also has no rotary setup.
             let Some(setup) = setup else {
-                return Err(check::invalid(format!("toolpath {path_i} block {block_i} rotary angle needs a rotary setup")));
+                continue;
             };
             if let Some(limits) = setup.limits()
                 && !limits.contains(angle)
@@ -381,6 +392,37 @@ fn check_turning(turning: &TurningSetup, toolpaths: &[ClPath], tool_ids: &BTreeS
     Ok(())
 }
 
+/// A C-axis or brake event names a spindle that already exists and has a C axis.
+fn check_spindle_modes(turning: &TurningSetup, toolpaths: &[ClPath], channels: &[ChannelProgram]) -> Result<()> {
+    for path in toolpaths {
+        for block in path.blocks() {
+            if let ClBlock::Event(event) = block {
+                check_spindle_event(turning, event)?;
+            }
+        }
+    }
+    for program in channels {
+        for block in program.blocks() {
+            if let AxisBlock::Event(event) = block {
+                check_spindle_event(turning, event)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_spindle_event(turning: &TurningSetup, event: &Event) -> Result<()> {
+    let spindle = match event {
+        Event::CAxis { spindle, .. } | Event::SpindleBrake { spindle, .. } => spindle.as_str(),
+        _ => return Ok(()),
+    };
+    match turning.spindle(spindle) {
+        Some(found) if found.c_axis().is_some() => Ok(()),
+        Some(_) => Err(check::invalid(format!("spindle {spindle} has no C axis"))),
+        None => Err(check::invalid(format!("unknown spindle {spindle}"))),
+    }
+}
+
 fn bound_path(toolpaths: &[ClPath], index: u32) -> Option<&ClPath> {
     usize::try_from(index).ok().and_then(|index| toolpaths.get(index))
 }
@@ -422,6 +464,24 @@ fn vec_within(left: Vec3, right: Vec3, tol: f64) -> bool {
 fn mentions_sync(programs: &[ChannelProgram], toolpaths: &[ClPath]) -> bool {
     programs.iter().any(|program| program.blocks().iter().any(|block| block.sync_id().is_some()))
         || toolpaths.iter().any(|path| path.blocks().iter().any(|block| block.sync_id().is_some()))
+}
+
+/// A finished program that stores an angle needs a rotary setup or a turning setup.
+fn check_angles_need_a_setup(program: &Program) -> Result<()> {
+    if program.turning.is_some() || program.rotary.is_some() {
+        return Ok(());
+    }
+    for (path_i, path) in program.toolpaths.iter().enumerate() {
+        for (block_i, block) in path.blocks().iter().enumerate() {
+            let Some(pose) = block_pose(block) else {
+                continue;
+            };
+            if pose.rotary().is_some() {
+                return Err(check::invalid(format!("toolpath {path_i} block {block_i} rotary angle needs a rotary setup")));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A toolpath document. `format` is `campanion-ir/1` for documents this build writes.

@@ -6,11 +6,13 @@
 //! uses the straight-line distance between the part-frame tips.
 //!
 //! A turning program is written in the part frame. X is a radius until the lathe block asks for
-//! diameters. Y is omitted. Arc offsets stay in that radius frame: `I` along X, `K` along Z.
+//! diameters. Y is omitted. While the C axis is engaged, `G0` and `G1` append that letter after Z.
+//! Arcs stay in the ZX plane and do not carry a C word. Arc offsets stay in the radius frame:
+//! `I` along X, `K` along Z.
 
 use campanion_ir::{
-    ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind, RotarySetup,
-    SpindleSpeed, TurningSetup, Vec3, part_to_machine,
+    ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, LiveDirection, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind,
+    RotarySetup, SpindleSpeed, TurningSetup, Vec3, part_to_machine,
 };
 
 use crate::def::{ArcMode, PostDef, ProcessWords, RotaryFeedMode};
@@ -52,6 +54,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     }
     writer.stop_processes()?;
     writer.templates("footer", &post.footer, &header_vars)?;
+    writer.finish_mill_turn()?;
     writer.lathe_home()?;
     writer.templates("program_end", &post.program_end, &header_vars)?;
     Ok(writer.out)
@@ -85,10 +88,12 @@ struct Posted {
     part: Xyz,
     /// Continuous A/B angle from the IR, when this pose has one.
     angle: Option<f64>,
+    /// C angle in degrees on a turning pose. Written only on `G0` and `G1` while engaged.
+    c: Option<f64>,
 }
 
 fn plain(end: Xyz) -> Posted {
-    Posted { xyz: end, part: end, angle: None }
+    Posted { xyz: end, part: end, angle: None, c: None }
 }
 
 struct Writer<'a> {
@@ -104,6 +109,16 @@ struct Writer<'a> {
     part_tip: Option<Xyz>,
     /// Last IR angle, degrees. `None` until a pose carries one.
     angle: Option<f64>,
+    /// True after `CAxis` engage, until disengage.
+    c_engaged: bool,
+    /// Formatted C word last written. Cleared on disengage so the next engage writes it again.
+    c_modal: Option<String>,
+    /// True after a spindle brake clamp, until release. C may not move while it is set.
+    brake_clamped: bool,
+    /// True after a live-tool start, until stop.
+    live_on: bool,
+    /// True once the live-tool feed mode has been considered for this program.
+    live_feed_written: bool,
     /// Modal inverse-time feed (`G93` on LinuxCNC). Units per minute is the default.
     inverse_time: bool,
     setup: Option<RotarySetup>,
@@ -133,6 +148,11 @@ impl<'a> Writer<'a> {
             exact: None,
             part_tip: None,
             angle: None,
+            c_engaged: false,
+            brake_clamped: false,
+            c_modal: None,
+            live_on: false,
+            live_feed_written: false,
             inverse_time: header_inverse(post),
             setup,
             turning,
@@ -234,6 +254,7 @@ impl<'a> Writer<'a> {
         let posted = self.posted_end(to)?;
         let mut words = vec![thread.code.clone()];
         let rounded = self.push_lathe_axes(&mut words, posted.xyz)?;
+        // A thread stays a ZX move. C interpolation is a later item, so no C word is written.
         let lead_text = self.format_axis(lead, self.post.decimals.linear)?;
         words.push(format!("{}{lead_text}", thread.lead_word));
         self.linear = None;
@@ -257,11 +278,32 @@ impl<'a> Writer<'a> {
 
     fn posted_end(&self, to: Pose) -> Result<Posted> {
         let part = tip(to);
+        if self.turning.is_some() {
+            self.guard_c(to.rotary())?;
+            return Ok(Posted { xyz: part, part, angle: None, c: to.rotary() });
+        }
         let Some(angle) = to.rotary() else {
-            return Ok(Posted { xyz: part, part, angle: None });
+            return Ok(Posted { xyz: part, part, angle: None, c: None });
         };
         let setup = self.setup.ok_or_else(|| invalid("rotary angle needs a rotary setup"))?;
-        Ok(Posted { xyz: tip(part_to_machine(&setup, to, angle)), part, angle: Some(angle) })
+        Ok(Posted { xyz: tip(part_to_machine(&setup, to, angle)), part, angle: Some(angle), c: None })
+    }
+
+    /// A turning pose with a C angle needs a `c_axis` block and an engaged axis.
+    ///
+    /// The missing block is reported before the not-engaged state.
+    fn guard_c(&self, angle: Option<f64>) -> Result<()> {
+        if self.turning.is_none() || angle.is_none() {
+            return Ok(());
+        }
+        let has_axis = self.post.lathe.as_ref().is_some_and(|lathe| lathe.c_axis.is_some());
+        if !has_axis {
+            return Err(unsupported(format!("post `{}` has no C axis", self.post.id())));
+        }
+        if !self.c_engaged {
+            return Err(invalid("C angle needs the C axis engaged"));
+        }
+        Ok(())
     }
 
     /// Part-frame arc, or the same arc rotated into a principal machine plane.
@@ -273,7 +315,12 @@ impl<'a> Writer<'a> {
         if self.turning.is_some() && plane != Plane::Zx {
             return Err(invalid("lathe arc must be in the zx plane"));
         }
-        if self.angle.is_none() && to.rotary().is_none() {
+        if self.turning.is_some() {
+            self.guard_c(to.rotary())?;
+        }
+        // A turning arc stays in the part ZX plane even when the pose carries a C angle.
+        // The C word is not written; C interpolation is a later item.
+        if self.turning.is_some() || (self.angle.is_none() && to.rotary().is_none()) {
             let end = tip(to);
             if let Some(sweep) = sweep {
                 let start = self.curve_start()?;
@@ -357,7 +404,7 @@ impl<'a> Writer<'a> {
         for sample in samples {
             let pose = rotary::pose_at(sample.part)?.with_rotary(sample.angle).map_err(|err| invalid(err.to_string()))?;
             let machine = tip(part_to_machine(&setup, pose, sample.angle));
-            self.linear_move("G1", Posted { xyz: machine, part: sample.part, angle: Some(sample.angle) }, Some(feed))?;
+            self.linear_move("G1", Posted { xyz: machine, part: sample.part, angle: Some(sample.angle), c: None }, Some(feed))?;
         }
         Ok(())
     }
@@ -478,7 +525,8 @@ impl<'a> Writer<'a> {
 
     fn linear_move(&mut self, code: &str, posted: Posted, feed: Option<f64>) -> Result<()> {
         let rotating = rotary::angle_changes(self.angle, posted.angle);
-        if self.omit_z_only(code, posted.xyz)? && !rotating {
+        let c_moves = self.c_text_changes(posted.c)?;
+        if self.omit_z_only(code, posted.xyz)? && !rotating && !c_moves {
             self.pos = Some(self.round_xyz(posted.xyz)?);
             self.exact = Some(posted.xyz);
             self.part_tip = Some(posted.part);
@@ -492,6 +540,7 @@ impl<'a> Writer<'a> {
         }
         let rounded = self.push_axes(&mut words, posted.xyz)?;
         self.push_rotary(&mut words, posted.angle)?;
+        self.push_c(&mut words, posted.c)?;
         self.push_feed(&mut words, feed, force)?;
         self.linear = Some(if code == "G0" { "G0" } else { "G1" });
         self.pos = Some(rounded);
@@ -673,11 +722,19 @@ impl<'a> Writer<'a> {
     }
 
     fn event(&mut self, event: &Event) -> Result<()> {
+        if self.turning.is_none() && matches!(event, Event::CAxis { .. } | Event::SpindleBrake { .. } | Event::LiveToolOn { .. } | Event::LiveToolOff)
+        {
+            return Err(unsupported(format!("post `{}` does not support mill-turn spindle modes", self.post.id())));
+        }
         if self.turning.is_some() {
             match event {
                 Event::ProcessOn { process: ProcessKind::Spindle, params } => return self.lathe_spindle_on(params),
                 Event::ProcessOff { process: ProcessKind::Spindle } => return self.lathe_spindle_off(),
                 Event::ToolChange { tool_id } => return self.lathe_tool_change(*tool_id),
+                Event::CAxis { engage, .. } => return self.c_axis(*engage),
+                Event::SpindleBrake { clamp, .. } => return self.spindle_brake(*clamp),
+                Event::LiveToolOn { rpm, direction } => return self.live_tool_on(*rpm, *direction),
+                Event::LiveToolOff => return self.live_tool_off(),
                 _ => {}
             }
         }
@@ -724,6 +781,9 @@ impl<'a> Writer<'a> {
             Event::Probe { .. } => self.comment("probe"),
             Event::Custom { name, .. } => self.comment(&format!("custom {}", sanitize(name))),
             Event::Sync { id } => self.comment(&format!("sync {id}")),
+            Event::CAxis { .. } | Event::SpindleBrake { .. } | Event::LiveToolOn { .. } | Event::LiveToolOff => {
+                Err(unsupported(format!("post `{}` does not support mill-turn spindle modes", self.post.id())))
+            }
         }
     }
 
@@ -801,6 +861,9 @@ impl<'a> Writer<'a> {
     }
 
     fn lathe_spindle_on(&mut self, params: &ProcessParams) -> Result<()> {
+        if self.c_engaged {
+            return Err(invalid("turning spindle start while the C axis is engaged"));
+        }
         let lathe = self.post.lathe.clone().ok_or_else(|| invalid("lathe spindle needs a lathe post"))?;
         let speed = self.turning.and_then(|turning| turning.binding_for(self.path_index)).and_then(|binding| binding.speed());
         match speed {
@@ -833,6 +896,109 @@ impl<'a> Writer<'a> {
         self.thc_before_off()?;
         self.note_off(&ProcessKind::Spindle);
         self.templates("lathe.spindle_off", &lines, &[("date-free!", "")])
+    }
+
+    fn c_axis(&mut self, engage: bool) -> Result<()> {
+        let lathe = self.post.lathe.clone().ok_or_else(|| invalid("C axis needs a lathe post"))?;
+        let c_axis = lathe.c_axis.ok_or_else(|| unsupported(format!("post `{}` has no C axis", self.post.id())))?;
+        if engage {
+            self.templates("lathe.c_axis.engage", &c_axis.engage, &[("date-free!", "")])?;
+            self.c_engaged = true;
+        } else {
+            self.templates("lathe.c_axis.disengage", &c_axis.disengage, &[("date-free!", "")])?;
+            self.c_engaged = false;
+            self.c_modal = None;
+        }
+        Ok(())
+    }
+
+    fn spindle_brake(&mut self, clamp: bool) -> Result<()> {
+        let lathe = self.post.lathe.clone().ok_or_else(|| invalid("spindle brake needs a lathe post"))?;
+        let brake = lathe.brake.ok_or_else(|| unsupported(format!("post `{}` has no spindle brake", self.post.id())))?;
+        let (field_name, lines) = if clamp { ("lathe.brake.clamp", brake.clamp) } else { ("lathe.brake.release", brake.release) };
+        self.templates(field_name, &lines, &[("date-free!", "")])?;
+        self.brake_clamped = clamp;
+        Ok(())
+    }
+
+    fn live_tool_on(&mut self, rpm: f64, direction: LiveDirection) -> Result<()> {
+        let lathe = self.post.lathe.clone().ok_or_else(|| invalid("live tool needs a lathe post"))?;
+        let live = lathe.live_tool.ok_or_else(|| unsupported(format!("post `{}` has no live tooling", self.post.id())))?;
+        let rpm_text = format_live_rpm(rpm)?;
+        if !self.live_feed_written {
+            if !live.feed_mode.is_empty() && live.feed_mode != lathe.feed_mode {
+                let line = live.feed_mode.clone();
+                self.templates("lathe.live_tool.feed_mode", &[line], &[("date-free!", "")])?;
+            }
+            self.live_feed_written = true;
+        }
+        let (field_name, lines) = match direction {
+            LiveDirection::Forward => ("lathe.live_tool.forward", live.forward),
+            LiveDirection::Reverse => ("lathe.live_tool.reverse", live.reverse),
+        };
+        self.templates(field_name, &lines, &[("rpm", rpm_text.as_str()), ("date-free!", "")])?;
+        self.live_on = true;
+        Ok(())
+    }
+
+    fn live_tool_off(&mut self) -> Result<()> {
+        let lathe = self.post.lathe.clone().ok_or_else(|| invalid("live tool needs a lathe post"))?;
+        let live = lathe.live_tool.ok_or_else(|| unsupported(format!("post `{}` has no live tooling", self.post.id())))?;
+        self.templates("lathe.live_tool.stop", &live.stop, &[("date-free!", "")])?;
+        self.live_on = false;
+        Ok(())
+    }
+
+    /// Stop a live tool that is still running, then disengage a C axis that is still engaged.
+    ///
+    /// Both lines are written after the footer and before [`Self::lathe_home`].
+    fn finish_mill_turn(&mut self) -> Result<()> {
+        if self.live_on {
+            self.live_tool_off()?;
+        }
+        if self.brake_clamped {
+            self.spindle_brake(false)?;
+        }
+        if self.c_engaged {
+            self.c_axis(false)?;
+        }
+        Ok(())
+    }
+
+    /// True when this block would write a C word that is not already modal.
+    fn c_text_changes(&self, angle: Option<f64>) -> Result<bool> {
+        if self.turning.is_none() || !self.c_engaged {
+            return Ok(false);
+        }
+        let Some(angle) = angle else {
+            return Ok(false);
+        };
+        let text = self.format_axis(angle, self.post.decimals.linear)?;
+        Ok(self.c_modal.as_deref() != Some(text.as_str()))
+    }
+
+    /// `<letter><angle>` after Z. Modal on the formatted linear-decimal text.
+    fn push_c(&mut self, words: &mut Vec<String>, angle: Option<f64>) -> Result<()> {
+        if !self.c_text_changes(angle)? {
+            return Ok(());
+        }
+        let Some(angle) = angle else {
+            return Ok(());
+        };
+        if self.brake_clamped && self.c_modal.is_some() {
+            return Err(invalid("C move with the spindle brake clamped; release it first"));
+        }
+        let letter = self
+            .post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.c_axis.as_ref())
+            .map(|c_axis| c_axis.letter.clone())
+            .ok_or_else(|| unsupported(format!("post `{}` has no C axis", self.post.id())))?;
+        let text = self.format_axis(angle, self.post.decimals.linear)?;
+        words.push(format!("{letter}{text}"));
+        self.c_modal = Some(text);
+        Ok(())
     }
 
     fn lathe_tool_change(&mut self, tool_id: u32) -> Result<()> {
@@ -975,6 +1141,18 @@ fn format_power(post: &PostDef, power: Option<f64>) -> Result<(String, bool)> {
     }
     let text = format_fixed(value * scale, 0, false)?;
     Ok((text, missing))
+}
+
+/// Live-tool `{rpm}`: rounded half away from zero, written with no decimal point.
+fn format_live_rpm(rpm: f64) -> Result<String> {
+    if !(rpm.is_finite() && rpm > 0.0 && rpm <= 100_000.0) {
+        return Err(invalid("live tool rpm must be positive and at most 100000"));
+    }
+    let whole = rpm.round();
+    if !(whole.is_finite() && (0.0..=100_000.0).contains(&whole)) {
+        return Err(invalid("live tool rpm must be positive and at most 100000"));
+    }
+    Ok(format!("{}", whole as u64))
 }
 
 /// `{surface}`, `{max_rpm}` and `{rpm}`. A whole number is an integer. Anything else uses the feed decimals.
@@ -1180,6 +1358,10 @@ fn motion_pose(motion: &ClMotion) -> Pose {
 }
 
 fn check_rotary_program(program: &Program, post: &PostDef) -> Result<()> {
+    // Turning C is a lathe angle, not a mill A/B axis.
+    if program.turning().is_some() {
+        return Ok(());
+    }
     if !poses_use_rotary(program) {
         return Ok(());
     }

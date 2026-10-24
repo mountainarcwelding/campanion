@@ -728,7 +728,7 @@
       ]
     },
     "Event": {
-      "description": "One non-motion step.",
+      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -932,6 +932,93 @@
           "required": [
             "type",
             "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Use the named spindle as a positioning C axis (`engage: true`) or return it to turning (`false`).",
+          "properties": {
+            "engage": {
+              "description": "`true` engages the C axis. `false` returns the spindle to turning.",
+              "type": "boolean"
+            },
+            "spindle": {
+              "description": "Spindle name.",
+              "type": "string"
+            },
+            "type": {
+              "const": "c_axis",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "spindle",
+            "engage"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Clamp (`true`) or release (`false`) the named spindle's brake while the C axis holds position.",
+          "properties": {
+            "clamp": {
+              "description": "`true` clamps the brake. `false` releases it.",
+              "type": "boolean"
+            },
+            "spindle": {
+              "description": "Spindle name.",
+              "type": "string"
+            },
+            "type": {
+              "const": "spindle_brake",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "spindle",
+            "clamp"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Start the live (driven) tool. `rpm` > 0, finite, at most 100000.",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/LiveDirection",
+              "description": "Forward or reverse."
+            },
+            "rpm": {
+              "description": "Revolutions per minute.",
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "live_tool_on",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "rpm",
+            "direction"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Stop the live tool.",
+          "properties": {
+            "type": {
+              "const": "live_tool_off",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
           ],
           "type": "object"
         }
@@ -1173,6 +1260,21 @@
       ],
       "type": "object"
     },
+    "LiveDirection": {
+      "description": "Direction of a live (driven) tool.",
+      "oneOf": [
+        {
+          "const": "forward",
+          "description": "Tool spins in the forward direction.",
+          "type": "string"
+        },
+        {
+          "const": "reverse",
+          "description": "Tool spins in the reverse direction.",
+          "type": "string"
+        }
+      ]
+    },
     "Machine": {
       "additionalProperties": false,
       "description": "The joints of one machine and the channels that group them.",
@@ -1266,7 +1368,7 @@
     },
     "Pose": {
       "additionalProperties": false,
-      "description": "Tool pose in the part frame.\n\n`tip` is the tool tip. `axis` points from the tip toward the spindle (or along the process\ndirection). It is stored as given; a unit vector is the convention.\n\n`rotary` is the machine A/B angle in degrees when the program has a [`crate::RotarySetup`].\nIt may exceed 360 for multi-turn motion. A pose with no rotary angle is a 3-axis pose.",
+      "description": "Tool pose in the part frame.\n\n`tip` is the tool tip. `axis` points from the tip toward the spindle (or along the process\ndirection). It is stored as given; a unit vector is the convention.\n\n`rotary` is the machine A/B angle in degrees when the program has a [`crate::RotarySetup`].\nIt may exceed 360 for multi-turn motion. In a turning program it is the C angle in degrees:\nfinite, and at most 99999 in absolute value. A pose with no rotary angle does not command\nthat axis.",
       "properties": {
         "axis": {
           "$ref": "#/$defs/Vec3"
