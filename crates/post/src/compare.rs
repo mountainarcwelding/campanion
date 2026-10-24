@@ -507,7 +507,9 @@ fn consume_curve(
         // then has no block. The following motion belongs to the next program move.
         if !rotary_curve {
             let prev_read = (*cursor > 0).then(|| moves.get(*cursor - 1)).flatten().map(|m| project(end_of(m), drop_z));
-            let already = prev_read.is_some_and(|at| geom::dist3(at, end) <= tol && geom::dist3(at, start) <= tol);
+            // Only an arc the writer can drop: at most a half circle, so a chord within tol bounds the sagitta.
+            let already =
+                prev_read.is_some_and(|at| geom::dist3(at, end) <= tol && geom::dist3(at, start) <= tol) && sweep <= std::f64::consts::PI + 1e-9;
             let next_on_curve =
                 moves.get(*cursor).is_some_and(|mv| on_curve(project(end_of(mv), drop_z), start, end, center, plane, sense, sweep, tol));
             if already && !next_on_curve {
@@ -585,7 +587,8 @@ fn consume_curve(
         let slack = if radius <= 1e-12 { 1e-3 } else { 1e-3_f64.max(tol / radius) };
         // Both programmed ends lie on this posted point when the chord rounded away.
         // A line there cannot cut a circle; an equal-endpoint arc was rejected above.
-        let unresolved = matches!(mv, ReadMove::Linear { .. }) && geom::dist3(point, start) <= tol;
+        // Past a half circle the writer still posts that chord, and travel ignores the long way.
+        let unresolved = geom::dist3(point, start) <= tol && (matches!(mv, ReadMove::Linear { .. }) || sweep > std::f64::consts::PI);
         if geom::dist3(point, end) <= tol && (acc + slack >= sweep || unresolved) {
             if acc > sweep + 0.25 {
                 return Err(invalid(format!("motion {index}: arc travelled too far")));
@@ -594,8 +597,10 @@ fn consume_curve(
             // same-sense arc block that also ends there is this arc's last piece. A separate tiny
             // program arc there is still accepted by the collapsed-arc branch at the loop top.
             // Rotary sense is remapped per block; the next block's angle is not this one.
+            // A following full circle on the same circle is not this circle's tail.
             let tail_still_open = acc < sweep + slack
                 && !rotary_curve
+                && (sweep < std::f64::consts::TAU - 0.2 || acc + 1e-3 < sweep)
                 && moves.get(*cursor).is_some_and(|next| match next {
                     ReadMove::Arc { sense: got, .. } if *got == sense => {
                         let next_end = project(end_of(next), drop_z);
@@ -863,7 +868,7 @@ fn xyz(point: Vec3) -> Xyz {
 mod tests {
     use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, Plane, Pose, Program, Vec3};
 
-    use crate::{builtin, read_back};
+    use crate::{PostOptions, builtin, post_program, read_back};
 
     fn tip(x: f64, y: f64, z: f64) -> Pose {
         Pose::new(Vec3::new(x, y, z).expect("tip"), Vec3::Z).expect("pose")
@@ -895,5 +900,95 @@ mod tests {
         let moves = read_back(text, &post).expect("read");
         let err = super::compare(&program, &moves, 1e-4, &post).expect_err("full circle");
         assert!(err.to_string().contains("cuts a full circle"), "{err}");
+    }
+
+    fn linux() -> crate::PostDef {
+        builtin("linuxcnc").expect("linuxcnc")
+    }
+
+    fn options() -> PostOptions {
+        PostOptions { arc_tolerance: 0.05 }
+    }
+
+    fn program_of(blocks: Vec<ClBlock>) -> Program {
+        let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
+        let path = ClPath::try_new(None, None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program")
+    }
+
+    fn arc_line(line: &str) -> bool {
+        line.split_whitespace().any(|word| word == "G2" || word == "G3")
+    }
+
+    fn join_lines(lines: &[&str]) -> String {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    }
+
+    /// Two identical full circles, then a line off the circle.
+    fn two_full_circles() -> Program {
+        let start = tip(5.0, 0.0, 0.0);
+        let arc = ClMotion::Arc { to: start, plane: Plane::Xy, center: Vec3::ZERO, sense: ArcSense::Ccw, feed: 100.0, role: MoveRole::Cut };
+        program_of(vec![
+            ClBlock::Motion(ClMotion::Rapid { to: start, feed: None }),
+            ClBlock::Motion(arc.clone()),
+            ClBlock::Motion(arc),
+            ClBlock::Motion(ClMotion::Linear { to: tip(15.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ])
+    }
+
+    #[test]
+    fn two_full_circles_read_back() {
+        let program = two_full_circles();
+        let post = linux();
+        let text = post_program(&program, &post, &options()).expect("post");
+        let moves = read_back(&text, &post).expect("read");
+        super::compare(&program, &moves, 1e-3, &post).expect("compare");
+    }
+
+    #[test]
+    fn missing_full_circle_is_rejected() {
+        let program = two_full_circles();
+        let post = linux();
+        let text = post_program(&program, &post, &options()).expect("post");
+        let lines: Vec<&str> = text.lines().collect();
+        let g1 = lines.iter().position(|line| line.split_whitespace().any(|word| word == "G1")).expect("line");
+        let arcs: Vec<usize> = lines.iter().enumerate().take(g1).filter(|(_, line)| arc_line(line)).map(|(index, _)| index).collect();
+        assert!(arcs.len() >= 2 && arcs.len().is_multiple_of(2), "{text}");
+        let first_last = arcs[arcs.len() / 2 - 1];
+        let kept: Vec<&str> =
+            lines.iter().enumerate().filter(|(index, line)| !(*index > first_last && *index < g1 && arc_line(line))).map(|(_, line)| *line).collect();
+        assert!(kept.len() < lines.len(), "{text}");
+        let moves = read_back(&join_lines(&kept), &post).expect("read");
+        let err = super::compare(&program, &moves, 1e-3, &post).expect_err("missing circle");
+        assert!(err.to_string().contains("motion 2"), "{err}");
+    }
+
+    #[test]
+    fn missing_half_circle_is_rejected() {
+        let radius = 5.0;
+        let sweep = 4.0_f64;
+        let end_x = radius * sweep.cos();
+        let end_y = radius * sweep.sin();
+        let program = program_of(vec![
+            ClBlock::Motion(ClMotion::Rapid { to: tip(radius, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: tip(end_x, end_y, 0.0),
+                plane: Plane::Xy,
+                center: Vec3::ZERO,
+                sense: ArcSense::Ccw,
+                feed: 100.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ]);
+        let post = linux();
+        let text = post_program(&program, &post, &options()).expect("post");
+        let kept: Vec<&str> = text.lines().filter(|line| !arc_line(line)).collect();
+        assert!(kept.len() < text.lines().count(), "{text}");
+        let moves = read_back(&join_lines(&kept), &post).expect("read");
+        let err = super::compare(&program, &moves, 1e-3, &post).expect_err("missing arc");
+        assert!(err.to_string().contains("motion 1"), "{err}");
     }
 }
