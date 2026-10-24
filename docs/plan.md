@@ -245,14 +245,22 @@ Part C: B-axis heads and 5-axis milling
 Haas ST/DS lathe completion (ahead of items 11–13; checked against the Haas NGC lathe operator's manual):
 - **H1. Threading feed mode and tailstock:** `haas_lathe` writes G99 around G32 thread passes (Haas
   requires feed per revolution for G32) and G98 after; a tailstock operation advances with M21 and
-  retracts with M22 (ST-10 hydraulic quill, ST-20/30 hydraulic, ST-40 servo). Hold force and
-  advance distances are machine settings, not program words. A tailstock zone check keeps the
-  turret clear while it is engaged. Programmed B positioning of the ST tailstock is not written.
+  retracts with M22. The tailstock type depends on the model: the optional ST-15Y tailstock is a
+  hydraulic quill on a manually positioned body (locked before M21), the optional ST-20Y tailstock
+  is hydraulically positioned, and the ST-40 tailstock is a servo. Hold force and advance
+  distances are machine settings, not program words. A tailstock zone check keeps the turret clear
+  while it is engaged. Programmed B positioning of the ST tailstock is not written. The DS-30Y has
+  a secondary spindle on the B axis and no tailstock, and Haas lists the ST-20Y sub-spindle option
+  as not compatible with the tailstock, so a job cannot have both.
 - **H2. Part handling:** parts catcher M36/M37 (and M35) with part-off, bar feeder G105, steady
   rest M146/M147.
-- **H3. Machine limits:** Y travel and live-tool rpm per machine model (DS-30Y Y ±51 mm),
-  secondary spindle brake and orient (M114/M115, M119), and live tooling on the sub-spindle once
-  its C-axis addressing is confirmed.
+- **H3. Machine limit profiles:** cited limit profiles for the Haas ST-15Y, ST-20Y and DS-30Y
+  (X, Y and Z travel; main, secondary and synchronized spindle rpm; live-tool rpm; C-axis rpm),
+  taken from the Haas model spec pages, that a lathe job can name. Y travel (±51 mm about the
+  spindle centreline on all three) and the rpm limits are checked directly. X and Z travel are
+  checked as the extent of the program, because the work offset is not known. Then secondary
+  spindle brake and orient (M114/M115, M119), and live tooling on the sub-spindle once its C-axis
+  addressing is confirmed.
 - **H4. Optional threading and cycles:** multi-start and taper threads, canned G76 and G71/G70
   output.
 
@@ -337,3 +345,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-24: v0.8.2 is the arc read-back and short-arc posting fix alone. Haas ST/DS lathe
   completion (H1–H4) moves ahead of continuous 5-axis and ships in patch releases from v0.8.3;
   items 11–13 follow it.
+- 2026-10-24: The Haas lathe work targets the ST-15Y, ST-20Y and DS-30Y. H3 becomes cited machine
+  limit profiles for these three models, and H1 records which tailstock each ST model offers.
