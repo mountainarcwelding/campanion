@@ -253,7 +253,7 @@ Part C: B-axis heads and 5-axis milling
 Also open from M10: canned `G76` threading as a post option.
 
 Releases: v0.7.0 after 0–4 (Haas post; LinuxCNC as soon as it is ready), v0.7.1 after 5–7,
-v0.8.0 after 8–10, v0.8.1 after 11–13.
+v0.8.0 after 8–10, v0.8.1 for the mill drill and rapid safety fix, v0.8.2 after 11–13.
 
 ### M12: Additive and non-planar slicing
 See the additive entry under Later; it becomes M12 after M11.
@@ -315,3 +315,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-24: M11 Part C items 8–10 released as v0.8.0 (kinematics, indexed 3+2 with Haas G254
   and LinuxCNC machine-coordinate posts, B-head turning). Deferred mesh ops on tilted planes to a
   follow-up to keep v0.8.0 small.
+- 2026-10-24: v0.8.1 is a safety patch: mill drill feeds to depth from the R plane instead of
+  rapiding (v0.1.0–v0.8.0), surface rapids stay above the model top (v0.3.0–v0.8.0), and a rapid
+  safety rule blocks low rapids. Continuous 5-axis (items 11–13) moves to v0.8.2.
