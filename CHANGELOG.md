@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Lathe `tailstock` operation (advance/retract) with a tailstock zone check; `haas_lathe` writes M21/M22. Hold force and travel stay machine settings.
+
 ### Fixed
 
 - `haas_lathe` writes G99 before G32 thread passes and G98 after them. Haas requires feed per revolution for G32; earlier versions wrote the thread passes under G98.

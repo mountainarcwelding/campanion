@@ -331,7 +331,8 @@ pub enum CoolantMode {
 /// [`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]
 /// hand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.
 /// [`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is
-/// `(cos b_deg, 0, sin b_deg)`.
+/// `(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold
+/// force and travel are machine settings; the event carries no position.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
@@ -477,6 +478,12 @@ pub enum Event {
         /// Head angle, degrees.
         b_deg: f64,
     },
+    /// Advance (`engage: true`) or retract (`false`) the lathe tailstock. Hold force and
+    /// travel are machine settings; the event carries no position.
+    Tailstock {
+        /// `true` advances the tailstock. `false` retracts it.
+        engage: bool,
+    },
 }
 
 impl Event {
@@ -513,7 +520,7 @@ impl Event {
                     return Err(check::invalid("live tool rpm is above 100000"));
                 }
             }
-            Self::LiveToolOff | Self::FaceInterpolation { .. } => {}
+            Self::LiveToolOff | Self::FaceInterpolation { .. } | Self::Tailstock { .. } => {}
             Self::CylinderInterpolation { radius } => {
                 if let Some(radius) = radius {
                     positive(*radius, "cylinder interpolation radius")?;

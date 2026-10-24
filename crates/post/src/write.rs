@@ -178,6 +178,8 @@ struct Writer<'a> {
     brake_clamped: bool,
     /// True after a live-tool start, until stop.
     live_on: bool,
+    /// True after a tailstock advance, until retract. Not cleared between channels: the quill stays advanced.
+    tailstock_engaged: bool,
     /// True once the live-tool feed mode has been considered for this program.
     live_feed_written: bool,
     /// Formatted Y word last written. `None` means centreline 0 has not been written.
@@ -254,6 +256,7 @@ impl<'a> Writer<'a> {
             force_axes: false,
             polar_count: 0,
             live_on: false,
+            tailstock_engaged: false,
             live_feed_written: false,
             y_modal: None,
             mill_plane: None,
@@ -1457,6 +1460,9 @@ impl<'a> Writer<'a> {
     }
 
     fn event(&mut self, event: &Event) -> Result<()> {
+        if self.tailstock_engaged && matches!(event, Event::SpindleMove { .. } | Event::SpindleSync { .. } | Event::ChuckClamp { .. }) {
+            return Err(invalid("retract the tailstock before a part transfer"));
+        }
         if self.turning.is_none()
             && matches!(
                 event,
@@ -1549,7 +1555,23 @@ impl<'a> Writer<'a> {
                 Err(unsupported(format!("post `{}` has no part transfer", self.post.id())))
             }
             Event::HeadIndex { b_deg, .. } => self.head_index(*b_deg),
+            Event::Tailstock { engage } => self.tailstock(*engage),
         }
+    }
+
+    /// Advance or retract. A post with no `tailstock` block, including a mill post, cannot write the event.
+    fn tailstock(&mut self, engage: bool) -> Result<()> {
+        let lines = self
+            .post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.tailstock.as_ref())
+            .map(|tailstock| if engage { tailstock.advance.clone() } else { tailstock.retract.clone() })
+            .ok_or_else(|| unsupported(format!("post `{}` has no tailstock", self.post.id())))?;
+        let field_name = if engage { "lathe.tailstock.advance" } else { "lathe.tailstock.retract" };
+        self.templates(field_name, &lines, &[("date-free!", "")])?;
+        self.tailstock_engaged = engage;
+        Ok(())
     }
 
     /// Index B. A post with no `b_head` block cannot write the event.

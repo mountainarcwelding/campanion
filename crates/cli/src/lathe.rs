@@ -17,7 +17,9 @@
 //! start of the path when the tool does not change) and the pose axis is `(cos B, 0, sin B)`.
 //! A `transfer` is one
 //! main-spindle toolpath on channel 0 that hands the part to the sub, optionally parting it off
-//! without a spindle stop. An `eject` stops the sub and unclamps it. Speed is stored on the
+//! without a spindle stop. An `eject` stops the sub and unclamps it. A `tailstock` operation
+//! advances or retracts the tailstock: one event on channel 0, main spindle, no tool. While it
+//! is advanced, motion tips stay outside the quill cylinder. Speed is stored on the
 //! turning binding, which names the operation's spindle and channel. Channel 1 uses head `lower`.
 //! A `wait` operation inserts the same sync event on channel 0 and channel 1. An indexed live drill or slot
 //! changes the tool the same way, engages C, starts the live tool, clamps the brake around each
@@ -88,7 +90,7 @@ const DEFAULT_FLANK_DEG: f64 = 29.5;
 const DEFAULT_FIRST_DEPTH_CAP: f64 = 0.35;
 /// Thread cycles emit rapids and synchronised moves. The path still needs a positive cut feed.
 const THREAD_RECORD_FEED: f64 = 100.0;
-/// Eject and a transfer with no cut still need a positive recorded feed. Nothing posts it.
+/// Eject, tailstock and a transfer with no cut still need a positive recorded feed. Nothing posts it.
 const EVENT_ONLY_FEED: f64 = 1.0;
 /// Flank length, millimetres, used when a face, rough or finish path is checked for gouges.
 const TURN_EDGE_MM: f64 = 4.0;
@@ -109,6 +111,8 @@ struct LatheJob {
     c_axis: bool,
     /// Second spindle. Its profile is drawn in the sub frame: back face at Z 0, part toward −Z.
     sub: Option<SubBlock>,
+    /// Centre or quill at the finished face. Absent when the job has no tailstock block.
+    tailstock: Option<TailstockBlock>,
     head: LatheHead,
     tools: Vec<LatheTool>,
     operations: Vec<Operation>,
@@ -384,6 +388,20 @@ enum Operation {
     Eject {
         name: String,
     },
+    /// Advance or retract the tailstock. No tool, channel 0, main spindle.
+    Tailstock {
+        name: String,
+        /// `true` advances. `false` retracts.
+        engage: bool,
+    },
+}
+
+/// Centre or quill diameter at the part face, and the clearance around that cylinder.
+struct TailstockBlock {
+    /// Diameter of the centre or quill where it meets the finished face. Positive.
+    diameter: f64,
+    /// Extra gap around that cylinder, in job units. Default 1.
+    clearance: f64,
 }
 
 /// Part-off nested in a transfer. Same fields as a `part` operation, without name, type or spindle.
@@ -414,7 +432,8 @@ impl Operation {
             | Self::LiveFlat { name, .. }
             | Self::LiveMill { name, .. }
             | Self::Transfer { name, .. }
-            | Self::Eject { name } => name,
+            | Self::Eject { name }
+            | Self::Tailstock { name, .. } => name,
         }
     }
 
@@ -432,7 +451,7 @@ impl Operation {
             | Self::LiveSlot { spindle, .. }
             | Self::LiveFlat { spindle, .. }
             | Self::LiveMill { spindle, .. } => *spindle,
-            Self::Transfer { .. } => WorkSpindle::Main,
+            Self::Transfer { .. } | Self::Tailstock { .. } => WorkSpindle::Main,
             Self::Eject { .. } => WorkSpindle::Sub,
         }
     }
@@ -452,14 +471,14 @@ impl Operation {
             | Self::LiveFlat { tool_id, .. }
             | Self::LiveMill { tool_id, .. } => *tool_id,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id).unwrap_or(0),
-            Self::Eject { .. } => 0,
+            Self::Eject { .. } | Self::Tailstock { .. } => 0,
         }
     }
 
-    /// Tool the job file must name. Eject and a transfer with no part-off name none.
+    /// Tool the job file must name. Eject, tailstock and a transfer with no part-off name none.
     fn checked_tool(&self) -> Option<u32> {
         match self {
-            Self::Eject { .. } => None,
+            Self::Eject { .. } | Self::Tailstock { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id),
             _ => Some(self.tool_id()),
         }
@@ -468,7 +487,7 @@ impl Operation {
     /// 0 or 1. A wait is written on both channels and reports 0 here.
     fn channel(&self) -> u8 {
         match self {
-            Self::Wait { .. } | Self::Transfer { .. } | Self::Eject { .. } => 0,
+            Self::Wait { .. } | Self::Transfer { .. } | Self::Eject { .. } | Self::Tailstock { .. } => 0,
             Self::Face { channel, .. }
             | Self::Rough { channel, .. }
             | Self::Finish { channel, .. }
@@ -501,7 +520,7 @@ impl Operation {
             | Self::LiveMill { feed, .. } => *feed,
             Self::Thread { .. } => THREAD_RECORD_FEED,
             Self::Transfer { feed, part_off, .. } => part_off.as_ref().map(|part| part.feed).unwrap_or(*feed),
-            Self::Eject { .. } => EVENT_ONLY_FEED,
+            Self::Eject { .. } | Self::Tailstock { .. } => EVENT_ONLY_FEED,
             Self::Wait { .. } => 1.0,
         }
     }
@@ -521,6 +540,7 @@ impl Operation {
             | Self::LiveFlat { .. }
             | Self::LiveMill { .. }
             | Self::Eject { .. }
+            | Self::Tailstock { .. }
             | Self::Wait { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.speed),
         }
@@ -536,6 +556,10 @@ impl Operation {
 
     fn is_eject(&self) -> bool {
         matches!(self, Self::Eject { .. })
+    }
+
+    fn is_tailstock(&self) -> bool {
+        matches!(self, Self::Tailstock { .. })
     }
 
     fn is_flat(&self) -> bool {
@@ -689,7 +713,11 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let map = object(&value, "job")?;
     let tag = as_str(require(map, "format")?, "format tag")?;
     check_format(tag)?;
-    check_keys(map, &["format", "source", "units", "stock", "spindle", "sub", "head", "tools", "operations", "tolerance", "clearance"], "job")?;
+    check_keys(
+        map,
+        &["format", "source", "units", "stock", "spindle", "sub", "tailstock", "head", "tools", "operations", "tolerance", "clearance"],
+        "job",
+    )?;
     let units = as_str(require(map, "units")?, "units")?;
     if units != "mm" {
         return Err(CliError::invalid(format!("units must be mm, not `{units}`")));
@@ -701,12 +729,20 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         Some(value) => Some(parse_sub(value)?),
         None => None,
     };
+    let tailstock = match optional(map, "tailstock") {
+        Some(value) => Some(parse_tailstock_block(value)?),
+        None => None,
+    };
+    if sub.is_some() && tailstock.is_some() {
+        return Err(CliError::invalid("\"tailstock\" is not allowed with a \"sub\" block (the B axis is the secondary spindle)"));
+    }
     let head = parse_head(optional(map, "head"))?;
     let tools = parse_tools(require(map, "tools")?)?;
     let (linear, chord) = parse_tolerance(optional(map, "tolerance"))?;
     let clearance = non_negative(require(map, "clearance")?, "clearance")?;
     let sub_rpm = sub.as_ref().map(|block| block.max_rpm);
     let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
+    check_tailstock_ops(&operations, tailstock.is_some())?;
     for operation in &operations {
         check_b_deg(operation, &head)?;
         if operation.is_wait() {
@@ -722,7 +758,43 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         check_flat(operation, tool, &head, clearance)?;
         check_mill_head(operation, &head)?;
     }
-    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, sub, head, tools, operations, linear, chord, clearance })
+    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, sub, tailstock, head, tools, operations, linear, chord, clearance })
+}
+
+fn parse_tailstock_block(value: &Value) -> Result<TailstockBlock, CliError> {
+    let map = object(value, "tailstock")?;
+    check_keys(map, &["diameter", "clearance"], "tailstock")?;
+    let diameter = positive(require(map, "diameter")?, "diameter")?;
+    let clearance = match optional(map, "clearance") {
+        Some(value) => non_negative(value, "clearance")?,
+        None => 1.0,
+    };
+    Ok(TailstockBlock { diameter, clearance })
+}
+
+/// Advance and retract must alternate. A transfer or a sub-spindle operation while the tailstock
+/// is advanced is rejected. Ending the program still advanced is allowed.
+fn check_tailstock_ops(operations: &[Operation], has_block: bool) -> Result<(), CliError> {
+    let mut advanced = false;
+    for operation in operations {
+        if let Operation::Tailstock { name, engage } = operation {
+            if !has_block {
+                return Err(CliError::invalid(format!("operation {name}: tailstock needs a \"tailstock\" block")));
+            }
+            if *engage && advanced {
+                return Err(CliError::invalid(format!("operation {name}: tailstock is already advanced")));
+            }
+            if !*engage && !advanced {
+                return Err(CliError::invalid(format!("operation {name}: tailstock is not advanced")));
+            }
+            advanced = *engage;
+            continue;
+        }
+        if advanced && (operation.is_transfer() || operation.spindle() == WorkSpindle::Sub) {
+            return Err(CliError::invalid(format!("operation {}: retract the tailstock first", operation.name())));
+        }
+    }
+    Ok(())
 }
 
 fn parse_sub(value: &Value) -> Result<SubBlock, CliError> {
@@ -1165,6 +1237,9 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
     if op_type == "eject" {
         return parse_eject(map, names, has_sub);
     }
+    if op_type == "tailstock" {
+        return parse_tailstock(map, names);
+    }
     let allowed: &[&str] = match op_type {
         "face" => &["name", "type", "tool_id", "spindle", "channel", "step_z", "feed", "speed", "b_deg"],
         "rough" => &["name", "type", "tool_id", "spindle", "channel", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed", "b_deg"],
@@ -1485,6 +1560,21 @@ fn parse_eject(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_sub: 
         return Err(CliError::invalid(format!("operation {name}: eject needs a \"sub\" block")));
     }
     Ok(Operation::Eject { name })
+}
+
+fn parse_tailstock(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
+    check_keys(map, &["name", "type", "action"], "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    let action = as_str(require(map, "action")?, "action")?;
+    let engage = match action {
+        "advance" => true,
+        "retract" => false,
+        _ => return Err(CliError::invalid(format!("operation {name}: tailstock action must be advance or retract"))),
+    };
+    Ok(Operation::Tailstock { name, engage })
 }
 
 fn parse_drill(map: &Map<String, Value>, name: String, spindle: WorkSpindle, tool_id: u32, channel: u8) -> Result<Operation, CliError> {
@@ -1987,6 +2077,8 @@ fn build_document(
     let mut previous = [None, None];
     let mut b_now = [0.0, 0.0];
     let mut sync_id = 0u32;
+    let mut tailstock_advanced = false;
+    let mut zone_start: Option<Vec3> = None;
     for operation in &job.operations {
         if operation.is_wait() {
             sync_id = sync_id.saturating_add(1);
@@ -2023,6 +2115,10 @@ fn build_document(
             transfer_toolpath(job, active_profile, operation, previous_slot)?
         } else if operation.is_eject() {
             eject_toolpath(operation)?
+        } else if operation.is_tailstock() {
+            let (path, engage) = tailstock_toolpath(operation)?;
+            tailstock_advanced = engage;
+            path
         } else {
             let turned = turn_operation(job, active_profile, operation)?;
             if let Some(step) = sample_step
@@ -2036,6 +2132,18 @@ fn build_document(
             with_events(motion, operation.tool_id(), previous_slot)?
         };
         let toolpath = with_head_index(toolpath, head_for(channel), &mut b_now[usize::from(channel)], operation.b_target())?;
+        if tailstock_advanced
+            && !operation.is_tailstock()
+            && let Some(tailstock) = &job.tailstock
+        {
+            check_tailstock_zone(operation.name(), &toolpath, tailstock, zone_start)?;
+        }
+        if channel == 0
+            && operation.spindle() == WorkSpindle::Main
+            && let Some(tip) = last_motion_tip(&toolpath)
+        {
+            zone_start = Some(tip);
+        }
         let index = u32::try_from(toolpaths.len()).map_err(|_| CliError::run("too many toolpaths"))?;
         toolpaths.push(toolpath);
         let binding =
@@ -2058,7 +2166,7 @@ fn build_document(
 }
 
 /// Face is always outside. Rough and finish use the operation side. Thread, groove, part, drill,
-/// transfer, eject and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
+/// transfer, eject, tailstock and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
 fn gouge_side(operation: &Operation) -> Option<Side> {
     match operation {
         Operation::Face { .. } => Some(Side::Outside),
@@ -2073,6 +2181,7 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
         | Operation::LiveMill { .. }
         | Operation::Transfer { .. }
         | Operation::Eject { .. }
+        | Operation::Tailstock { .. }
         | Operation::Wait { .. } => None,
     }
 }
@@ -2195,7 +2304,7 @@ fn mount_insert(job: &LatheJob, tool_id: u32, insert: &Insert) -> Result<Insert,
 fn mount_angle(operation: &Operation, tool_id: u32) -> Option<f64> {
     let uses = match operation {
         Operation::Transfer { part_off, .. } => part_off.as_ref().is_some_and(|part| part.tool_id == tool_id),
-        Operation::Wait { .. } | Operation::Eject { .. } => false,
+        Operation::Wait { .. } | Operation::Eject { .. } | Operation::Tailstock { .. } => false,
         _ => operation.checked_tool() == Some(tool_id),
     };
     if uses { Some(operation.b_deg().unwrap_or(0.0)) } else { None }
@@ -2320,7 +2429,13 @@ fn front_allowance(job: &LatheJob, spindle: WorkSpindle) -> Result<f64, CliError
 }
 
 fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) -> Result<TurnPath, CliError> {
-    if operation.is_wait() || operation.is_live() || operation.is_mill() || operation.is_transfer() || operation.is_eject() {
+    if operation.is_wait()
+        || operation.is_live()
+        || operation.is_mill()
+        || operation.is_transfer()
+        || operation.is_eject()
+        || operation.is_tailstock()
+    {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
     }
     let (insert, tip, nose_radius, _) = planning_insert(job, operation)?;
@@ -2450,6 +2565,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
         | Operation::LiveMill { .. }
         | Operation::Transfer { .. }
         | Operation::Eject { .. }
+        | Operation::Tailstock { .. }
         | Operation::Wait { .. } => Err(CliError::run(format!("internal: operation {} has no turning path", operation.name()))),
     }
 }
@@ -2515,6 +2631,111 @@ fn part_off_blocks(job: &LatheJob, profile: &TurnProfile, name: &str, part: &Par
         Some(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle })) => Ok(blocks),
         _ => Err(CliError::run(format!("internal: operation {name} part-off did not end on spindle stop"))),
     }
+}
+
+fn tailstock_toolpath(operation: &Operation) -> Result<(ClPath, bool), CliError> {
+    let Operation::Tailstock { name, engage } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not a tailstock move", operation.name())));
+    };
+    let blocks = vec![ClBlock::Event(Event::Tailstock { engage: *engage })];
+    let feeds = Feeds::try_new(EVENT_ONLY_FEED, None, None, None, None)?;
+    let path = ClPath::try_new(Some(name.clone()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks)?;
+    Ok((path, *engage))
+}
+
+/// A tip in the quill cylinder is rejected. X of an ordinary turning pose is a radius. Face
+/// interpolation and a Y move are Cartesian, so the radius is the distance from the spindle axis.
+/// Cylinder interpolation keeps the radius in X and the unrolled distance in Y.
+/// Rejects any move of `path` that passes through the tailstock zone: `z > -clearance` and radius
+/// below `diameter / 2 + clearance`. Each move is checked as the straight segment from the previous
+/// tip (`start` for the first move, the last tip of the previous main-channel operation), so a
+/// diagonal rapid between two points outside the zone still fails. Arcs are checked by their chord;
+/// the clearance covers the chord error.
+fn check_tailstock_zone(name: &str, path: &ClPath, tailstock: &TailstockBlock, start: Option<Vec3>) -> Result<(), CliError> {
+    let limit = tailstock.diameter * 0.5 + tailstock.clearance;
+    let z_min = -tailstock.clearance;
+    let mut face = false;
+    let mut cylinder = false;
+    let mut prev = start;
+    for block in path.blocks() {
+        match block {
+            ClBlock::Event(Event::FaceInterpolation { on }) => {
+                face = *on;
+                if *on {
+                    cylinder = false;
+                }
+            }
+            ClBlock::Event(Event::CylinderInterpolation { radius }) => {
+                cylinder = radius.is_some();
+                if cylinder {
+                    face = false;
+                }
+            }
+            ClBlock::Motion(motion) => {
+                let tip = motion_tip(motion);
+                let from = prev.unwrap_or(tip);
+                prev = Some(tip);
+                if let Some((radius, z)) = segment_zone_hit(from, tip, face, cylinder, z_min, limit) {
+                    let diameter = radius * 2.0;
+                    return Err(CliError::invalid(format!("operation {name}: move at X{diameter:.3} Z{z:.3} enters the tailstock zone")));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The point of the segment `from`→`to` with the smallest radius among those with `z > z_min`,
+/// when that radius is below `limit`. Radius is X in turning and cylinder mode and |XY| when the
+/// tip is off the XZ plane or face interpolation is on.
+fn segment_zone_hit(from: Vec3, to: Vec3, face: bool, cylinder: bool, z_min: f64, limit: f64) -> Option<(f64, f64)> {
+    let dz = to.z() - from.z();
+    // Interval of t in [0, 1] where z(t) > z_min (open at a crossing).
+    let (lo, hi) = if dz.abs() <= 1.0e-12 {
+        if from.z() > z_min { (0.0, 1.0) } else { return None }
+    } else {
+        let t = (z_min - from.z()) / dz;
+        if dz > 0.0 { (t.max(0.0), 1.0) } else { (0.0, t.min(1.0)) }
+    };
+    if lo > hi || (lo == hi && !(from.z() + dz * lo > z_min)) {
+        return None;
+    }
+    let planar = cylinder || (!face && from.y().abs() <= 1.0e-9 && to.y().abs() <= 1.0e-9);
+    let t = if planar {
+        if to.x() - from.x() >= 0.0 { lo } else { hi }
+    } else {
+        let (px, py) = (from.x(), from.y());
+        let (dx, dy) = (to.x() - from.x(), to.y() - from.y());
+        let len2 = dx * dx + dy * dy;
+        let t0 = if len2 <= 1.0e-24 { lo } else { -(px * dx + py * dy) / len2 };
+        t0.clamp(lo, hi)
+    };
+    let x = from.x() + (to.x() - from.x()) * t;
+    let y = from.y() + (to.y() - from.y()) * t;
+    let z = from.z() + dz * t;
+    let radius = if planar { x } else { x.hypot(y) };
+    // A hit exactly on the z boundary only counts if the segment continues inside.
+    let inside_z = z > z_min || (hi > lo && radius < limit);
+    (inside_z && radius < limit).then_some((radius, z))
+}
+
+fn last_motion_tip(path: &ClPath) -> Option<Vec3> {
+    path.blocks().iter().rev().find_map(|block| match block {
+        ClBlock::Motion(motion) => Some(motion_tip(motion)),
+        _ => None,
+    })
+}
+
+fn motion_tip(motion: &ClMotion) -> Vec3 {
+    let pose = match motion {
+        ClMotion::Rapid { to, .. }
+        | ClMotion::Linear { to, .. }
+        | ClMotion::Arc { to, .. }
+        | ClMotion::Helix { to, .. }
+        | ClMotion::Thread { to, .. } => to,
+    };
+    pose.tip()
 }
 
 fn eject_toolpath(operation: &Operation) -> Result<ClPath, CliError> {
@@ -2838,8 +3059,10 @@ fn op_fail(name: &str, err: impl std::fmt::Display) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use campanion_geom::{Line, Point, Segment};
-    use campanion_ir::{Hand, Insert, InsertShape};
+    use campanion_ir::{ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, Hand, Insert, InsertShape, Pose, Vec3};
     use campanion_turn::{FaceParams, FinishParams, Side, TipPoint, TurnMove, TurnProfile, TurnTool, face, finish};
 
     use super::{SourceKind, face_to_radius, parse_source, programmed_tip, source_kind};
@@ -2966,5 +3189,175 @@ mod tests {
             }
             assert!(saw_end, "facing feed did not cross the centre: {:?}", path.moves);
         }
+    }
+
+    fn tailstock_job(extra: &str, operations: &str) -> String {
+        format!(
+            r#"{{
+            "format": "campanion-lathe/1",
+            "source": {{ "path": "shaft.dxf" }},
+            "units": "mm",
+            "stock": {{ "kind": "bar", "diameter": 40, "length": 40, "front_allowance": 1 }},
+            "spindle": {{ "max_rpm": 3000 }},
+            {extra}
+            "tools": [{{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }}],
+            "operations": [{operations}],
+            "clearance": 2
+        }}"#
+        )
+    }
+
+    fn parse_err(body: &str) -> String {
+        match super::parse_job(body) {
+            Ok(_) => panic!("job was accepted"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    fn unwrap_ok<T>(result: Result<T, super::CliError>, what: &str) -> T {
+        result.unwrap_or_else(|err| panic!("{what}: {err}"))
+    }
+
+    #[test]
+    fn tailstock_block_rejects_a_sub_spindle_a_missing_block_and_a_bad_action() {
+        let advance = r#"{ "name": "in", "type": "tailstock", "action": "advance" }"#;
+        let both = tailstock_job(r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } }, "tailstock": { "diameter": 12 },"#, advance);
+        let err = parse_err(&both);
+        assert!(err.contains("\"tailstock\" is not allowed with a \"sub\" block (the B axis is the secondary spindle)"), "{err}");
+
+        let missing = parse_err(&tailstock_job("", advance));
+        assert!(missing.contains("operation in: tailstock needs a \"tailstock\" block"), "{missing}");
+
+        let bad = parse_err(&tailstock_job(r#""tailstock": { "diameter": 12 },"#, r#"{ "name": "in", "type": "tailstock", "action": "park" }"#));
+        assert!(bad.contains("operation in: tailstock action must be advance or retract"), "{bad}");
+
+        let job = unwrap_ok(super::parse_job(&tailstock_job(r#""tailstock": { "diameter": 12 },"#, advance)), "default clearance");
+        let tailstock = job.tailstock.expect("block");
+        assert!((tailstock.diameter - 12.0).abs() < 1e-12);
+        assert!((tailstock.clearance - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tailstock_advance_and_retract_must_alternate_and_a_transfer_waits() {
+        let block = r#""tailstock": { "diameter": 12, "clearance": 1 },"#;
+        let twice = parse_err(&tailstock_job(
+            block,
+            r#"{ "name": "in", "type": "tailstock", "action": "advance" }, { "name": "again", "type": "tailstock", "action": "advance" }"#,
+        ));
+        assert!(twice.contains("operation again: tailstock is already advanced"), "{twice}");
+
+        let early = parse_err(&tailstock_job(block, r#"{ "name": "out", "type": "tailstock", "action": "retract" }"#));
+        assert!(early.contains("operation out: tailstock is not advanced"), "{early}");
+
+        unwrap_ok(super::parse_job(&tailstock_job(block, r#"{ "name": "in", "type": "tailstock", "action": "advance" }"#)), "end advanced");
+
+        let ops = [
+            super::Operation::Tailstock { name: "in".into(), engage: true },
+            super::Operation::Transfer {
+                name: "handoff".into(),
+                rpm: 0.0,
+                phase: None,
+                approach_z: 4.0,
+                grip_z: -1.0,
+                park_z: -50.0,
+                feed: 200.0,
+                dwell: 0.5,
+                part_off: None,
+            },
+        ];
+        let err = super::check_tailstock_ops(&ops, true).expect_err("transfer");
+        assert!(err.to_string().contains("operation handoff: retract the tailstock first"), "{err}");
+
+        let eject = [super::Operation::Tailstock { name: "in".into(), engage: true }, super::Operation::Eject { name: "drop".into() }];
+        let err = super::check_tailstock_ops(&eject, true).expect_err("eject");
+        assert!(err.to_string().contains("operation drop: retract the tailstock first"), "{err}");
+    }
+
+    fn rapid_at(x: f64, y: f64, z: f64) -> ClBlock {
+        let pose = Pose::new(Vec3::new(x, y, z).expect("tip"), Vec3::Z).expect("pose");
+        ClBlock::Motion(ClMotion::Rapid { to: pose, feed: None })
+    }
+
+    fn path_of(blocks: Vec<ClBlock>) -> ClPath {
+        let feeds = Feeds::try_new(1.0, None, None, None, None).expect("feeds");
+        ClPath::try_new(Some("cut".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path")
+    }
+
+    #[test]
+    fn tailstock_zone_allows_the_exact_radius_and_rejects_the_inside() {
+        let tailstock = super::TailstockBlock { diameter: 18.0, clearance: 1.0 };
+        let limit = tailstock.diameter * 0.5 + tailstock.clearance;
+        assert!((limit - 10.0).abs() < 1e-12);
+        unwrap_ok(super::check_tailstock_zone("cut", &path_of(vec![rapid_at(limit, 0.0, 0.0)]), &tailstock, None), "exact radius passes");
+        unwrap_ok(
+            super::check_tailstock_zone("cut", &path_of(vec![rapid_at(0.0, 0.0, -tailstock.clearance)]), &tailstock, None),
+            "z = -clearance passes",
+        );
+
+        let inside = limit - 0.001;
+        let err = super::check_tailstock_zone("cut", &path_of(vec![rapid_at(inside, 0.0, -0.25)]), &tailstock, None).expect_err("inside");
+        let expected = format!("operation cut: move at X{:.3} Z{:.3} enters the tailstock zone", inside * 2.0, -0.25);
+        assert!(err.to_string().contains(&expected), "{err}");
+
+        let face = vec![ClBlock::Event(Event::FaceInterpolation { on: true }), rapid_at(0.0, limit, 0.0)];
+        unwrap_ok(super::check_tailstock_zone("face", &path_of(face), &tailstock, None), "face radius on the boundary passes");
+        let face_in = vec![ClBlock::Event(Event::FaceInterpolation { on: true }), rapid_at(0.0, inside, 0.0)];
+        let err = super::check_tailstock_zone("face", &path_of(face_in), &tailstock, None).expect_err("face inside");
+        assert!(err.to_string().contains("operation face: move at X"), "{err}");
+
+        let cylinder = vec![ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) }), rapid_at(limit, 80.0, 0.0)];
+        unwrap_ok(super::check_tailstock_zone("wrap", &path_of(cylinder), &tailstock, None), "unrolled Y is not a radius");
+    }
+
+    #[test]
+    fn tailstock_zone_checks_whole_moves_not_only_their_end_points() {
+        let tailstock = super::TailstockBlock { diameter: 18.0, clearance: 1.0 };
+        // Both ends are outside (Z-5 below the zone, then X30 outside the radius) but the diagonal
+        // rapid cuts the zone corner.
+        let diagonal = vec![rapid_at(0.0, 0.0, -5.0), rapid_at(15.0, 0.0, 5.0)];
+        let err = super::check_tailstock_zone("approach", &path_of(diagonal), &tailstock, None).expect_err("diagonal");
+        assert!(err.to_string().contains("operation approach: move at X12.000 Z-1.000 enters the tailstock zone"), "{err}");
+
+        // The same move with the corner kept clear passes.
+        let clear = vec![rapid_at(0.0, 0.0, -5.0), rapid_at(15.0, 0.0, -5.0), rapid_at(15.0, 0.0, 5.0)];
+        unwrap_ok(super::check_tailstock_zone("approach", &path_of(clear), &tailstock, None), "square approach passes");
+
+        // A move along z = -clearance touches the zone boundary only.
+        let along = vec![rapid_at(30.0, 0.0, -1.0), rapid_at(0.0, 0.0, -1.0)];
+        unwrap_ok(super::check_tailstock_zone("face", &path_of(along), &tailstock, None), "boundary move passes");
+
+        // The first move starts where the previous operation ended.
+        let first = vec![rapid_at(15.0, 0.0, 5.0)];
+        let start = Vec3::new(0.0, 0.0, -5.0).expect("start");
+        let err = super::check_tailstock_zone("next", &path_of(first.clone()), &tailstock, Some(start)).expect_err("carried start");
+        assert!(err.to_string().contains("operation next: move at X"), "{err}");
+        unwrap_ok(super::check_tailstock_zone("next", &path_of(first), &tailstock, None), "no start passes");
+
+        // A face-interpolated move through the centre is caught even though both ends are at radius 12.
+        let face = vec![ClBlock::Event(Event::FaceInterpolation { on: true }), rapid_at(12.0, 0.0, 0.0), rapid_at(-12.0, 0.0, 0.0)];
+        let err = super::check_tailstock_zone("face", &path_of(face), &tailstock, None).expect_err("through centre");
+        assert!(err.to_string().contains("move at X0.000 Z0.000"), "{err}");
+    }
+
+    #[test]
+    fn a_centre_drill_and_an_exact_finish_follow_the_zone() {
+        let block = r#""tailstock": { "diameter": 18, "clearance": 1 },"#;
+        let drill = tailstock_job(
+            block,
+            r#"{ "name": "in", "type": "tailstock", "action": "advance" },
+              { "name": "centre", "type": "drill", "tool_id": 1, "z_start": 0, "depth": 5, "diameter": 4, "feed": 80, "rpm": 800 }"#,
+        );
+        let job = unwrap_ok(super::parse_job(&drill), "drill job");
+        let err = super::build_document(Path::new("job.lathe.json"), &job, &cylinder(15.0, 30.0), None).expect_err("drill enters");
+        assert!(err.to_string().contains("operation centre: move at X0.000 Z2.000 enters the tailstock zone"), "{err}");
+
+        let finish = tailstock_job(
+            block,
+            r#"{ "name": "in", "type": "tailstock", "action": "advance" },
+              { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "rpm": 800 } }"#,
+        );
+        let job = unwrap_ok(super::parse_job(&finish), "finish job");
+        // Profile radius 10 equals D/2 + clearance. The finish stays on that radius.
+        unwrap_ok(super::build_document(Path::new("job.lathe.json"), &job, &cylinder(10.0, 20.0), None), "exact radius finish passes");
     }
 }

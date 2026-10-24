@@ -743,7 +743,7 @@
       ]
     },
     "Event": {
-      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.\n[`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]\nhand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.\n[`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is\n`(cos b_deg, 0, sin b_deg)`.",
+      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.\n[`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]\nhand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.\n[`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is\n`(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold\nforce and travel are machine settings; the event carries no position.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -1220,6 +1220,25 @@
             "type",
             "head",
             "b_deg"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Advance (`engage: true`) or retract (`false`) the lathe tailstock. Hold force and\ntravel are machine settings; the event carries no position.",
+          "properties": {
+            "engage": {
+              "description": "`true` advances the tailstock. `false` retracts it.",
+              "type": "boolean"
+            },
+            "type": {
+              "const": "tailstock",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "engage"
           ],
           "type": "object"
         }
