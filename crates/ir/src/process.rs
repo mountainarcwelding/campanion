@@ -324,6 +324,8 @@ pub enum CoolantMode {
 ///
 /// In a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and
 /// [`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.
+/// [`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame
+/// or an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.
 /// `Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value
 /// at most 99999. A live-tool event does not require a turning setup.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -405,6 +407,21 @@ pub enum Event {
     },
     /// Stop the live tool.
     LiveToolOff,
+    /// Cartesian face interpolation. While on, a pose tip (x, y, z) is a point on the part face
+    /// frame: x, y Cartesian about the spindle axis, z axial. Poses carry no rotary. Arcs may use
+    /// [`crate::Plane::Xy`].
+    FaceInterpolation {
+        /// `true` selects the face frame. `false` leaves it.
+        on: bool,
+    },
+    /// Cylinder interpolation. While on (`radius` Some, > 0), tip.x is the radius of the tool tip,
+    /// tip.y is the distance unrolled along the circumference at `radius` (C degrees = y / radius
+    /// in radians), z axial. Arcs may use [`crate::Plane::Yz`]. `None` turns it off.
+    CylinderInterpolation {
+        /// Mapping radius in millimetres. Absent or `None` leaves cylinder interpolation.
+        #[serde(default)]
+        radius: Option<f64>,
+    },
 }
 
 impl Event {
@@ -441,7 +458,12 @@ impl Event {
                     return Err(check::invalid("live tool rpm is above 100000"));
                 }
             }
-            Self::LiveToolOff => {}
+            Self::LiveToolOff | Self::FaceInterpolation { .. } => {}
+            Self::CylinderInterpolation { radius } => {
+                if let Some(radius) = radius {
+                    positive(*radius, "cylinder interpolation radius")?;
+                }
+            }
         }
         Ok(())
     }

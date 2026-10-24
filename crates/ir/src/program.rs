@@ -16,8 +16,9 @@ use crate::{FORMAT_TAG, Result, check_format};
 /// How close a pose tool axis must be to the part-frame image of machine +Z at that rotary angle.
 const ROTARY_AXIS_TOL: f64 = 1e-6;
 
-/// Slack for a turning pose on a head with no Y axis. X may be negative when a face crosses the axis.
-/// A head that carries [`HeadAxis::Y`] may leave the XZ plane by more than this while its C axis is engaged.
+/// Slack for a turning pose outside face and cylinder interpolation on a head with no Y axis.
+/// X may be negative when a face crosses the axis. A head that carries [`HeadAxis::Y`] may leave
+/// the XZ plane by more than this while its C axis is engaged.
 const TURNING_PLANE_TOL: f64 = 1e-6;
 
 /// Channels that must arrive together. A sync event waits on this id.
@@ -428,23 +429,39 @@ fn bound_path(toolpaths: &[ClPath], index: u32) -> Option<&ClPath> {
     usize::try_from(index).ok().and_then(|index| toolpaths.get(index))
 }
 
-/// `|Y|` above [`TURNING_PLANE_TOL`] needs a head with [`HeadAxis::Y`] and an engaged C axis.
-///
-/// The pose must also name that C angle. Successive Y moves may use different angles. C and Y
-/// changing in one block is a post error, not an IR error. Arcs in XY and YZ are ordinary
-/// motions: this check only looks at the tip.
+/// `|Y|` above [`TURNING_PLANE_TOL`] is allowed inside face or cylinder interpolation (Y is the
+/// Cartesian face coordinate or the unrolled distance). Outside them it needs a head with
+/// [`HeadAxis::Y`] and an engaged C axis, and the pose must name that C angle. Successive Y moves
+/// may use different angles. C and Y changing in one block is a post error, not an IR error. Arcs
+/// in XY and YZ are ordinary motions: this check only looks at the tip.
 fn check_turning_poses(turning: &TurningSetup, index: u32, path: &ClPath) -> Result<()> {
     let head_has_y =
         turning.binding_for(index).and_then(|binding| turning.head(binding.head())).is_some_and(|head| head.axes().contains(&HeadAxis::Y));
     let mut c_engaged = false;
+    let mut face = false;
+    let mut cylinder = false;
     for (block_i, block) in path.blocks().iter().enumerate() {
-        if let ClBlock::Event(Event::CAxis { engage, .. }) = block {
-            c_engaged = *engage;
+        match block {
+            ClBlock::Event(Event::CAxis { engage, .. }) => c_engaged = *engage,
+            ClBlock::Event(Event::FaceInterpolation { on }) => {
+                face = *on;
+                if *on {
+                    cylinder = false;
+                }
+            }
+            ClBlock::Event(Event::CylinderInterpolation { radius }) => {
+                cylinder = radius.is_some();
+                if cylinder {
+                    face = false;
+                }
+            }
+            _ => {}
         }
         let Some(pose) = block_pose(block) else {
             continue;
         };
-        if pose.tip().y().abs() <= TURNING_PLANE_TOL {
+        // Face and cylinder frames use Y. Outside those modes Y needs a Y head.
+        if face || cylinder || pose.tip().y().abs() <= TURNING_PLANE_TOL {
             continue;
         }
         if !head_has_y {

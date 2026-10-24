@@ -6,11 +6,15 @@
 //! inverse-time codes (`G93` / `G94` on LinuxCNC). Those stay modal the way `X` `Y` `Z` do.
 //!
 //! A lathe post returns part-frame positions. In diameter mode each X word is divided by two.
-//! Y stays 0 unless the post has `y_axis`, in which case Y is modal like X and Z. `I` is already
-//! a radius offset. `arc_flip` swaps G2 and G3 back to the IR sense on ZX arcs only. `G53` is a
-//! machine move and is not returned.
-//! `G28` is a reference return and is not returned. `U` and `W` are accepted only on that block.
-//! `G50` (spindle cap) and `G98` (Fanuc and Haas feed per minute) are not moves.
+//! Y is 0, except while face or cylinder interpolation (from the post's `face_interp` /
+//! `cylinder_interp` templates) is on, or when the post has `y_axis`, in which case Y is modal
+//! like X and Z. In face mode X is a radius unless `x_diameter` is set, and Y is kept. In
+//! cylinder mode X still follows diameter mode and Y is the unrolled distance.
+//! `I` `J` `K` are centre offsets from the stored start. `arc_flip` swaps G2 and G3 back to the
+//! IR sense on ZX arcs only. `G53` is a machine move and is not returned. `G28` is a reference
+//! return and is not returned. `U` and `W` are accepted only on that block. `G50` (spindle cap)
+//! and `G98` (Fanuc and Haas feed per minute) are not moves. A cylinder `on` line such as
+//! `G107 Y0 C0 R20.` is not a move and does not change the modal C word.
 //!
 //! A lathe post with `c_axis` treats that letter as a modal angle. Rapid and linear moves return
 //! it on `rotary`. `M` lines, `P` and `H` words, and `G28 H0.` are not moves. `G28 H0.` does not
@@ -105,11 +109,25 @@ struct Parser<'a> {
     angle: Option<f64>,
     /// Modal inverse time. `G94` (or the post's off code) clears it.
     inverse_time: bool,
+    /// Cartesian face frame. X scaling follows `face_interp.x_diameter` and Y is kept.
+    face_mode: bool,
+    /// Unrolled cylinder frame. Y is kept and X follows lathe diameter mode.
+    cyl_mode: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(post: &'a PostDef) -> Self {
-        Self { post, pos: [0.0, 0.0, 0.0], motion: None, plane: Plane::Xy, feed: None, angle: None, inverse_time: false }
+        Self {
+            post,
+            pos: [0.0, 0.0, 0.0],
+            motion: None,
+            plane: Plane::Xy,
+            feed: None,
+            angle: None,
+            inverse_time: false,
+            face_mode: false,
+            cyl_mode: false,
+        }
     }
 
     fn line(&mut self, raw: &str) -> Result<Option<ReadMove>> {
@@ -170,7 +188,7 @@ impl<'a> Parser<'a> {
                 'G' => g_codes.push(g_number(*value)?),
                 'M' => saw_m = true,
                 'T' => saw_t = true,
-                'I' | 'J' | 'K' | 'R' | 'F' | 'S' | 'H' | 'D' | 'P' => {}
+                'I' | 'J' | 'K' | 'R' | 'Q' | 'F' | 'S' | 'H' | 'D' | 'P' => {}
                 'U' | 'W' if self.post.is_lathe() => {}
                 letter
                     if axes.contains(&letter)
@@ -182,6 +200,12 @@ impl<'a> Parser<'a> {
             }
         }
         let f = unique(&words, 'F')?;
+        // Mode lines are recognised before C is applied, so `G107 Y0 C0 R…` does not move and
+        // does not change the modal C word.
+        if self.take_interpolation(&words, &g_codes)? {
+            self.apply_plane_codes(&g_codes);
+            return Ok(None);
+        }
         if let Some(angle) = self.rotary_word(&words)? {
             self.angle = Some(angle);
         }
@@ -384,6 +408,71 @@ impl<'a> Parser<'a> {
         self.post.lathe.as_ref()?.thread.as_ref()?.lead_word.chars().next()
     }
 
+    fn stored_x(&self, x: f64) -> f64 {
+        if self.face_mode {
+            let diameter = self.post.lathe.as_ref().and_then(|lathe| lathe.face_interp.as_ref()).is_some_and(|face| face.x_diameter);
+            if diameter { x * 0.5 } else { x }
+        } else if self.post.lathe.as_ref().is_some_and(|lathe| lathe.diameter_mode) {
+            x * 0.5
+        } else {
+            x
+        }
+    }
+
+    fn apply_plane_codes(&mut self, g_codes: &[u16]) {
+        for code in g_codes {
+            match code {
+                17 => self.plane = Plane::Xy,
+                18 => self.plane = Plane::Zx,
+                19 => self.plane = Plane::Yz,
+                _ => {}
+            }
+        }
+    }
+
+    /// True when this line is only an interpolation mode change, and the mode was applied.
+    ///
+    /// A line that also carries G0/G1/G2/G3 (or the thread code) is motion and is left alone.
+    /// `G19` in a cylinder `on` template is a plane select unless the mapping word is on that
+    /// same line. `G107` with `{radius}` or `{diameter}` enters; a bare `G107` cancels.
+    fn take_interpolation(&mut self, words: &[(char, f64)], g_codes: &[u16]) -> Result<bool> {
+        if g_codes.iter().any(|code| is_motion_g(*code, self.thread_code())) {
+            return Ok(false);
+        }
+        let Some(lathe) = self.post.lathe.as_ref() else {
+            return Ok(false);
+        };
+        let mut consumed = false;
+        if let Some(face) = &lathe.face_interp {
+            let on = g_hits(g_codes, &face.on);
+            let off = g_hits(g_codes, &face.off);
+            if on && !off {
+                self.face_mode = true;
+                self.cyl_mode = false;
+                consumed = true;
+            } else if off {
+                self.face_mode = false;
+                consumed = true;
+            }
+        }
+        if let Some(cylinder) = &lathe.cylinder_interp {
+            let on = g_hits(g_codes, &cylinder.on);
+            let off = g_hits(g_codes, &cylinder.off);
+            if on || off {
+                let enter = on && mapping_present(&cylinder.on, words)?;
+                if enter {
+                    self.cyl_mode = true;
+                    self.face_mode = false;
+                    consumed = true;
+                } else if off {
+                    self.cyl_mode = false;
+                    consumed = true;
+                }
+            }
+        }
+        Ok(consumed)
+    }
+
     fn is_rotary_letter(&self, letter: char) -> bool {
         let Some(rotary) = &self.post.rotary else {
             return false;
@@ -410,8 +499,11 @@ impl<'a> Parser<'a> {
     /// Diameter mode halves X. Without `y_axis`, Y is centreline 0. With it, Y is modal, and a
     /// letter that is not the second axis letter is read into Y.
     fn lathe_end(&self, mut end: Xyz, axes_present: [Option<f64>; 3], words: &[(char, f64)]) -> Result<Xyz> {
-        if self.post.lathe.as_ref().is_some_and(|lathe| lathe.diameter_mode) && axes_present[0].is_some() {
-            end[0] *= 0.5;
+        if axes_present[0].is_some() {
+            end[0] = self.stored_x(end[0]);
+        }
+        if self.face_mode || self.cyl_mode {
+            return Ok(end);
         }
         let Some(letter) = self.y_axis_letter() else {
             end[1] = 0.0;
@@ -549,6 +641,62 @@ fn unique(words: &[(char, f64)], letter: char) -> Result<Option<f64>> {
         }
     }
     Ok(found)
+}
+
+fn is_motion_g(code: u16, thread: Option<u16>) -> bool {
+    matches!(code, 0..=3) || thread == Some(code)
+}
+
+/// G codes named in interpolation templates, such as `G112` or `G107`.
+fn template_g_codes(lines: &[String]) -> Vec<u16> {
+    let mut codes = Vec::new();
+    for line in lines {
+        let bytes = line.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index].eq_ignore_ascii_case(&b'G') {
+                index += 1;
+                let start = index;
+                while index < bytes.len() && bytes[index].is_ascii_digit() {
+                    index += 1;
+                }
+                if start < index
+                    && let Ok(code) = line[start..index].parse::<u16>()
+                {
+                    codes.push(code);
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+    codes
+}
+
+fn g_hits(g_codes: &[u16], lines: &[String]) -> bool {
+    let needles = template_g_codes(lines);
+    g_codes.iter().any(|code| needles.contains(code))
+}
+
+/// Letter that carries `{radius}` or `{diameter}` in a cylinder `on` template.
+fn mapping_letter(lines: &[String]) -> Option<char> {
+    for line in lines {
+        for key in ["{radius}", "{diameter}"] {
+            if let Some(at) = line.find(key) {
+                let letter = line[..at].chars().rev().find(|ch| ch.is_ascii_alphabetic())?;
+                return Some(letter.to_ascii_uppercase());
+            }
+        }
+    }
+    None
+}
+
+/// True when the cylinder `on` line is present. No placeholder means the G code alone enters.
+fn mapping_present(lines: &[String], words: &[(char, f64)]) -> Result<bool> {
+    let Some(letter) = mapping_letter(lines) else {
+        return Ok(true);
+    };
+    Ok(unique(words, letter)?.is_some())
 }
 
 fn g_number(value: f64) -> Result<u16> {

@@ -953,6 +953,8 @@ mod tests {
                 FlatStep::Feed { x: 22.0, y: y_lo, z: -10.0, c_deg: 90.0 },
                 FlatStep::Feed { x: 18.0, y: y_lo, z: -10.0, c_deg: 90.0 },
                 FlatStep::Feed { x: 18.0, y: y_hi, z: -10.0, c_deg: 90.0 },
+                FlatStep::Rapid { x: 22.0, y: y_hi, z: -10.0, c_deg: 90.0 },
+                FlatStep::Rapid { x: 22.0, y: 0.0, z: -10.0, c_deg: 90.0 },
             ]
         );
     }

@@ -7,13 +7,18 @@
 //! A lathe post's read-back is already in the part frame: diameter-mode X was divided by two,
 //! Y is 0 unless the post writes a Y axis, and G2/G3 were mapped back to the IR sense on ZX
 //! arcs. Arcs are checked in the plane the IR stored.
+//!
+//! Face and cylinder interpolation that the post writes with its own block are read back in the
+//! IR frame, so those poses compare directly. The X/C fallback is read back as a radius and a C
+//! angle. [`crate::interp::to_polar`] converts the IR pose the same way the writer did.
 
-use campanion_ir::{ArcSense, ClBlock, ClMotion, Plane, Pose, Program, RotarySetup, Vec3};
+use campanion_ir::{ArcSense, ClBlock, ClMotion, Event, Plane, Pose, Program, RotarySetup, Vec3};
 
 use crate::def::{PostDef, RotaryFeedMode};
 use crate::error::{Result, invalid, unsupported};
 use crate::fmt::xy_text_eq;
 use crate::geom::{self, Xyz};
+use crate::interp::{self, PolarCurve, PolarFrame};
 use crate::read::ReadMove;
 use crate::rotary::{self};
 
@@ -49,13 +54,28 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
     let mut part: Option<Xyz> = None;
     let mut written: Option<Xyz> = None;
     let mut prev_angle: Option<f64> = None;
+    let mut prev_c = 0.0;
+    let mut cart = InterpTrack::Off;
     let mut index = 0usize;
     for path in program.toolpaths() {
         for block in path.blocks() {
+            if let ClBlock::Event(event) = block {
+                note_interp(event, post, &mut cart, &mut prev_c);
+                continue;
+            }
             let ClBlock::Motion(motion) = block else { continue };
             let end_pose = pose_of(motion);
             let end_angle = end_pose.rotary();
             let part_end = tip(end_pose);
+            if let Some(frame) = cart.fallback() {
+                let (rapid, feed, curve) = fallback_curve(motion, part, index)?;
+                prev_c = consume_fallback(&motions, &mut cursor, frame, curve, part_end, prev_c, rapid, feed, tol, angle_tol, index, post)?;
+                part = Some(part_end);
+                written = Some(part_end);
+                prev_angle = end_angle;
+                index += 1;
+                continue;
+            }
             let written_end = written_tip(setup, end_pose)?;
             let rotating = rotary::angle_changes(prev_angle, end_angle);
             match motion {
@@ -133,6 +153,11 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
             part = Some(part_end);
             written = Some(written_end);
             prev_angle = end_angle;
+            if program.turning().is_some()
+                && let Some(angle) = end_angle
+            {
+                prev_c = angle;
+            }
             index += 1;
         }
     }
@@ -153,6 +178,150 @@ fn skip_z_only(post: &PostDef, pos: Option<Xyz>, end: Xyz, rapid: bool) -> Resul
     }
     let drop_rapid = rapid && !post.process_feeds.rapid_z;
     Ok(drop_rapid || post.drop_z())
+}
+
+/// Face or cylinder frame while `compare` walks the program.
+#[derive(Clone, Copy)]
+enum InterpTrack {
+    Off,
+    Face { native: bool },
+    Cylinder { radius: f64, native: bool },
+}
+
+impl InterpTrack {
+    fn fallback(self) -> Option<PolarFrame> {
+        match self {
+            Self::Face { native: false } => Some(PolarFrame::Face),
+            Self::Cylinder { radius, native: false } => Some(PolarFrame::Cylinder { radius }),
+            _ => None,
+        }
+    }
+}
+
+fn note_interp(event: &Event, post: &PostDef, cart: &mut InterpTrack, prev_c: &mut f64) {
+    match event {
+        Event::CAxis { engage: true, .. } => *prev_c = 0.0,
+        Event::FaceInterpolation { on: true } => {
+            let native = post.lathe.as_ref().is_some_and(|lathe| lathe.face_interp.is_some());
+            *cart = InterpTrack::Face { native };
+        }
+        Event::FaceInterpolation { on: false } => {
+            if matches!(cart, InterpTrack::Face { .. }) {
+                *cart = InterpTrack::Off;
+            }
+        }
+        Event::CylinderInterpolation { radius: Some(radius) } => {
+            let native = post.lathe.as_ref().is_some_and(|lathe| lathe.cylinder_interp.is_some());
+            *cart = InterpTrack::Cylinder { radius: *radius, native };
+        }
+        Event::CylinderInterpolation { radius: None } => {
+            if matches!(cart, InterpTrack::Cylinder { .. }) {
+                *cart = InterpTrack::Off;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fallback_curve(motion: &ClMotion, start: Option<Xyz>, index: usize) -> Result<(bool, Option<f64>, PolarCurve)> {
+    let end = tip(pose_of(motion));
+    match motion {
+        ClMotion::Rapid { .. } => Ok((true, None, line_curve(start, end))),
+        ClMotion::Linear { feed, .. } => Ok((false, Some(*feed), line_curve(start, end))),
+        ClMotion::Arc { plane, center, sense, feed, .. } => {
+            let start = start.ok_or_else(|| invalid(format!("motion {index}: arc needs a prior position")))?;
+            let center = xyz(*center);
+            let sweep = geom::arc_sweep(start, end, center, *plane, *sense, 0.0)?;
+            Ok((false, Some(*feed), PolarCurve::Arc { start, end, center, plane: *plane, sense: *sense, sweep }))
+        }
+        ClMotion::Helix { plane, center, sense, sweep, feed, .. } => {
+            let start = start.ok_or_else(|| invalid(format!("motion {index}: helix needs a prior position")))?;
+            Ok((false, Some(*feed), PolarCurve::Arc { start, end, center: xyz(*center), plane: *plane, sense: *sense, sweep: *sweep }))
+        }
+        ClMotion::Thread { .. } => Err(invalid("thread move during interpolation")),
+    }
+}
+
+fn line_curve(start: Option<Xyz>, end: Xyz) -> PolarCurve {
+    match start {
+        Some(start) => PolarCurve::Line { start, end },
+        None => PolarCurve::Point { end },
+    }
+}
+
+/// Walk the G1/G0 chords of one fallback move. Returns the continuous C at the end.
+fn consume_fallback(
+    moves: &[&ReadMove],
+    cursor: &mut usize,
+    frame: PolarFrame,
+    curve: PolarCurve,
+    end_tip: Xyz,
+    prev_c: f64,
+    rapid: bool,
+    feed: Option<f64>,
+    tol: f64,
+    angle_tol: f64,
+    index: usize,
+    post: &PostDef,
+) -> Result<f64> {
+    let target = interp::chained_polar(frame, &curve, prev_c)?;
+    let mut guard = 0u32;
+    loop {
+        let Some(mv) = moves.get(*cursor).copied() else {
+            return Err(invalid(format!("motion {index}: g-code ended before the interpolation move")));
+        };
+        *cursor += 1;
+        guard += 1;
+        if guard > 100_001 {
+            return Err(invalid(format!("motion {index}: too many blocks")));
+        }
+        let (got_rapid, got, got_c, got_feed) = match mv {
+            ReadMove::Rapid { end, rotary, feed, .. } => (true, *end, *rotary, *feed),
+            ReadMove::Linear { end, rotary, feed, .. } => (false, *end, *rotary, *feed),
+            _ => return Err(invalid(format!("motion {index}: expected a line"))),
+        };
+        if got_rapid != rapid {
+            return Err(invalid(format!("motion {index}: feed and rapid were swapped")));
+        }
+        let c = got_c.ok_or_else(|| invalid(format!("motion {index}: missing rotary angle")))?;
+        if got[1].abs() > tol {
+            return Err(invalid(format!("motion {index}: fallback move has a Y word")));
+        }
+        let cart = interp::polar_to_cart(frame, got[0], c, got[2]);
+        if !on_polar_curve(cart, curve, tol) {
+            return Err(invalid(format!("motion {index}: point is off the interpolation path")));
+        }
+        if !rapid && let Some(feed) = feed {
+            check_feed_number(got_feed, feed, post.decimals.feed, index)?;
+        }
+        let dist_end = geom::dist3(cart, end_tip);
+        let next_closer =
+            moves.get(*cursor).is_some_and(|next| fallback_tip(next, frame).is_some_and(|point| geom::dist3(point, end_tip) + 1e-9 < dist_end));
+        if dist_end <= tol && !next_closer {
+            if (got[0] - target.radius).abs() > tol || (got[2] - target.z).abs() > tol {
+                return Err(invalid(format!("motion {index}: polar end differs")));
+            }
+            check_angle(Some(c), target.c_deg, angle_tol, index)?;
+            return Ok(target.c_deg);
+        }
+    }
+}
+
+fn fallback_tip(mv: &ReadMove, frame: PolarFrame) -> Option<Xyz> {
+    let (end, rotary) = match mv {
+        ReadMove::Rapid { end, rotary, .. } | ReadMove::Linear { end, rotary, .. } => (*end, *rotary),
+        _ => return None,
+    };
+    let c = rotary?;
+    Some(interp::polar_to_cart(frame, end[0], c, end[2]))
+}
+
+fn on_polar_curve(point: Xyz, curve: PolarCurve, tol: f64) -> bool {
+    match curve {
+        PolarCurve::Point { end } => geom::dist3(point, end) <= tol,
+        PolarCurve::Line { start, end } => interp::segment_distance(point, start, end) <= tol,
+        PolarCurve::Arc { start, end, center, plane, sense, sweep } => on_curve(point, start, end, center, plane, sense, sweep, tol),
+    }
 }
 
 fn project(point: Xyz, drop_z: bool) -> Xyz {

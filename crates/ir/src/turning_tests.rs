@@ -475,6 +475,20 @@ fn turning_poses_stay_on_the_radius_plane() {
     let unbound_good = path_with(None, vec![rapid(5.0, 3.0, 0.0)]);
     let bound_bad = path_with(None, vec![linear(1.0, 1.0, -2.0)]);
     assert_err(program_with(vec![], vec![unbound_good, bound_bad], bind(1), None), "toolpath 1");
+
+    let face_on = ClBlock::Event(Event::FaceInterpolation { on: true });
+    let face_off = ClBlock::Event(Event::FaceInterpolation { on: false });
+    let on_face = vec![face_on.clone(), rapid(10.0, 4.0, -1.0), face_off.clone(), rapid(10.0, 0.0, -1.0)];
+    assert!(program_with(vec![], vec![path_with(None, on_face)], bind(0), None).is_ok());
+    let after_face = vec![face_on, rapid(10.0, 4.0, -1.0), face_off, rapid(10.0, 3.0, -1.0)];
+    assert_err(program_with(vec![], vec![path_with(None, after_face)], bind(0), None), "turning pose Y");
+
+    let cyl_on = ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) });
+    let cyl_off = ClBlock::Event(Event::CylinderInterpolation { radius: None });
+    let on_cyl = vec![cyl_on.clone(), rapid(20.0, 5.0, -10.0), cyl_off.clone(), linear(20.0, 0.0, -12.0)];
+    assert!(program_with(vec![], vec![path_with(None, on_cyl)], bind(0), None).is_ok());
+    let after_cyl = vec![cyl_on, rapid(20.0, 5.0, -10.0), cyl_off, linear(20.0, 1.0, -12.0)];
+    assert_err(program_with(vec![], vec![path_with(None, after_cyl)], bind(0), None), "turning pose Y");
 }
 
 #[test]
@@ -837,12 +851,32 @@ fn mill_turn_events_round_trip_and_reject_bad_spindles_and_rpm() {
     assert!(serde_json::from_str::<Event>(r#"{"type":"live_tool_on","rpm":1.0,"direction":"forward","extra":1}"#).is_err());
     assert!(serde_json::from_str::<Event>(r#"{"type":"c_axis","spindle":"main","engage":true,"nope":1}"#).is_err());
     assert!(serde_json::from_str::<Event>(r#"{"type":"spindle_brake","spindle":"main","clamp":true,"nope":1}"#).is_err());
+    let face_json = serde_json::to_string(&Event::FaceInterpolation { on: true }).expect("json");
+    assert!(face_json.contains("\"type\":\"face_interpolation\""), "{face_json}");
+    assert!(face_json.contains("\"on\":true"), "{face_json}");
+    let cyl_json = serde_json::to_string(&Event::CylinderInterpolation { radius: Some(20.0) }).expect("json");
+    assert!(cyl_json.contains("\"type\":\"cylinder_interpolation\""), "{cyl_json}");
+    assert!(cyl_json.contains("\"radius\":20"), "{cyl_json}");
+    let missing: Event = serde_json::from_str(r#"{"type":"cylinder_interpolation"}"#).expect("default radius");
+    assert_eq!(missing, Event::CylinderInterpolation { radius: None });
+    let null_radius: Event = serde_json::from_str(r#"{"type":"cylinder_interpolation","radius":null}"#).expect("null radius");
+    assert_eq!(null_radius, Event::CylinderInterpolation { radius: None });
+    assert!(serde_json::from_str::<Event>(r#"{"type":"face_interpolation","on":false,"extra":1}"#).is_err());
+    assert!(serde_json::from_str::<Event>(r#"{"type":"cylinder_interpolation","radius":1.0,"extra":1}"#).is_err());
+    assert_err(try_event(Event::CylinderInterpolation { radius: Some(0.0) }), "must be positive");
+    assert_err(try_event(Event::CylinderInterpolation { radius: Some(-1.0) }), "must be positive");
+    assert!(try_event(Event::CylinderInterpolation { radius: None }).is_ok());
+    assert!(try_event(Event::FaceInterpolation { on: false }).is_ok());
 
     let blocks = vec![
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
         ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
         ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Reverse }),
         ClBlock::Event(Event::LiveToolOff),
+        ClBlock::Event(Event::FaceInterpolation { on: true }),
+        ClBlock::Event(Event::FaceInterpolation { on: false }),
+        ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) }),
+        ClBlock::Event(Event::CylinderInterpolation { radius: None }),
         ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
     ];

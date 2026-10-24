@@ -6,9 +6,12 @@
 //! uses the straight-line distance between the part-frame tips.
 //!
 //! A turning program is written in the part frame. X is a radius until the lathe block asks for
-//! diameters. Y is a modal word and is never doubled. While the C axis is engaged, `G0` and `G1`
-//! append that letter after Z. ZX arcs do not carry a C word. A Y move may not share a block with
-//! a C word. Arc offsets stay in the radius frame: `I` along X, `J` along Y, `K` along Z.
+//! diameters. Y is a modal word and is never doubled when the post has `y_axis`; otherwise Y is
+//! omitted, except during face and cylinder interpolation. While the C axis is engaged, `G0` and
+//! `G1` append that letter after Z. ZX arcs do not carry a C word. A Y move may not share a block
+//! with a C word. Arc offsets stay in the radius frame: `I` along X, `J` along Y, `K` along Z.
+//! Face interpolation writes Cartesian X Y Z (and XY arcs). Cylinder interpolation writes X Y Z
+//! with Y unrolled (and YZ arcs). Without those post blocks the same poses are split into X and C.
 
 use campanion_ir::{
     ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, LiveDirection, Plane, Pose, ProcessKind, ProcessParams, Program, RotaryAxisKind,
@@ -19,6 +22,7 @@ use crate::def::{ArcMode, PostDef, ProcessWords, RotaryFeedMode};
 use crate::error::{Result, invalid, unsupported};
 use crate::fmt::{format_dim, format_fixed, xy_text_eq};
 use crate::geom::{self, Xyz};
+use crate::interp::{self, PolarCurve, PolarFrame, PolarTarget};
 use crate::rotary::{self, angles_equal};
 
 /// Controls how a [`PostDef`] writes arcs.
@@ -113,6 +117,14 @@ enum LatheKind {
     Arc(Plane),
 }
 
+/// Active face or cylinder frame, and whether the post has a native block for it.
+#[derive(Clone, Copy, PartialEq)]
+enum CartMode {
+    Off,
+    Face { native: bool },
+    Cylinder { radius: f64, native: bool },
+}
+
 struct Writer<'a> {
     post: &'a PostDef,
     options: &'a PostOptions,
@@ -128,8 +140,17 @@ struct Writer<'a> {
     angle: Option<f64>,
     /// True after `CAxis` engage, until disengage.
     c_engaged: bool,
+    /// Continuous C in degrees. Reset to 0 on engage (Haas `G28 H0.` unwinds). Face fallback
+    /// unwraps against this so a sweep does not jump by more than 180°.
+    c_continuous: Option<f64>,
     /// Formatted C word last written. Cleared on disengage so the next engage writes it again.
     c_modal: Option<String>,
+    /// Face or cylinder interpolation. `Off` is ordinary XZ turning.
+    cart: CartMode,
+    /// After interpolation turns off, the next move rewrites X, Y and Z. C is rewritten when the pose has one.
+    force_axes: bool,
+    /// Segments emitted for the fallback move in progress.
+    polar_count: u32,
     /// True after a spindle brake clamp, until release. C may not move while it is set.
     brake_clamped: bool,
     /// True after a live-tool start, until stop.
@@ -170,8 +191,12 @@ impl<'a> Writer<'a> {
             part_tip: None,
             angle: None,
             c_engaged: false,
+            c_continuous: None,
             brake_clamped: false,
             c_modal: None,
+            cart: CartMode::Off,
+            force_axes: false,
+            polar_count: 0,
             live_on: false,
             live_feed_written: false,
             y_modal: None,
@@ -246,6 +271,15 @@ impl<'a> Writer<'a> {
     }
 
     fn motion(&mut self, motion: &ClMotion) -> Result<()> {
+        if !matches!(self.cart, CartMode::Off) && matches!(motion, ClMotion::Thread { .. }) {
+            return Err(invalid("thread move during interpolation"));
+        }
+        if self.interp_fallback() {
+            return self.fallback_motion(motion);
+        }
+        if self.face_active() {
+            self.reject_centre_motion(motion)?;
+        }
         match motion {
             ClMotion::Rapid { to, feed } => self.linear_move("G0", self.posted_end(*to)?, *feed),
             ClMotion::Linear { to, feed, .. } => {
@@ -278,7 +312,7 @@ impl<'a> Writer<'a> {
         self.prepare_lathe_motion(posted.xyz, posted.c, posted.axis, LatheKind::Line)?;
         let mut words = vec![thread.code.clone()];
         let rounded = self.push_lathe_axes(&mut words, posted.xyz)?;
-        // A thread stays a ZX move. C interpolation is a later item, so no C word is written.
+        // A thread stays a ZX move, so it carries no C word.
         let lead_text = self.format_axis(lead, self.post.decimals.linear)?;
         words.push(format!("{}{lead_text}", thread.lead_word));
         self.linear = None;
@@ -289,6 +323,7 @@ impl<'a> Writer<'a> {
         self.exact = Some(posted.xyz);
         self.part_tip = Some(posted.part);
         self.angle = posted.angle;
+        self.force_axes = false;
         self.emit_words(&words)
     }
 
@@ -303,6 +338,10 @@ impl<'a> Writer<'a> {
     fn posted_end(&self, to: Pose) -> Result<Posted> {
         let part = tip(to);
         if self.turning.is_some() {
+            if !matches!(self.cart, CartMode::Off) {
+                self.reject_interp_rotary(to)?;
+                return Ok(Posted { xyz: part, part, angle: None, c: None, axis: to.axis() });
+            }
             self.guard_c(to.rotary())?;
             return Ok(Posted { xyz: part, part, angle: None, c: to.rotary(), axis: to.axis() });
         }
@@ -337,11 +376,18 @@ impl<'a> Writer<'a> {
     /// before the points are mapped with [`part_to_machine`].
     fn arc(&mut self, to: Pose, plane: Plane, center: Xyz, sense: campanion_ir::ArcSense, sweep: Option<f64>, feed: f64) -> Result<()> {
         if self.turning.is_some() {
-            self.prepare_lathe_motion(tip(to), to.rotary(), to.axis(), LatheKind::Arc(plane))?;
-            self.guard_c(to.rotary())?;
+            if matches!(self.cart, CartMode::Off) {
+                self.prepare_lathe_motion(tip(to), to.rotary(), to.axis(), LatheKind::Arc(plane))?;
+                self.guard_c(to.rotary())?;
+            } else {
+                if !self.plane_allowed(plane) {
+                    return Err(invalid("lathe arc must be in the zx plane"));
+                }
+                self.reject_interp_rotary(to)?;
+            }
         }
-        // A turning arc stays in the part ZX plane even when the pose carries a C angle.
-        // The C word is not written; C interpolation is a later item.
+        // A turning arc outside face and cylinder interpolation stays in the part ZX plane.
+        // The C word is not written on that arc.
         if self.turning.is_some() || (self.angle.is_none() && to.rotary().is_none()) {
             let end = tip(to);
             if let Some(sweep) = sweep {
@@ -542,11 +588,13 @@ impl<'a> Writer<'a> {
         self.linear = None;
         self.pos = Some(rounded);
         self.exact = Some(end);
+        self.force_axes = false;
         self.emit_words(&words)
     }
 
     fn linear_move(&mut self, code: &str, posted: Posted, feed: Option<f64>) -> Result<()> {
-        if self.turning.is_some() {
+        // Face and cylinder interpolation carry their own Y frame and plane words.
+        if self.turning.is_some() && matches!(self.cart, CartMode::Off) {
             self.prepare_lathe_motion(posted.xyz, posted.c, posted.axis, LatheKind::Line)?;
         }
         let rotating = rotary::angle_changes(self.angle, posted.angle);
@@ -556,6 +604,9 @@ impl<'a> Writer<'a> {
             self.exact = Some(posted.xyz);
             self.part_tip = Some(posted.part);
             self.angle = posted.angle;
+            if let Some(c) = posted.c {
+                self.c_continuous = Some(c);
+            }
             return Ok(());
         }
         let (feed, force) = self.resolve_feed(code, feed, &posted, rotating)?;
@@ -572,6 +623,10 @@ impl<'a> Writer<'a> {
         self.exact = Some(posted.xyz);
         self.part_tip = Some(posted.part);
         self.angle = posted.angle;
+        if let Some(c) = posted.c {
+            self.c_continuous = Some(c);
+        }
+        self.force_axes = false;
         self.emit_words(&words)
     }
 
@@ -652,6 +707,9 @@ impl<'a> Writer<'a> {
     /// A Z-only rapid is omitted when `rapid_z` is false. With Z words omitted, a Z-only feed is
     /// omitted too: the block would have no axis word.
     fn omit_z_only(&self, code: &str, end: Xyz) -> Result<bool> {
+        if self.force_axes {
+            return Ok(false);
+        }
         let Some(pos) = self.pos else {
             return Ok(false);
         };
@@ -693,6 +751,9 @@ impl<'a> Writer<'a> {
             LatheKind::Arc(plane) if plane != Plane::Zx => self.prepare_milling_arc(axis, plane, c),
             _ if y_changes => {
                 self.y_letter()?;
+                if !self.c_engaged {
+                    return Err(invalid("Y move needs the C axis engaged"));
+                }
                 if self.c_text_changes(c)? {
                     return Err(invalid("C and Y in one move"));
                 }
@@ -797,6 +858,9 @@ impl<'a> Writer<'a> {
     }
 
     fn push_axes(&mut self, words: &mut Vec<String>, end: Xyz) -> Result<Xyz> {
+        if self.native_interp() {
+            return self.push_interp_axes(words, end);
+        }
         if self.turning.is_some() {
             return self.push_lathe_axes(words, end);
         }
@@ -815,8 +879,10 @@ impl<'a> Writer<'a> {
         Ok(rounded)
     }
 
-    /// X is a diameter when the post asks for one. Y is modal and is never doubled. The stored
-    /// point stays in the part frame, so the next `I` or `J` is a radius offset from the rounded start.
+    /// X is a diameter when the post asks for one. Y is modal and is never doubled when the post has
+    /// `y_axis`; without it Y is written only after interpolation has cleared the modal axes. The
+    /// stored point stays in the part frame, so the next `I` or `J` is a radius offset from the
+    /// rounded start.
     fn push_lathe_axes(&mut self, words: &mut Vec<String>, end: Xyz) -> Result<Xyz> {
         let lathe = self.post.lathe.as_ref().ok_or_else(|| invalid("lathe motion needs a lathe post"))?;
         let letters = self.post.axis_letters.chars().collect::<Vec<_>>();
@@ -827,10 +893,14 @@ impl<'a> Writer<'a> {
         let y_text = self.format_axis(end[1], self.post.decimals.linear)?;
         let z_text = self.format_axis(end[2], self.post.decimals.linear)?;
         words.push(format!("{x_letter}{x_text}"));
-        if self.y_text_changes(&y_text)? {
+        let has_y = lathe.y_axis.is_some();
+        if has_y && (self.force_axes || self.y_text_changes(&y_text)?) {
             let letter = self.y_letter()?;
             words.push(format!("{letter}{y_text}"));
             self.y_modal = Some(y_text.clone());
+        } else if !has_y && self.force_axes {
+            let y_letter = letters.get(1).copied().ok_or_else(|| invalid("axis value is missing"))?;
+            words.push(format!("{y_letter}{y_text}"));
         }
         words.push(format!("{z_letter}{z_text}"));
         let written_x = x_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
@@ -840,9 +910,43 @@ impl<'a> Writer<'a> {
         Ok([stored_x, stored_y, stored_z])
     }
 
-    /// G2/G3 in the IR picture. `arc_flip` swaps them for ZX turning arcs only.
+    /// X Y Z in the active interpolation frame. Face X is a diameter only when the block says so.
+    /// Cylinder X follows `diameter_mode`. Stored coordinates stay in the IR frame, so `I` `J` `K`
+    /// are offsets from that point and are not doubled.
+    fn push_interp_axes(&self, words: &mut Vec<String>, end: Xyz) -> Result<Xyz> {
+        let letters = self.post.axis_letters.chars().collect::<Vec<_>>();
+        let x_letter = letters.first().copied().ok_or_else(|| invalid("axis value is missing"))?;
+        let y_letter = letters.get(1).copied().ok_or_else(|| invalid("axis value is missing"))?;
+        let z_letter = letters.get(2).copied().ok_or_else(|| invalid("axis value is missing"))?;
+        let x_diameter = self.interp_x_diameter();
+        let x_out = if x_diameter { end[0] * 2.0 } else { end[0] };
+        let x_text = self.format_axis(x_out, self.post.decimals.linear)?;
+        let y_text = self.format_axis(end[1], self.post.decimals.linear)?;
+        let z_text = self.format_axis(end[2], self.post.decimals.linear)?;
+        words.push(format!("{x_letter}{x_text}"));
+        words.push(format!("{y_letter}{y_text}"));
+        words.push(format!("{z_letter}{z_text}"));
+        let written_x = x_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        let stored_x = if x_diameter { written_x * 0.5 } else { written_x };
+        let stored_y = y_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        let stored_z = z_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+        Ok([stored_x, stored_y, stored_z])
+    }
+
+    fn interp_x_diameter(&self) -> bool {
+        let Some(lathe) = self.post.lathe.as_ref() else {
+            return false;
+        };
+        match self.cart {
+            CartMode::Face { native: true } => lathe.face_interp.as_ref().is_some_and(|face| face.x_diameter),
+            CartMode::Cylinder { native: true, .. } => lathe.diameter_mode,
+            _ => lathe.diameter_mode,
+        }
+    }
+
+    /// G2/G3 in the IR picture. `arc_flip` swaps them only for the ZX lathe view, not for a face or a cylinder.
     fn written_sense(&self, sense: campanion_ir::ArcSense, plane: Plane) -> campanion_ir::ArcSense {
-        let flip = self.turning.is_some() && plane == Plane::Zx && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip);
+        let flip = plane == Plane::Zx && self.turning.is_some() && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip);
         if !flip {
             return sense;
         }
@@ -869,7 +973,16 @@ impl<'a> Writer<'a> {
     }
 
     fn event(&mut self, event: &Event) -> Result<()> {
-        if self.turning.is_none() && matches!(event, Event::CAxis { .. } | Event::SpindleBrake { .. } | Event::LiveToolOn { .. } | Event::LiveToolOff)
+        if self.turning.is_none()
+            && matches!(
+                event,
+                Event::CAxis { .. }
+                    | Event::SpindleBrake { .. }
+                    | Event::LiveToolOn { .. }
+                    | Event::LiveToolOff
+                    | Event::FaceInterpolation { .. }
+                    | Event::CylinderInterpolation { .. }
+            )
         {
             return Err(unsupported(format!("post `{}` does not support mill-turn spindle modes", self.post.id())));
         }
@@ -882,6 +995,8 @@ impl<'a> Writer<'a> {
                 Event::SpindleBrake { clamp, .. } => return self.spindle_brake(*clamp),
                 Event::LiveToolOn { rpm, direction } => return self.live_tool_on(*rpm, *direction),
                 Event::LiveToolOff => return self.live_tool_off(),
+                Event::FaceInterpolation { on } => return self.face_interpolation(*on),
+                Event::CylinderInterpolation { radius } => return self.cylinder_interpolation(*radius),
                 _ => {}
             }
         }
@@ -928,9 +1043,12 @@ impl<'a> Writer<'a> {
             Event::Probe { .. } => self.comment("probe"),
             Event::Custom { name, .. } => self.comment(&format!("custom {}", sanitize(name))),
             Event::Sync { id } => self.comment(&format!("sync {id}")),
-            Event::CAxis { .. } | Event::SpindleBrake { .. } | Event::LiveToolOn { .. } | Event::LiveToolOff => {
-                Err(unsupported(format!("post `{}` does not support mill-turn spindle modes", self.post.id())))
-            }
+            Event::CAxis { .. }
+            | Event::SpindleBrake { .. }
+            | Event::LiveToolOn { .. }
+            | Event::LiveToolOff
+            | Event::FaceInterpolation { .. }
+            | Event::CylinderInterpolation { .. } => Err(unsupported(format!("post `{}` does not support mill-turn spindle modes", self.post.id()))),
         }
     }
 
@@ -1051,6 +1169,8 @@ impl<'a> Writer<'a> {
         if engage {
             self.templates("lathe.c_axis.engage", &c_axis.engage, &[("date-free!", "")])?;
             self.c_engaged = true;
+            // Engage unwinds the spindle (Haas writes `G28 H0.`), so the next face angle starts at 0.
+            self.c_continuous = Some(0.0);
         } else {
             self.restore_turn_plane()?;
             self.templates("lathe.c_axis.disengage", &c_axis.disengage, &[("date-free!", "")])?;
@@ -1097,10 +1217,347 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Stop a live tool that is still running, then disengage a C axis that is still engaged.
+    fn face_active(&self) -> bool {
+        matches!(self.cart, CartMode::Face { .. })
+    }
+
+    fn native_interp(&self) -> bool {
+        matches!(self.cart, CartMode::Face { native: true } | CartMode::Cylinder { native: true, .. })
+    }
+
+    fn interp_fallback(&self) -> bool {
+        matches!(self.cart, CartMode::Face { native: false } | CartMode::Cylinder { native: false, .. })
+    }
+
+    fn plane_allowed(&self, plane: Plane) -> bool {
+        match self.cart {
+            CartMode::Face { .. } => matches!(plane, Plane::Xy | Plane::Zx),
+            CartMode::Cylinder { .. } => matches!(plane, Plane::Yz | Plane::Zx),
+            CartMode::Off => plane == Plane::Zx,
+        }
+    }
+
+    fn reject_interp_rotary(&self, pose: Pose) -> Result<()> {
+        if pose.rotary().is_none() {
+            return Ok(());
+        }
+        let message = match self.cart {
+            CartMode::Cylinder { .. } => "cylinder interpolation pose must not carry a rotary angle",
+            _ => "face interpolation pose must not carry a rotary angle",
+        };
+        Err(invalid(message))
+    }
+
+    fn face_interpolation(&mut self, on: bool) -> Result<()> {
+        if !on {
+            if matches!(self.cart, CartMode::Face { .. }) {
+                self.end_interpolation()?;
+            }
+            return Ok(());
+        }
+        if matches!(self.cart, CartMode::Cylinder { .. }) {
+            return Err(invalid("face interpolation while cylinder interpolation is on"));
+        }
+        if self.prepare_interp(true)? {
+            let lines = self.face_lines(true);
+            self.templates("lathe.face_interp.on", &lines, &[("date-free!", "")])?;
+            self.note_plane(&lines);
+            self.cart = CartMode::Face { native: true };
+        } else {
+            self.cart = CartMode::Face { native: false };
+        }
+        Ok(())
+    }
+
+    fn cylinder_interpolation(&mut self, radius: Option<f64>) -> Result<()> {
+        let Some(radius) = radius else {
+            if matches!(self.cart, CartMode::Cylinder { .. }) {
+                self.end_interpolation()?;
+            }
+            return Ok(());
+        };
+        if !(radius.is_finite() && radius > 0.0) {
+            return Err(invalid("cylinder interpolation radius must be positive"));
+        }
+        if matches!(self.cart, CartMode::Face { .. }) {
+            return Err(invalid("cylinder interpolation while face interpolation is on"));
+        }
+        if self.prepare_interp(false)? {
+            let lines = self.cylinder_lines(true);
+            let radius_text = self.format_axis(radius, self.post.decimals.linear)?;
+            let diameter_text = self.format_axis(radius * 2.0, self.post.decimals.linear)?;
+            self.templates(
+                "lathe.cylinder_interp.on",
+                &lines,
+                &[("radius", radius_text.as_str()), ("diameter", diameter_text.as_str()), ("date-free!", "")],
+            )?;
+            self.note_plane(&lines);
+            self.cart = CartMode::Cylinder { radius, native: true };
+        } else {
+            self.cart = CartMode::Cylinder { radius, native: false };
+        }
+        Ok(())
+    }
+
+    /// `true` when the post has a native block. A missing block with no C axis is reported before
+    /// the not-engaged error.
+    fn prepare_interp(&self, face: bool) -> Result<bool> {
+        let lathe = self.post.lathe.as_ref().ok_or_else(|| invalid("interpolation needs a lathe post"))?;
+        let native = if face { lathe.face_interp.is_some() } else { lathe.cylinder_interp.is_some() };
+        if !native && lathe.c_axis.is_none() {
+            return Err(unsupported(format!("post `{}` has no C axis", self.post.id())));
+        }
+        if !self.c_engaged {
+            let message = if face { "face interpolation needs the C axis engaged" } else { "cylinder interpolation needs the C axis engaged" };
+            return Err(invalid(message));
+        }
+        if self.brake_clamped {
+            return Err(invalid("interpolation with the spindle brake clamped; release it first"));
+        }
+        Ok(native)
+    }
+
+    fn face_lines(&self, on: bool) -> Vec<String> {
+        self.post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.face_interp.as_ref())
+            .map(|face| if on { face.on.clone() } else { face.off.clone() })
+            .unwrap_or_default()
+    }
+
+    fn cylinder_lines(&self, on: bool) -> Vec<String> {
+        self.post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.cylinder_interp.as_ref())
+            .map(|cylinder| if on { cylinder.on.clone() } else { cylinder.off.clone() })
+            .unwrap_or_default()
+    }
+
+    fn end_interpolation(&mut self) -> Result<()> {
+        match self.cart {
+            CartMode::Off => return Ok(()),
+            CartMode::Face { native: true } => {
+                let lines = self.face_lines(false);
+                self.templates("lathe.face_interp.off", &lines, &[("date-free!", "")])?;
+                self.note_plane(&lines);
+            }
+            CartMode::Cylinder { native: true, .. } => {
+                let lines = self.cylinder_lines(false);
+                self.templates("lathe.cylinder_interp.off", &lines, &[("date-free!", "")])?;
+                self.note_plane(&lines);
+            }
+            CartMode::Face { native: false } | CartMode::Cylinder { native: false, .. } => {}
+        }
+        self.leave_interp_state();
+        Ok(())
+    }
+
+    fn leave_interp_state(&mut self) {
+        if let Some(tip) = self.part_tip
+            && let Ok(rounded) = self.round_xyz(tip)
+        {
+            self.pos = Some(rounded);
+            self.exact = Some(tip);
+        }
+        self.cart = CartMode::Off;
+        self.force_axes = true;
+        self.c_modal = None;
+        self.linear = None;
+    }
+
+    fn note_plane(&mut self, lines: &[String]) {
+        if let Some(plane) = header_plane(lines) {
+            self.plane = Some(plane);
+        }
+    }
+
+    fn reject_centre_motion(&self, motion: &ClMotion) -> Result<()> {
+        if !self.face_active() {
+            return Ok(());
+        }
+        let end = tip(motion_pose(motion));
+        let clearance = match motion {
+            ClMotion::Rapid { .. } | ClMotion::Linear { .. } | ClMotion::Thread { .. } => match self.part_tip {
+                Some(start) => interp::xy_segment_min(start, end),
+                None => end[0].hypot(end[1]),
+            },
+            ClMotion::Arc { plane, center, sense, .. } => {
+                let start = self.part_tip.ok_or_else(|| invalid("arc needs a prior position"))?;
+                let center = xyz(*center);
+                let sweep = geom::arc_sweep(start, end, center, *plane, *sense, 0.0)?;
+                interp::xy_arc_min(start, end, center, *plane, *sense, sweep)
+            }
+            ClMotion::Helix { plane, center, sense, sweep, .. } => {
+                let start = self.part_tip.ok_or_else(|| invalid("arc needs a prior position"))?;
+                interp::xy_arc_min(start, end, xyz(*center), *plane, *sense, *sweep)
+            }
+        };
+        interp::reject_centre(clearance)
+    }
+
+    fn fallback_motion(&mut self, motion: &ClMotion) -> Result<()> {
+        let frame = match self.cart {
+            CartMode::Face { native: false } => PolarFrame::Face,
+            CartMode::Cylinder { radius, native: false } => PolarFrame::Cylinder { radius },
+            _ => return Err(invalid("interpolation fallback is not active")),
+        };
+        match motion {
+            ClMotion::Rapid { to, feed } => {
+                self.reject_interp_rotary(*to)?;
+                let end = tip(*to);
+                self.reject_centre_span(self.part_tip, end)?;
+                self.emit_fallback(frame, "G0", line_curve(self.part_tip, end), *feed)
+            }
+            ClMotion::Linear { to, feed, .. } => {
+                self.thc_before_cut()?;
+                self.reject_interp_rotary(*to)?;
+                let end = tip(*to);
+                self.reject_centre_span(self.part_tip, end)?;
+                self.emit_fallback(frame, "G1", line_curve(self.part_tip, end), Some(*feed))
+            }
+            ClMotion::Arc { to, plane, center, sense, feed, .. } => {
+                self.thc_before_cut()?;
+                self.fallback_arc(frame, *to, *plane, xyz(*center), *sense, None, *feed)
+            }
+            ClMotion::Helix { to, plane, center, sense, sweep, feed, .. } => {
+                self.thc_before_cut()?;
+                self.fallback_arc(frame, *to, *plane, xyz(*center), *sense, Some(*sweep), *feed)
+            }
+            ClMotion::Thread { .. } => Err(invalid("thread move during interpolation")),
+        }
+    }
+
+    fn fallback_arc(
+        &mut self,
+        frame: PolarFrame,
+        to: Pose,
+        plane: Plane,
+        center: Xyz,
+        sense: campanion_ir::ArcSense,
+        sweep: Option<f64>,
+        feed: f64,
+    ) -> Result<()> {
+        self.reject_interp_rotary(to)?;
+        if !self.plane_allowed(plane) {
+            return Err(invalid("lathe arc must be in the zx plane"));
+        }
+        let end = tip(to);
+        let start = self.part_tip.ok_or_else(|| invalid("arc needs a prior position"))?;
+        let sweep = if let Some(sweep) = sweep {
+            geom::same_radius(start, end, center, plane, 0.0)?;
+            if !(sweep.is_finite() && sweep > 0.0) {
+                return Err(invalid("helix sweep must be positive"));
+            }
+            if sweep > std::f64::consts::TAU * 10_000.0 {
+                return Err(invalid("helix has more than 10000 turns"));
+            }
+            sweep
+        } else {
+            geom::arc_sweep(start, end, center, plane, sense, 0.0)?
+        };
+        if self.face_active() {
+            interp::reject_centre(interp::xy_arc_min(start, end, center, plane, sense, sweep))?;
+        }
+        self.emit_fallback(frame, "G1", PolarCurve::Arc { start, end, center, plane, sense, sweep }, Some(feed))
+    }
+
+    fn reject_centre_span(&self, start: Option<Xyz>, end: Xyz) -> Result<()> {
+        if !self.face_active() {
+            return Ok(());
+        }
+        let clearance = match start {
+            Some(start) => interp::xy_segment_min(start, end),
+            None => end[0].hypot(end[1]),
+        };
+        interp::reject_centre(clearance)
+    }
+
+    fn emit_fallback(&mut self, frame: PolarFrame, code: &str, curve: PolarCurve, feed: Option<f64>) -> Result<()> {
+        self.polar_count = 0;
+        let prev = self.c_continuous.unwrap_or(0.0);
+        if matches!(curve, PolarCurve::Point { .. }) {
+            let end = curve.at(1.0);
+            let polar = interp::to_polar(frame, end, prev)?;
+            return self.emit_polar(code, polar, end, feed);
+        }
+        self.polar_count = 0;
+        self.emit_span(frame, curve, 0.0, 1.0, prev, code, feed, 0)?;
+        Ok(())
+    }
+
+    fn emit_span(
+        &mut self,
+        frame: PolarFrame,
+        curve: PolarCurve,
+        t0: f64,
+        t1: f64,
+        prev_c: f64,
+        code: &str,
+        feed: Option<f64>,
+        depth: u32,
+    ) -> Result<f64> {
+        let start = curve.at(t0);
+        let end = curve.at(t1);
+        let fits = self.span_fits(frame, start, end, |t| curve.at(t0 + (t1 - t0) * t), prev_c)?;
+        if fits || geom::dist3(start, end) <= 1e-9 {
+            let polar = interp::to_polar(frame, end, prev_c)?;
+            self.emit_polar(code, polar, end, feed)?;
+            return Ok(polar.c_deg);
+        }
+        if !(self.options.arc_tolerance.is_finite() && self.options.arc_tolerance > 0.0) {
+            return Err(invalid("arc_tolerance must be positive to linearise an arc"));
+        }
+        if depth >= 24 || self.polar_count > 100_000 {
+            return Err(invalid("arc linearises to more than 100000 segments"));
+        }
+        let mid = (t0 + t1) * 0.5;
+        let mid_c = self.emit_span(frame, curve, t0, mid, prev_c, code, feed, depth + 1)?;
+        self.emit_span(frame, curve, mid, t1, mid_c, code, feed, depth + 1)
+    }
+
+    /// True when linear interpolation in the polar frame stays within `arc_tolerance` of the real curve.
+    fn span_fits<F>(&self, frame: PolarFrame, start: Xyz, end: Xyz, at: F, prev_c: f64) -> Result<bool>
+    where
+        F: Fn(f64) -> Xyz,
+    {
+        let tol = self.options.arc_tolerance.max(0.0);
+        let p0 = interp::to_polar(frame, start, prev_c)?;
+        let p1 = interp::to_polar(frame, end, p0.c_deg)?;
+        for t in [0.25_f64, 0.5, 0.75] {
+            let radius = p0.radius + (p1.radius - p0.radius) * t;
+            let c_deg = p0.c_deg + (p1.c_deg - p0.c_deg) * t;
+            let z = p0.z + (p1.z - p0.z) * t;
+            if geom::dist3(interp::polar_to_cart(frame, radius, c_deg, z), at(t)) > tol {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn emit_polar(&mut self, code: &str, polar: PolarTarget, cart: Xyz, feed: Option<f64>) -> Result<()> {
+        self.polar_count = self.polar_count.saturating_add(1);
+        if self.polar_count > 100_000 {
+            return Err(invalid("arc linearises to more than 100000 segments"));
+        }
+        let posted = Posted { xyz: [polar.radius, 0.0, polar.z], part: cart, angle: None, c: Some(polar.c_deg), axis: Vec3::Z };
+        self.linear_move(code, posted, feed)?;
+        // `linear_move` stores the written X radius. The part tip stays Cartesian so the next
+        // chord is sampled from the original curve.
+        self.exact = Some(cart);
+        self.part_tip = Some(cart);
+        self.c_continuous = Some(polar.c_deg);
+        Ok(())
+    }
+
+    /// Cancel interpolation, stop a live tool that is still running, release a clamped brake,
+    /// then disengage a C axis that is still engaged.
     ///
-    /// Both lines are written after the footer and before [`Self::lathe_home`].
+    /// Those lines are written after the footer and before [`Self::lathe_home`]. Interpolation
+    /// ends first so G112/G107 cancel while the C axis is still engaged.
     fn finish_mill_turn(&mut self) -> Result<()> {
+        self.end_interpolation()?;
         if self.live_on {
             self.live_tool_off()?;
         }
@@ -1146,6 +1603,7 @@ impl<'a> Writer<'a> {
         let text = self.format_axis(angle, self.post.decimals.linear)?;
         words.push(format!("{letter}{text}"));
         self.c_modal = Some(text);
+        self.c_continuous = Some(angle);
         Ok(())
     }
 
@@ -1361,6 +1819,13 @@ fn tip(pose: Pose) -> Xyz {
     [point.x(), point.y(), point.z()]
 }
 
+fn line_curve(start: Option<Xyz>, end: Xyz) -> PolarCurve {
+    match start {
+        Some(start) => PolarCurve::Line { start, end },
+        None => PolarCurve::Point { end },
+    }
+}
+
 fn xyz(point: Vec3) -> Xyz {
     [point.x(), point.y(), point.z()]
 }
@@ -1458,7 +1923,9 @@ fn check_thread_support(program: &Program, post: &PostDef) -> Result<()> {
 
 /// A turning program needs a lathe post, and a lathe post needs a turning program.
 ///
-/// A pose with `|y|` above `1e-6` needs `lathe.y_axis`. Without that block, a non-ZX arc is rejected.
+/// Lathe poses are part-frame XZ outside face and cylinder interpolation unless the post has
+/// `lathe.y_axis`: `|y|` above `1e-6` then needs that block, and a rotary setup is rejected. XY
+/// arcs are allowed in face mode, YZ arcs in cylinder mode, and both with a Y axis.
 fn check_lathe_program(program: &Program, post: &PostDef) -> Result<()> {
     match (program.turning().is_some(), post.is_lathe()) {
         (true, false) => return Err(unsupported(format!("post `{}` is not a lathe post", post.id()))),
@@ -1473,21 +1940,44 @@ fn check_lathe_program(program: &Program, post: &PostDef) -> Result<()> {
     }
     let has_y = post.lathe.as_ref().is_some_and(|lathe| lathe.y_axis.is_some());
     for (path_i, path) in program.toolpaths().iter().enumerate() {
+        let mut face = false;
+        let mut cylinder = false;
         for (block_i, block) in path.blocks().iter().enumerate() {
+            match block {
+                ClBlock::Event(Event::FaceInterpolation { on }) => {
+                    face = *on;
+                    if *on {
+                        cylinder = false;
+                    }
+                }
+                ClBlock::Event(Event::CylinderInterpolation { radius }) => {
+                    cylinder = radius.is_some();
+                    if cylinder {
+                        face = false;
+                    }
+                }
+                _ => {}
+            }
             if let Some(pose) = pose_of_block(block) {
                 let y = pose.tip().y();
                 if !y.is_finite() {
                     return Err(invalid(format!("toolpath {path_i} block {block_i} lathe pose y must be finite")));
                 }
-                if y.abs() > 1e-6 && !has_y {
+                if !face && !cylinder && y.abs() > 1e-6 && !has_y {
                     return Err(unsupported(format!("post `{}` has no Y axis", post.id())));
                 }
             }
-            if let ClBlock::Motion(ClMotion::Arc { plane, .. } | ClMotion::Helix { plane, .. }) = block
-                && *plane != Plane::Zx
-                && !has_y
-            {
-                return Err(invalid("lathe arc must be in the zx plane"));
+            if let ClBlock::Motion(ClMotion::Arc { plane, .. } | ClMotion::Helix { plane, .. }) = block {
+                let allowed = if face {
+                    matches!(plane, Plane::Xy | Plane::Zx)
+                } else if cylinder {
+                    matches!(plane, Plane::Yz | Plane::Zx)
+                } else {
+                    *plane == Plane::Zx || has_y
+                };
+                if !allowed {
+                    return Err(invalid("lathe arc must be in the zx plane"));
+                }
             }
         }
     }
