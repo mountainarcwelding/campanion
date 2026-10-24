@@ -759,3 +759,181 @@ impl<'a> JsonParser<'a> {
         if self.index == start { Err("number needs a digit".into()) } else { Ok(()) }
     }
 }
+
+/// Two circles on layer HOLES, in millimetres: centre (10, 0) radius 2, and (30, 5) radius 1.5.
+fn holes_dxf() -> String {
+    let circles = "\
+0
+CIRCLE
+8
+HOLES
+10
+10
+20
+0
+40
+2
+0
+CIRCLE
+8
+HOLES
+10
+30
+20
+5
+40
+1.5
+";
+    format!("0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n{circles}0\nENDSEC\n0\nEOF\n")
+}
+
+fn fnv1a64(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn drill_job(hash: &str, step_down: f64, dwell: Option<f64>) -> String {
+    let dwell_field = match dwell {
+        Some(seconds) => format!(",\n      \"dwell\": {seconds}"),
+        None => String::new(),
+    };
+    format!(
+        r#"{{
+  "format": "campanion-job/1",
+  "source": {{ "path": "holes.dxf", "hash": "{hash}" }},
+  "units": "mm",
+  "heights": {{ "clearance": 5.0, "retract": 2.0 }},
+  "tools": [ {{ "id": 1, "diameter": 6.0 }} ],
+  "operations": [ {{
+    "name": "holes",
+    "type": "drill",
+    "layers": ["HOLES"],
+    "tool_id": 1,
+    "depth": 3.0,
+    "step_down": {step_down}{dwell_field},
+    "feeds": {{ "cut": 1000.0, "plunge": 300.0 }}
+  }} ]
+}}
+"#
+    )
+}
+
+fn run_drill(step_down: f64, dwell: Option<f64>, label: &str) -> Result<String, String> {
+    let dxf = holes_dxf();
+    let dir = temp_path(&format!("campanion-run-e2e-drill-{label}"));
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    std::fs::write(dir.join("holes.dxf"), dxf.as_bytes()).map_err(|err| err.to_string())?;
+    let job = drill_job(&fnv1a64(dxf.as_bytes()), step_down, dwell);
+    std::fs::write(dir.join("holes.job.json"), job.as_bytes()).map_err(|err| err.to_string())?;
+    let ngc_path = temp_path(&format!("campanion-run-e2e-drill-{label}.ngc"));
+    let ir_path = temp_path(&format!("campanion-run-e2e-drill-{label}.json"));
+    run_job(&dir, "holes.job.json", &ngc_path, &ir_path)?;
+    std::fs::read_to_string(&ngc_path).map_err(|err| format!("read ngc: {err}"))
+}
+
+fn motion_blocks(ngc: &str) -> Result<Vec<Words>, String> {
+    let mut blocks = Vec::new();
+    for (index, line) in ngc.lines().enumerate() {
+        let code = strip_comments(line.trim());
+        if code.is_empty() {
+            continue;
+        }
+        let words = parse_words(&code).map_err(|err| format!("line {}: {err}\n{line}", index + 1))?;
+        if words.motion.is_some() || words.dwell {
+            blocks.push(words);
+        }
+    }
+    Ok(blocks)
+}
+
+fn at_hole(block: &Words, x: f64, y: f64) -> bool {
+    block.x.is_some_and(|value| near(value, x)) && block.y.is_some_and(|value| near(value, y))
+}
+
+#[test]
+fn drill_feeds_to_depth_and_keeps_rapids_at_the_r_plane() -> Result<(), String> {
+    let ngc = run_drill(3.0, None, "one-feed")?;
+    let blocks = motion_blocks(&ngc)?;
+    for block in &blocks {
+        if block.motion == Some(0) {
+            let z = block.z.ok_or_else(|| format!("G0 has no Z\n{ngc}"))?;
+            if z < RETRACT_Z - EPS {
+                return Err(format!("G0 ends at Z{z:.4}, below retract {RETRACT_Z:.1}; exceptions: none\n{ngc}"));
+            }
+        }
+    }
+    for (x, y) in [(10.0, 0.0), (30.0, 5.0)] {
+        let feeds = blocks.iter().filter(|block| block.motion == Some(1) && at_hole(block, x, y) && block.z.is_some_and(|z| near(z, -3.0))).count();
+        if feeds != 1 {
+            return Err(format!("hole ({x}, {y}) has {feeds} G1 moves to Z-3, expected 1\n{ngc}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn drill_pecks_and_dwells_at_each_hole() -> Result<(), String> {
+    let ngc = run_drill(1.0, Some(0.5), "peck")?;
+    let blocks = motion_blocks(&ngc)?;
+    let dwells: Vec<&Words> = blocks.iter().filter(|block| block.dwell).collect();
+    if dwells.len() != 2 {
+        return Err(format!("{} dwells, expected one G4 per hole\n{ngc}", dwells.len()));
+    }
+    for block in dwells {
+        let p = block.p.ok_or_else(|| format!("G4 has no P\n{ngc}"))?;
+        if !near(p, 0.5) {
+            return Err(format!("G4 P{p}, expected 0.5\n{ngc}"));
+        }
+    }
+    for (x, y) in [(10.0, 0.0), (30.0, 5.0)] {
+        let feeds: Vec<f64> = blocks.iter().filter(|block| block.motion == Some(1) && at_hole(block, x, y)).filter_map(|block| block.z).collect();
+        if feeds.len() != 3 {
+            return Err(format!("hole ({x}, {y}) has {} feeds, expected 3\n{ngc}", feeds.len()));
+        }
+        for (actual, expected) in feeds.iter().zip([-1.0, -2.0, -3.0]) {
+            if !near(*actual, expected) {
+                return Err(format!("hole ({x}, {y}) feed Z{actual} expected Z{expected}\n{ngc}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn dwell_on_an_engrave_is_rejected() -> Result<(), String> {
+    let dir = temp_path("campanion-run-e2e-drill-engrave-dwell");
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let job = r#"{
+  "format": "campanion-job/1",
+  "source": { "path": "missing.dxf", "hash": "cbf29ce484222325" },
+  "units": "mm",
+  "tools": [ { "id": 1, "diameter": 6.0 } ],
+  "operations": [ {
+    "name": "mark",
+    "type": "engrave",
+    "layers": ["HOLES"],
+    "tool_id": 1,
+    "depth": 0.2,
+    "step_down": 0.2,
+    "dwell": 0.5,
+    "feeds": { "cut": 1000.0, "plunge": 300.0 }
+  } ]
+}
+"#;
+    std::fs::write(dir.join("engrave.job.json"), job).map_err(|err| err.to_string())?;
+    let ngc_path = temp_path("campanion-run-e2e-drill-engrave-dwell.ngc");
+    let ir_path = temp_path("campanion-run-e2e-drill-engrave-dwell.json");
+    let output = campanion(&dir, &["run", "engrave.job.json", "-o", &path_arg(&ngc_path)?, "--ir", &path_arg(&ir_path)?])?;
+    let stderr = output_text(&output.stderr)?;
+    if output.status.success() {
+        return Err(format!("engrave with dwell exited 0\n{stderr}"));
+    }
+    if !stderr.contains("dwell is only valid on a drill") {
+        return Err(format!("stderr missing dwell error:\n{stderr}"));
+    }
+    Ok(())
+}

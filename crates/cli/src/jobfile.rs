@@ -477,6 +477,9 @@ impl Finish {
 /// [`Self::tip_clearance`] describe a chamfer. Other kinds store 0.
 /// [`Self::top_z`] and [`Self::grid`] describe a rough or a waterline. Other kinds store `None`.
 /// [`Self::min_slope_deg`] describes a waterline. Other kinds store 0.
+/// [`Self::dwell`] is the pause at the bottom of a drill, in seconds. Other kinds store `None`.
+/// On a drill, [`Self::step_down`] is the peck depth: when it is less than [`Self::depth`] the
+/// drill pecks, and otherwise the drill feeds to depth in one move.
 /// [`Self::index_deg`] is the machine A/B angle for this operation, in degrees. `None` means the
 /// file omitted it. A job with a rotary setup then runs the operation at 0°. A wrap rejects
 /// `index_deg`. [`Self::cylinder_diameter`] is set only on a wrap. [`Self::u_offset`] and
@@ -490,6 +493,8 @@ pub struct Operation {
     tool_id: u32,
     depth: f64,
     step_down: f64,
+    /// Pause at the bottom of a drill, in seconds. `None` except on a drill that sets `dwell`.
+    dwell: Option<f64>,
     stepover: Option<f64>,
     /// Flat-floor scallop height in millimetres. `None` except on a surface that sets it instead of `stepover`.
     scallop_height: Option<f64>,
@@ -590,8 +595,18 @@ impl Operation {
     /// Maximum thickness of one depth pass, in millimetres.
     ///
     /// A chamfer cuts the tip depth in one pass, so this matches [`Self::depth`].
+    /// On a drill this is the peck depth. When it is less than [`Self::depth`] the drill pecks,
+    /// and otherwise the drill feeds to depth in one move.
     pub fn step_down(&self) -> f64 {
         self.step_down
+    }
+
+    /// Pause at the bottom of a drilled hole, in seconds.
+    ///
+    /// `None` when the file omits `dwell`, and on every kind other than a drill. Not scaled by
+    /// the file's `units`.
+    pub fn dwell(&self) -> Option<f64> {
+        self.dwell
     }
 
     /// Chamfer width, in millimetres. The horizontal leg of the bevel. Other operations store `0`.
@@ -1248,6 +1263,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "side",
             "tool_id",
             "depth",
+            "dwell",
             "step_down",
             "stepover",
             "scallop_height",
@@ -1286,6 +1302,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let name = required_name(as_str(name_value, "operation name").map_err(from_cli)?, "operation name").map_err(from_cli)?;
     let index_deg = parse_index_deg(optional(map, "index_deg"))?;
     let kind = parse_kind(map)?;
+    let dwell = parse_dwell(optional(map, "dwell"), kind)?;
     let plane = take_plane(&name, map, &kind, index_deg.is_some(), scale)?;
     if matches!(kind, OperationKind::Surface) {
         return Ok(attach_plane(with_index(finish_surface(name, map, scale, tools)?, index_deg), plane));
@@ -1355,6 +1372,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         tool_id,
         depth,
         step_down,
+        dwell,
         stepover,
         scallop_height: None,
         sample_step: None,
@@ -1468,6 +1486,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         tool_id,
         depth: 0.0,
         step_down: 0.0,
+        dwell: None,
         stepover,
         scallop_height,
         sample_step,
@@ -1588,6 +1607,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         tool_id,
         depth: 0.0,
         step_down,
+        dwell: None,
         stepover: Some(stepover),
         scallop_height: None,
         sample_step: None,
@@ -1707,6 +1727,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         tool_id,
         depth: 0.0,
         step_down,
+        dwell: None,
         stepover: None,
         scallop_height: None,
         sample_step: None,
@@ -1797,6 +1818,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         tool_id,
         depth,
         step_down,
+        dwell: None,
         stepover: None,
         scallop_height: None,
         sample_step: None,
@@ -1913,6 +1935,7 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         tool_id,
         depth: 0.0,
         step_down: 0.0,
+        dwell: None,
         stepover,
         scallop_height: None,
         sample_step,
@@ -2162,6 +2185,23 @@ fn parse_face_angle(value: Option<&Value>, kind: OperationKind) -> Result<f64, J
     } else {
         Err(JobFileError::invalid("angle_deg must be 0 or 90"))
     }
+}
+
+/// Seconds at the bottom of a drill. Absent is `None`. Not scaled by `units`.
+fn parse_dwell(value: Option<&Value>, kind: OperationKind) -> Result<Option<f64>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !matches!(kind, OperationKind::Drill) {
+        return Err(JobFileError::invalid("dwell is only valid on a drill"));
+    }
+    let Some(seconds) = value.as_f64() else {
+        return Err(JobFileError::invalid("dwell must be a number"));
+    };
+    if !(seconds.is_finite() && (0.0..=3600.0).contains(&seconds)) {
+        return Err(JobFileError::invalid("dwell must be between 0 and 3600 seconds"));
+    }
+    Ok(Some(seconds))
 }
 
 /// Extra stock around the faced bounding box. A length in file units, at least 0.

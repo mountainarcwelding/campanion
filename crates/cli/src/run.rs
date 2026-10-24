@@ -23,9 +23,11 @@
 //! A chamfer plunges once to the tip along each selected closed contour. An open contour is an
 //! error. The V-bit's largest cutting diameter is the tool diameter, stock Z is 0, and the job
 //! tolerance is used. The pass is linked the same way as an engrave.
-//! Drill cycles are not in this job version: each hole is a rapid to the final depth, not an
-//! expanded peck. A contour that is not a circle is skipped, so a layer can hold holes and other
-//! profiles together.
+//! Each hole is a rapid to clearance over the hole, a rapid to the job retract height (the R
+//! plane), a plunge feed to depth (pecking back to the R plane when `step_down` is less than
+//! `depth`), an optional dwell, and a rapid out to clearance. No canned cycle is written.
+//! G81/G83 output may become a post option later. A contour that is not a circle is skipped, so a
+//! layer can hold holes and other profiles together.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
 //! and retract height is the job retract. Issues are printed and the process exits 1.
 //!
@@ -92,8 +94,8 @@ use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, RotarySetup, Vec3};
 use campanion_mesh::Mesh;
 use campanion_path::{
-    ChamferOp, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileSide,
-    Tool as PathTool, Toolpath, apply_timing,
+    ChamferOp, CutKind, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming,
+    ProfileSide, Tool as PathTool, Toolpath, apply_timing,
 };
 use campanion_post::PostDef;
 
@@ -749,11 +751,20 @@ fn drill_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
     }
     // No circles: ask again with the original contours so the error names the first rejection.
     let selected = if circles.is_empty() { cut.contours } else { circles.as_slice() };
-    let drilling = DrillOp::new(DrillCycle::new()).z(z).tolerance(cut.tolerance).generate(selected, points).map_err(|err| op_err(cut.op, err))?;
+    let mut cycle = DrillCycle::new();
+    // `step_down` is the peck. A step that reaches the full depth is one feed, not a peck.
+    if cut.op.step_down() < cut.op.depth() - 1e-9 {
+        cycle = cycle.peck_depth(cut.op.step_down());
+    }
+    if let Some(seconds) = cut.op.dwell() {
+        cycle = cycle.dwell(seconds);
+    }
+    let drilling = DrillOp::new(cycle).z(z).tolerance(cut.tolerance).generate(selected, points).map_err(|err| op_err(cut.op, err))?;
     if drilling.hits().is_empty() {
         return Err(op_err(cut.op, "drill produced no holes"));
     }
-    push_doc(paths, Document::from_toolpath(drilling.toolpath(), cut.import)?)
+    let path = drilling.expand(0.0, cut.job.retract(), cut.job.clearance(), CutKind::Plunge).map_err(|err| op_err(cut.op, err))?;
+    push_doc(paths, Document::from_toolpath(&path, cut.import)?)
 }
 
 fn is_not_circle(err: &impl std::fmt::Display) -> bool {
