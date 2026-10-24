@@ -30,8 +30,10 @@
 //! is Cartesian on the face; while cylinder interpolation is on, Y is the distance unrolled at
 //! the mapping radius. A head that carries Y may also leave that plane while its C axis is
 //! engaged and the pose names a fixed C angle. Diameter mode is a post setting
-//! only; the IR never stores diameters in X. The pose axis is not interpreted for XZ turning
-//! moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis. A single-point
+//! only; the IR never stores diameters in X. The pose axis is not interpreted for ordinary XZ
+//! turning moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis. A B-head
+//! toolpath replaces that axis with `(cos B, 0, sin B)` and records the angle on [`Event::HeadIndex`].
+//! A single-point
 //! thread is [`ClMotion::Thread`]: a straight move whose `lead` is millimetres per spindle
 //! revolution. It is valid only when the program has a turning setup.
 //!

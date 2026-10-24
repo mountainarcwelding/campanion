@@ -390,6 +390,9 @@ impl Writer {
                     None => self.line(&format!("(spindle move {name} {frame} {z})")),
                 }
             }
+            Event::HeadIndex { head, b_deg } => {
+                self.line(&format!("(head index {} {b_deg})", strip_parens(head)));
+            }
         }
         Ok(())
     }

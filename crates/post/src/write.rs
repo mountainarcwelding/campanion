@@ -206,6 +206,8 @@ struct Writer<'a> {
     channel_inverse: bool,
     /// Sync events write the post's wait lines.
     multi_channel: bool,
+    /// Current B-head angle, degrees. Starts at 0 and resets with each channel.
+    b_deg: f64,
 }
 
 impl<'a> Writer<'a> {
@@ -247,6 +249,7 @@ impl<'a> Writer<'a> {
             channel_plane: plane,
             channel_inverse: inverse_time,
             multi_channel: false,
+            b_deg: 0.0,
         }
     }
 
@@ -284,6 +287,7 @@ impl<'a> Writer<'a> {
         self.thc_phase = ThcPhase::Idle;
         self.last_speed.clear();
         self.last_power = "0".to_string();
+        self.b_deg = 0.0;
     }
 
     /// `start` when `end` is false, otherwise `end`. `{channel}` is 1-based.
@@ -1042,10 +1046,13 @@ impl<'a> Writer<'a> {
         let letters = self.post.axis_letters.chars().collect::<Vec<_>>();
         let x_letter = letters.first().copied().ok_or_else(|| invalid("axis value is missing"))?;
         let z_letter = letters.get(2).copied().ok_or_else(|| invalid("axis value is missing"))?;
-        let x_out = if lathe.diameter_mode { end[0] * 2.0 } else { end[0] };
+        let (dr, dz) = self.pivot_shift();
+        let radius = end[0] + dr;
+        let z_tip = end[2] + dz;
+        let x_out = if lathe.diameter_mode { radius * 2.0 } else { radius };
         let x_text = self.format_axis(x_out, self.post.decimals.linear)?;
         let y_text = self.format_axis(end[1], self.post.decimals.linear)?;
-        let z_out = if self.mirror_z() { -end[2] } else { end[2] };
+        let z_out = if self.mirror_z() { -z_tip } else { z_tip };
         let z_text = self.format_axis(z_out, self.post.decimals.linear)?;
         words.push(format!("{x_letter}{x_text}"));
         let has_y = lathe.y_axis.is_some();
@@ -1059,13 +1066,23 @@ impl<'a> Writer<'a> {
         }
         words.push(format!("{z_letter}{z_text}"));
         let written_x = x_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
-        let stored_x = if lathe.diameter_mode { written_x * 0.5 } else { written_x };
+        let mut stored_x = if lathe.diameter_mode { written_x * 0.5 } else { written_x };
         let stored_y = y_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
         let mut stored_z = z_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
         if self.mirror_z() {
             stored_z = -stored_z;
         }
+        stored_x -= dr;
+        stored_z -= dz;
         Ok([stored_x, stored_y, stored_z])
+    }
+
+    /// Pivot-mode shift of the tip, in radius and Z. Tip mode and B = 0 add nothing.
+    fn pivot_shift(&self) -> (f64, f64) {
+        let Some(b_head) = self.post.lathe.as_ref().and_then(|lathe| lathe.b_head.as_ref()) else {
+            return (0.0, 0.0);
+        };
+        crate::def::b_pivot_offset(self.b_deg, &b_head.mode, b_head.pivot_length)
     }
 
     /// X Y Z in the active interpolation frame. Face X is a diameter only when the block says so.
@@ -1162,6 +1179,7 @@ impl<'a> Writer<'a> {
                 Event::SpindleSync { engage, phase_deg } => return self.spindle_sync(*engage, *phase_deg),
                 Event::SpindleRun { spindle, rpm, reverse } => return self.spindle_run(spindle, *rpm, *reverse),
                 Event::SpindleMove { spindle, z, machine, feed } => return self.spindle_move(spindle, *z, *machine, *feed),
+                Event::HeadIndex { b_deg, .. } => return self.head_index(*b_deg),
                 _ => {}
             }
         }
@@ -1223,7 +1241,25 @@ impl<'a> Writer<'a> {
             Event::ChuckClamp { .. } | Event::SpindleSync { .. } | Event::SpindleRun { .. } | Event::SpindleMove { .. } => {
                 Err(unsupported(format!("post `{}` has no part transfer", self.post.id())))
             }
+            Event::HeadIndex { b_deg, .. } => self.head_index(*b_deg),
         }
+    }
+
+    /// Index B. A post with no `b_head` block cannot write the event.
+    fn head_index(&mut self, b_deg: f64) -> Result<()> {
+        let index = {
+            let lathe = self.post.lathe.as_ref().ok_or_else(|| unsupported(format!("post `{}` has no B head", self.post.id())))?;
+            let b_head = lathe.b_head.as_ref().ok_or_else(|| unsupported(format!("post `{}` has no B head", self.post.id())))?;
+            b_head.index.clone()
+        };
+        if !b_deg.is_finite() {
+            return Err(invalid("number must be finite"));
+        }
+        let text = format_lathe_number_signed(b_deg, self.post)?;
+        self.templates("lathe.b_head.index", &index, &[("b", text.as_str()), ("date-free!", "")])?;
+        self.note_transfer_modal(&index, None);
+        self.b_deg = b_deg;
+        Ok(())
     }
 
     fn process_words(&self, process: &ProcessKind) -> Result<&ProcessWords> {

@@ -12,7 +12,10 @@
 //! Z 0, part toward −Z). `back_allowance` is the facing depth on the sub. An operation's
 //! `spindle` is `main` or `sub`. The stored section stays the main profile.
 //! A turning operation is one toolpath: a tool change the first time that tool id is used on
-//! that operation's channel, spindle on, the moves, then spindle off. A `transfer` is one
+//! that operation's channel, spindle on, the moves, then spindle off. When the job has
+//! `head.b_axis`, a change of B writes [`Event::HeadIndex`] after that tool change (or at the
+//! start of the path when the tool does not change) and the pose axis is `(cos B, 0, sin B)`.
+//! A `transfer` is one
 //! main-spindle toolpath on channel 0 that hands the part to the sub, optionally parting it off
 //! without a spindle stop. An `eject` stops the sub and unclamps it. Speed is stored on the
 //! turning binding, which names the operation's spindle and channel. Channel 1 uses head `lower`.
@@ -55,7 +58,7 @@ use campanion_turn::{
 use serde_json::{Map, Value};
 
 use crate::error::CliError;
-use crate::job::{as_bool, as_f64, as_str, as_u32, check_keys, object, optional, read_text, require, required_name};
+use crate::job::{as_bool, as_f64, as_str, as_u32, check_keys, object, optional, optional_f64, read_text, require, required_name};
 use crate::jobfile::DEFAULT_JOB_CHORD_MM;
 use crate::live_mill::{MillFrame, MillInterp, MillProgram, MillSpec, MillStrategy, build as build_mill, load_contours, profile_side};
 
@@ -137,11 +140,19 @@ impl WorkSpindle {
     }
 }
 
-/// Optional Y travel on turret `turret1`. Limits are required when `y_axis` is true.
+/// Optional Y travel and an optional B head on turret `turret1`.
 struct LatheHead {
     y_axis: bool,
     y_min: Option<f64>,
     y_max: Option<f64>,
+    b_axis: Option<BAxis>,
+}
+
+/// B rotation of the head in the XZ plane. `pivot_length` is millimetres from the pivot to the tip.
+struct BAxis {
+    min_deg: f64,
+    max_deg: f64,
+    pivot_length: f64,
 }
 
 struct Source {
@@ -210,6 +221,7 @@ enum Operation {
         feed: f64,
         speed: SpindleSpeed,
         channel: u8,
+        b_deg: Option<f64>,
     },
     Rough {
         name: String,
@@ -222,6 +234,7 @@ enum Operation {
         feed: f64,
         speed: SpindleSpeed,
         channel: u8,
+        b_deg: Option<f64>,
     },
     Finish {
         name: String,
@@ -233,6 +246,7 @@ enum Operation {
         feed: f64,
         speed: SpindleSpeed,
         channel: u8,
+        b_deg: Option<f64>,
     },
     Thread {
         name: String,
@@ -269,6 +283,7 @@ enum Operation {
         feed: f64,
         speed: SpindleSpeed,
         channel: u8,
+        b_deg: Option<f64>,
     },
     Part {
         name: String,
@@ -282,6 +297,7 @@ enum Operation {
         feed: f64,
         speed: SpindleSpeed,
         channel: u8,
+        b_deg: Option<f64>,
     },
     Drill {
         name: String,
@@ -537,6 +553,23 @@ impl Operation {
         }
     }
 
+    /// Head angle on a face, rough, finish, groove or part. Absent means the tool table orientation.
+    fn b_deg(&self) -> Option<f64> {
+        match self {
+            Self::Face { b_deg, .. }
+            | Self::Rough { b_deg, .. }
+            | Self::Finish { b_deg, .. }
+            | Self::Groove { b_deg, .. }
+            | Self::Part { b_deg, .. } => *b_deg,
+            _ => None,
+        }
+    }
+
+    /// B this operation leaves on its channel. Operations that cannot name `b_deg` return to 0.
+    fn b_target(&self) -> f64 {
+        self.b_deg().unwrap_or(0.0)
+    }
+
     fn live_face(&self) -> Option<LiveFace> {
         match self {
             Self::LiveDrill { params, .. } => Some(params.face),
@@ -675,6 +708,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let sub_rpm = sub.as_ref().map(|block| block.max_rpm);
     let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
     for operation in &operations {
+        check_b_deg(operation, &head)?;
         if operation.is_wait() {
             continue;
         }
@@ -708,26 +742,63 @@ fn parse_sub(value: &Value) -> Result<SubBlock, CliError> {
 
 fn parse_head(value: Option<&Value>) -> Result<LatheHead, CliError> {
     let Some(value) = value else {
-        return Ok(LatheHead { y_axis: false, y_min: None, y_max: None });
+        return Ok(LatheHead { y_axis: false, y_min: None, y_max: None, b_axis: None });
     };
     let map = object(value, "head")?;
-    check_keys(map, &["y_axis", "y_min", "y_max"], "head")?;
+    check_keys(map, &["y_axis", "y_min", "y_max", "b_axis"], "head")?;
     let y_axis = match optional(map, "y_axis") {
         Some(value) => as_bool(value, "y_axis")?,
         None => false,
     };
-    if !y_axis {
-        if map.contains_key("y_min") || map.contains_key("y_max") {
-            return Err(CliError::invalid("y_min and y_max need head.y_axis true"));
+    if !y_axis && (map.contains_key("y_min") || map.contains_key("y_max")) {
+        return Err(CliError::invalid("y_min and y_max need head.y_axis true"));
+    }
+    let (y_min, y_max) = if y_axis {
+        let y_min = as_f64(require(map, "y_min")?, "y_min")?;
+        let y_max = as_f64(require(map, "y_max")?, "y_max")?;
+        if !(y_min < 0.0 && y_max > 0.0) {
+            return Err(CliError::invalid("y_min must be < 0 and y_max must be > 0"));
         }
-        return Ok(LatheHead { y_axis: false, y_min: None, y_max: None });
+        (Some(y_min), Some(y_max))
+    } else {
+        (None, None)
+    };
+    let b_axis = match optional(map, "b_axis") {
+        Some(value) => Some(parse_b_axis(value)?),
+        None => None,
+    };
+    Ok(LatheHead { y_axis, y_min, y_max, b_axis })
+}
+
+fn parse_b_axis(value: &Value) -> Result<BAxis, CliError> {
+    let map = object(value, "head.b_axis")?;
+    check_keys(map, &["min_deg", "max_deg", "pivot_length"], "head.b_axis")?;
+    let min_deg = as_f64(require(map, "min_deg")?, "min_deg")?;
+    let max_deg = as_f64(require(map, "max_deg")?, "max_deg")?;
+    if !(min_deg < max_deg) {
+        return Err(CliError::invalid("head.b_axis: min_deg must be less than max_deg"));
     }
-    let y_min = as_f64(require(map, "y_min")?, "y_min")?;
-    let y_max = as_f64(require(map, "y_max")?, "y_max")?;
-    if !(y_min < 0.0 && y_max > 0.0) {
-        return Err(CliError::invalid("y_min must be < 0 and y_max must be > 0"));
+    let pivot_length = match optional(map, "pivot_length") {
+        Some(value) => as_f64(value, "pivot_length")?,
+        None => 0.0,
+    };
+    if pivot_length < 0.0 {
+        return Err(CliError::invalid("head.b_axis: pivot_length must be zero or positive"));
     }
-    Ok(LatheHead { y_axis: true, y_min: Some(y_min), y_max: Some(y_max) })
+    Ok(BAxis { min_deg, max_deg, pivot_length })
+}
+
+fn check_b_deg(operation: &Operation, head: &LatheHead) -> Result<(), CliError> {
+    let Some(b_deg) = operation.b_deg() else {
+        return Ok(());
+    };
+    let Some(axis) = &head.b_axis else {
+        return Err(CliError::invalid(format!("operation {}: b_deg needs head.b_axis", operation.name())));
+    };
+    if b_deg < axis.min_deg || b_deg > axis.max_deg {
+        return Err(CliError::invalid(format!("operation {}: b_deg {} outside head B travel", operation.name(), format_travel(b_deg))));
+    }
+    Ok(())
 }
 
 fn check_format(tag: &str) -> Result<(), CliError> {
@@ -1095,9 +1166,9 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
         return parse_eject(map, names, has_sub);
     }
     let allowed: &[&str] = match op_type {
-        "face" => &["name", "type", "tool_id", "spindle", "channel", "step_z", "feed", "speed"],
-        "rough" => &["name", "type", "tool_id", "spindle", "channel", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed"],
-        "finish" => &["name", "type", "tool_id", "spindle", "channel", "side", "feed", "speed", "leave_x", "leave_z"],
+        "face" => &["name", "type", "tool_id", "spindle", "channel", "step_z", "feed", "speed", "b_deg"],
+        "rough" => &["name", "type", "tool_id", "spindle", "channel", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed", "b_deg"],
+        "finish" => &["name", "type", "tool_id", "spindle", "channel", "side", "feed", "speed", "leave_x", "leave_z", "b_deg"],
         "thread" => &[
             "name",
             "type",
@@ -1135,8 +1206,9 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
             "dwell_s",
             "feed",
             "speed",
+            "b_deg",
         ],
-        "part" => &["name", "type", "tool_id", "spindle", "channel", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed"],
+        "part" => &["name", "type", "tool_id", "spindle", "channel", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed", "b_deg"],
         "drill" => &[
             "name",
             "type",
@@ -1168,8 +1240,11 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
         "face" | "rough" | "finish" | "groove" | "part" => {
             let feed = positive(require(map, "feed")?, "feed")?;
             let speed = parse_speed(require(map, "speed")?, cap)?;
+            let b_deg = optional_f64(map, "b_deg")?;
             match op_type {
-                "face" => Ok(Operation::Face { name, spindle, tool_id, step_z: positive(require(map, "step_z")?, "step_z")?, feed, speed, channel }),
+                "face" => {
+                    Ok(Operation::Face { name, spindle, tool_id, step_z: positive(require(map, "step_z")?, "step_z")?, feed, speed, channel, b_deg })
+                }
                 "rough" => Ok(Operation::Rough {
                     name,
                     spindle,
@@ -1181,6 +1256,7 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
                     feed,
                     speed,
                     channel,
+                    b_deg,
                 }),
                 "finish" => Ok(Operation::Finish {
                     name,
@@ -1192,9 +1268,10 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
                     feed,
                     speed,
                     channel,
+                    b_deg,
                 }),
-                "groove" => parse_groove(map, name, spindle, tool_id, feed, speed, channel),
-                "part" => parse_part(map, name, spindle, tool_id, feed, speed, channel),
+                "groove" => parse_groove(map, name, spindle, tool_id, feed, speed, channel, b_deg),
+                "part" => parse_part(map, name, spindle, tool_id, feed, speed, channel, b_deg),
                 _ => Err(CliError::invalid(format!("unknown operation type `{op_type}`"))),
             }
         }
@@ -1275,6 +1352,7 @@ fn parse_groove(
     feed: f64,
     speed: SpindleSpeed,
     channel: u8,
+    b_deg: Option<f64>,
 ) -> Result<Operation, CliError> {
     let stepover_frac = match optional(map, "stepover_frac") {
         Some(value) => as_f64(value, "stepover_frac")?,
@@ -1303,6 +1381,7 @@ fn parse_groove(
         feed,
         speed,
         channel,
+        b_deg,
     })
 }
 
@@ -1314,6 +1393,7 @@ fn parse_part(
     feed: f64,
     speed: SpindleSpeed,
     channel: u8,
+    b_deg: Option<f64>,
 ) -> Result<Operation, CliError> {
     Ok(Operation::Part {
         name,
@@ -1330,6 +1410,7 @@ fn parse_part(
         feed,
         speed,
         channel,
+        b_deg,
     })
 }
 
@@ -1890,7 +1971,8 @@ fn build_document(
         let ToolBody::Insert { insert, .. } = &tool.body else {
             continue;
         };
-        let mounted = TurnInsert::try_new(tool.id, HEAD, tool.station, *insert, false)?;
+        let mounted_insert = mount_insert(job, tool.id, insert)?;
+        let mounted = TurnInsert::try_new(tool.id, HEAD, tool.station, mounted_insert, false)?;
         setup = setup.with_insert(mounted)?;
     }
     let check = job.operations.iter().any(|operation| gouge_side(operation).is_some());
@@ -1903,12 +1985,14 @@ fn build_document(
     let mut gouge_lines = Vec::new();
     let mut toolpaths = Vec::with_capacity(job.operations.len());
     let mut previous = [None, None];
+    let mut b_now = [0.0, 0.0];
     let mut sync_id = 0u32;
     for operation in &job.operations {
         if operation.is_wait() {
             sync_id = sync_id.saturating_add(1);
             for channel in [0u8, 1] {
                 let path = wait_toolpath(operation.name(), sync_id)?;
+                let path = with_head_index(path, head_for(channel), &mut b_now[usize::from(channel)], 0.0)?;
                 let index = u32::try_from(toolpaths.len()).map_err(|_| CliError::run("too many toolpaths"))?;
                 toolpaths.push(path);
                 let binding = TurnBinding::try_new(index, SPINDLE, head_for(channel), u16::from(channel))?;
@@ -1948,8 +2032,10 @@ fn build_document(
             }
             let motion = to_cl_path(&turned, Some(operation.name().to_string()), operation.tool_id(), operation.feed(), Some(job.clearance))
                 .map_err(|err| op_fail(operation.name(), err))?;
+            let motion = apply_b_axis(job, motion, operation.b_target())?;
             with_events(motion, operation.tool_id(), previous_slot)?
         };
+        let toolpath = with_head_index(toolpath, head_for(channel), &mut b_now[usize::from(channel)], operation.b_target())?;
         let index = u32::try_from(toolpaths.len()).map_err(|_| CliError::run("too many toolpaths"))?;
         toolpaths.push(toolpath);
         let binding =
@@ -2023,7 +2109,7 @@ fn wait_toolpath(name: &str, id: u32) -> Result<ClPath, CliError> {
 fn turning_setup(job: &LatheJob, stock: TurnStock) -> Result<TurningSetup, CliError> {
     let live_tooling = job.tools.iter().any(|tool| tool.body.is_live());
     let lower = needs_lower_head(job);
-    if !job.c_axis && !live_tooling && !job.head.y_axis && job.sub.is_none() && !lower {
+    if !job.c_axis && !live_tooling && !job.head.y_axis && job.head.b_axis.is_none() && job.sub.is_none() && !lower {
         return Ok(TurningSetup::single(Some(stock), job.max_rpm)?);
     }
     let c_axis = if job.c_axis { Some(0) } else { None };
@@ -2032,7 +2118,11 @@ fn turning_setup(job: &LatheJob, stock: TurnStock) -> Result<TurningSetup, CliEr
         spindles.push(Spindle::try_new(SUB_SPINDLE, None, 0.0, sub.max_rpm)?);
     }
     let stations = u16::try_from(STATIONS).map_err(|_| CliError::run("turret station count is out of range"))?;
-    let axes = if job.head.y_axis { vec![HeadAxis::X, HeadAxis::Y, HeadAxis::Z] } else { vec![HeadAxis::X, HeadAxis::Z] };
+    let mut axes = if job.head.y_axis { vec![HeadAxis::X, HeadAxis::Y, HeadAxis::Z] } else { vec![HeadAxis::X, HeadAxis::Z] };
+    if let Some(b_axis) = &job.head.b_axis {
+        let _ = b_axis.pivot_length;
+        axes.push(HeadAxis::B);
+    }
     let mut heads = vec![Head::try_new(HEAD, axes.clone(), stations, live_tooling)?];
     if lower {
         heads.push(Head::try_new(LOWER, axes, stations, live_tooling)?);
@@ -2049,8 +2139,8 @@ fn turn_gouges(
     section: &[(f64, f64)],
     sample_step: f64,
 ) -> Result<Vec<String>, CliError> {
-    let (insert, tip, _nose_radius, holder) = require_insert(job, operation)?;
-    let outline = InsertGeom::from_insert(insert, TURN_EDGE_MM).map_err(|err| op_fail(operation.name(), err))?;
+    let (insert, tip, _nose_radius, holder) = planning_insert(job, operation)?;
+    let outline = InsertGeom::from_insert(&insert, TURN_EDGE_MM).map_err(|err| op_fail(operation.name(), err))?;
     let mut found =
         check_turn_gouges(section, side, path, tip, &outline, holder, sample_step, job.chord).map_err(|err| op_fail(operation.name(), err))?;
     for gouge in &mut found {
@@ -2082,6 +2172,133 @@ fn turn_stock(stock: &Stock) -> Result<TurnStock, CliError> {
     }
 }
 
+/// Tool-table orientation, unless every use of the tool shares one B. A shared angle is added
+/// to `orientation_deg` on the mounted copy. The table entry itself is left as written.
+fn mount_insert(job: &LatheJob, tool_id: u32, insert: &Insert) -> Result<Insert, CliError> {
+    let mut agreed: Option<f64> = None;
+    for operation in &job.operations {
+        let Some(angle) = mount_angle(operation, tool_id) else {
+            continue;
+        };
+        match agreed {
+            None => agreed = Some(angle),
+            Some(previous) if (previous - angle).abs() > 1e-9 => return Ok(*insert),
+            Some(_) => {}
+        }
+    }
+    match agreed {
+        Some(angle) if angle != 0.0 => effective_insert(insert, angle),
+        _ => Ok(*insert),
+    }
+}
+
+fn mount_angle(operation: &Operation, tool_id: u32) -> Option<f64> {
+    let uses = match operation {
+        Operation::Transfer { part_off, .. } => part_off.as_ref().is_some_and(|part| part.tool_id == tool_id),
+        Operation::Wait { .. } | Operation::Eject { .. } => false,
+        _ => operation.checked_tool() == Some(tool_id),
+    };
+    if uses { Some(operation.b_deg().unwrap_or(0.0)) } else { None }
+}
+
+/// Insert and programmed tip for one operation. `b_deg` replaces the orientation with
+/// `orientation_deg + b_deg`, wrapped into −360..=360, and rebuilds an imaginary tip from that insert.
+fn planning_insert<'a>(job: &'a LatheJob, operation: &Operation) -> Result<(Insert, TipPoint, f64, Option<&'a HolderGeom>), CliError> {
+    let (insert, tip, nose_radius, holder) = require_insert(job, operation)?;
+    let Some(b_deg) = operation.b_deg() else {
+        return Ok((*insert, tip, nose_radius, holder));
+    };
+    let effective = effective_insert(insert, b_deg)?;
+    let tip = match tip {
+        TipPoint::Centre => TipPoint::Centre,
+        TipPoint::ImaginaryTip { .. } => {
+            let (dx, dz) = effective.tip_offset();
+            TipPoint::ImaginaryTip { dz, dx }
+        }
+    };
+    Ok((effective, tip, nose_radius, holder))
+}
+
+fn effective_insert(insert: &Insert, b_deg: f64) -> Result<Insert, CliError> {
+    let orientation = normalise_orientation(insert.orientation_deg() + b_deg);
+    Ok(Insert::try_new(insert.shape(), insert.nose_radius(), insert.width(), insert.hand(), orientation)?)
+}
+
+fn normalise_orientation(mut degrees: f64) -> f64 {
+    while degrees > 360.0 {
+        degrees -= 360.0;
+    }
+    while degrees < -360.0 {
+        degrees += 360.0;
+    }
+    degrees
+}
+
+/// Pose axis `(cos B, 0, sin B)` on a turning path when the job has a B head.
+fn apply_b_axis(job: &LatheJob, path: ClPath, b_deg: f64) -> Result<ClPath, CliError> {
+    if job.head.b_axis.is_none() {
+        return Ok(path);
+    }
+    let radians = b_deg.to_radians();
+    let axis = Vec3::new(radians.cos(), 0.0, radians.sin())?;
+    let blocks = path
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            ClBlock::Motion(motion) => Ok(ClBlock::Motion(map_motion(motion, axis)?)),
+            other => Ok(other.clone()),
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    rebuild_path(path, blocks)
+}
+
+fn map_motion(motion: &ClMotion, axis: Vec3) -> Result<ClMotion, CliError> {
+    Ok(match motion {
+        ClMotion::Rapid { to, feed } => ClMotion::Rapid { to: map_pose(*to, axis)?, feed: *feed },
+        ClMotion::Linear { to, feed, role } => ClMotion::Linear { to: map_pose(*to, axis)?, feed: *feed, role: *role },
+        ClMotion::Arc { to, plane, center, sense, feed, role } => {
+            ClMotion::Arc { to: map_pose(*to, axis)?, plane: *plane, center: *center, sense: *sense, feed: *feed, role: *role }
+        }
+        ClMotion::Helix { to, plane, center, sense, sweep, feed, role } => {
+            ClMotion::Helix { to: map_pose(*to, axis)?, plane: *plane, center: *center, sense: *sense, sweep: *sweep, feed: *feed, role: *role }
+        }
+        ClMotion::Thread { to, lead } => ClMotion::Thread { to: map_pose(*to, axis)?, lead: *lead },
+    })
+}
+
+fn map_pose(pose: Pose, axis: Vec3) -> Result<Pose, CliError> {
+    let mut next = Pose::new(pose.tip(), axis)?;
+    if let Some(rotary) = pose.rotary() {
+        next = next.with_rotary(rotary)?;
+    }
+    Ok(next)
+}
+
+/// `HeadIndex` after the first tool change, or at the start of the path, when B changes.
+fn with_head_index(path: ClPath, head: &str, current: &mut f64, target: f64) -> Result<ClPath, CliError> {
+    if (target - *current).abs() <= 1e-9 {
+        return Ok(path);
+    }
+    *current = target;
+    let event = ClBlock::Event(Event::HeadIndex { head: head.to_string(), b_deg: target });
+    let mut blocks = path.blocks().to_vec();
+    let at = blocks.iter().position(|block| matches!(block, ClBlock::Event(Event::ToolChange { .. }))).map(|index| index + 1).unwrap_or(0);
+    blocks.insert(at, event);
+    rebuild_path(path, blocks)
+}
+
+fn rebuild_path(path: ClPath, blocks: Vec<ClBlock>) -> Result<ClPath, CliError> {
+    Ok(ClPath::try_new(
+        path.name().map(str::to_string),
+        path.tool_id(),
+        path.compensation(),
+        path.feeds(),
+        path.pierce(),
+        path.tabs().to_vec(),
+        blocks,
+    )?)
+}
+
 fn require_insert<'a>(job: &'a LatheJob, operation: &Operation) -> Result<(&'a Insert, TipPoint, f64, Option<&'a HolderGeom>), CliError> {
     let tool = job
         .tools
@@ -2106,7 +2323,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
     if operation.is_wait() || operation.is_live() || operation.is_mill() || operation.is_transfer() || operation.is_eject() {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
     }
-    let (insert, tip, nose_radius, _) = require_insert(job, operation)?;
+    let (insert, tip, nose_radius, _) = planning_insert(job, operation)?;
     let turn_tool = TurnTool { nose_radius, tip };
     let stock = turn_stock(&job.stock)?;
     match operation {
@@ -2287,9 +2504,11 @@ fn part_off_blocks(job: &LatheJob, profile: &TurnProfile, name: &str, part: &Par
         feed: part.feed,
         speed: part.speed,
         channel: 0,
+        b_deg: None,
     };
     let turned = turn_operation(job, profile, &part_op)?;
     let motion = to_cl_path(&turned, Some(name.to_string()), part.tool_id, part.feed, Some(job.clearance)).map_err(|err| op_fail(name, err))?;
+    let motion = apply_b_axis(job, motion, 0.0)?;
     let with = with_events(motion, part.tool_id, previous)?;
     let mut blocks = with.blocks().to_vec();
     match blocks.pop() {

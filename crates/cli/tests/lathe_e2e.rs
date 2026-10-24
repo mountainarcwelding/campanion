@@ -837,6 +837,300 @@ fn assert_rejects_at(job: &Path, needle: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn bare_job(head: &str, tools: &str, operations: &str) -> String {
+    format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 20, "length": 10, "front_allowance": 1 }},
+        "spindle": {{ "max_rpm": 1000 }},
+        {head}
+        "tools": [{tools}],
+        "operations": [{operations}],
+        "clearance": 1
+    }}"#
+    )
+}
+
+#[test]
+fn b_axis_errors_use_the_exact_text() -> Result<(), String> {
+    let tool = r#"{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }"#;
+    let finish = r#"{ "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 100, "speed": { "rpm": 1000 }, "b_deg": 30 }"#;
+    assert_rejects(
+        &bare_job(r#""head": { "b_axis": { "min_deg": 20, "max_deg": 20, "pivot_length": 0 } },"#, tool, finish),
+        "b-axis-range.json",
+        "head.b_axis: min_deg must be less than max_deg",
+    )?;
+    assert_rejects(
+        &bare_job(r#""head": { "b_axis": { "min_deg": -120, "max_deg": 120, "pivot_length": -1 } },"#, tool, finish),
+        "b-axis-pivot.json",
+        "head.b_axis: pivot_length must be zero or positive",
+    )?;
+    assert_rejects(&bare_job("", tool, finish), "b-deg-needs-head.json", "operation finish: b_deg needs head.b_axis")?;
+    let outside = finish.replace("\"b_deg\": 30", "\"b_deg\": 130");
+    assert_rejects(
+        &bare_job(r#""head": { "b_axis": { "min_deg": -120, "max_deg": 120 } },"#, tool, &outside),
+        "b-deg-travel.json",
+        "operation finish: b_deg 130 outside head B travel",
+    )?;
+    let thread = r#"{ "name": "thread", "type": "thread", "tool_id": 1, "b_deg": 10 }"#;
+    assert_rejects(
+        &bare_job(r#""head": { "b_axis": { "min_deg": -120, "max_deg": 120 } },"#, tool, thread),
+        "b-deg-thread.json",
+        "unknown operation field `b_deg`",
+    )?;
+    let live = r#"{ "name": "holes", "type": "live_drill", "face": "front", "b_deg": 10 }"#;
+    assert_rejects(
+        &bare_job(r##""head": { "b_axis": { "min_deg": -120, "max_deg": 120 } }, "spindle": { "max_rpm": 1000, "c_axis": true },"##, tool, live),
+        "b-deg-live.json",
+        "unknown operation field `b_deg`",
+    )?;
+    Ok(())
+}
+
+fn shaft_text() -> Result<String, String> {
+    let root = workspace_root()?;
+    std::fs::read_to_string(root.join("examples/shaft.dxf")).map_err(|err| err.to_string())
+}
+
+fn shaft_finish_job(orientation: i32, b_deg: i32) -> String {
+    format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "shaft.dxf", "layer": "PROFILE" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 }},
+        "spindle": {{ "max_rpm": 3000 }},
+        "head": {{ "b_axis": {{ "min_deg": -120, "max_deg": 120 }} }},
+        "tools": [{{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.8, "orientation_deg": {orientation}, "hand": "right", "tip": "centre" }}],
+        "operations": [{{ "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": {{ "rpm": 1000 }}, "b_deg": {b_deg} }}],
+        "tolerance": {{ "linear": 0.001, "chord": 0.01 }},
+        "clearance": 2.0
+    }}"#
+    )
+}
+
+/// A c80 at 45° clears the shaft shoulder. The same table entry at B 30 is an effective 75° and edge-gouges it.
+#[test]
+fn b_deg_reaches_the_gouge_check() -> Result<(), String> {
+    let dxf = shaft_text()?;
+    let clean = shaft_finish_job(45, 0);
+    let path = write_tree("campanion-lathe-b-clean", &[("shaft.dxf", &dxf)], "clean.json", &clean)?;
+    let out = temp_path("campanion-lathe-b-clean.nc");
+    let _ = std::fs::remove_file(&out);
+    run_ok(&["lathe", &path_arg(&path)?, "-o", &path_arg(&out)?])?;
+
+    let gouge = shaft_finish_job(45, 30);
+    let path = write_tree("campanion-lathe-b-gouge", &[("shaft.dxf", &dxf)], "gouge.json", &gouge)?;
+    let out = path.with_extension("nc");
+    let _ = std::fs::remove_file(&out);
+    let output = campanion(&["lathe", &path_arg(&path)?, "-o", &path_arg(&out)?])?;
+    let stderr = text(&output.stderr)?;
+    let code = output.status.code();
+    if code == Some(101) || stderr.to_ascii_lowercase().contains("panicked") {
+        return Err(format!("lathe panicked ({code:?}): {stderr}"));
+    }
+    if code != Some(1) {
+        return Err(format!("exit {code:?}, expected 1\n{stderr}"));
+    }
+    if !stderr.lines().any(|line| line.starts_with("gouge operation finish ") && line.split_whitespace().any(|word| word == "edge")) {
+        return Err(format!("stderr missing an edge gouge line: {stderr}"));
+    }
+    if out.exists() {
+        return Err(format!("gouged job wrote {}", out.display()));
+    }
+    Ok(())
+}
+
+fn motion_axis(block: &campanion_ir::ClBlock) -> Option<campanion_ir::Vec3> {
+    let motion = match block {
+        campanion_ir::ClBlock::Motion(motion) => motion,
+        _ => return None,
+    };
+    let pose = match motion {
+        campanion_ir::ClMotion::Rapid { to, .. }
+        | campanion_ir::ClMotion::Linear { to, .. }
+        | campanion_ir::ClMotion::Arc { to, .. }
+        | campanion_ir::ClMotion::Helix { to, .. }
+        | campanion_ir::ClMotion::Thread { to, .. } => *to,
+    };
+    Some(pose.axis())
+}
+
+fn expect_axis(path: &campanion_ir::ClPath, expected: campanion_ir::Vec3) -> Result<(), String> {
+    let mut seen = false;
+    for block in path.blocks() {
+        let Some(axis) = motion_axis(block) else {
+            continue;
+        };
+        seen = true;
+        let delta = (axis.x() - expected.x()).abs() + (axis.y() - expected.y()).abs() + (axis.z() - expected.z()).abs();
+        if delta > 1e-9 {
+            return Err(format!(
+                "path {:?} axis ({}, {}, {}), expected ({}, {}, {})",
+                path.name(),
+                axis.x(),
+                axis.y(),
+                axis.z(),
+                expected.x(),
+                expected.y(),
+                expected.z()
+            ));
+        }
+    }
+    if !seen {
+        return Err(format!("path {:?} has no motion", path.name()));
+    }
+    Ok(())
+}
+
+fn head_index_at(path: &campanion_ir::ClPath) -> Result<Option<(usize, f64)>, String> {
+    let mut found = None;
+    for (index, block) in path.blocks().iter().enumerate() {
+        if let campanion_ir::ClBlock::Event(campanion_ir::Event::HeadIndex { head, b_deg }) = block {
+            if head != "turret1" {
+                return Err(format!("path {:?} head index names {head}", path.name()));
+            }
+            if found.is_some() {
+                return Err(format!("path {:?} has two head indexes", path.name()));
+            }
+            found = Some((index, *b_deg));
+        }
+    }
+    Ok(found)
+}
+
+/// Finish at the starting angle writes no index. A later groove at 30 indexes after its tool change.
+/// The same tool with `b_deg` omitted indexes 0 at the start of the path and keeps the table orientation.
+#[test]
+fn head_index_follows_the_tool_change_and_resets() -> Result<(), String> {
+    let dxf = shaft_text()?;
+    let job = r#"{
+        "format": "campanion-lathe/1",
+        "source": { "path": "shaft.dxf", "layer": "PROFILE" },
+        "units": "mm",
+        "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
+        "spindle": { "max_rpm": 3000 },
+        "head": { "b_axis": { "min_deg": -120, "max_deg": 120, "pivot_length": 0 } },
+        "tools": [
+            { "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.8, "orientation_deg": 45, "hand": "right", "tip": "centre" },
+            { "id": 2, "station": 2, "shape": "groove", "width": 3, "nose_radius": 0.2, "orientation_deg": 90, "hand": "neutral", "tip": "centre" }
+        ],
+        "operations": [
+            { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "rpm": 1500 } },
+            { "name": "groove", "type": "groove", "tool_id": 2, "side": "outside", "z_left": -52, "z_right": -48, "bottom_diameter": 36, "surface_diameter": 40, "feed": 80, "speed": { "rpm": 600 }, "b_deg": 30 },
+            { "name": "relief", "type": "groove", "tool_id": 2, "side": "outside", "z_left": -52, "z_right": -48, "bottom_diameter": 36, "surface_diameter": 40, "feed": 80, "speed": { "rpm": 600 } }
+        ],
+        "tolerance": { "linear": 0.001, "chord": 0.01 },
+        "clearance": 2.0
+    }"#;
+    let path = write_tree("campanion-lathe-b-index", &[("shaft.dxf", &dxf)], "index.json", job)?;
+    let out = temp_path("campanion-lathe-b-index.nc");
+    let ir = temp_path("campanion-lathe-b-index.ir.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    run_ok(&["lathe", &path_arg(&path)?, "-o", &path_arg(&out)?, "--ir", &path_arg(&ir)?])?;
+    let doc = campanion_ir::Document::from_json(&std::fs::read_to_string(&ir).map_err(|err| err.to_string())?).map_err(|err| err.to_string())?;
+    let turning = doc.program().turning().ok_or("turning setup is missing")?;
+    let head = turning.heads().first().ok_or("head is missing")?;
+    if !head.axes().contains(&campanion_ir::HeadAxis::B) {
+        return Err(format!("head axes are {:?}", head.axes()));
+    }
+    let mounted = |tool_id: u32| -> Result<f64, String> {
+        turning
+            .inserts()
+            .iter()
+            .find(|insert| insert.tool_id() == tool_id)
+            .map(|insert| insert.insert().orientation_deg())
+            .ok_or_else(|| format!("tool {tool_id} is not mounted"))
+    };
+    let tool1 = mounted(1)?;
+    let tool2 = mounted(2)?;
+    if (tool1 - 45.0).abs() > 1e-9 || (tool2 - 90.0).abs() > 1e-9 {
+        return Err(format!("mounted orientations are {tool1} and {tool2}"));
+    }
+    let paths = doc.program().toolpaths();
+    if paths.len() != 3 {
+        return Err(format!("expected 3 toolpaths, found {}", paths.len()));
+    }
+    let radial = campanion_ir::Vec3::new(1.0, 0.0, 0.0).map_err(|err| err.to_string())?;
+    let angled = {
+        let radians = 30.0_f64.to_radians();
+        campanion_ir::Vec3::new(radians.cos(), 0.0, radians.sin()).map_err(|err| err.to_string())?
+    };
+    if head_index_at(&paths[0])?.is_some() {
+        return Err("finish wrote a head index at the starting angle".into());
+    }
+    expect_axis(&paths[0], radial)?;
+    let (at, angle) = head_index_at(&paths[1])?.ok_or("groove is missing a head index")?;
+    let tool_at = paths[1]
+        .blocks()
+        .iter()
+        .position(|block| matches!(block, campanion_ir::ClBlock::Event(campanion_ir::Event::ToolChange { .. })))
+        .ok_or("groove is missing a tool change")?;
+    if at != tool_at + 1 || (angle - 30.0).abs() > 1e-9 {
+        return Err(format!("groove head index at {at} angle {angle}, tool change at {tool_at}"));
+    }
+    expect_axis(&paths[1], angled)?;
+    let (at, angle) = head_index_at(&paths[2])?.ok_or("relief is missing the reset")?;
+    if at != 0 || angle.abs() > 1e-9 {
+        return Err(format!("relief head index at {at} angle {angle}"));
+    }
+    if paths[2].blocks().iter().any(|block| matches!(block, campanion_ir::ClBlock::Event(campanion_ir::Event::ToolChange { .. }))) {
+        return Err("relief changed tools".into());
+    }
+    expect_axis(&paths[2], radial)?;
+    Ok(())
+}
+
+#[test]
+fn angled_example_posts_linuxcnc_and_mounts_the_effective_insert() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/angled.lathe.json"))?;
+    let out = temp_path("campanion-lathe-angled.nc");
+    let ir = temp_path("campanion-lathe-angled.ir.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "linuxcnc_lathe", "--ir", &path_arg(&ir)?])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("angled.linuxcnc_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["T2 M6", "G43", "G0 B30", "G97 S1200"])?;
+    if posted.matches("B30").count() != 1 || posted.contains("B30.") {
+        return Err(format!("B index is not a single whole-number word\n{posted}"));
+    }
+    let doc = campanion_ir::Document::from_json(&std::fs::read_to_string(&ir).map_err(|err| err.to_string())?).map_err(|err| err.to_string())?;
+    let turning = doc.program().turning().ok_or("turning setup is missing")?;
+    if !turning.heads().first().ok_or("head is missing")?.axes().contains(&campanion_ir::HeadAxis::B) {
+        return Err(format!("head axes are {:?}", turning.heads().first().map(|head| head.axes())));
+    }
+    let tool2 = turning.inserts().iter().find(|insert| insert.tool_id() == 2).ok_or("tool 2 is not mounted")?;
+    if (tool2.insert().orientation_deg() - 45.0).abs() > 1e-9 {
+        return Err(format!("tool 2 mounted at {}", tool2.insert().orientation_deg()));
+    }
+    let paths = doc.program().toolpaths();
+    let finish = paths.iter().find(|path| path.name() == Some("finish")).ok_or("finish path is missing")?;
+    let chamfer = paths.iter().find(|path| path.name() == Some("chamfer")).ok_or("chamfer path is missing")?;
+    if head_index_at(finish)?.is_some() {
+        return Err("finish wrote a head index".into());
+    }
+    let radial = campanion_ir::Vec3::new(1.0, 0.0, 0.0).map_err(|err| err.to_string())?;
+    expect_axis(finish, radial)?;
+    let (at, angle) = head_index_at(chamfer)?.ok_or("chamfer is missing a head index")?;
+    let tool_at = chamfer
+        .blocks()
+        .iter()
+        .position(|block| matches!(block, campanion_ir::ClBlock::Event(campanion_ir::Event::ToolChange { .. })))
+        .ok_or("chamfer is missing a tool change")?;
+    if at != tool_at + 1 || (angle - 30.0).abs() > 1e-9 {
+        return Err(format!("chamfer head index at {at} angle {angle}, tool change at {tool_at}"));
+    }
+    let radians = 30.0_f64.to_radians();
+    let angled = campanion_ir::Vec3::new(radians.cos(), 0.0, radians.sin()).map_err(|err| err.to_string())?;
+    expect_axis(chamfer, angled)?;
+    Ok(())
+}
+
 /// A C word is `C` followed by a number. `G112` and comments are not C words.
 fn assert_no_c_word_between(text: &str) -> Result<(), String> {
     let Some(start) = text.find("G112") else {

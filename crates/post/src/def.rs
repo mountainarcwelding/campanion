@@ -20,8 +20,8 @@
 //!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
-//! `{offset2}`, `{phase}`, `{z}`, `{feed}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
-//! `cylinder_interp` are optional mill-turn blocks. `transfer` is an optional part-transfer block. `c_axis.engage`, `c_axis.disengage`,
+//! `{offset2}`, `{phase}`, `{z}`, `{feed}`, `{b}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
+//! `cylinder_interp` are optional mill-turn blocks. `b_head` is an optional B-head block. `transfer` is an optional part-transfer block. `c_axis.engage`, `c_axis.disengage`,
 //! `brake.clamp` and `brake.release` may be empty; an empty list writes nothing. Live-tool
 //! `forward`, `reverse` and `stop` must not be empty. Live-tool `{rpm}` is a whole number.
 //! `c_feed` is `per_minute` or `inverse_time`. Cylinder `on` lines may use `{radius}` and
@@ -48,6 +48,7 @@ const LATHE_CYLINDER: &[&str] = &["radius", "diameter", "date-free!"];
 const LATHE_PHASE: &[&str] = &["phase", "date-free!"];
 const LATHE_MOVE: &[&str] = &["z", "date-free!"];
 const LATHE_MOVE_FEED: &[&str] = &["z", "feed", "date-free!"];
+const LATHE_B: &[&str] = &["b", "date-free!"];
 
 /// How circular moves are written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,6 +355,37 @@ pub(crate) struct LatheOutput {
     /// Two or more channel sections. Absent: a binding whose channel is not 0 is rejected.
     #[serde(default)]
     pub(crate) channels: Option<ChannelsOutput>,
+    /// B head. Absent: a [`campanion_ir::Event::HeadIndex`] is rejected.
+    ///
+    /// `index` may use `{b}`, written with the signed lathe number format. `mode` `tip` writes the
+    /// tool tip. `mode` `pivot` adds `pivot_length * ((cos B - 1), sin B)` to `(radius, Z)` while
+    /// B is not 0. Diameter mode doubles that radius part.
+    #[serde(default)]
+    pub(crate) b_head: Option<BHeadOutput>,
+}
+
+/// Lines that index a B head, and how X and Z relate to the tool tip.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BHeadOutput {
+    /// Lines written for [`campanion_ir::Event::HeadIndex`]. `{b}` is the angle in degrees.
+    pub(crate) index: Vec<String>,
+    /// `tip` or `pivot`.
+    pub(crate) mode: String,
+    /// Pivot-to-tip length along the tool axis, millimetres. Zero leaves X and Z on the tip.
+    #[serde(default)]
+    pub(crate) pivot_length: f64,
+}
+
+/// Radius and Z added to a tip while a pivot-mode head sits at `b_deg`.
+///
+/// `B = 0` and `mode` `tip` and a zero length all add nothing. At 90° the shift is `(-length, length)`.
+pub(crate) fn b_pivot_offset(b_deg: f64, mode: &str, pivot_length: f64) -> (f64, f64) {
+    if mode != "pivot" || b_deg == 0.0 || pivot_length == 0.0 {
+        return (0.0, 0.0);
+    }
+    let radians = b_deg.to_radians();
+    (pivot_length * (radians.cos() - 1.0), pivot_length * radians.sin())
 }
 
 /// How a lathe post splits a program across channels.
@@ -743,6 +775,15 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_templates("lathe.channels.start", &channels.start, &["channel", "date-free!"])?;
         check_templates("lathe.channels.end", &channels.end, LATHE_BARE)?;
         check_templates("lathe.channels.wait", &channels.wait, &["code", "date-free!"])?;
+    }
+    if let Some(b_head) = &lathe.b_head {
+        if !matches!(b_head.mode.as_str(), "tip" | "pivot") {
+            return Err(field("lathe.b_head.mode", "must be tip or pivot"));
+        }
+        if !(b_head.pivot_length.is_finite() && b_head.pivot_length >= 0.0) {
+            return Err(field("lathe.b_head.pivot_length", "must be zero or positive"));
+        }
+        check_templates("lathe.b_head.index", &b_head.index, LATHE_B)?;
     }
     Ok(())
 }

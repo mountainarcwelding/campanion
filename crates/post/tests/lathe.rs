@@ -1710,3 +1710,41 @@ fn part_transfer_rejects_a_post_without_it_and_an_unknown_spindle() {
     raw["lathe"]["transfer"]["extra"] = serde_json::json!(true);
     assert!(load_post(&raw.to_string()).is_err());
 }
+
+#[test]
+fn haas_lathe_rejects_a_b_head_index() {
+    let program = lathe_program(vec![ClBlock::Event(Event::HeadIndex { head: "turret1".into(), b_deg: 30.0 })], turning(None, false));
+    let err = post_program(&program, &builtin("haas_lathe").expect("haas"), &options()).expect_err("b head");
+    assert_eq!(err.to_string(), "not supported: post `haas_lathe` has no B head");
+}
+
+#[test]
+fn pivot_mode_at_b90_shifts_by_the_hand_derived_offset() {
+    // L = 100 mm, B = 90°. cos 90 = 0 and sin 90 = 1, so
+    // dr = L * (cos B - 1) = -100 and dz = L * sin B = 100.
+    // A tip at radius 20, Z -10 is posted at radius -80, Z 90.
+    // Diameter mode writes X = 2 * -80 = -160. Read-back returns the tip.
+    let mut raw = lathe_json();
+    raw["lathe"]["b_head"]["pivot_length"] = serde_json::json!(100.0);
+    let post = post_from(raw);
+    let program = lathe_program(
+        vec![ClBlock::Event(Event::HeadIndex { head: "turret1".into(), b_deg: 90.0 }), linear(20.0, -10.0, 80.0)],
+        turning(None, false),
+    );
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(has_word(&text, "B90"), "{text}");
+    assert!(has_word(&text, "X-160.0000"), "{text}");
+    assert!(has_word(&text, "Z90.0000"), "{text}");
+    let moves = read_back(&text, &post).expect("read");
+    let end = moves
+        .iter()
+        .find_map(|move_| match move_ {
+            ReadMove::Linear { end, .. } | ReadMove::Rapid { end, .. } => Some(*end),
+            _ => None,
+        })
+        .expect("move");
+    assert!((end[0] - 20.0).abs() < 1e-6, "radius {end:?}\n{text}");
+    assert!(end[1].abs() < 1e-9, "y {end:?}");
+    assert!((end[2] + 10.0).abs() < 1e-6, "z {end:?}\n{text}");
+    compare(&program, &moves, 1e-3, &post).expect("compare");
+}
