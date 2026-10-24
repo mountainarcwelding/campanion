@@ -453,6 +453,24 @@ Load failures:
 
 A post with `five_axis` writes indexed 3+2. Before the first move of a toolpath whose tool axis changed, and before the first toolpath of a five-axis program, it retracts, indexes the rotaries, and turns the frame on. `mode` `work` writes the part tip rotated about the origin by the table angles (the control applies the rotary centres). `mode` `machine` writes the gauge point from the kinematics inverse with tool length 0. The first move after an index is a rapid in X and Y, then a rapid in Z. At the end the frame is cancelled, the tool retracts, and the rotaries return to zero. `haas_umc` is work mode (G254/G255). `linuxcnc_5ax` is machine mode. The kinematics file has to match the machine; this output has not been proven on a machine.
 
+## Rapid safety
+
+`campanion run` rejects a mill toolpath when a rapid ends or travels below the safe plane inside the part. In the planning frame the tool axis is +Z. For a drawing, stock top is Z 0 and the safe plane is the job retract height (the R plane). For a mesh, the floor is the higher of the stock top (the highest Z of that view) and the retract height. The footprint is the selected contours, or the mesh bounds in XY, grown by the tool radius. A kerf tool is not grown.
+
+`operation <name>: rapid ends at Z <z> below the safe plane <floor> inside the part`
+
+`operation <name>: rapid traverse at Z <z> below the safe plane <floor> inside the part`
+
+Wrap and rotary finish are already in the part frame. The cut surface is the largest radius of a feed tip from the rotary axis. A rapid that ends inside that radius fails with:
+
+`operation <name>: rapid ends at radius <r> below the cut surface <floor>`
+
+On a 3-axis program, with no rotary setup and no kinematics, the IR verifier's rapid findings are blocking as well. Nothing is written and the process exits 1. Toolpath and block numbers are 1-based. An XY rapid that stays between the retract height and the clearance height is not an error. Rotary and 3+2 programs use the planning-frame check above.
+
+`toolpath <T> block <B>: rapid ends at Z <z> below the safe plane <r>`
+
+`toolpath <T> block <B>: rapid traverse at Z <z> below the safe plane <r>`
+
 ## Limits
 
 Hostile numbers and sizes fail the load instead of being passed on:

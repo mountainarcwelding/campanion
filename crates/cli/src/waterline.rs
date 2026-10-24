@@ -1,10 +1,11 @@
 //! Waterline finishing for steep walls of an STL mesh.
 //!
 //! Levels follow the same depth plan as Z-level roughing. Each polyline, closed or open, is
-//! entered with a plunge: rapid at clearance to the first point, rapid down to the retract
-//! height, feed to that point's Z plus axial stock, cut along the polyline, and feed back up
-//! to the retract height. The process turns on once before the first plunge and off after the
-//! last retract, then the tool rapids to clearance.
+//! entered with a plunge: rapid at clearance to the first point, rapid down to the safe plane
+//! (the retract height, or the stock top when that is higher), feed to that point's Z plus
+//! axial stock, cut along the polyline, and feed back up to the retract height. The process
+//! turns on once before the first plunge and off after the last retract, then the tool rapids
+//! to clearance.
 
 use campanion_mesh::{Cutter, DropCutter, Mesh, WaterlineLevel, WaterlineParams, waterline};
 use campanion_path::{CutKind, Move, Point3, ProcessEvent, Toolpath};
@@ -37,7 +38,8 @@ pub(crate) fn finish(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh)
     let area_min = (bounds.min().x - margin, bounds.min().y - margin);
     let area_max = (bounds.max().x + margin, bounds.max().y + margin);
     let levels = waterline(&dc, area_min, area_max, &params).map_err(|err| op_err(op, err))?;
-    link_levels(op, job.clearance(), job.retract(), stock, &levels)
+    let rapid_floor = job.retract().max(bounds.max().z);
+    link_levels(op, job.clearance(), job.retract(), rapid_floor, stock, &levels)
 }
 
 pub(crate) fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
@@ -54,7 +56,8 @@ pub(crate) fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError>
 }
 
 /// Levels top to bottom, polylines in order. Rapids between polylines stay at clearance.
-fn link_levels(op: &Operation, clearance: f64, retract: f64, stock: f64, levels: &[WaterlineLevel]) -> Result<Toolpath, CliError> {
+fn link_levels(op: &Operation, clearance: f64, retract: f64, rapid_floor: f64, stock: f64, levels: &[WaterlineLevel]) -> Result<Toolpath, CliError> {
+    let travel = clearance.max(rapid_floor);
     let mut pen = Pen::new(op);
     let mut turned_on = false;
     let mut any = false;
@@ -63,7 +66,7 @@ fn link_levels(op: &Operation, clearance: f64, retract: f64, stock: f64, levels:
             let Some(start) = points.first() else {
                 continue;
             };
-            pen.approach(start.x, start.y, clearance, retract)?;
+            pen.approach(start.x, start.y, travel, rapid_floor)?;
             if !turned_on {
                 pen.push(Move::Event(ProcessEvent::On))?;
                 turned_on = true;
@@ -83,7 +86,7 @@ fn link_levels(op: &Operation, clearance: f64, retract: f64, stock: f64, levels:
     }
     pen.push(Move::Event(ProcessEvent::Off))?;
     if let Some(here) = pen.at {
-        pen.rapid(here.x(), here.y(), clearance)?;
+        pen.rapid(here.x(), here.y(), travel)?;
     }
     Toolpath::new(pen.moves).map_err(|err| op_err(op, err))
 }

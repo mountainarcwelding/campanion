@@ -4,10 +4,12 @@
 //! axial stock. Clearance and retract stay at the job heights. Links between raster lines are
 //! drop-cutter samples along the straight segment, so the feed stays on the surface.
 //!
-//! A 3-axis surface keeps every raster sample, including cutter misses at the mesh floor, so an
-//! existing job stays byte-identical. An indexed view (the job has a rotary setup) does not.
-//! Samples the cutter misses are dropped. The tool retracts, rapids at clearance, and plunges
-//! between the remaining hits, and it does the same when a chord between hits would gouge.
+//! A 3-axis surface keeps every raster sample, including cutter misses at the mesh floor.
+//! Rapids end at or above the stock top: when the job clearance is below the mesh, they use
+//! that top instead of the clearance height. An indexed view (the job has a rotary setup) does
+//! not keep misses. Samples the cutter misses are dropped. The tool retracts, rapids at or
+//! above the stock top, and plunges between the remaining hits, and it does the same when a
+//! chord between hits would gouge.
 
 use campanion_mesh::{Cutter, DropCutter, Mesh, RasterAngle, RasterParams, Vec3 as MeshVec, parallel_finish, scallop_stepover};
 use campanion_path::{CutKind, Move, Point3, ProcessEvent, Toolpath};
@@ -40,11 +42,14 @@ pub(crate) fn finish(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh)
     let area_max = (bounds.max().x + margin, bounds.max().y + margin);
     let lines = parallel_finish(&dc, area_min, area_max, &params).map_err(|err| op_err(op, err))?;
     let points = collect_points(op, &dc, &lines, sample_step, floor, stock)?;
-    if job.rotary().is_some() { emit_indexed(op, job, &dc, &points) } else { emit_plain(op, job, &points) }
+    // A clearance below the mesh would rapid through the stock. The safe height is the
+    // higher of the job clearance, the job retract, and the mesh top.
+    let rapid_z = job.clearance().max(bounds.max().z).max(job.retract());
+    if job.rotary().is_some() { emit_indexed(op, job, &dc, &points, rapid_z) } else { emit_plain(op, job, &points, rapid_z) }
 }
 
-/// Every raster sample, misses included. This is the 3-axis surface, kept byte-identical.
-fn emit_plain(op: &Operation, job: &JobFile, points: &[MeshVec]) -> Result<Toolpath, CliError> {
+/// Every raster sample, misses included. This is the 3-axis surface. Rapids use `rapid_z`.
+fn emit_plain(op: &Operation, job: &JobFile, points: &[MeshVec], rapid_z: f64) -> Result<Toolpath, CliError> {
     let Some(first) = points.first().copied() else {
         return Err(op_err(op, "surface produced no toolpath"));
     };
@@ -52,7 +57,7 @@ fn emit_plain(op: &Operation, job: &JobFile, points: &[MeshVec]) -> Result<Toolp
         return Err(op_err(op, "surface produced no toolpath"));
     };
     let mut moves = Vec::with_capacity(points.len().saturating_add(PATH_OVERHEAD));
-    push_move(&mut moves, Move::Rapid { to: point(op, first.x, first.y, job.clearance())? })?;
+    push_move(&mut moves, Move::Rapid { to: point(op, first.x, first.y, rapid_z)? })?;
     push_move(&mut moves, Move::Event(ProcessEvent::On))?;
     push_move(&mut moves, Move::Linear { to: point(op, first.x, first.y, first.z)?, kind: CutKind::Plunge })?;
     for sample in points.iter().skip(1) {
@@ -60,12 +65,12 @@ fn emit_plain(op: &Operation, job: &JobFile, points: &[MeshVec]) -> Result<Toolp
     }
     push_move(&mut moves, Move::Linear { to: point(op, last.x, last.y, job.retract())?, kind: CutKind::Retract })?;
     push_move(&mut moves, Move::Event(ProcessEvent::Off))?;
-    push_move(&mut moves, Move::Rapid { to: point(op, last.x, last.y, job.clearance())? })?;
+    push_move(&mut moves, Move::Rapid { to: point(op, last.x, last.y, rapid_z)? })?;
     Toolpath::new(moves).map_err(|err| op_err(op, err))
 }
 
 /// Hits only. A cutter miss splits the polyline: retract and plunge, do not cut the floor chord.
-fn emit_indexed(op: &Operation, job: &JobFile, dc: &DropCutter, points: &[MeshVec]) -> Result<Toolpath, CliError> {
+fn emit_indexed(op: &Operation, job: &JobFile, dc: &DropCutter, points: &[MeshVec], rapid_z: f64) -> Result<Toolpath, CliError> {
     let runs = hit_runs(dc, points);
     let Some(first) = runs.first().and_then(|run| run.first()).copied() else {
         return Err(op_err(op, "surface produced no toolpath"));
@@ -74,7 +79,7 @@ fn emit_indexed(op: &Operation, job: &JobFile, dc: &DropCutter, points: &[MeshVe
         return Err(op_err(op, "surface produced no toolpath"));
     };
     let mut moves = Vec::with_capacity(points.len().saturating_add(PATH_OVERHEAD));
-    push_move(&mut moves, Move::Rapid { to: point(op, first.x, first.y, job.clearance())? })?;
+    push_move(&mut moves, Move::Rapid { to: point(op, first.x, first.y, rapid_z)? })?;
     push_move(&mut moves, Move::Event(ProcessEvent::On))?;
     push_move(&mut moves, Move::Linear { to: point(op, first.x, first.y, first.z)?, kind: CutKind::Plunge })?;
     let mut previous = first;
@@ -86,7 +91,7 @@ fn emit_indexed(op: &Operation, job: &JobFile, dc: &DropCutter, points: &[MeshVe
             // A new run starts after a miss. The straight chord would be the floor step the
             // raster inserts where the turned mesh has no contact.
             if point_index == 0 || chord_gouges(dc, previous, sample, job.tolerance().chord()) {
-                link_over(op, job, dc, &mut moves, previous, sample)?;
+                link_over(op, job, dc, &mut moves, previous, sample, rapid_z)?;
             } else {
                 push_move(&mut moves, Move::Linear { to: point(op, sample.x, sample.y, sample.z)?, kind: CutKind::Cut })?;
             }
@@ -95,7 +100,7 @@ fn emit_indexed(op: &Operation, job: &JobFile, dc: &DropCutter, points: &[MeshVe
     }
     push_move(&mut moves, Move::Linear { to: point(op, last.x, last.y, job.retract())?, kind: CutKind::Retract })?;
     push_move(&mut moves, Move::Event(ProcessEvent::Off))?;
-    push_move(&mut moves, Move::Rapid { to: point(op, last.x, last.y, job.clearance())? })?;
+    push_move(&mut moves, Move::Rapid { to: point(op, last.x, last.y, rapid_z)? })?;
     Toolpath::new(moves).map_err(|err| op_err(op, err))
 }
 
@@ -253,10 +258,18 @@ fn chord_gouges(dc: &DropCutter, from: MeshVec, to: MeshVec, tolerance: f64) -> 
 /// Retract, rapid across at a height the destination can plunge from, then plunge.
 ///
 /// The plunge starts at or above the drop-cutter tip, so the entry does not repeat the gouge.
-fn link_over(op: &Operation, job: &JobFile, dc: &DropCutter, moves: &mut Vec<Move>, from: MeshVec, to: MeshVec) -> Result<(), CliError> {
+fn link_over(
+    op: &Operation,
+    job: &JobFile,
+    dc: &DropCutter,
+    moves: &mut Vec<Move>,
+    from: MeshVec,
+    to: MeshVec,
+    rapid_z: f64,
+) -> Result<(), CliError> {
     let retract_z = job.retract().max(from.z);
     let contact = dc.tip_z(to.x, to.y).unwrap_or(to.z);
-    let safe_z = retract_z.max(job.clearance()).max(to.z).max(contact);
+    let safe_z = retract_z.max(job.clearance()).max(to.z).max(contact).max(rapid_z);
     if retract_z > from.z {
         push_move(moves, Move::Linear { to: point(op, from.x, from.y, retract_z)?, kind: CutKind::Retract })?;
     }

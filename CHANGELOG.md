@@ -5,6 +5,7 @@
 ### Fixed
 
 - Mill `drill` no longer rapids to the hole bottom. Each hole is now a rapid to clearance and to the R plane (job retract height), a plunge feed to depth (pecking when `step_down` is less than `depth`), an optional `dwell`, and a rapid out. Every release from v0.1.0 to v0.8.0 rapided to depth; do not run mill drill output from those versions.
+- `campanion run` now rejects any mill toolpath with a rapid that ends below the R plane (job retract height) or below the cut surface inside the part, or that traverses below it; the IR verifier's rapid-height findings were computed but never enforced.
 
 ## 0.8.0 — 2026-10-24
 

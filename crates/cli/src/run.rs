@@ -29,27 +29,31 @@
 //! G81/G83 output may become a post option later. A contour that is not a circle is skipped, so a
 //! layer can hold holes and other profiles together.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
-//! and retract height is the job retract. Issues are printed and the process exits 1.
+//! and retract height is the job retract. Issues are printed and the process exits 1. On a 3-axis
+//! job, a rapid that ends below the retract height, or that traverses below it, is an error too.
+//! Rotary and tilted programs are checked in the planning frame instead.
 //!
 //! `--post` writes that dialect instead of the test-sink NGC. The text is read back and compared
 //! at the job chord tolerance. A mismatch exits 1 and nothing is written. Without `--post` the
 //! test sink is unchanged.
 //!
 //! An STL source is read as bytes, not as text, and is not sent through the DXF or SVG importer.
-//! Each `surface` operation is a parallel finish: a rapid to clearance, a plunge to the first
-//! cutter location, cuts along the raster and along the drop-cutter link between lines, a retract
-//! to the job retract height, then a rapid back to clearance. Rapids stay at clearance, which is
-//! at or above the retract height.
+//! Each `surface` operation is a parallel finish: a rapid at or above the stock top (the job
+//! clearance when that is higher), a plunge to the first cutter location, cuts along the raster
+//! and along the drop-cutter link between lines, a retract to the job retract height, then a
+//! rapid back to that safe height.
 //! Each `rough` operation is Z-level roughing. Levels run top to bottom and rings stay in order.
-//! For each ring the tool rapids at clearance to the entry, rapids down to the retract height,
-//! feeds the entry from the previous level (or the stock top on the first level), cuts the ring,
-//! and feeds back to the retract height. An omitted entry is a plunge. A helix that leaves the
+//! For each ring the tool rapids at clearance to the entry, rapids down to the safe plane (the
+//! retract height, or the stock top when that is higher), feeds the entry from the previous level
+//! (or from that plane when a ramp or helix would otherwise rapid below it), cuts the ring, and
+//! feeds back to the retract height. An omitted entry is a plunge. A helix that leaves the
 //! ring or the stock allowance ramps instead, and the operation warns once. The process turns on
 //! once before the first cut and off after the last retract, then the tool rapids to clearance.
 //! Each `waterline` operation finishes steep walls. Levels use the same depth plan as roughing.
-//! For each polyline the tool rapids at clearance to the first point, rapids down to the retract
-//! height, plunges to that point's Z plus axial stock, cuts along the polyline, and feeds back
-//! to the retract height. The process turns on once and off after the last retract.
+//! For each polyline the tool rapids at clearance to the first point, rapids down to the safe
+//! plane (the retract height, or the stock top when that is higher), plunges to that point's Z
+//! plus axial stock, cuts along the polyline, and feeds back to the retract height. The process
+//! turns on once and off after the last retract.
 //! After the document is built, each cutting move is checked against the mesh with that
 //! operation's cutter. The sample step is `min(0.25, chord * 10)` millimetres and the allowance
 //! is the job chord tolerance. A gouge is a verify error. Roughing, surfacing, waterline and
@@ -107,6 +111,7 @@ use crate::plane::{self, ViewFrame};
 use crate::report;
 use crate::rotary;
 use crate::rough;
+use crate::safety;
 use crate::step;
 use crate::surface;
 use crate::waterline;
@@ -222,6 +227,7 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
                 return Err(op_err(op, "rotary finish needs a rotary setup"));
             };
             let path = rotary::cut(job, op, tool, mesh, &setup)?;
+            safety::check_radial(op.name(), std::slice::from_ref(&path), setup.center(), setup.axis_direction())?;
             groups.push(index::part_frame_op(op.tool_id(), op.feeds(), vec![path])?);
             continue;
         }
@@ -235,6 +241,14 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
         };
         let mut paths = Vec::new();
         push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
+        // Stock top is the highest Z of this planning mesh. The R plane is the job retract
+        // height. The floor is the higher of the two, so a retract below the mesh still rejects
+        // a rapid inside the part under the stock top. Surface rapids are raised to that floor.
+        let bounds = view.bounds().map_err(|err| op_err(op, err))?;
+        let grow = tool.diameter().map_or(0.0, |d| d * 0.5);
+        let footprint = safety::Footprint::from_aabb(bounds.min().x, bounds.min().y, bounds.max().x, bounds.max().y, grow);
+        let floor_z = bounds.max().z.max(job.retract());
+        safety::check_planar(op.name(), &paths, &footprint, floor_z)?;
         groups.push(indexed_op(op, paths));
     }
     let sweep = if job.rotary().is_some() { mesh_vertices(mesh)? } else { Vec::new() };
@@ -244,9 +258,19 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
 fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::GougeNote], post: Option<&PostDef>) -> Result<ExitCode, CliError> {
     let options = campanion_ir::VerifyOptions { safe_z: Some(job.clearance()), retract_z: Some(job.retract()) };
     let report = campanion_ir::verify_with(doc.program(), &options);
-    if !report.issues().is_empty() || !gouges.is_empty() {
+    // Rotary and 3+2 programs are checked in the planning frame, before indexing. A 3-axis
+    // program also blocks verifier findings that end or traverse below the retract height.
+    // An XY rapid between the retract and clearance heights stays a non-blocking finding.
+    let rapid_lines = if job.rotary().is_none() && job.five_axis().is_none() { safety::blocking_rapids(&report, job.retract()) } else { Vec::new() };
+    if !report.issues().is_empty() || !gouges.is_empty() || !rapid_lines.is_empty() {
         let mut err_out = io::stderr().lock();
-        write_all(&mut err_out, &report::format_report_and_gouges(&report, gouges))?;
+        if !report.issues().is_empty() || !gouges.is_empty() {
+            write_all(&mut err_out, &report::format_report_and_gouges(&report, gouges))?;
+        }
+        for line in &rapid_lines {
+            writeln!(err_out, "{line}")?;
+        }
+        err_out.flush()?;
         return Ok(ExitCode::from(1));
     }
     let text = match post {
@@ -395,6 +419,16 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
                 };
                 wrap::cut(&mut paths, op, tool, contours, &setup, job.tolerance().chord(), safe)?;
             }
+        }
+        if matches!(op.kind(), OperationKind::Wrap) {
+            let Some(setup) = job.rotary() else {
+                return Err(op_err(op, "wrap needs a rotary setup"));
+            };
+            safety::check_radial(op.name(), &paths, setup.center(), setup.axis_direction())?;
+        } else {
+            let grow = tool.diameter().map_or(0.0, |diameter| diameter * 0.5);
+            let footprint = safety::Footprint::from_contours(contours, grow).map_err(|err| op_err(op, err))?;
+            safety::check_planar(op.name(), &paths, &footprint, job.retract())?;
         }
         if plane_job {
             let frame = match op.plane() {
