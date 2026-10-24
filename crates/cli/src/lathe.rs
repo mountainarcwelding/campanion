@@ -2078,6 +2078,7 @@ fn build_document(
     let mut b_now = [0.0, 0.0];
     let mut sync_id = 0u32;
     let mut tailstock_advanced = false;
+    let mut zone_start: Option<Vec3> = None;
     for operation in &job.operations {
         if operation.is_wait() {
             sync_id = sync_id.saturating_add(1);
@@ -2135,7 +2136,13 @@ fn build_document(
             && !operation.is_tailstock()
             && let Some(tailstock) = &job.tailstock
         {
-            check_tailstock_zone(operation.name(), &toolpath, tailstock)?;
+            check_tailstock_zone(operation.name(), &toolpath, tailstock, zone_start)?;
+        }
+        if channel == 0
+            && operation.spindle() == WorkSpindle::Main
+            && let Some(tip) = last_motion_tip(&toolpath)
+        {
+            zone_start = Some(tip);
         }
         let index = u32::try_from(toolpaths.len()).map_err(|_| CliError::run("too many toolpaths"))?;
         toolpaths.push(toolpath);
@@ -2639,10 +2646,17 @@ fn tailstock_toolpath(operation: &Operation) -> Result<(ClPath, bool), CliError>
 /// A tip in the quill cylinder is rejected. X of an ordinary turning pose is a radius. Face
 /// interpolation and a Y move are Cartesian, so the radius is the distance from the spindle axis.
 /// Cylinder interpolation keeps the radius in X and the unrolled distance in Y.
-fn check_tailstock_zone(name: &str, path: &ClPath, tailstock: &TailstockBlock) -> Result<(), CliError> {
+/// Rejects any move of `path` that passes through the tailstock zone: `z > -clearance` and radius
+/// below `diameter / 2 + clearance`. Each move is checked as the straight segment from the previous
+/// tip (`start` for the first move, the last tip of the previous main-channel operation), so a
+/// diagonal rapid between two points outside the zone still fails. Arcs are checked by their chord;
+/// the clearance covers the chord error.
+fn check_tailstock_zone(name: &str, path: &ClPath, tailstock: &TailstockBlock, start: Option<Vec3>) -> Result<(), CliError> {
     let limit = tailstock.diameter * 0.5 + tailstock.clearance;
+    let z_min = -tailstock.clearance;
     let mut face = false;
     let mut cylinder = false;
+    let mut prev = start;
     for block in path.blocks() {
         match block {
             ClBlock::Event(Event::FaceInterpolation { on }) => {
@@ -2659,9 +2673,9 @@ fn check_tailstock_zone(name: &str, path: &ClPath, tailstock: &TailstockBlock) -
             }
             ClBlock::Motion(motion) => {
                 let tip = motion_tip(motion);
-                let radius = tailstock_radius(tip, face, cylinder);
-                let z = tip.z();
-                if z > -tailstock.clearance && radius < limit {
+                let from = prev.unwrap_or(tip);
+                prev = Some(tip);
+                if let Some((radius, z)) = segment_zone_hit(from, tip, face, cylinder, z_min, limit) {
                     let diameter = radius * 2.0;
                     return Err(CliError::invalid(format!("operation {name}: move at X{diameter:.3} Z{z:.3} enters the tailstock zone")));
                 }
@@ -2672,10 +2686,45 @@ fn check_tailstock_zone(name: &str, path: &ClPath, tailstock: &TailstockBlock) -
     Ok(())
 }
 
-/// Radius in the main part frame. Turning and cylinder poses store it in X. A face frame, and a
-/// pose that has left the centreline on Y, stores Cartesian X and Y.
-fn tailstock_radius(tip: Vec3, face: bool, cylinder: bool) -> f64 {
-    if cylinder || (!face && tip.y().abs() <= 1.0e-9) { tip.x() } else { tip.x().hypot(tip.y()) }
+/// The point of the segment `from`→`to` with the smallest radius among those with `z > z_min`,
+/// when that radius is below `limit`. Radius is X in turning and cylinder mode and |XY| when the
+/// tip is off the XZ plane or face interpolation is on.
+fn segment_zone_hit(from: Vec3, to: Vec3, face: bool, cylinder: bool, z_min: f64, limit: f64) -> Option<(f64, f64)> {
+    let dz = to.z() - from.z();
+    // Interval of t in [0, 1] where z(t) > z_min (open at a crossing).
+    let (lo, hi) = if dz.abs() <= 1.0e-12 {
+        if from.z() > z_min { (0.0, 1.0) } else { return None }
+    } else {
+        let t = (z_min - from.z()) / dz;
+        if dz > 0.0 { (t.max(0.0), 1.0) } else { (0.0, t.min(1.0)) }
+    };
+    if lo > hi || (lo == hi && !(from.z() + dz * lo > z_min)) {
+        return None;
+    }
+    let planar = cylinder || (!face && from.y().abs() <= 1.0e-9 && to.y().abs() <= 1.0e-9);
+    let t = if planar {
+        if to.x() - from.x() >= 0.0 { lo } else { hi }
+    } else {
+        let (px, py) = (from.x(), from.y());
+        let (dx, dy) = (to.x() - from.x(), to.y() - from.y());
+        let len2 = dx * dx + dy * dy;
+        let t0 = if len2 <= 1.0e-24 { lo } else { -(px * dx + py * dy) / len2 };
+        t0.clamp(lo, hi)
+    };
+    let x = from.x() + (to.x() - from.x()) * t;
+    let y = from.y() + (to.y() - from.y()) * t;
+    let z = from.z() + dz * t;
+    let radius = if planar { x } else { x.hypot(y) };
+    // A hit exactly on the z boundary only counts if the segment continues inside.
+    let inside_z = z > z_min || (hi > lo && radius < limit);
+    (inside_z && radius < limit).then_some((radius, z))
+}
+
+fn last_motion_tip(path: &ClPath) -> Option<Vec3> {
+    path.blocks().iter().rev().find_map(|block| match block {
+        ClBlock::Motion(motion) => Some(motion_tip(motion)),
+        _ => None,
+    })
 }
 
 fn motion_tip(motion: &ClMotion) -> Vec3 {
@@ -3239,22 +3288,55 @@ mod tests {
         let tailstock = super::TailstockBlock { diameter: 18.0, clearance: 1.0 };
         let limit = tailstock.diameter * 0.5 + tailstock.clearance;
         assert!((limit - 10.0).abs() < 1e-12);
-        unwrap_ok(super::check_tailstock_zone("cut", &path_of(vec![rapid_at(limit, 0.0, 0.0)]), &tailstock), "exact radius passes");
-        unwrap_ok(super::check_tailstock_zone("cut", &path_of(vec![rapid_at(0.0, 0.0, -tailstock.clearance)]), &tailstock), "z = -clearance passes");
+        unwrap_ok(super::check_tailstock_zone("cut", &path_of(vec![rapid_at(limit, 0.0, 0.0)]), &tailstock, None), "exact radius passes");
+        unwrap_ok(
+            super::check_tailstock_zone("cut", &path_of(vec![rapid_at(0.0, 0.0, -tailstock.clearance)]), &tailstock, None),
+            "z = -clearance passes",
+        );
 
         let inside = limit - 0.001;
-        let err = super::check_tailstock_zone("cut", &path_of(vec![rapid_at(inside, 0.0, -0.25)]), &tailstock).expect_err("inside");
+        let err = super::check_tailstock_zone("cut", &path_of(vec![rapid_at(inside, 0.0, -0.25)]), &tailstock, None).expect_err("inside");
         let expected = format!("operation cut: move at X{:.3} Z{:.3} enters the tailstock zone", inside * 2.0, -0.25);
         assert!(err.to_string().contains(&expected), "{err}");
 
         let face = vec![ClBlock::Event(Event::FaceInterpolation { on: true }), rapid_at(0.0, limit, 0.0)];
-        unwrap_ok(super::check_tailstock_zone("face", &path_of(face), &tailstock), "face radius on the boundary passes");
+        unwrap_ok(super::check_tailstock_zone("face", &path_of(face), &tailstock, None), "face radius on the boundary passes");
         let face_in = vec![ClBlock::Event(Event::FaceInterpolation { on: true }), rapid_at(0.0, inside, 0.0)];
-        let err = super::check_tailstock_zone("face", &path_of(face_in), &tailstock).expect_err("face inside");
+        let err = super::check_tailstock_zone("face", &path_of(face_in), &tailstock, None).expect_err("face inside");
         assert!(err.to_string().contains("operation face: move at X"), "{err}");
 
         let cylinder = vec![ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) }), rapid_at(limit, 80.0, 0.0)];
-        unwrap_ok(super::check_tailstock_zone("wrap", &path_of(cylinder), &tailstock), "unrolled Y is not a radius");
+        unwrap_ok(super::check_tailstock_zone("wrap", &path_of(cylinder), &tailstock, None), "unrolled Y is not a radius");
+    }
+
+    #[test]
+    fn tailstock_zone_checks_whole_moves_not_only_their_end_points() {
+        let tailstock = super::TailstockBlock { diameter: 18.0, clearance: 1.0 };
+        // Both ends are outside (Z-5 below the zone, then X30 outside the radius) but the diagonal
+        // rapid cuts the zone corner.
+        let diagonal = vec![rapid_at(0.0, 0.0, -5.0), rapid_at(15.0, 0.0, 5.0)];
+        let err = super::check_tailstock_zone("approach", &path_of(diagonal), &tailstock, None).expect_err("diagonal");
+        assert!(err.to_string().contains("operation approach: move at X12.000 Z-1.000 enters the tailstock zone"), "{err}");
+
+        // The same move with the corner kept clear passes.
+        let clear = vec![rapid_at(0.0, 0.0, -5.0), rapid_at(15.0, 0.0, -5.0), rapid_at(15.0, 0.0, 5.0)];
+        unwrap_ok(super::check_tailstock_zone("approach", &path_of(clear), &tailstock, None), "square approach passes");
+
+        // A move along z = -clearance touches the zone boundary only.
+        let along = vec![rapid_at(30.0, 0.0, -1.0), rapid_at(0.0, 0.0, -1.0)];
+        unwrap_ok(super::check_tailstock_zone("face", &path_of(along), &tailstock, None), "boundary move passes");
+
+        // The first move starts where the previous operation ended.
+        let first = vec![rapid_at(15.0, 0.0, 5.0)];
+        let start = Vec3::new(0.0, 0.0, -5.0).expect("start");
+        let err = super::check_tailstock_zone("next", &path_of(first.clone()), &tailstock, Some(start)).expect_err("carried start");
+        assert!(err.to_string().contains("operation next: move at X"), "{err}");
+        unwrap_ok(super::check_tailstock_zone("next", &path_of(first), &tailstock, None), "no start passes");
+
+        // A face-interpolated move through the centre is caught even though both ends are at radius 12.
+        let face = vec![ClBlock::Event(Event::FaceInterpolation { on: true }), rapid_at(12.0, 0.0, 0.0), rapid_at(-12.0, 0.0, 0.0)];
+        let err = super::check_tailstock_zone("face", &path_of(face), &tailstock, None).expect_err("through centre");
+        assert!(err.to_string().contains("move at X0.000 Z0.000"), "{err}");
     }
 
     #[test]
