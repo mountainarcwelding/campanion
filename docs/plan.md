@@ -337,7 +337,7 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-23: M10 done (v0.6.1) except the STEP section, which moves to M11 v0.7.0. M11 broken
   down into Parts A–C. Mill-turn posts: Haas first, then LinuxCNC. 5-axis milling stays in M11.
 - 2026-10-24: M11 Part C items 8–10 released as v0.8.0 (kinematics, indexed 3+2 with Haas G254
-  and LinuxCNC machine-coordinate posts, tilting-B-head turning). Deferred mesh ops on tilted planes to a
+  and LinuxCNC machine-coordinate posts, B-head turning). Deferred mesh ops on tilted planes to a
   follow-up to keep v0.8.0 small.
 - 2026-10-24: v0.8.1 is a safety patch: mill drill feeds to depth from the R plane instead of
   rapiding (v0.1.0–v0.8.0), surface rapids stay above the model top (v0.3.0–v0.8.0), and a rapid

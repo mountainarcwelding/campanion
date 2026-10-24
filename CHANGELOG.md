@@ -8,7 +8,7 @@
 
 ### Changed
 
-- Docs and error messages call the tilting milling head a "tilting B head", so it is not confused with the linear B axis of Haas ST tailstocks and DS secondary spindles.
+- Docs and error messages call the tilting milling head a "tilting B head", so it is not confused with the linear B axis of positioned Haas ST tailstocks and of DS secondary spindles.
 
 ## 0.8.2 — 2026-10-24
 
