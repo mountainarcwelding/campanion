@@ -31,8 +31,11 @@
 //! Facing, longitudinal roughing, and finishing are in [`ops`]. Those paths are
 //! coordinates of the programmed point with the nose radius applied here, so they
 //! do not depend on cutter compensation (G41/G42). Threading, grooving, parting and
-//! centreline drilling are in [`cycles`]. [`to_cl_path`] writes one path as a
-//! [`campanion_ir::ClPath`] in the ZX plane.
+//! centreline drilling are in [`cycles`]. Indexed live drilling and slotting are in
+//! [`live`]: C changes only on rapids at clearance, with no Y axis and no C
+//! interpolation. [`to_cl_path`] writes one turning path as a [`campanion_ir::ClPath`]
+//! in the ZX plane. A live path is converted by the caller, because its steps carry a
+//! C angle and brake markers.
 //!
 //! [`check_turn_gouges`] places the insert outline and an optional holder on every
 //! sample of a [`TurnPath`], including rapids, and reports how far the nose, a
@@ -46,6 +49,7 @@
 mod cycles;
 mod gouge;
 mod ir;
+mod live;
 mod mesh;
 mod ops;
 mod profile;
@@ -57,6 +61,7 @@ mod section_tests;
 pub use cycles::{DrillParams, GrooveParams, Infeed, PartParams, ThreadParams, centre_drill, groove, part_off, thread, thread_pass_depths};
 pub use gouge::{GougeKind, HolderGeom, InsertGeom, TurnGouge, check_turn_gouges};
 pub use ir::to_cl_path;
+pub use live::{LiveDrillParams, LiveFace, LivePath, LiveSlotParams, LiveStation, LiveStep, MAX_LIVE_POSITIONS, live_drill, live_slot};
 pub use mesh::MeshAxis;
 pub use ops::{FaceParams, FinishParams, RoughParams, Side, TipPoint, TurnMove, TurnPath, TurnTool, compensated_profile, face, finish, rough};
 pub use profile::TurnProfile;

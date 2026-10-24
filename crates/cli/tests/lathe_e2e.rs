@@ -320,3 +320,166 @@ EOF
     }
     Ok(())
 }
+
+fn assert_golden(name: &str, actual: &str) -> Result<(), String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden").join(name);
+    if std::env::var("UPDATE_GOLDEN").ok().as_deref() == Some("1") {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        std::fs::write(&path, actual).map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    let expected = std::fs::read_to_string(&path).map_err(|err| format!("read {}: {err} (set UPDATE_GOLDEN=1 to create)", path.display()))?;
+    if actual != expected {
+        return Err(format!("golden mismatch for {} (set UPDATE_GOLDEN=1 to regenerate)", path.display()));
+    }
+    Ok(())
+}
+
+fn assert_in_order(text: &str, needles: &[&str]) -> Result<(), String> {
+    let mut from = 0;
+    for needle in needles {
+        let Some(at) = text[from..].find(needle) else {
+            return Err(format!("missing `{needle}` after byte {from}\n{text}"));
+        };
+        from += at + needle.len();
+    }
+    Ok(())
+}
+
+/// `M133` and `M135` contain the characters M3. Only a whitespace token that is exactly `M3` is a work-spindle start.
+fn assert_no_work_spindle_between_c_engage(text: &str) -> Result<(), String> {
+    let mut rest = text;
+    let mut spans = 0;
+    while let Some(start) = rest.find("M154") {
+        let after = &rest[start + "M154".len()..];
+        let Some(end) = after.find("M155") else {
+            return Err(format!("M154 has no following M155\n{text}"));
+        };
+        for token in after[..end].split_whitespace() {
+            if token == "M3" {
+                return Err(format!("M3 between M154 and M155\n{}", &after[..end]));
+            }
+        }
+        spans += 1;
+        rest = &after[end + "M155".len()..];
+    }
+    if spans < 2 {
+        return Err(format!("expected two C-axis cycles, found {spans}"));
+    }
+    Ok(())
+}
+
+fn live_shell(spindle: &str, tools: &str, operation: &str) -> String {
+    format!(
+        r#"{{
+        "format": "campanion-lathe/1",
+        "source": {{ "path": "missing.dxf" }},
+        "units": "mm",
+        "stock": {{ "kind": "bar", "diameter": 40, "length": 30, "front_allowance": 0 }},
+        "spindle": {spindle},
+        "tools": [{tools}],
+        "operations": [{operation}],
+        "clearance": 2
+    }}"#
+    )
+}
+
+#[test]
+fn millturn_posts_haas_live_drill_and_slot() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/millturn.lathe.json"))?;
+    let out = temp_path("campanion-lathe-millturn.nc");
+    let ir = temp_path("campanion-lathe-millturn.ir.json");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "haas_lathe", "--ir", &path_arg(&ir)?])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("millturn.haas_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["M154", "G28 H0.", "M133", "M14", "M15", "C90.", "M135", "M155"])?;
+    assert_no_work_spindle_between_c_engage(&posted)?;
+
+    let ir_text = std::fs::read_to_string(&ir).map_err(|err| err.to_string())?;
+    let doc = campanion_ir::Document::from_json(&ir_text).map_err(|err| err.to_string())?;
+    let program = doc.program();
+    let turning = program.turning().ok_or("turning setup is missing")?;
+    if turning.spindles().first().and_then(|spindle| spindle.c_axis()) != Some(0) {
+        return Err(format!("spindle C axis is {:?}", turning.spindles().first().map(|spindle| spindle.c_axis())));
+    }
+    if turning.heads().first().is_none_or(|head| !head.live_tooling()) {
+        return Err("head live tooling is off".into());
+    }
+    if turning.bindings().len() != 3 || program.toolpaths().len() != 3 {
+        return Err(format!("expected 3 toolpaths, bindings {} paths {}", turning.bindings().len(), program.toolpaths().len()));
+    }
+    if turning.bindings()[0].speed().is_none() {
+        return Err("face binding has no spindle speed".into());
+    }
+    if turning.bindings()[1].speed().is_some() || turning.bindings()[2].speed().is_some() {
+        return Err("a live binding stored a spindle speed".into());
+    }
+    if turning.insert_for_tool(1).is_none() || turning.insert_for_tool(2).is_some() || turning.insert_for_tool(3).is_some() {
+        return Err("live tools were mounted as inserts, or the facing insert is missing".into());
+    }
+    let diameter = |id: u32| program.tools().iter().find(|tool| tool.id() == id).and_then(|tool| tool.diameter());
+    if diameter(1).is_some() || diameter(2) != Some(6.0) || diameter(3) != Some(8.0) {
+        return Err(format!("tool diameters {:?} {:?} {:?}", diameter(1), diameter(2), diameter(3)));
+    }
+    assert_live_path(&program.toolpaths()[1], campanion_ir::Vec3::Z, &[0.0, 90.0, 180.0, 270.0])?;
+    assert_live_path(&program.toolpaths()[2], campanion_ir::Vec3::X, &[0.0])?;
+    Ok(())
+}
+
+fn assert_live_path(path: &campanion_ir::ClPath, axis: campanion_ir::Vec3, angles: &[f64]) -> Result<(), String> {
+    let mut seen = Vec::new();
+    for block in path.blocks() {
+        match block {
+            campanion_ir::ClBlock::Event(campanion_ir::Event::ProcessOn { .. }) => {
+                return Err(format!("live path {} turns the work spindle on", path.name().unwrap_or("")));
+            }
+            campanion_ir::ClBlock::Motion(motion) => {
+                let pose = match motion {
+                    campanion_ir::ClMotion::Rapid { to, .. } | campanion_ir::ClMotion::Linear { to, .. } => to,
+                    _ => return Err("live path has a non-linear move".into()),
+                };
+                if pose.axis() != axis || pose.tip().y() != 0.0 {
+                    return Err(format!("pose axis {:?} y {}", pose.axis(), pose.tip().y()));
+                }
+                let Some(c) = pose.rotary() else {
+                    return Err("live motion has no C angle".into());
+                };
+                seen.push(c);
+            }
+            campanion_ir::ClBlock::Event(_) => {}
+        }
+    }
+    for angle in angles {
+        if !seen.iter().any(|c| (c - angle).abs() < 1e-9) {
+            return Err(format!("C {angle} is missing from {seen:?}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn live_jobs_reject_a_missing_c_axis_a_wrong_tool_and_bad_geometry() -> Result<(), String> {
+    let axial = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6, "max_rpm": 5000 }"#;
+    let radial = r#"{ "id": 3, "station": 3, "live": "radial", "kind": "endmill", "diameter": 8 }"#;
+    let front = r#"{ "name": "holes", "type": "live_drill", "tool_id": 2, "face": "front", "z_start": 0, "positions": [{ "c": 0, "r": 10 }], "depth": 5, "rpm": 1000, "feed": 80 }"#;
+    let no_c = live_shell(r#"{ "max_rpm": 3000 }"#, axial, front);
+    assert_rejects(&no_c, "campanion-lathe-live-no-c.json", "live operations need spindle.c_axis true")?;
+
+    let od = r#"{ "name": "cross", "type": "live_drill", "tool_id": 2, "face": "od", "diameter": 30, "positions": [{ "c": 0, "z": -8 }], "depth": 4, "rpm": 1000, "feed": 80 }"#;
+    let axial_on_od = live_shell(r#"{ "max_rpm": 3000, "c_axis": true }"#, axial, od);
+    assert_rejects(&axial_on_od, "campanion-lathe-live-axial-od.json", "operation cross: tool 2 is not a radial live tool")?;
+
+    let empty = r#"{ "name": "holes", "type": "live_drill", "tool_id": 2, "face": "front", "z_start": 0, "positions": [], "depth": 5, "rpm": 1000, "feed": 80 }"#;
+    let empty_positions = live_shell(r#"{ "max_rpm": 3000, "c_axis": true }"#, axial, empty);
+    assert_rejects(&empty_positions, "campanion-lathe-live-empty.json", "positions is empty")?;
+
+    let deep = r#"{ "name": "cross", "type": "live_drill", "tool_id": 3, "face": "od", "diameter": 20, "positions": [{ "c": 0, "z": -4 }], "depth": 11, "rpm": 1000, "feed": 80 }"#;
+    let too_deep = live_shell(r#"{ "max_rpm": 3000, "c_axis": true }"#, radial, deep);
+    assert_rejects(&too_deep, "campanion-lathe-live-depth.json", "depth exceeds the surface radius")?;
+    Ok(())
+}
