@@ -1712,6 +1712,60 @@ fn part_transfer_rejects_a_post_without_it_and_an_unknown_spindle() {
 }
 
 #[test]
+fn tailstock_writes_m21_m22_and_blocks_a_transfer_while_advanced() {
+    let blocks = vec![event_block(Event::Tailstock { engage: true }), linear(20.0, -10.0, 80.0), event_block(Event::Tailstock { engage: false })];
+    let program = lathe_program(blocks, turning(None, false));
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let m21 = index_of(&text, "M21");
+    let m22 = index_of(&text, "M22");
+    assert!(m21 < m22, "{text}");
+    let between = &text[m21 + 3..m22];
+    assert!(between.lines().all(|line| !line.contains('B')), "{between}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    for event in [
+        Event::ChuckClamp { spindle: "sub".into(), clamp: false },
+        Event::SpindleSync { engage: true, phase_deg: None },
+        Event::SpindleMove { spindle: "sub".into(), z: 1.0, machine: false, feed: None },
+    ] {
+        let blocked = lathe_program(vec![event_block(Event::Tailstock { engage: true }), event_block(event)], turning(None, false));
+        let err = post_program(&blocked, &post, &options()).expect_err("transfer while advanced");
+        assert!(err.to_string().contains("retract the tailstock before a part transfer"), "{err}");
+    }
+
+    let linux = post_program(&lathe_program(vec![event_block(Event::Tailstock { engage: true })], turning(None, false)), &linux_lathe(), &options())
+        .expect_err("linuxcnc");
+    assert!(linux.to_string().contains("post `linuxcnc_lathe` has no tailstock"), "{linux}");
+
+    let mill = Program::try_new(
+        Some("mill".into()),
+        Vec::new(),
+        None,
+        vec![path(None, None, vec![event_block(Event::Tailstock { engage: false })])],
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .expect("program");
+    let err = post_program(&mill, &builtin("haas").expect("haas"), &options()).expect_err("mill");
+    assert!(err.to_string().contains("post `haas` has no tailstock"), "{err}");
+
+    let mut raw = haas_json();
+    raw["lathe"]["tailstock"]["advance"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty advance");
+    assert!(err.to_string().contains("lathe.tailstock.advance") && err.to_string().contains("must not be empty"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["tailstock"]["retract"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty retract");
+    assert!(err.to_string().contains("lathe.tailstock.retract") && err.to_string().contains("must not be empty"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["tailstock"]["advance"] = serde_json::json!(["M21 {z}"]);
+    let err = load_post(&raw.to_string()).expect_err("placeholder");
+    assert!(err.to_string().contains("lathe.tailstock.advance") && err.to_string().contains("unknown placeholder {z}"), "{err}");
+}
+
+#[test]
 fn haas_lathe_rejects_a_b_head_index() {
     let program = lathe_program(vec![ClBlock::Event(Event::HeadIndex { head: "turret1".into(), b_deg: 30.0 })], turning(None, false));
     let err = post_program(&program, &builtin("haas_lathe").expect("haas"), &options()).expect_err("b head");

@@ -359,6 +359,9 @@ pub(crate) struct LatheOutput {
     /// Absent: chuck, sync, spindle-run and spindle-move events are rejected.
     #[serde(default)]
     pub(crate) transfer: Option<TransferOutput>,
+    /// Tailstock advance and retract lines. Absent: tailstock events are rejected.
+    #[serde(default)]
+    pub(crate) tailstock: Option<TailstockOutput>,
     /// Two or more channel sections. Absent: a binding whose channel is not 0 is rejected.
     #[serde(default)]
     pub(crate) channels: Option<ChannelsOutput>,
@@ -412,6 +415,18 @@ pub struct ChannelsOutput {
     pub wait: Vec<String>,
     /// Added to the sync id to form `{code}`.
     pub wait_base: u32,
+}
+
+/// Advance and retract lines for a lathe tailstock.
+///
+/// Both lists are bare. Hold force and travel are machine settings, not placeholders.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TailstockOutput {
+    /// Written for [`campanion_ir::Event::Tailstock`] with `engage` true.
+    pub(crate) advance: Vec<String>,
+    /// Written for [`campanion_ir::Event::Tailstock`] with `engage` false.
+    pub(crate) retract: Vec<String>,
 }
 
 /// Chuck, sync, secondary-spindle run and housing-move lines for a part transfer.
@@ -780,6 +795,16 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_templates("lathe.transfer.move_rapid", &transfer.move_rapid, LATHE_MOVE)?;
         check_templates("lathe.transfer.move_feed", &transfer.move_feed, LATHE_MOVE_FEED)?;
         check_templates("lathe.transfer.move_machine", &transfer.move_machine, LATHE_MOVE)?;
+    }
+    if let Some(tailstock) = &lathe.tailstock {
+        if tailstock.advance.is_empty() {
+            return Err(field("lathe.tailstock.advance", "must not be empty"));
+        }
+        if tailstock.retract.is_empty() {
+            return Err(field("lathe.tailstock.retract", "must not be empty"));
+        }
+        check_templates("lathe.tailstock.advance", &tailstock.advance, LATHE_BARE)?;
+        check_templates("lathe.tailstock.retract", &tailstock.retract, LATHE_BARE)?;
     }
     if let Some(channels) = &lathe.channels {
         if channels.count < 2 {

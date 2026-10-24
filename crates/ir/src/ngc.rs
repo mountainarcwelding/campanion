@@ -393,6 +393,10 @@ impl Writer {
             Event::HeadIndex { head, b_deg } => {
                 self.line(&format!("(head index {} {b_deg})", strip_parens(head)));
             }
+            Event::Tailstock { engage } => {
+                let verb = if *engage { "advance" } else { "retract" };
+                self.line(&format!("(tailstock {verb})"));
+            }
         }
         Ok(())
     }
