@@ -1766,6 +1766,58 @@ fn tailstock_writes_m21_m22_and_blocks_a_transfer_while_advanced() {
 }
 
 #[test]
+fn parts_catcher_writes_m36_m37_and_other_posts_reject_it() {
+    let blocks =
+        vec![event_block(Event::PartsCatcher { extend: true }), linear(20.0, -10.0, 80.0), event_block(Event::PartsCatcher { extend: false })];
+    let program = lathe_program(blocks, turning(None, false));
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let m36 = index_of(&text, "M36");
+    let m37 = index_of(&text, "M37");
+    assert!(m36 < m37, "{text}");
+    let between = &text[m36 + 3..m37];
+    assert!(
+        between.lines().any(|line| {
+            let feed = line.split_whitespace().any(|word| word == "G1" || word == "G01");
+            feed && line.contains('X')
+        }),
+        "{between}"
+    );
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let linux =
+        post_program(&lathe_program(vec![event_block(Event::PartsCatcher { extend: true })], turning(None, false)), &linux_lathe(), &options())
+            .expect_err("linuxcnc");
+    assert!(linux.to_string().contains("post `linuxcnc_lathe` has no parts catcher"), "{linux}");
+
+    let mill = Program::try_new(
+        Some("mill".into()),
+        Vec::new(),
+        None,
+        vec![path(None, None, vec![event_block(Event::PartsCatcher { extend: false })])],
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .expect("program");
+    let err = post_program(&mill, &builtin("haas").expect("haas"), &options()).expect_err("mill");
+    assert!(err.to_string().contains("post `haas` has no parts catcher"), "{err}");
+
+    let mut raw = haas_json();
+    raw["lathe"]["parts_catcher"]["extend"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty extend");
+    assert!(err.to_string().contains("lathe.parts_catcher.extend") && err.to_string().contains("must not be empty"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["parts_catcher"]["retract"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty retract");
+    assert!(err.to_string().contains("lathe.parts_catcher.retract") && err.to_string().contains("must not be empty"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["parts_catcher"]["extend"] = serde_json::json!(["M36 {z}"]);
+    let err = load_post(&raw.to_string()).expect_err("placeholder");
+    assert!(err.to_string().contains("lathe.parts_catcher.extend") && err.to_string().contains("unknown placeholder {z}"), "{err}");
+}
+
+#[test]
 fn haas_lathe_rejects_a_b_head_index() {
     let program = lathe_program(vec![ClBlock::Event(Event::HeadIndex { head: "turret1".into(), b_deg: 30.0 })], turning(None, false));
     let err = post_program(&program, &builtin("haas_lathe").expect("haas"), &options()).expect_err("b head");

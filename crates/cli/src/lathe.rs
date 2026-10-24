@@ -19,7 +19,9 @@
 //! main-spindle toolpath on channel 0 that hands the part to the sub, optionally parting it off
 //! without a spindle stop. An `eject` stops the sub and unclamps it. A `tailstock` operation
 //! advances or retracts the tailstock: one event on channel 0, main spindle, no tool. While it
-//! is advanced, motion tips stay outside the quill cylinder. Speed is stored on the
+//! is advanced, motion tips stay outside the quill cylinder. A `part` operation with `catch`
+//! extends the parts catcher after the approach rapid and retracts it after the final retract,
+//! when the part fits the job's `parts_catcher` limits. Speed is stored on the
 //! turning binding, which names the operation's spindle and channel. Channel 1 uses head `lower`.
 //! A `wait` operation inserts the same sync event on channel 0 and channel 1. An indexed live drill or slot
 //! changes the tool the same way, engages C, starts the live tool, clamps the brake around each
@@ -113,6 +115,8 @@ struct LatheJob {
     sub: Option<SubBlock>,
     /// Centre or quill at the finished face. Absent when the job has no tailstock block.
     tailstock: Option<TailstockBlock>,
+    /// Diameter and length the parts catcher will take. Absent when the job has no parts_catcher block.
+    parts_catcher: Option<PartsCatcherBlock>,
     head: LatheHead,
     tools: Vec<LatheTool>,
     operations: Vec<Operation>,
@@ -302,6 +306,8 @@ enum Operation {
         speed: SpindleSpeed,
         channel: u8,
         b_deg: Option<f64>,
+        /// Swing the parts catcher in around this part-off. Default false.
+        catch: bool,
     },
     Drill {
         name: String,
@@ -402,6 +408,14 @@ struct TailstockBlock {
     diameter: f64,
     /// Extra gap around that cylinder, in job units. Default 1.
     clearance: f64,
+}
+
+/// Largest part the catcher will take. Both limits are job units and must be positive.
+struct PartsCatcherBlock {
+    /// Maximum stock outer diameter.
+    max_diameter: f64,
+    /// Maximum part length, `|z|` plus the part-off insert width.
+    max_length: f64,
 }
 
 /// Part-off nested in a transfer. Same fields as a `part` operation, without name, type or spindle.
@@ -562,6 +576,11 @@ impl Operation {
         matches!(self, Self::Tailstock { .. })
     }
 
+    /// `part` with `catch` true. A nested transfer part-off never sets it.
+    fn catches(&self) -> bool {
+        matches!(self, Self::Part { catch: true, .. })
+    }
+
     fn is_flat(&self) -> bool {
         matches!(self, Self::LiveFlat { .. })
     }
@@ -715,7 +734,21 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     check_format(tag)?;
     check_keys(
         map,
-        &["format", "source", "units", "stock", "spindle", "sub", "tailstock", "head", "tools", "operations", "tolerance", "clearance"],
+        &[
+            "format",
+            "source",
+            "units",
+            "stock",
+            "spindle",
+            "sub",
+            "tailstock",
+            "parts_catcher",
+            "head",
+            "tools",
+            "operations",
+            "tolerance",
+            "clearance",
+        ],
         "job",
     )?;
     let units = as_str(require(map, "units")?, "units")?;
@@ -733,6 +766,10 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         Some(value) => Some(parse_tailstock_block(value)?),
         None => None,
     };
+    let parts_catcher = match optional(map, "parts_catcher") {
+        Some(value) => Some(parse_parts_catcher_block(value)?),
+        None => None,
+    };
     if sub.is_some() && tailstock.is_some() {
         return Err(CliError::invalid("\"tailstock\" is not allowed with a \"sub\" block (the B axis is the secondary spindle)"));
     }
@@ -742,7 +779,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let clearance = non_negative(require(map, "clearance")?, "clearance")?;
     let sub_rpm = sub.as_ref().map(|block| block.max_rpm);
     let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
-    check_tailstock_ops(&operations, tailstock.is_some())?;
+    check_tailstock_ops(&operations, tailstock.is_some(), parts_catcher.is_some())?;
     for operation in &operations {
         check_b_deg(operation, &head)?;
         if operation.is_wait() {
@@ -758,7 +795,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         check_flat(operation, tool, &head, clearance)?;
         check_mill_head(operation, &head)?;
     }
-    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, sub, tailstock, head, tools, operations, linear, chord, clearance })
+    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, sub, tailstock, parts_catcher, head, tools, operations, linear, chord, clearance })
 }
 
 fn parse_tailstock_block(value: &Value) -> Result<TailstockBlock, CliError> {
@@ -772,11 +809,28 @@ fn parse_tailstock_block(value: &Value) -> Result<TailstockBlock, CliError> {
     Ok(TailstockBlock { diameter, clearance })
 }
 
+fn parse_parts_catcher_block(value: &Value) -> Result<PartsCatcherBlock, CliError> {
+    let map = object(value, "parts_catcher")?;
+    check_keys(map, &["max_diameter", "max_length"], "parts_catcher")?;
+    let max_diameter = positive(require(map, "max_diameter")?, "max_diameter")?;
+    let max_length = positive(require(map, "max_length")?, "max_length")?;
+    Ok(PartsCatcherBlock { max_diameter, max_length })
+}
+
 /// Advance and retract must alternate. A transfer or a sub-spindle operation while the tailstock
-/// is advanced is rejected. Ending the program still advanced is allowed.
-fn check_tailstock_ops(operations: &[Operation], has_block: bool) -> Result<(), CliError> {
+/// is advanced is rejected. Ending the program still advanced is allowed. A `part` with `catch`
+/// needs the parts-catcher block, and it is rejected while the tailstock is still advanced.
+fn check_tailstock_ops(operations: &[Operation], has_block: bool, has_catcher: bool) -> Result<(), CliError> {
     let mut advanced = false;
     for operation in operations {
+        if let Operation::Part { name, catch: true, .. } = operation {
+            if !has_catcher {
+                return Err(CliError::invalid(format!("operation {name}: catch needs a \"parts_catcher\" block")));
+            }
+            if advanced {
+                return Err(CliError::invalid(format!("operation {name}: retract the tailstock before catching the part")));
+            }
+        }
         if let Operation::Tailstock { name, engage } = operation {
             if !has_block {
                 return Err(CliError::invalid(format!("operation {name}: tailstock needs a \"tailstock\" block")));
@@ -1283,7 +1337,9 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
             "speed",
             "b_deg",
         ],
-        "part" => &["name", "type", "tool_id", "spindle", "channel", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed", "b_deg"],
+        "part" => {
+            &["name", "type", "tool_id", "spindle", "channel", "z", "to_diameter", "chamfer", "peck", "clearance", "feed", "speed", "b_deg", "catch"]
+        }
         "drill" => &[
             "name",
             "type",
@@ -1486,6 +1542,10 @@ fn parse_part(
         speed,
         channel,
         b_deg,
+        catch: match optional(map, "catch") {
+            Some(value) => as_bool(value, "catch")?,
+            None => false,
+        },
     })
 }
 
@@ -2129,6 +2189,7 @@ fn build_document(
             let motion = to_cl_path(&turned, Some(operation.name().to_string()), operation.tool_id(), operation.feed(), Some(job.clearance))
                 .map_err(|err| op_fail(operation.name(), err))?;
             let motion = apply_b_axis(job, motion, operation.b_target())?;
+            let motion = if operation.catches() { insert_parts_catcher(motion)? } else { motion };
             with_events(motion, operation.tool_id(), previous_slot)?
         };
         let toolpath = with_head_index(toolpath, head_for(channel), &mut b_now[usize::from(channel)], operation.b_target())?;
@@ -2533,11 +2594,34 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
             };
             groove(&turn_tool, &params).map_err(|err| op_fail(name, err))
         }
-        Operation::Part { name, z, to_diameter, chamfer, peck, clearance, .. } => {
+        Operation::Part { name, z, to_diameter, chamfer, peck, clearance, catch, .. } => {
             let width = insert.width().ok_or_else(|| op_fail(name, "part-off insert needs a width"))?;
+            let surface_radius = stock.outer_radius();
+            if *catch {
+                let catcher = job
+                    .parts_catcher
+                    .as_ref()
+                    .ok_or_else(|| CliError::invalid(format!("operation {name}: catch needs a \"parts_catcher\" block")))?;
+                // The part op already uses the stock outer radius. Fall back to the job stock
+                // diameter only when that radius is not a usable number.
+                let diameter = if surface_radius.is_finite() { surface_radius * 2.0 } else { stock_outer_diameter(&job.stock) };
+                let length = z.abs() + width;
+                if diameter > catcher.max_diameter {
+                    return Err(CliError::invalid(format!(
+                        "operation {name}: part diameter {diameter:.3} exceeds parts_catcher.max_diameter {:.3}",
+                        catcher.max_diameter
+                    )));
+                }
+                if length > catcher.max_length {
+                    return Err(CliError::invalid(format!(
+                        "operation {name}: part length {length:.3} exceeds parts_catcher.max_length {:.3}",
+                        catcher.max_length
+                    )));
+                }
+            }
             let params = PartParams {
                 z: *z,
-                surface_radius: stock.outer_radius(),
+                surface_radius,
                 insert_width: width,
                 to_radius: *to_diameter * 0.5,
                 chamfer: *chamfer,
@@ -2621,6 +2705,7 @@ fn part_off_blocks(job: &LatheJob, profile: &TurnProfile, name: &str, part: &Par
         speed: part.speed,
         channel: 0,
         b_deg: None,
+        catch: false,
     };
     let turned = turn_operation(job, profile, &part_op)?;
     let motion = to_cl_path(&turned, Some(name.to_string()), part.tool_id, part.feed, Some(job.clearance)).map_err(|err| op_fail(name, err))?;
@@ -2630,6 +2715,55 @@ fn part_off_blocks(job: &LatheJob, profile: &TurnProfile, name: &str, part: &Par
     match blocks.pop() {
         Some(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle })) => Ok(blocks),
         _ => Err(CliError::run(format!("internal: operation {name} part-off did not end on spindle stop"))),
+    }
+}
+
+/// Extend after the approach rapid and before the first feed that changes X. Retract after the
+/// last motion, which is the part-off's final retract.
+///
+/// The retract block is inserted first. Its index is past every motion, so the later extend
+/// insert shifts it by one and it stays after that retract.
+fn insert_parts_catcher(path: ClPath) -> Result<ClPath, CliError> {
+    let blocks = path.blocks().to_vec();
+    let mut approach = None;
+    let mut prev_x = None;
+    let mut feed_toward_x = None;
+    let mut last_motion = None;
+    for (index, block) in blocks.iter().enumerate() {
+        let ClBlock::Motion(motion) = block else {
+            continue;
+        };
+        last_motion = Some(index);
+        let x = motion_tip(motion).x();
+        if approach.is_none() {
+            if !matches!(motion, ClMotion::Rapid { .. }) {
+                return Err(CliError::run("internal: part-off approach is not a rapid"));
+            }
+            approach = Some(index);
+            prev_x = Some(x);
+            continue;
+        }
+        if feed_toward_x.is_none() && matches!(motion, ClMotion::Linear { .. }) && prev_x.is_some_and(|previous| (x - previous).abs() > 1e-9) {
+            feed_toward_x = Some(index);
+        }
+        prev_x = Some(x);
+    }
+    let approach = approach.ok_or_else(|| CliError::run("internal: part-off has no approach rapid"))?;
+    let feed_toward_x = feed_toward_x.ok_or_else(|| CliError::run("internal: part-off has no feed toward X"))?;
+    let last_motion = last_motion.ok_or_else(|| CliError::run("internal: part-off has no retract"))?;
+    if feed_toward_x != approach + 1 {
+        return Err(CliError::run("internal: part-off feed toward X does not follow the approach rapid"));
+    }
+    let mut blocks = blocks;
+    blocks.insert(last_motion + 1, ClBlock::Event(Event::PartsCatcher { extend: false }));
+    blocks.insert(approach + 1, ClBlock::Event(Event::PartsCatcher { extend: true }));
+    rebuild_path(path, blocks)
+}
+
+fn stock_outer_diameter(stock: &Stock) -> f64 {
+    match *stock {
+        Stock::Bar { diameter, .. } => diameter,
+        Stock::Tube { outer, .. } => outer,
     }
 }
 
@@ -3265,11 +3399,11 @@ mod tests {
                 part_off: None,
             },
         ];
-        let err = super::check_tailstock_ops(&ops, true).expect_err("transfer");
+        let err = super::check_tailstock_ops(&ops, true, false).expect_err("transfer");
         assert!(err.to_string().contains("operation handoff: retract the tailstock first"), "{err}");
 
         let eject = [super::Operation::Tailstock { name: "in".into(), engage: true }, super::Operation::Eject { name: "drop".into() }];
-        let err = super::check_tailstock_ops(&eject, true).expect_err("eject");
+        let err = super::check_tailstock_ops(&eject, true, false).expect_err("eject");
         assert!(err.to_string().contains("operation drop: retract the tailstock first"), "{err}");
     }
 
@@ -3359,5 +3493,138 @@ mod tests {
         let job = unwrap_ok(super::parse_job(&finish), "finish job");
         // Profile radius 10 equals D/2 + clearance. The finish stays on that radius.
         unwrap_ok(super::build_document(Path::new("job.lathe.json"), &job, &cylinder(10.0, 20.0), None), "exact radius finish passes");
+    }
+
+    /// Stock Ø40, part `z` -10, insert width 3, so the caught length is 13.
+    fn catcher_job(extra: &str, part_extra: &str) -> String {
+        format!(
+            r#"{{
+            "format": "campanion-lathe/1",
+            "source": {{ "path": "shaft.dxf" }},
+            "units": "mm",
+            "stock": {{ "kind": "bar", "diameter": 40, "length": 40, "front_allowance": 1 }},
+            "spindle": {{ "max_rpm": 3000 }},
+            {extra}
+            "tools": [{{ "id": 1, "station": 1, "shape": "groove", "width": 3, "nose_radius": 0.2, "orientation_deg": 90, "hand": "neutral", "tip": "centre" }}],
+            "operations": [{{ "name": "cutoff", "type": "part", "tool_id": 1, "z": -10, "clearance": 1, "feed": 60, "speed": {{ "rpm": 400 }}{part_extra} }}],
+            "clearance": 2
+        }}"#
+        )
+    }
+
+    fn catcher_events(path: &ClPath) -> Vec<bool> {
+        path.blocks()
+            .iter()
+            .filter_map(|block| match block {
+                ClBlock::Event(Event::PartsCatcher { extend }) => Some(*extend),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parts_catcher_block_uses_the_same_field_errors_as_tailstock() {
+        let unknown = parse_err(&catcher_job(r#""parts_catcher": { "max_diameter": 76, "max_length": 102, "weight": 3.6 },"#, ""));
+        assert!(unknown.contains("unknown parts_catcher field `weight`"), "{unknown}");
+
+        let zero = parse_err(&catcher_job(r#""parts_catcher": { "max_diameter": 0, "max_length": 102 },"#, ""));
+        assert!(zero.contains("max_diameter must be positive"), "{zero}");
+
+        let missing = parse_err(&catcher_job(r#""parts_catcher": { "max_diameter": 76 },"#, ""));
+        assert!(missing.contains("missing `max_length`"), "{missing}");
+
+        let negative = parse_err(&catcher_job(r#""parts_catcher": { "max_diameter": 76, "max_length": -1 },"#, ""));
+        assert!(negative.contains("max_length must be positive"), "{negative}");
+    }
+
+    #[test]
+    fn catch_needs_a_parts_catcher_block_and_a_retracted_tailstock() {
+        let missing = parse_err(&catcher_job("", r#", "catch": true"#));
+        assert!(missing.contains("operation cutoff: catch needs a \"parts_catcher\" block"), "{missing}");
+
+        let advanced = r#"{
+            "format": "campanion-lathe/1",
+            "source": { "path": "shaft.dxf" },
+            "units": "mm",
+            "stock": { "kind": "bar", "diameter": 40, "length": 40, "front_allowance": 1 },
+            "spindle": { "max_rpm": 3000 },
+            "tailstock": { "diameter": 12 },
+            "parts_catcher": { "max_diameter": 76, "max_length": 102 },
+            "tools": [{ "id": 1, "station": 1, "shape": "groove", "width": 3, "nose_radius": 0.2, "orientation_deg": 90, "hand": "neutral", "tip": "centre" }],
+            "operations": [
+                { "name": "in", "type": "tailstock", "action": "advance" },
+                { "name": "cutoff", "type": "part", "tool_id": 1, "z": -10, "clearance": 1, "feed": 60, "speed": { "rpm": 400 }, "catch": true }
+            ],
+            "clearance": 2
+        }"#
+        .to_string();
+        let err = parse_err(&advanced);
+        assert!(err.contains("operation cutoff: retract the tailstock before catching the part"), "{err}");
+
+        let retracted = advanced.replace(
+            r#"{ "name": "in", "type": "tailstock", "action": "advance" },"#,
+            r#"{ "name": "in", "type": "tailstock", "action": "advance" }, { "name": "out", "type": "tailstock", "action": "retract" },"#,
+        );
+        unwrap_ok(super::parse_job(&retracted), "retract then catch");
+
+        let transfer = r#"{
+            "format": "campanion-lathe/1",
+            "source": { "path": "shaft.dxf" },
+            "units": "mm",
+            "stock": { "kind": "bar", "diameter": 40, "length": 40, "front_allowance": 1 },
+            "spindle": { "max_rpm": 3000 },
+            "sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } },
+            "parts_catcher": { "max_diameter": 76, "max_length": 102 },
+            "tools": [{ "id": 1, "station": 1, "shape": "groove", "width": 3, "nose_radius": 0.2, "orientation_deg": 90, "hand": "neutral", "tip": "centre" }],
+            "operations": [{ "name": "handoff", "type": "transfer", "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200,
+                "part_off": { "tool_id": 1, "z": -10, "clearance": 1, "feed": 60, "speed": { "rpm": 400 }, "catch": true } }],
+            "clearance": 2
+        }"#
+        .to_string();
+        let err = parse_err(&transfer);
+        assert!(err.contains("unknown part_off field `catch`"), "{err}");
+    }
+
+    #[test]
+    fn part_size_must_fit_the_catcher_and_the_exact_length_passes() {
+        let job = unwrap_ok(
+            super::parse_job(&catcher_job(r#""parts_catcher": { "max_diameter": 39, "max_length": 13 },"#, r#", "catch": true"#)),
+            "fat job",
+        );
+        let err = super::build_document(Path::new("job.lathe.json"), &job, &cylinder(15.0, 30.0), None).expect_err("diameter");
+        assert!(err.to_string().contains("operation cutoff: part diameter 40.000 exceeds parts_catcher.max_diameter 39.000"), "{err}");
+
+        let long = unwrap_ok(
+            super::parse_job(&catcher_job(r#""parts_catcher": { "max_diameter": 40, "max_length": 12 },"#, r#", "catch": true"#)),
+            "long job",
+        );
+        let err = super::build_document(Path::new("job.lathe.json"), &long, &cylinder(15.0, 30.0), None).expect_err("length");
+        assert!(err.to_string().contains("operation cutoff: part length 13.000 exceeds parts_catcher.max_length 12.000"), "{err}");
+
+        let exact =
+            unwrap_ok(super::parse_job(&catcher_job(r#""parts_catcher": { "max_diameter": 40, "max_length": 13 },"#, r#", "catch": true"#)), "exact");
+        let (doc, gouges) = unwrap_ok(super::build_document(Path::new("job.lathe.json"), &exact, &cylinder(15.0, 30.0), None), "length equal to L");
+        assert!(gouges.is_empty());
+        let path = doc.program().toolpaths().last().expect("part path");
+        assert_eq!(catcher_events(path), vec![true, false]);
+        let blocks = path.blocks();
+        let extend_at = blocks.iter().position(|block| matches!(block, ClBlock::Event(Event::PartsCatcher { extend: true }))).expect("extend");
+        let retract_at = blocks.iter().position(|block| matches!(block, ClBlock::Event(Event::PartsCatcher { extend: false }))).expect("retract");
+        let (before, after) = match (&blocks[extend_at - 1], &blocks[extend_at + 1]) {
+            (ClBlock::Motion(before @ ClMotion::Rapid { .. }), ClBlock::Motion(after @ ClMotion::Linear { .. })) => (before, after),
+            _ => panic!("extend is not between the approach rapid and a feed"),
+        };
+        assert!(super::motion_tip(after).x() < super::motion_tip(before).x() - 1e-9, "first feed moves toward X");
+        assert!(matches!(blocks[retract_at - 1], ClBlock::Motion(_)), "retract follows the last motion");
+        assert!(matches!(blocks.last(), Some(ClBlock::Event(Event::ProcessOff { .. }))));
+        assert_eq!(retract_at + 1, blocks.len() - 1);
+
+        let plain = unwrap_ok(super::parse_job(&catcher_job("", "")), "no catch");
+        match &plain.operations[0] {
+            super::Operation::Part { catch: false, .. } => {}
+            _ => panic!("catch defaulted to true"),
+        }
+        let (doc, _) = unwrap_ok(super::build_document(Path::new("job.lathe.json"), &plain, &cylinder(15.0, 30.0), None), "uncatched part");
+        assert!(catcher_events(doc.program().toolpaths().last().expect("part")).is_empty());
     }
 }

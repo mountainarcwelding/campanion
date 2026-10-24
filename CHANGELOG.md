@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Lathe `part` option `catch` with a `parts_catcher` size check; `haas_lathe` writes M36 before the part-off plunge and M37 after the retract.
+
 ## 0.8.3 — 2026-10-24
 
 ### Added

@@ -362,6 +362,9 @@ pub(crate) struct LatheOutput {
     /// Tailstock advance and retract lines. Absent: tailstock events are rejected.
     #[serde(default)]
     pub(crate) tailstock: Option<TailstockOutput>,
+    /// Parts catcher extend and retract lines. Absent: parts-catcher events are rejected.
+    #[serde(default)]
+    pub(crate) parts_catcher: Option<PartsCatcherOutput>,
     /// Two or more channel sections. Absent: a binding whose channel is not 0 is rejected.
     #[serde(default)]
     pub(crate) channels: Option<ChannelsOutput>,
@@ -426,6 +429,18 @@ pub(crate) struct TailstockOutput {
     /// Written for [`campanion_ir::Event::Tailstock`] with `engage` true.
     pub(crate) advance: Vec<String>,
     /// Written for [`campanion_ir::Event::Tailstock`] with `engage` false.
+    pub(crate) retract: Vec<String>,
+}
+
+/// Extend and retract lines for a lathe parts catcher.
+///
+/// Both lists are bare. The event carries no position or part size.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PartsCatcherOutput {
+    /// Written for [`campanion_ir::Event::PartsCatcher`] with `extend` true.
+    pub(crate) extend: Vec<String>,
+    /// Written for [`campanion_ir::Event::PartsCatcher`] with `extend` false.
     pub(crate) retract: Vec<String>,
 }
 
@@ -805,6 +820,16 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         }
         check_templates("lathe.tailstock.advance", &tailstock.advance, LATHE_BARE)?;
         check_templates("lathe.tailstock.retract", &tailstock.retract, LATHE_BARE)?;
+    }
+    if let Some(parts_catcher) = &lathe.parts_catcher {
+        if parts_catcher.extend.is_empty() {
+            return Err(field("lathe.parts_catcher.extend", "must not be empty"));
+        }
+        if parts_catcher.retract.is_empty() {
+            return Err(field("lathe.parts_catcher.retract", "must not be empty"));
+        }
+        check_templates("lathe.parts_catcher.extend", &parts_catcher.extend, LATHE_BARE)?;
+        check_templates("lathe.parts_catcher.retract", &parts_catcher.retract, LATHE_BARE)?;
     }
     if let Some(channels) = &lathe.channels {
         if channels.count < 2 {

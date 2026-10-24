@@ -1556,6 +1556,7 @@ impl<'a> Writer<'a> {
             }
             Event::HeadIndex { b_deg, .. } => self.head_index(*b_deg),
             Event::Tailstock { engage } => self.tailstock(*engage),
+            Event::PartsCatcher { extend } => self.parts_catcher(*extend),
         }
     }
 
@@ -1572,6 +1573,19 @@ impl<'a> Writer<'a> {
         self.templates(field_name, &lines, &[("date-free!", "")])?;
         self.tailstock_engaged = engage;
         Ok(())
+    }
+
+    /// Extend or retract. A post with no `parts_catcher` block, including a mill post, cannot write the event.
+    fn parts_catcher(&mut self, extend: bool) -> Result<()> {
+        let lines = self
+            .post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.parts_catcher.as_ref())
+            .map(|parts_catcher| if extend { parts_catcher.extend.clone() } else { parts_catcher.retract.clone() })
+            .ok_or_else(|| unsupported(format!("post `{}` has no parts catcher", self.post.id())))?;
+        let field_name = if extend { "lathe.parts_catcher.extend" } else { "lathe.parts_catcher.retract" };
+        self.templates(field_name, &lines, &[("date-free!", "")])
     }
 
     /// Index B. A post with no `b_head` block cannot write the event.

@@ -1,7 +1,7 @@
 {
   "id": "haas_lathe",
   "name": "Haas lathe",
-  "description": "Millimetre Haas lathe dialect. Percent-delimited program O00001 with sequence numbers. Diameter mode is the control default. The safety block is G21 G18 G40 G80. Feed per minute is G98. G99 is written only around G32 thread passes (Haas requires feed per revolution for G32) and G98 is restored before the next feed move. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is T0101. Arcs are I and K, I a radius. Single-point threading is G32 with the lead on F. Home is G53 G0 X0 then G53 G0 Z0, in machine coordinates. The program ends with M30 and %. C axis: M154, G28 H0.; brake M14/M15; live tools P{rpm} M133/M134, stop M135; G112/G113 and G107. Sub-spindle select is G55 G14; G15 G54 returns to the main. These codes and part transfer are cited in `references`. Tailstock: M21 advance, M22 retract; hold force and advance distances are machine settings (Settings 105, 341, 342, 241), and the tailstock is not positioned with B words.",
+  "description": "Millimetre Haas lathe dialect. Percent-delimited program O00001 with sequence numbers. Diameter mode is the default. The safety block is G21 G18 G40 G80. Feed per minute is G98. G99 is written only around G32 thread passes (Haas requires feed per revolution) and G98 is restored before the next feed. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. Tool word T0101. Arcs are I and K, I a radius. Threading is G32, lead on F. Home is G53 G0 X0 then G53 G0 Z0. The program ends with M30 and %. C axis: M154, G28 H0.; brake M14/M15; live tools P{rpm} M133/M134, stop M135; G112/G113 and G107. Sub-spindle is G55 G14; G15 G54 returns to the main. These codes and part transfer are cited in `references`. Tailstock: M21 advance, M22 retract; hold force and advance distances are machine settings (Settings 105, 341, 342, 241), and the tailstock is not positioned with B words. Parts catcher: M36 before the part-off plunge, M37 after the retract.",
   "references": [
     "M133/M134/M135 P<rpm> live tool fwd/rev/stop: https://www.haascnc.com/service/codes-settings.type=mcode.machine=lathe.value=M133.html",
     "M154/M155 C axis engage/disengage, G28 H0. unwinds C: https://www.haascnc.com/service/service-content/guide-procedures/lathe---m-codes.html and Haas NGC Lathe Operator's Manual (96-8910) G82/G83 live examples",
@@ -86,6 +86,7 @@
       "move_feed": ["G01 B{z} F{feed}"],
       "move_machine": ["G00 G53 B{z}"]
     },
-    "tailstock": { "advance": ["M21"], "retract": ["M22"] }
+    "tailstock": { "advance": ["M21"], "retract": ["M22"] },
+    "parts_catcher": { "extend": ["M36"], "retract": ["M37"] }
   }
 }
