@@ -13,7 +13,7 @@
 //!
 //! A lathe has named spindles and heads. Each [`Spindle`] has its own optional C axis (a machine
 //! axis id) and a work-zero offset along Z. The main spindle is named `main`; a sub-spindle is
-//! another entry in the same list. A [`Head`] is a turret or a B-axis head. It carries X and Z,
+//! another entry in the same list. A [`Head`] is a turret or a tilting B head. It carries X and Z,
 //! and optionally Y and B, plus a station count and a live-tooling flag. Every turning toolpath
 //! has a [`TurnBinding`] that names its spindle, head and channel. An M10 program uses one
 //! spindle `main`, one head `turret1` and channel 0. [`TurningSetup::single`] builds that spindle
@@ -186,7 +186,7 @@ impl Spindle {
 
 /// Axis a turning head can carry.
 ///
-/// X and Z are required. Y and B are optional, so a later live-tool or B-axis head uses this
+/// X and Z are required. Y and B are optional, so a later live-tool or tilting B head uses this
 /// same enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -201,7 +201,7 @@ pub enum HeadAxis {
     B,
 }
 
-/// A turret or a B-axis head.
+/// A turret or a tilting B head.
 ///
 /// `stations` is the number of tool pockets, from 1 to 256. `live_tooling` is true when the
 /// head can drive a spinning tool. Axes always include X and Z. Y and B are optional. The same
