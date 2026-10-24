@@ -1,0 +1,19 @@
+{
+  "name": "head_table_bc",
+  "spindle_axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+  "rotaries": [
+    {
+      "letter": "C",
+      "carrier": "table",
+      "axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+      "pivot": { "x": 0.0, "y": 0.0, "z": 0.0 }
+    },
+    {
+      "letter": "B",
+      "carrier": "head",
+      "axis": { "x": 0.0, "y": 1.0, "z": 0.0 },
+      "pivot": { "x": 0.0, "y": 0.0, "z": 150.0 },
+      "limits": { "min_deg": -110.0, "max_deg": 110.0 }
+    }
+  ]
+}

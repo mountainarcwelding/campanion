@@ -50,12 +50,20 @@
 //! event does not require a turning setup. Bar and tube stock runs from the finished front face at
 //! Z = 0 back to Z = -length. Facing allowance comes from the operation, not from the stock value.
 //! The IR stores the finished section on the turning setup when one is recorded.
+//!
+//! # Kinematics
+//!
+//! [`Kinematics`] names one or two rotary joints and a spindle direction. It is not stored on a
+//! [`Document`]. Angles are degrees. [`Kinematics::forward`] maps a joint position and a tool
+//! length to a tool tip and axis in the part frame. [`Kinematics::inverse`] lists joint solutions
+//! for a pose, and [`Kinematics::choose`] picks one.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod check;
 mod convert;
 mod geom;
+mod kinematics;
 mod machine;
 mod motion;
 mod ngc;
@@ -69,6 +77,7 @@ mod wrap;
 
 pub use convert::Import;
 pub use geom::{ArcSense, Plane, Pose, Vec3};
+pub use kinematics::{Carrier, Choice, Joints, Kinematics, RotaryJoint, ToolPose};
 pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
 pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};
@@ -178,6 +187,9 @@ fn valid_minor(minor: &str) -> bool {
     }
     minor.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
+
+#[cfg(test)]
+mod kinematics_tests;
 
 #[cfg(test)]
 mod tests;
