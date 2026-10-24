@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.8.3 — 2026-10-24
+
 ### Added
 
 - Lathe `tailstock` operation (advance/retract) with a tailstock zone check; `haas_lathe` writes M21/M22. Hold force and travel stay machine settings.

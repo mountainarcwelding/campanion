@@ -347,3 +347,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   items 11–13 follow it.
 - 2026-10-24: The Haas lathe work targets the ST-15Y, ST-20Y and DS-30Y. H3 becomes cited machine
   limit profiles for these three models, and H1 records which tailstock each ST model offers.
+- 2026-10-24: v0.8.3 is the Haas lathe G99 thread feed mode fix, the tailstock operation (H1,
+  M21/M22 only) and the tilting B head rename. Parts catcher, bar feeder and steady rest follow in
+  v0.8.4; machine limit profiles and sub-spindle brake/orient in v0.8.5.
