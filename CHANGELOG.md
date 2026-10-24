@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.8.0 — 2026-10-24
+
+Milestone M11 Part C, items 8–10: rotary kinematics as data, indexed 3+2 tilted work planes with Haas and LinuxCNC posts, and angled turning with a B head.
+
 ### Added
 
 - Indexed 3+2 posts: `haas_umc` writes Haas G254/G255 dynamic work offsets, and `linuxcnc_5ax` writes machine coordinates from the kinematics inverse.
