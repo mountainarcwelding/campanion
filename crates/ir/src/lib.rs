@@ -28,7 +28,8 @@
 //! Z is the spindle axis, positive away from the chuck toward the tailstock and the tool. X is a
 //! radius in millimetres, never a diameter. Y is 0 for XZ work. While face interpolation is on, Y
 //! is Cartesian on the face; while cylinder interpolation is on, Y is the distance unrolled at
-//! the mapping radius. Diameter mode is a post setting
+//! the mapping radius. A head that carries Y may also leave that plane while its C axis is
+//! engaged and the pose names a fixed C angle. Diameter mode is a post setting
 //! only; the IR never stores diameters in X. The pose axis is not interpreted for XZ turning
 //! moves. Turning code passes [`Vec3::Z`] because a pose requires a unit axis. A single-point
 //! thread is [`ClMotion::Thread`]: a straight move whose `lead` is millimetres per spindle

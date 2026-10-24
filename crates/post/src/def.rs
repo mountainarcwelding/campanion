@@ -326,6 +326,28 @@ pub(crate) struct LatheOutput {
     /// `c_axis` is set.
     #[serde(default)]
     pub(crate) cylinder_interp: Option<CylInterpOutput>,
+    /// Cross axis for live milling. Absent: a pose with Y off the centreline is rejected.
+    #[serde(default)]
+    pub(crate) y_axis: Option<YAxisOutput>,
+}
+
+/// Y-axis live milling on a lathe.
+///
+/// `letter` is the modal cross-axis word. It is never doubled in diameter mode. `face_plane` is
+/// written before an axial tool mills in XY. `side_plane` is written before a radial tool mills
+/// in YZ. `turn_plane` is written when that milling ends, before C disengages or the next
+/// turning move. Haas uses `Y`, `G17`, `G19` and `G18`, and no activation code.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct YAxisOutput {
+    /// One uppercase ASCII letter, for example `Y`.
+    pub(crate) letter: String,
+    /// Plane word for face milling (axial tool, XY).
+    pub(crate) face_plane: String,
+    /// Plane word for side milling (radial tool, YZ).
+    pub(crate) side_plane: String,
+    /// Plane word restored for turning.
+    pub(crate) turn_plane: String,
 }
 
 /// Engage and disengage a spindle as a positioning axis.
@@ -558,6 +580,36 @@ fn check_lathe(post: &PostDef) -> Result<()> {
     if let Some(cylinder) = &lathe.cylinder_interp {
         check_templates("lathe.cylinder_interp.on", &cylinder.on, LATHE_CYLINDER)?;
         check_templates("lathe.cylinder_interp.off", &cylinder.off, LATHE_BARE)?;
+    }
+    if let Some(y_axis) = &lathe.y_axis {
+        let c_letter = lathe.c_axis.as_ref().map(|c_axis| c_axis.letter.as_str());
+        check_y_letter(&y_axis.letter, c_letter)?;
+        check_plane_word("lathe.y_axis.face_plane", &y_axis.face_plane)?;
+        check_plane_word("lathe.y_axis.side_plane", &y_axis.side_plane)?;
+        check_plane_word("lathe.y_axis.turn_plane", &y_axis.turn_plane)?;
+    }
+    Ok(())
+}
+
+fn check_plane_word(field_name: &str, word: &str) -> Result<()> {
+    if word.is_empty() {
+        return Err(field(field_name, "must not be empty"));
+    }
+    let lines = [word.to_string()];
+    check_templates(field_name, &lines, LATHE_BARE)
+}
+
+/// `Y` is allowed. Axis letters already used by X and Z, arc words, and the C letter are not.
+fn check_y_letter(letter: &str, c_letter: Option<&str>) -> Result<()> {
+    const MESSAGE: &str = "must be one uppercase ASCII letter and not X, Z, I, J, K, F, S, T, M, G, N, O, P, or the C-axis letter";
+    const BANNED: &str = "XZIJKFSTMGNOP";
+    let mut chars = letter.chars();
+    let Some(ch) = chars.next() else {
+        return Err(field("lathe.y_axis.letter", MESSAGE));
+    };
+    let c_hit = c_letter.is_some_and(|c| c.starts_with(ch));
+    if chars.next().is_some() || !ch.is_ascii_uppercase() || BANNED.contains(ch) || c_hit {
+        return Err(field("lathe.y_axis.letter", MESSAGE));
     }
     Ok(())
 }

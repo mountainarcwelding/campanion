@@ -506,7 +506,7 @@ fields are rejected with a message that names the key. Every number must be fini
 millimetres. Feeds are millimetres per minute. Constant surface speed is metres per minute.
 Direct spindle speed is revolutions per minute.
 
-`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off. `examples/shaft_fillet.lathe.json` is the same part with an R3 front fillet, read from `examples/shaft_fillet.step`; that job needs SolidCraft's `solidcraft-cli`. `examples/millturn.lathe.json` faces that shaft, then drills four holes on the front face and cuts an axial slot on the Ø40, with the spindle indexed as C.
+`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off. `examples/shaft_fillet.lathe.json` is the same part with an R3 front fillet, read from `examples/shaft_fillet.step`; that job needs SolidCraft's `solidcraft-cli`. `examples/millturn.lathe.json` faces that shaft, then drills four holes on the front face and cuts an axial slot on the Ø40, with the spindle indexed as C. `examples/millturn_flat.lathe.json` mills one flat on a Ø40 field of that shaft with the Y axis.
 
 ```json
 {
@@ -535,8 +535,9 @@ Direct spindle speed is revolutions per minute.
 | `units` | yes | Only `mm`. |
 | `stock` | yes | Bar or tube, plus `front_allowance`. |
 | `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. Optional `c_axis` (boolean, default false). `true` builds spindle `main` with C axis id 0. |
+| `head` | no | Y travel for turret `turret1`. `y_axis` is a boolean, default false. When it is false, `y_min` and `y_max` are rejected. When it is true both limits are required, with `y_min < 0 < y_max`, and the head lists axis Y. There is no default travel: the job supplies the numbers (a Haas ST-Y class machine is about ±50.8 mm). A tool-centre Y outside `[y_min, y_max]` is `operation NAME: Y VALUE outside head travel`. |
 | `tools` | yes | Inserts and live tools, at most 256. May be empty when `operations` is empty. |
-| `operations` | yes | Face, rough, finish, thread, groove, part, drill, `live_drill` and `live_slot`, in order, at most 1024. |
+| `operations` | yes | Face, rough, finish, thread, groove, part, drill, `live_drill`, `live_slot` and `live_flat`, in order, at most 1024. |
 | `tolerance` | no | `linear` (default 1e-6, must be positive) is the profile and finish tolerance. `chord` (default 0.01) is the post read-back tolerance and the gouge tolerance. The finished section is sampled at `chord`. `angular` is accepted, must be `>= 0`, and is not used. |
 | `clearance` | yes | Approach gap, millimetres, `>= 0`. Roughing retracts by the same distance. |
 
@@ -623,7 +624,7 @@ Diameters in a thread, groove or part operation are job diameters. The cycle see
 | `through` | no | When true, the tip goes deeper by the point length. Default `false`. |
 | `feed`, `rpm` | yes | `rpm` is revolutions per minute. |
 
-`live_drill` and `live_slot` need `spindle.c_axis` true. A front cycle needs an axial live tool. An OD cycle needs a radial live tool. There is no Y axis and no C interpolation. C changes only on a rapid at the clearance point, while the spindle brake is released. The pose axis is +Z for an axial tool and +X for a radial tool. `Pose.rotary` is the C angle in degrees. `rpm` is positive and at most 100000, and must not exceed the tool's `max_rpm` when that is set. `feed` is millimetres per minute. Unknown keys are rejected the same way as on any other operation.
+`live_drill`, `live_slot` and `live_flat` need `spindle.c_axis` true. A front cycle needs an axial live tool. An OD cycle, including `live_flat`, needs a radial live tool. `live_drill` and `live_slot` stay on Y = 0 and do not interpolate C. C changes only on a rapid at the clearance point, while the spindle brake is released. The pose axis is +Z for an axial tool and +X for a radial tool. `Pose.rotary` is the C angle in degrees. `rpm` is positive and at most 100000, and must not exceed the tool's `max_rpm` when that is set. `feed` is millimetres per minute. Unknown keys are rejected the same way as on any other operation. `live_flat` also needs `head.y_axis` true. A job without it is `operation NAME: head has no Y axis`. The tool must be an endmill.
 
 `live_drill` drills each position in order. At most 64 positions. `c` is finite and in −99999 to 99999. The tip stops at the programmed depth. No point allowance is added.
 
@@ -652,15 +653,28 @@ Front clearance is Z `z_start + retract` at the hole radius. Moves from one fron
 | `diameter` | od | Surface diameter. Passes sit at radius `diameter / 2 - k * step_down`. |
 | `rpm`, `feed` | yes | Same as `live_drill`. |
 
+`live_flat` mills one flat with a radial endmill. The tool axis is +X. The face of the cutter makes the flat, at a distance `across` from the spindle centre, with `0 < across < diameter / 2`. `diameter` is the stock diameter at the flat, not the tool diameter. Passes run in Y, from `-width / 2 - tool radius` to `+width / 2 + tool radius`. `width` defaults to the full chord at the finished flat, `2 * sqrt((diameter / 2)² - across²)`, and that same width is used on the shallower passes. Z steps by `stepover` times the live-tool diameter, from `z_from` to `z_to` (either order; equal values are one station). Radial passes step from the stock radius down to `across` by `step_down`. Omit `step_down` for one pass at `across`. `stepover` is a fraction in `(0, 1]`, default `0.6`. The approach rapid is at radius `diameter / 2 + clearance`, Y = 0, Z = `z_from`, before the brake is clamped. The first feed moves Y to the side in the air, then X feeds in at that side, then Y crosses the flat. Y and Z both zigzag.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool_id`, `c` | yes | Radial endmill. `c` is the index angle in degrees. |
+| `diameter` | yes | Stock diameter at the flat. |
+| `across` | yes | Distance from the spindle centre to the finished flat. Below half of `diameter`. |
+| `z_from`, `z_to` | yes | Z of the first and last stations. |
+| `width` | no | Width along Y. Default is the chord at `across`. Any positive number. |
+| `step_down` | no | Radial thickness of one pass. Default is the whole depth, one pass at `across`. |
+| `stepover` | no | Z step as a fraction of the live-tool diameter, in `(0, 1]`. Default `0.6`. |
+| `rpm`, `feed` | yes | Same as `live_drill`. |
+
 `campanion lathe` checks each face, rough and finish path against the finished profile. The profile is the polyline sampled at `tolerance.chord`. The insert flank length is 4 mm, and the tool's `holder` is included when the tool has one. Samples are `min(0.25, chord * 10)` millimetres apart. A hit deeper than `chord` is a gouge. Each gouge is one stderr line, `gouge operation NAME z Z x X depth DEPTH KIND`, with `KIND` one of `nose`, `edge` or `holder` and the numbers printed to six decimal places. A gouge exits 1 and writes nothing. Thread, groove, part, drill and the live cycles are not checked: those tools are meant to enter the profile, or they are not inserts.
 
-Each turning operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`). A live cycle uses the same tool-change rule and the same compensation, and it does not turn the work spindle on. Its blocks are C-axis engage on spindle `main`, live tool on forward at `rpm`, then for each hole or for the slot a rapid to the clearance point at the new C, brake clamp, the feed (pecking retracts all the way to the clearance point between pecks), a feed back out, a rapid to clearance when that point is not already the end of the feed, and brake release. Then the live tool stops and C disengages.
+Each turning operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`). A live cycle uses the same tool-change rule and the same compensation, and it does not turn the work spindle on. For `live_drill` and `live_slot` the blocks are C-axis engage on spindle `main`, live tool on forward at `rpm`, then for each hole or for the slot a rapid to the clearance point at the new C, brake clamp, the feed (pecking retracts all the way to the clearance point between pecks), a feed back out, a rapid to clearance when that point is not already the end of the feed, and brake release. Then the live tool stops and C disengages. `live_flat` clamps before the live tool starts: tool change, C-axis engage, the Y = 0 approach rapid, brake clamp, live tool on, the feeds, live tool off, brake release, C disengage.
 
 Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine, and it rejects synchronised thread moves, so a job that threads needs `--post`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. A thread is `G33` with the lead on `K` for LinuxCNC and grblHAL, and `G32` with the lead on `F` for Fanuc and Haas. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. A face, rough or finish gouge is printed on its own, one line per gouge, and the status is 1. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the finished section on `turning.section`, sampled from the loaded profile at `tolerance.chord`.
 
 ### Haas output
 
-`haas_lathe` writes an indexed live cycle as `M154` then `G28 H0.` to engage C, `M155` to disengage, `M14` to clamp the spindle brake and `M15` to release it, `P<rpm> M133` to start the live tool forward, and `M135` to stop it. Posted X is a diameter. The work spindle is not started with `M3` while C is engaged.
+`haas_lathe` writes an indexed live cycle as `M154` then `G28 H0.` to engage C, `M155` to disengage, `M14` to clamp the spindle brake and `M15` to release it, `P<rpm> M133` to start the live tool forward, and `M135` to stop it. Posted X is a diameter. Y is not doubled. The work spindle is not started with `M3` while C is engaged. A Y move with a radial tool writes `G19` on its own line before the move. An axial tool writes `G17`. `G18` is restored before `M155`. There is no Y activation code. Y axis, G17/G19 live milling planes, no activation code: Haas NGC Lathe Operator's Manual 6.12 / https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html
 
 - https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html
 - https://www.haascnc.com/service/codes-settings.type=gcode.machine=lathe.value=G107.html

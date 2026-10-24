@@ -492,6 +492,51 @@ fn turning_poses_stay_on_the_radius_plane() {
 }
 
 #[test]
+fn y_axis_head_allows_off_plane_poses_only_while_c_is_engaged() {
+    let spindle = Spindle::try_new("main", Some(0), 0.0, 3_000.0).expect("spindle");
+    let head = Head::try_new("turret1", vec![HeadAxis::X, HeadAxis::Y, HeadAxis::Z], 12, true).expect("head");
+    let binding = TurnBinding::try_new(0, "main", "turret1", 0).expect("binding");
+    let setup = setup_with(vec![spindle], vec![head], vec![], vec![binding]).expect("setup");
+    let engage = ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true });
+    let release = ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false });
+    let at = |x: f64, y: f64, z: f64, c: f64, axis: Vec3| {
+        ClBlock::Motion(ClMotion::Linear {
+            to: Pose::new(Vec3::new(x, y, z).expect("tip"), axis).expect("pose").with_rotary(c).expect("c"),
+            feed: 80.0,
+            role: MoveRole::Cut,
+        })
+    };
+    let y_then_other_c = vec![engage.clone(), at(18.0, -4.0, -10.0, 0.0, Vec3::X), at(18.0, 4.0, -10.0, 90.0, Vec3::X)];
+    assert!(program_with(vec![], vec![path_with(None, y_then_other_c)], setup.clone(), None).is_ok());
+
+    let xy = ClBlock::Motion(ClMotion::Arc {
+        to: Pose::new(Vec3::new(0.0, 10.0, -5.0).expect("tip"), Vec3::Z).expect("pose").with_rotary(10.0).expect("c"),
+        plane: Plane::Xy,
+        center: Vec3::new(0.0, 0.0, -5.0).expect("centre"),
+        sense: ArcSense::Ccw,
+        feed: 40.0,
+        role: MoveRole::Cut,
+    });
+    let yz = ClBlock::Motion(ClMotion::Arc {
+        to: Pose::new(Vec3::new(18.0, 5.0, -5.0).expect("tip"), Vec3::X).expect("pose").with_rotary(10.0).expect("c"),
+        plane: Plane::Yz,
+        center: Vec3::new(18.0, 0.0, -10.0).expect("centre"),
+        sense: ArcSense::Cw,
+        feed: 40.0,
+        role: MoveRole::Cut,
+    });
+    let arcs = vec![engage.clone(), at(10.0, 0.0, -5.0, 10.0, Vec3::Z), xy, yz];
+    assert!(program_with(vec![], vec![path_with(None, arcs)], setup.clone(), None).is_ok());
+
+    let bare = vec![at(18.0, 2.0, -1.0, 0.0, Vec3::X)];
+    assert_err(program_with(vec![], vec![path_with(None, bare)], setup.clone(), None), "needs an engaged C axis");
+    let no_angle = ClBlock::Motion(ClMotion::Rapid { to: pose_xz(18.0, 2.0, -1.0), feed: None });
+    assert_err(program_with(vec![], vec![path_with(None, vec![engage.clone(), no_angle])], setup.clone(), None), "needs an engaged C axis");
+    let after = vec![engage, at(18.0, 1.0, -1.0, 0.0, Vec3::X), release, at(18.0, 2.0, -1.0, 0.0, Vec3::X)];
+    assert_err(program_with(vec![], vec![path_with(None, after)], setup, None), "needs an engaged C axis");
+}
+
+#[test]
 fn rotary_and_turning_cannot_be_combined() {
     let turning = m10(None);
     let rotary = RotarySetup::new(RotaryAxisKind::A, Vec3::ZERO, RotaryDirection::Positive, None).expect("rotary");

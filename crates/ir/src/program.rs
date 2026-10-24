@@ -10,14 +10,15 @@ use crate::machine::{Channel, Machine};
 use crate::motion::{AxisBlock, ChannelProgram, ClBlock, ClMotion, ClPath};
 use crate::process::{Event, Tool};
 use crate::rotary::{RotarySetup, machine_to_part};
-use crate::turning::TurningSetup;
+use crate::turning::{HeadAxis, TurningSetup};
 use crate::{FORMAT_TAG, Result, check_format};
 
 /// How close a pose tool axis must be to the part-frame image of machine +Z at that rotary angle.
 const ROTARY_AXIS_TOL: f64 = 1e-6;
 
-/// Slack for a turning pose outside face and cylinder interpolation. |Y| may be at most this.
-/// X may be negative when a face crosses the axis.
+/// Slack for a turning pose outside face and cylinder interpolation on a head with no Y axis.
+/// X may be negative when a face crosses the axis. A head that carries [`HeadAxis::Y`] may leave
+/// the XZ plane by more than this while its C axis is engaged.
 const TURNING_PLANE_TOL: f64 = 1e-6;
 
 /// Channels that must arrive together. A sync event waits on this id.
@@ -388,7 +389,7 @@ fn check_turning(turning: &TurningSetup, toolpaths: &[ClPath], tool_ids: &BTreeS
         let Some(path) = bound_path(toolpaths, index) else {
             return Err(check::invalid(format!("turning binding toolpath {index} is outside 0..{}", toolpaths.len())));
         };
-        check_turning_poses(index, path)?;
+        check_turning_poses(turning, index, path)?;
     }
     Ok(())
 }
@@ -428,11 +429,20 @@ fn bound_path(toolpaths: &[ClPath], index: u32) -> Option<&ClPath> {
     usize::try_from(index).ok().and_then(|index| toolpaths.get(index))
 }
 
-fn check_turning_poses(index: u32, path: &ClPath) -> Result<()> {
+/// `|Y|` above [`TURNING_PLANE_TOL`] is allowed inside face or cylinder interpolation (Y is the
+/// Cartesian face coordinate or the unrolled distance). Outside them it needs a head with
+/// [`HeadAxis::Y`] and an engaged C axis, and the pose must name that C angle. Successive Y moves
+/// may use different angles. C and Y changing in one block is a post error, not an IR error. Arcs
+/// in XY and YZ are ordinary motions: this check only looks at the tip.
+fn check_turning_poses(turning: &TurningSetup, index: u32, path: &ClPath) -> Result<()> {
+    let head_has_y =
+        turning.binding_for(index).and_then(|binding| turning.head(binding.head())).is_some_and(|head| head.axes().contains(&HeadAxis::Y));
+    let mut c_engaged = false;
     let mut face = false;
     let mut cylinder = false;
     for (block_i, block) in path.blocks().iter().enumerate() {
         match block {
+            ClBlock::Event(Event::CAxis { engage, .. }) => c_engaged = *engage,
             ClBlock::Event(Event::FaceInterpolation { on }) => {
                 face = *on;
                 if *on {
@@ -450,9 +460,15 @@ fn check_turning_poses(index: u32, path: &ClPath) -> Result<()> {
         let Some(pose) = block_pose(block) else {
             continue;
         };
-        // Face and cylinder frames use Y. Outside those modes a turning pose stays in the XZ plane.
-        if !face && !cylinder && pose.tip().y().abs() > TURNING_PLANE_TOL {
+        // Face and cylinder frames use Y. Outside those modes Y needs a Y head.
+        if face || cylinder || pose.tip().y().abs() <= TURNING_PLANE_TOL {
+            continue;
+        }
+        if !head_has_y {
             return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose Y is not zero")));
+        }
+        if !c_engaged || pose.rotary().is_none() {
+            return Err(check::invalid(format!("toolpath {index} block {block_i} turning pose Y needs an engaged C axis")));
         }
     }
     Ok(())

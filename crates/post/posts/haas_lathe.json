@@ -8,7 +8,8 @@
     "M14/M15 main spindle brake: Haas NGC Lathe Operator's Manual M-code list",
     "C axis, H incremental C, Setting 102 C feed: https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html",
     "G112/G113 XY to XC interpolation, G17, X radius, G98 required, no centre crossing: https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html",
-    "G107 Y0 C0 R/Q cylindrical mapping in G19, bare G107 cancels: https://www.haascnc.com/service/codes-settings.type=gcode.machine=lathe.value=G107.html"
+    "G107 Y0 C0 R/Q cylindrical mapping in G19, bare G107 cancels: https://www.haascnc.com/service/codes-settings.type=gcode.machine=lathe.value=G107.html",
+    "Y axis, G17/G19 live milling planes, no activation code: Haas NGC Lathe Operator's Manual 6.12 / https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html"
   ],
   "program_number": "00001",
   "units": "mm",
@@ -58,6 +59,7 @@
     "c_axis": { "letter": "C", "engage": ["M154", "G28 H0."], "disengage": ["M155"] },
     "brake": { "clamp": ["M14"], "release": ["M15"] },
     "live_tool": { "forward": ["P{rpm} M133"], "reverse": ["P{rpm} M134"], "stop": ["M135"], "feed_mode": "G98" },
+    "y_axis": { "letter": "Y", "face_plane": "G17", "side_plane": "G19", "turn_plane": "G18" },
     "face_interp": { "on": ["G17", "G112"], "off": ["G113", "G18"], "x_diameter": false },
     "cylinder_interp": { "on": ["G19", "M15", "G107 Y0 C0 R{radius}"], "off": ["G107", "G18"] }
   }

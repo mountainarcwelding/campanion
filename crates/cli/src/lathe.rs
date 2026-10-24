@@ -11,7 +11,8 @@
 //! A turning operation is one toolpath: a tool change when the tool id changes, spindle on, the
 //! moves, then spindle off. Speed is stored on the turning binding. An indexed live drill or slot
 //! changes the tool the same way, engages C, starts the live tool, clamps the brake around each
-//! feed, then stops the live tool and disengages C. That binding stores no spindle speed. The IR
+//! feed, then stops the live tool and disengages C. `live_flat` engages C, rapids to the flat,
+//! clamps, then starts the live tool, and mills in Y. That binding stores no spindle speed. The IR
 //! stores the finished section on the turning setup, sampled from the profile at the job chord
 //! tolerance.
 //!
@@ -36,9 +37,10 @@ use campanion_ir::{
     ProcessKind, ProcessParams, Program, Spindle, SpindleSpeed, Tool, TurnBinding, TurnInsert, TurnSection, TurnStock, TurningSetup, Vec3,
 };
 use campanion_turn::{
-    DrillParams, FaceParams, FinishParams, GrooveParams, HolderGeom, Infeed, InsertGeom, LiveDrillParams, LiveFace, LivePath, LiveSlotParams,
-    LiveStation, LiveStep, MAX_LIVE_POSITIONS, MeshAxis, PartParams, RoughParams, Side, ThreadParams, TipPoint, TurnGouge, TurnPath, TurnProfile,
-    TurnTool, centre_drill, check_turn_gouges, face, finish, groove, live_drill, live_slot, part_off, rough, thread, to_cl_path,
+    DrillParams, FaceParams, FinishParams, FlatPath, FlatStep, GrooveParams, HolderGeom, Infeed, InsertGeom, LiveDrillParams, LiveFace,
+    LiveFlatParams, LivePath, LiveSlotParams, LiveStation, LiveStep, MAX_LIVE_POSITIONS, MeshAxis, PartParams, RoughParams, Side, ThreadParams,
+    TipPoint, TurnGouge, TurnPath, TurnProfile, TurnTool, centre_drill, check_turn_gouges, face, finish, groove, live_drill, live_flat, live_slot,
+    part_off, rough, thread, to_cl_path,
 };
 use serde_json::{Map, Value};
 
@@ -86,11 +88,19 @@ struct LatheJob {
     front_allowance: f64,
     max_rpm: f64,
     c_axis: bool,
+    head: LatheHead,
     tools: Vec<LatheTool>,
     operations: Vec<Operation>,
     linear: f64,
     chord: f64,
     clearance: f64,
+}
+
+/// Optional Y travel on turret `turret1`. Limits are required when `y_axis` is true.
+struct LatheHead {
+    y_axis: bool,
+    y_min: Option<f64>,
+    y_max: Option<f64>,
 }
 
 struct Source {
@@ -127,6 +137,7 @@ enum ToolBody {
     /// `max_rpm` limits the live-tool rpm of an operation that uses this tool.
     Live {
         orientation: LiveOrientation,
+        kind: LiveKind,
         diameter: f64,
         max_rpm: Option<f64>,
     },
@@ -137,6 +148,7 @@ enum LiveOrientation {
     Radial,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum LiveKind {
     Drill,
     Endmill,
@@ -245,6 +257,20 @@ enum Operation {
         feed: f64,
         params: LiveSlotParams,
     },
+    LiveFlat {
+        name: String,
+        tool_id: u32,
+        rpm: f64,
+        feed: f64,
+        c_deg: f64,
+        diameter: f64,
+        across: f64,
+        z_from: f64,
+        z_to: f64,
+        width: Option<f64>,
+        step_down: Option<f64>,
+        stepover: f64,
+    },
 }
 
 impl Operation {
@@ -258,7 +284,8 @@ impl Operation {
             | Self::Part { name, .. }
             | Self::Drill { name, .. }
             | Self::LiveDrill { name, .. }
-            | Self::LiveSlot { name, .. } => name,
+            | Self::LiveSlot { name, .. }
+            | Self::LiveFlat { name, .. } => name,
         }
     }
 
@@ -272,7 +299,8 @@ impl Operation {
             | Self::Part { tool_id, .. }
             | Self::Drill { tool_id, .. }
             | Self::LiveDrill { tool_id, .. }
-            | Self::LiveSlot { tool_id, .. } => *tool_id,
+            | Self::LiveSlot { tool_id, .. }
+            | Self::LiveFlat { tool_id, .. } => *tool_id,
         }
     }
 
@@ -285,7 +313,8 @@ impl Operation {
             | Self::Part { feed, .. }
             | Self::Drill { feed, .. }
             | Self::LiveDrill { feed, .. }
-            | Self::LiveSlot { feed, .. } => *feed,
+            | Self::LiveSlot { feed, .. }
+            | Self::LiveFlat { feed, .. } => *feed,
             Self::Thread { .. } => THREAD_RECORD_FEED,
         }
     }
@@ -300,7 +329,7 @@ impl Operation {
             | Self::Groove { speed, .. }
             | Self::Part { speed, .. }
             | Self::Drill { speed, .. } => Some(*speed),
-            Self::LiveDrill { .. } | Self::LiveSlot { .. } => None,
+            Self::LiveDrill { .. } | Self::LiveSlot { .. } | Self::LiveFlat { .. } => None,
         }
     }
 
@@ -308,9 +337,13 @@ impl Operation {
         matches!(self, Self::LiveDrill { .. } | Self::LiveSlot { .. })
     }
 
+    fn is_flat(&self) -> bool {
+        matches!(self, Self::LiveFlat { .. })
+    }
+
     fn live_rpm(&self) -> Option<f64> {
         match self {
-            Self::LiveDrill { rpm, .. } | Self::LiveSlot { rpm, .. } => Some(*rpm),
+            Self::LiveDrill { rpm, .. } | Self::LiveSlot { rpm, .. } | Self::LiveFlat { rpm, .. } => Some(*rpm),
             _ => None,
         }
     }
@@ -319,6 +352,7 @@ impl Operation {
         match self {
             Self::LiveDrill { params, .. } => Some(params.face),
             Self::LiveSlot { params, .. } => Some(params.face),
+            Self::LiveFlat { .. } => Some(LiveFace::Od),
             _ => None,
         }
     }
@@ -428,7 +462,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let map = object(&value, "job")?;
     let tag = as_str(require(map, "format")?, "format tag")?;
     check_format(tag)?;
-    check_keys(map, &["format", "source", "units", "stock", "spindle", "tools", "operations", "tolerance", "clearance"], "job")?;
+    check_keys(map, &["format", "source", "units", "stock", "spindle", "head", "tools", "operations", "tolerance", "clearance"], "job")?;
     let units = as_str(require(map, "units")?, "units")?;
     if units != "mm" {
         return Err(CliError::invalid(format!("units must be mm, not `{units}`")));
@@ -436,6 +470,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let source = parse_source(require(map, "source")?)?;
     let (stock, front_allowance) = parse_stock(require(map, "stock")?)?;
     let (max_rpm, c_axis) = parse_spindle(require(map, "spindle")?)?;
+    let head = parse_head(optional(map, "head"))?;
     let tools = parse_tools(require(map, "tools")?)?;
     let (linear, chord) = parse_tolerance(optional(map, "tolerance"))?;
     let clearance = non_negative(require(map, "clearance")?, "clearance")?;
@@ -445,8 +480,33 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
             return Err(CliError::run(format!("operation {}: missing tool {}", operation.name(), operation.tool_id())));
         };
         check_tool_use(operation, tool, c_axis)?;
+        check_flat(operation, tool, &head, clearance)?;
     }
-    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, tools, operations, linear, chord, clearance })
+    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, head, tools, operations, linear, chord, clearance })
+}
+
+fn parse_head(value: Option<&Value>) -> Result<LatheHead, CliError> {
+    let Some(value) = value else {
+        return Ok(LatheHead { y_axis: false, y_min: None, y_max: None });
+    };
+    let map = object(value, "head")?;
+    check_keys(map, &["y_axis", "y_min", "y_max"], "head")?;
+    let y_axis = match optional(map, "y_axis") {
+        Some(value) => as_bool(value, "y_axis")?,
+        None => false,
+    };
+    if !y_axis {
+        if map.contains_key("y_min") || map.contains_key("y_max") {
+            return Err(CliError::invalid("y_min and y_max need head.y_axis true"));
+        }
+        return Ok(LatheHead { y_axis: false, y_min: None, y_max: None });
+    }
+    let y_min = as_f64(require(map, "y_min")?, "y_min")?;
+    let y_max = as_f64(require(map, "y_max")?, "y_max")?;
+    if !(y_min < 0.0 && y_max > 0.0) {
+        return Err(CliError::invalid("y_min must be < 0 and y_max must be > 0"));
+    }
+    Ok(LatheHead { y_axis: true, y_min: Some(y_min), y_max: Some(y_max) })
 }
 
 fn check_format(tag: &str) -> Result<(), CliError> {
@@ -687,7 +747,7 @@ fn parse_live_tool(map: &Map<String, Value>) -> Result<LatheTool, CliError> {
         }
         None => None,
     };
-    Ok(LatheTool { id, station, body: ToolBody::Live { orientation, diameter, max_rpm } })
+    Ok(LatheTool { id, station, body: ToolBody::Live { orientation, kind, diameter, max_rpm } })
 }
 
 fn parse_holder(value: &Value) -> Result<HolderGeom, CliError> {
@@ -753,6 +813,9 @@ fn parse_operation(value: &Value, max_rpm: f64, clearance: f64, names: &mut BTre
     let op_type = as_str(require(map, "type")?, "operation type")?;
     if op_type == "live_drill" || op_type == "live_slot" {
         return parse_live_operation(map, op_type, clearance, names);
+    }
+    if op_type == "live_flat" {
+        return parse_live_flat(map, names);
     }
     let allowed: &[&str] = match op_type {
         "face" => &["name", "type", "tool_id", "step_z", "feed", "speed"],
@@ -1014,6 +1077,39 @@ fn parse_live_operation(map: &Map<String, Value>, op_type: &str, clearance: f64,
     }
 }
 
+fn parse_live_flat(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
+    check_keys(
+        map,
+        &["name", "type", "tool_id", "c", "diameter", "across", "z_from", "z_to", "width", "step_down", "stepover", "rpm", "feed"],
+        "operation",
+    )?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    let stepover = match optional(map, "stepover") {
+        Some(value) => as_f64(value, "stepover")?,
+        None => 0.6,
+    };
+    if !(stepover > 0.0 && stepover <= 1.0) {
+        return Err(CliError::invalid("stepover fraction must be in (0, 1]"));
+    }
+    Ok(Operation::LiveFlat {
+        name,
+        tool_id: as_u32(require(map, "tool_id")?, "tool_id")?,
+        rpm: parse_live_rpm(require(map, "rpm")?)?,
+        feed: positive(require(map, "feed")?, "feed")?,
+        c_deg: as_f64(require(map, "c")?, "c")?,
+        diameter: positive(require(map, "diameter")?, "diameter")?,
+        across: positive(require(map, "across")?, "across")?,
+        z_from: as_f64(require(map, "z_from")?, "z_from")?,
+        z_to: as_f64(require(map, "z_to")?, "z_to")?,
+        width: optional_positive(map, "width")?,
+        step_down: optional_positive(map, "step_down")?,
+        stepover,
+    })
+}
+
 fn parse_live_face(text: &str) -> Result<LiveFace, CliError> {
     match text {
         "front" => Ok(LiveFace::Front),
@@ -1062,7 +1158,7 @@ fn check_tool_use(operation: &Operation, tool: &LatheTool, c_axis: bool) -> Resu
     if !c_axis {
         return Err(CliError::invalid("live operations need spindle.c_axis true"));
     }
-    let ToolBody::Live { orientation, max_rpm, .. } = &tool.body else {
+    let ToolBody::Live { orientation, kind, max_rpm, .. } = &tool.body else {
         let which = if face.axial() { "an axial" } else { "a radial" };
         return Err(CliError::invalid(format!("operation {}: tool {} is not {which} live tool", operation.name(), tool.id)));
     };
@@ -1071,6 +1167,9 @@ fn check_tool_use(operation: &Operation, tool: &LatheTool, c_axis: bool) -> Resu
         let which = if face.axial() { "an axial" } else { "a radial" };
         return Err(CliError::invalid(format!("operation {}: tool {} is not {which} live tool", operation.name(), tool.id)));
     }
+    if operation.is_flat() && *kind != LiveKind::Endmill {
+        return Err(CliError::invalid(format!("operation {}: tool {} is not an endmill", operation.name(), tool.id)));
+    }
     if let Some(cap) = max_rpm
         && let Some(rpm) = operation.live_rpm()
         && rpm > *cap
@@ -1078,6 +1177,42 @@ fn check_tool_use(operation: &Operation, tool: &LatheTool, c_axis: bool) -> Resu
         return Err(CliError::invalid(format!("operation {}: rpm exceeds tool {} max_rpm", operation.name(), tool.id)));
     }
     Ok(())
+}
+
+/// A flat needs a Y head. Every tool-centre Y on the path must sit in `[y_min, y_max]`.
+fn check_flat(operation: &Operation, tool: &LatheTool, head: &LatheHead, clearance: f64) -> Result<(), CliError> {
+    let Operation::LiveFlat { name, .. } = operation else {
+        return Ok(());
+    };
+    if !head.y_axis {
+        return Err(CliError::invalid(format!("operation {name}: head has no Y axis")));
+    }
+    let (Some(y_min), Some(y_max)) = (head.y_min, head.y_max) else {
+        return Err(CliError::invalid(format!("operation {name}: head has no Y axis")));
+    };
+    let ToolBody::Live { diameter, .. } = &tool.body else {
+        return Ok(());
+    };
+    let path = live_flat(&flat_params(operation, *diameter, clearance)?).map_err(|err| geometry_err(name, err))?;
+    for step in &path.steps {
+        let y = step.y();
+        if y < y_min - 1e-9 || y > y_max + 1e-9 {
+            return Err(CliError::invalid(format!("operation {name}: Y {} outside head travel", format_travel(y))));
+        }
+    }
+    Ok(())
+}
+
+fn format_travel(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let text = format!("{value:.9}");
+    let Some((head, frac)) = text.split_once('.') else {
+        return text;
+    };
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() { head.to_string() } else { format!("{head}.{frac}") }
 }
 
 fn geometry_err(name: &str, err: impl std::fmt::Display) -> CliError {
@@ -1193,8 +1328,12 @@ fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Res
     let mut toolpaths = Vec::with_capacity(job.operations.len());
     let mut previous: Option<u32> = None;
     for (index, operation) in job.operations.iter().enumerate() {
-        let motion = if operation.is_live() {
-            live_motion(operation)?
+        let toolpath = if operation.is_flat() {
+            flat_toolpath(job, operation, &mut previous)?
+        } else if operation.is_live() {
+            let motion = live_motion(operation)?;
+            let rpm = operation.live_rpm().ok_or_else(|| CliError::run(format!("internal: operation {} has no live rpm", operation.name())))?;
+            with_live_events(motion, operation.tool_id(), rpm, &mut previous)?
         } else {
             let turned = turn_operation(job, profile, operation)?;
             if let Some(step) = sample_step
@@ -1202,12 +1341,9 @@ fn build_document(job_path: &Path, job: &LatheJob, profile: &TurnProfile) -> Res
             {
                 gouge_lines.extend(turn_gouges(job, operation, index, &turned, side, &section, step)?);
             }
-            to_cl_path(&turned, Some(operation.name().to_string()), operation.tool_id(), operation.feed(), Some(job.clearance))
-                .map_err(|err| op_fail(operation.name(), err))?
-        };
-        let toolpath = match operation.live_rpm() {
-            Some(rpm) => with_live_events(motion, operation.tool_id(), rpm, &mut previous)?,
-            None => with_events(motion, operation.tool_id(), &mut previous)?,
+            let motion = to_cl_path(&turned, Some(operation.name().to_string()), operation.tool_id(), operation.feed(), Some(job.clearance))
+                .map_err(|err| op_fail(operation.name(), err))?;
+            with_events(motion, operation.tool_id(), &mut previous)?
         };
         toolpaths.push(toolpath);
         let binding = TurnBinding::try_new(index as u32, SPINDLE, HEAD, 0)?.with_speed(operation.turning_speed())?;
@@ -1239,22 +1375,24 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
         | Operation::Part { .. }
         | Operation::Drill { .. }
         | Operation::LiveDrill { .. }
-        | Operation::LiveSlot { .. } => None,
+        | Operation::LiveSlot { .. }
+        | Operation::LiveFlat { .. } => None,
     }
 }
 
 /// Spindle `main` with C axis id 0 when the job asks for it. The head is `turret1`, X and Z,
-/// 12 stations. `live_tooling` is set when any tool is live. A plain turning job keeps
-/// [`TurningSetup::single`], which has no C axis and no live tooling.
+/// plus Y when `head.y_axis` is true, 12 stations. `live_tooling` is set when any tool is live.
+/// A plain turning job keeps [`TurningSetup::single`], which has no C axis, no Y and no live tooling.
 fn turning_setup(job: &LatheJob, stock: TurnStock) -> Result<TurningSetup, CliError> {
     let live_tooling = job.tools.iter().any(|tool| tool.body.is_live());
-    if !job.c_axis && !live_tooling {
+    if !job.c_axis && !live_tooling && !job.head.y_axis {
         return Ok(TurningSetup::single(Some(stock), job.max_rpm)?);
     }
     let c_axis = if job.c_axis { Some(0) } else { None };
     let spindle = Spindle::try_new(SPINDLE, c_axis, 0.0, job.max_rpm)?;
     let stations = u16::try_from(STATIONS).map_err(|_| CliError::run("turret station count is out of range"))?;
-    let head = Head::try_new(HEAD, vec![HeadAxis::X, HeadAxis::Z], stations, live_tooling)?;
+    let axes = if job.head.y_axis { vec![HeadAxis::X, HeadAxis::Y, HeadAxis::Z] } else { vec![HeadAxis::X, HeadAxis::Z] };
+    let head = Head::try_new(HEAD, axes, stations, live_tooling)?;
     Ok(TurningSetup::try_new(vec![spindle], vec![head], Some(stock), Vec::new(), Vec::new())?)
 }
 
@@ -1437,7 +1575,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
             };
             centre_drill(&params).map_err(|err| op_fail(name, err))
         }
-        Operation::LiveDrill { .. } | Operation::LiveSlot { .. } => {
+        Operation::LiveDrill { .. } | Operation::LiveSlot { .. } | Operation::LiveFlat { .. } => {
             Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())))
         }
     }
@@ -1488,6 +1626,78 @@ fn live_cl_path(name: &str, tool_id: u32, feed: f64, path: &LivePath) -> Result<
         blocks.push(block);
     }
     Ok(ClPath::try_new(Some(name.to_string()), Some(tool_id), CompensationMode::Computed, feeds, None, Vec::new(), blocks)?)
+}
+
+fn flat_params(operation: &Operation, tool_diameter: f64, clearance: f64) -> Result<LiveFlatParams, CliError> {
+    let Operation::LiveFlat { c_deg, diameter, across, z_from, z_to, width, step_down, stepover, .. } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not a flat", operation.name())));
+    };
+    Ok(LiveFlatParams {
+        c_deg: *c_deg,
+        stock_diameter: *diameter,
+        across: *across,
+        z_from: *z_from,
+        z_to: *z_to,
+        width: *width,
+        step_down: *step_down,
+        stepover: *stepover,
+        tool_diameter,
+        clearance,
+    })
+}
+
+/// Tool change, C engage, the Y=0 rapid, brake clamp, live tool on, the feeds, live tool off,
+/// brake release, C disengage.
+fn flat_toolpath(job: &LatheJob, operation: &Operation, previous: &mut Option<u32>) -> Result<ClPath, CliError> {
+    let ToolBody::Live { diameter, .. } = job
+        .tools
+        .iter()
+        .find(|tool| tool.id == operation.tool_id())
+        .map(|tool| &tool.body)
+        .ok_or_else(|| CliError::run(format!("operation {}: missing tool {}", operation.name(), operation.tool_id())))?
+    else {
+        return Err(CliError::run(format!("operation {}: tool {} is not a live tool", operation.name(), operation.tool_id())));
+    };
+    let path = live_flat(&flat_params(operation, *diameter, job.clearance)?).map_err(|err| geometry_err(operation.name(), err))?;
+    let Some(rpm) = operation.live_rpm() else {
+        return Err(CliError::run(format!("internal: operation {} has no live rpm", operation.name())));
+    };
+    flat_blocks(operation.name(), operation.tool_id(), operation.feed(), rpm, &path, previous)
+}
+
+fn flat_blocks(name: &str, tool_id: u32, feed: f64, rpm: f64, path: &FlatPath, previous: &mut Option<u32>) -> Result<ClPath, CliError> {
+    let Some((first, rest)) = path.steps.split_first() else {
+        return Err(CliError::run(format!("operation {name}: flat path is empty")));
+    };
+    let FlatStep::Rapid { .. } = first else {
+        return Err(CliError::run(format!("operation {name}: flat path does not start on a rapid")));
+    };
+    let mut blocks = Vec::with_capacity(path.steps.len().saturating_add(6));
+    if *previous != Some(tool_id) {
+        blocks.push(ClBlock::Event(Event::ToolChange { tool_id }));
+        *previous = Some(tool_id);
+    }
+    blocks.push(ClBlock::Event(Event::CAxis { spindle: SPINDLE.to_string(), engage: true }));
+    blocks.push(flat_block(first, feed)?);
+    blocks.push(ClBlock::Event(Event::SpindleBrake { spindle: SPINDLE.to_string(), clamp: true }));
+    blocks.push(ClBlock::Event(Event::LiveToolOn { rpm, direction: LiveDirection::Forward }));
+    for step in rest {
+        blocks.push(flat_block(step, feed)?);
+    }
+    blocks.push(ClBlock::Event(Event::LiveToolOff));
+    blocks.push(ClBlock::Event(Event::SpindleBrake { spindle: SPINDLE.to_string(), clamp: false }));
+    blocks.push(ClBlock::Event(Event::CAxis { spindle: SPINDLE.to_string(), engage: false }));
+    let feeds = Feeds::try_new(feed, None, None, None, None)?;
+    Ok(ClPath::try_new(Some(name.to_string()), Some(tool_id), CompensationMode::Computed, feeds, None, Vec::new(), blocks)?)
+}
+
+fn flat_block(step: &FlatStep, feed: f64) -> Result<ClBlock, CliError> {
+    let pose = Pose::new(Vec3::new(step.x(), step.y(), step.z())?, Vec3::X)?.with_rotary(step.c_deg())?;
+    let motion = match step {
+        FlatStep::Rapid { .. } => ClMotion::Rapid { to: pose, feed: None },
+        FlatStep::Feed { .. } => ClMotion::Linear { to: pose, feed, role: MoveRole::Cut },
+    };
+    Ok(ClBlock::Motion(motion))
 }
 
 fn live_pose(z: f64, x: f64, c_deg: f64, axis: Vec3) -> Result<Pose, CliError> {

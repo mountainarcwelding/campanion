@@ -7,13 +7,14 @@
 //!
 //! A lathe post returns part-frame positions. In diameter mode each X word is divided by two.
 //! Y is 0, except while face or cylinder interpolation (from the post's `face_interp` /
-//! `cylinder_interp` templates) is on. In face mode X is a radius unless `x_diameter` is set, and
-//! Y is kept. In cylinder mode X still follows diameter mode and Y is the unrolled distance.
+//! `cylinder_interp` templates) is on, or when the post has `y_axis`, in which case Y is modal
+//! like X and Z. In face mode X is a radius unless `x_diameter` is set, and Y is kept. In
+//! cylinder mode X still follows diameter mode and Y is the unrolled distance.
 //! `I` `J` `K` are centre offsets from the stored start. `arc_flip` swaps G2 and G3 back to the
-//! IR sense. `G53` is a machine move and is not returned. `G28` is a reference return and is not
-//! returned. `U` and `W` are accepted only on that block. `G50` (spindle cap) and `G98` (Fanuc
-//! and Haas feed per minute) are not moves. A cylinder `on` line such as `G107 Y0 C0 R20.` is not
-//! a move and does not change the modal C word.
+//! IR sense on ZX arcs only. `G53` is a machine move and is not returned. `G28` is a reference
+//! return and is not returned. `U` and `W` are accepted only on that block. `G50` (spindle cap)
+//! and `G98` (Fanuc and Haas feed per minute) are not moves. A cylinder `on` line such as
+//! `G107 Y0 C0 R20.` is not a move and does not change the modal C word.
 //!
 //! A lathe post with `c_axis` treats that letter as a modal angle. Rapid and linear moves return
 //! it on `rotary`. `M` lines, `P` and `H` words, and `G28 H0.` are not moves. `G28 H0.` does not
@@ -189,7 +190,12 @@ impl<'a> Parser<'a> {
                 'T' => saw_t = true,
                 'I' | 'J' | 'K' | 'R' | 'Q' | 'F' | 'S' | 'H' | 'D' | 'P' => {}
                 'U' | 'W' if self.post.is_lathe() => {}
-                letter if axes.contains(&letter) || letter == dwell_letter || self.is_rotary_letter(letter) || self.is_c_letter(letter) => {}
+                letter
+                    if axes.contains(&letter)
+                        || letter == dwell_letter
+                        || self.is_rotary_letter(letter)
+                        || self.is_c_letter(letter)
+                        || self.is_y_letter(letter) => {}
                 letter => return Err(invalid(format!("unexpected word {letter}"))),
             }
         }
@@ -329,12 +335,7 @@ impl<'a> Parser<'a> {
             }
         }
         if self.post.is_lathe() {
-            if axes[0].is_some() {
-                end[0] = self.stored_x(end[0]);
-            }
-            if !self.face_mode && !self.cyl_mode {
-                end[1] = 0.0;
-            }
+            end = self.lathe_end(end, axes, words)?;
         }
         if let Some(feed) = f {
             self.feed = Some(feed);
@@ -347,7 +348,7 @@ impl<'a> Parser<'a> {
             Motion::Linear => ReadMove::Linear { end, feed, rotary, inverse_time },
             Motion::Cw | Motion::Ccw => {
                 let mut sense = if matches!(motion, Motion::Cw) { ArcSense::Cw } else { ArcSense::Ccw };
-                if self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip) {
+                if plane == Plane::Zx && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip) {
                     sense = match sense {
                         ArcSense::Cw => ArcSense::Ccw,
                         ArcSense::Ccw => ArcSense::Cw,
@@ -385,12 +386,7 @@ impl<'a> Parser<'a> {
             }
         }
         if self.post.is_lathe() {
-            if axes[0].is_some() {
-                end[0] = self.stored_x(end[0]);
-            }
-            if !self.face_mode && !self.cyl_mode {
-                end[1] = 0.0;
-            }
+            end = self.lathe_end(end, axes, words)?;
         }
         let lead = unique(words, letter)?.ok_or_else(|| invalid("thread lead is missing"))?;
         if !(lead.is_finite() && lead > 0.0) {
@@ -490,6 +486,36 @@ impl<'a> Parser<'a> {
 
     fn is_c_letter(&self, letter: char) -> bool {
         self.c_axis_letter() == Some(letter)
+    }
+
+    fn y_axis_letter(&self) -> Option<char> {
+        self.post.lathe.as_ref()?.y_axis.as_ref()?.letter.chars().next()
+    }
+
+    fn is_y_letter(&self, letter: char) -> bool {
+        self.y_axis_letter() == Some(letter)
+    }
+
+    /// Diameter mode halves X. Without `y_axis`, Y is centreline 0. With it, Y is modal, and a
+    /// letter that is not the second axis letter is read into Y.
+    fn lathe_end(&self, mut end: Xyz, axes_present: [Option<f64>; 3], words: &[(char, f64)]) -> Result<Xyz> {
+        if axes_present[0].is_some() {
+            end[0] = self.stored_x(end[0]);
+        }
+        if self.face_mode || self.cyl_mode {
+            return Ok(end);
+        }
+        let Some(letter) = self.y_axis_letter() else {
+            end[1] = 0.0;
+            return Ok(end);
+        };
+        let second = axis_letters(self.post)[1];
+        if letter != second
+            && let Some(value) = unique(words, letter)?
+        {
+            end[1] = value;
+        }
+        Ok(end)
     }
 
     fn rotary_word(&self, words: &[(char, f64)]) -> Result<Option<f64>> {
