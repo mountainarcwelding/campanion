@@ -25,6 +25,7 @@ mod report;
 mod rotary;
 mod rough;
 mod run;
+mod safety;
 mod surface;
 mod waterline;
 mod wrap;

@@ -96,7 +96,8 @@ unique within that operation. The same layer may appear on two operations.
 | `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface, rough, waterline, wrap and rotary finish. |
 | `tool_id` | yes | `id` of a tool in this file. |
 | `depth` | yes, except chamfer, surface, rough, waterline and rotary finish | Positive distance downward, in `units`. Not an absolute Z. On a profile, pocket, drill, engrave or face this is below the stock surface. On a wrap it is below the cylinder surface. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface, a rough, a waterline or a rotary finish rejects `depth`. |
-| `step_down` | yes, except chamfer, surface and rotary finish | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface or a rotary finish rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. |
+| `step_down` | yes, except chamfer, surface and rotary finish | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface or a rotary finish rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. On a drill it is the peck depth: when it is less than `depth` the drill pecks, and otherwise the drill feeds to depth in one move. |
+| `dwell` | drill only | Seconds to pause at the bottom of a drill, from 0 to 3600 inclusive. Not scaled by `units`. Rejected on every other kind. Omitted, the drill does not pause. |
 | `stepover` | pocket, face, surface, rough and rotary finish | Positive step between passes, in `units`. At most the tool diameter on a pocket, face, surface or rough. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. A rough that omits it uses 0.4 times the tool diameter. A waterline rejects `stepover`. On a rotary finish it is the arc length between angle passes at the largest radius, and it is not capped at the tool diameter. When `angle_step_deg` is also set, the run uses `stepover`. |
 | `scallop_height` | surface only | Positive length in `units`. Flat-floor cusp height used instead of `stepover`. See below. Rejected on every other kind. |
 | `sample_step` | surface and rotary finish | Positive length in `units`. On a surface, the default is half of the stepover that is used (after a scallop height is resolved and capped). It is the maximum gap between the regular drop-cutter samples on a raster line, and between the samples on the link from one line to the next. On a rotary finish it is the spacing along the axis. Omitted there, the run uses `min(0.25, chord * 10)` millimetres. |
@@ -333,7 +334,7 @@ The safe radius is at least the swept radius plus `heights.clearance`, and at le
 
 `examples/rotary.job.json` finishes `examples/rotary.stl` with a 3 mm ball, zigzag, a 30° angle step and a 0.25 mm sample step, about axis A through the origin. The mesh is a vase revolved about X, 60 mm long and about 30 mm in diameter, with closed ends. `crates/mesh/tests/rotary_vase.rs` builds that STL.
 
-Pocket strategy, leads, tabs and drill-cycle fields are not part of this version.
+A drill is expanded into moves: each hole is a rapid to clearance over the hole, a rapid to the job retract height (the R plane), a plunge feed to depth (pecking back to the R plane when `step_down` is less than `depth`), an optional `dwell`, and a rapid out to clearance. No canned cycle is written. `step_down` on a drill is the peck depth. Pocket strategy, leads and tabs are not part of this version.
 
 ### Timing
 
@@ -448,9 +449,27 @@ Load failures:
 - `operation `<name>`: plane is not supported on waterline`
 - `operation `<name>`: ` followed by the kinematics error when that pose is not reachable
 
-`examples/tilted.job.json` profiles `examples/sample.dxf` flat, profiles it again on a 30° plane, and profiles a side plane 1 mm deep. A post with no `five_axis` block still rejects a tilted tool axis with `post `<id>` has no tilted-plane output`.
+`examples/tilted.job.json` profiles `examples/sample.dxf` flat, profiles it again on a 30° plane, and drills a side plane. A post with no `five_axis` block still rejects a tilted tool axis with `post `<id>` has no tilted-plane output`.
 
 A post with `five_axis` writes indexed 3+2. Before the first move of a toolpath whose tool axis changed, and before the first toolpath of a five-axis program, it retracts, indexes the rotaries, and turns the frame on. `mode` `work` writes the part tip rotated about the origin by the table angles (the control applies the rotary centres). `mode` `machine` writes the gauge point from the kinematics inverse with tool length 0. The first move after an index is a rapid in X and Y, then a rapid in Z. At the end the frame is cancelled, the tool retracts, and the rotaries return to zero. `haas_umc` is work mode (G254/G255). `linuxcnc_5ax` is machine mode. The kinematics file has to match the machine; this output has not been proven on a machine.
+
+## Rapid safety
+
+`campanion run` rejects a mill toolpath when a rapid ends or travels below the safe plane inside the part. In the planning frame the tool axis is +Z. For a drawing, stock top is Z 0 and the safe plane is the job retract height (the R plane). For a mesh, the floor is the higher of the stock top (the highest Z of that view) and the retract height. The footprint is the selected contours, or the mesh bounds in XY, grown by the tool radius. A kerf tool is not grown.
+
+`operation <name>: rapid ends at Z <z> below the safe plane <floor> inside the part`
+
+`operation <name>: rapid traverse at Z <z> below the safe plane <floor> inside the part`
+
+Wrap and rotary finish are already in the part frame. The cut surface is the largest radius of a feed tip from the rotary axis. A rapid that ends inside that radius fails with:
+
+`operation <name>: rapid ends at radius <r> below the cut surface <floor>`
+
+On a 3-axis program, with no rotary setup and no kinematics, the IR verifier's rapid findings are blocking as well. Nothing is written and the process exits 1. Toolpath and block numbers are 1-based. An XY rapid that stays between the retract height and the clearance height is not an error. Rotary and 3+2 programs use the planning-frame check above.
+
+`toolpath <T> block <B>: rapid ends at Z <z> below the safe plane <r>`
+
+`toolpath <T> block <B>: rapid traverse at Z <z> below the safe plane <r>`
 
 ## Limits
 

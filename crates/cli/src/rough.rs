@@ -5,9 +5,10 @@
 //! at the ring start. A ramp follows the ring. A helix circles the ring's bounding-box centre
 //! and is used only when that circle stays inside the ring and clear of the part; otherwise the
 //! operation ramps at the helix angle and warns once. The tool rapids at clearance to the entry,
-//! rapids down to the retract height, cuts, and feeds back up to the retract height. The process
-//! turns on once before the first cut and off after the last retract, then the tool rapids to
-//! clearance.
+//! then down to the safe plane (the retract height, or the stock top when that is higher). A ramp
+//! or helix starts on that plane when the previous level is below it and feeds down with XY.
+//! A plunge stays one feed from the retract height. The process turns on once before the first
+//! cut and off after the last retract, then the tool rapids to clearance.
 
 use std::io::{self, Write};
 
@@ -43,7 +44,8 @@ pub(crate) fn rough(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh) 
     let area_min = (bounds.min().x - margin, bounds.min().y - margin);
     let area_max = (bounds.max().x + margin, bounds.max().y + margin);
     let levels = zlevel_rough(&dc, area_min, area_max, &params, &job.tolerance()).map_err(|err| op_err(op, err))?;
-    link_levels(op, job.clearance(), job.retract(), top, floor, stock, job.tolerance(), &dc, &levels)
+    let rapid_floor = job.retract().max(bounds.max().z);
+    link_levels(op, job.clearance(), job.retract(), rapid_floor, top, floor, stock, job.tolerance(), &dc, &levels)
 }
 
 pub(crate) fn cutter(op: &Operation, tool: &JobTool) -> Result<Cutter, CliError> {
@@ -74,6 +76,8 @@ struct Link<'a, 'm> {
     stock: f64,
     clearance: f64,
     retract: f64,
+    /// Lowest Z a rapid may end at: the higher of the retract height and the mesh top.
+    rapid_floor: f64,
 }
 
 /// Levels top to bottom, rings in order. XY rapids between rings stay at clearance.
@@ -81,6 +85,7 @@ fn link_levels(
     op: &Operation,
     clearance: f64,
     retract: f64,
+    rapid_floor: f64,
     top: f64,
     floor: f64,
     stock: f64,
@@ -88,7 +93,7 @@ fn link_levels(
     dc: &DropCutter,
     levels: &[ZLevel],
 ) -> Result<Toolpath, CliError> {
-    let link = Link { op, dc, tolerance, floor, stock, clearance, retract };
+    let link = Link { op, dc, tolerance, floor, stock, clearance, retract, rapid_floor };
     let mut pen = Pen::new(op);
     let mut turned_on = false;
     let mut any = false;
@@ -110,7 +115,7 @@ fn link_levels(
     }
     pen.push(Move::Event(ProcessEvent::Off))?;
     if let Some(here) = pen.at {
-        pen.rapid(here.x(), here.y(), clearance)?;
+        pen.rapid(here.x(), here.y(), clearance.max(rapid_floor))?;
     }
     Toolpath::new(pen.moves).map_err(|err| op_err(op, err))
 }
@@ -191,18 +196,23 @@ fn cut_ring(
     if !drop.is_finite() || drop <= 0.0 {
         return Err(op_err(link.op, "rough level is not below the previous level"));
     }
-    let plan = DepthPlan::new(prev_z, drop, drop, entry);
+    // A plunge is planned from the previous level and feeds down from the retract height.
+    // A ramp or helix starts at the safe plane when that level is below it, then feeds down
+    // along the entry, so the tool never rapids below the plane.
+    let (plan_z, plan) = if matches!(entry, DepthEntry::Plunge) {
+        (prev_z, DepthPlan::new(prev_z, drop, drop, entry))
+    } else {
+        let plan_z = prev_z.max(link.rapid_floor);
+        (plan_z, DepthPlan::new(plan_z, plan_z - z, plan_z - z, entry))
+    };
     let path = depth_toolpath(ring, &plan, &link.tolerance).map_err(|err| op_err(link.op, err))?;
     let Some(start) = first_rapid(&path) else {
         return Err(op_err(link.op, "entry has no start"));
     };
-    pen.approach(start.x(), start.y(), link.clearance, link.retract)?;
-    // The ramp and helix are planned from `prev_z`. Feeding straight down from the retract
-    // height would be a vertical move below the stock top, so the tool rapids down on the entry
-    // point instead. That point is allowed at this level, which is below `prev_z`. A plunge
-    // stays one feed from the retract height, which keeps an omitted entry unchanged.
-    if !matches!(entry, DepthEntry::Plunge) {
-        pen.rapid(start.x(), start.y(), prev_z)?;
+    let travel = link.clearance.max(link.rapid_floor);
+    pen.approach(start.x(), start.y(), travel, link.rapid_floor)?;
+    if !matches!(entry, DepthEntry::Plunge) && plan_z > link.rapid_floor + 1e-9 {
+        pen.rapid(start.x(), start.y(), plan_z)?;
     }
     if !*turned_on {
         pen.push(Move::Event(ProcessEvent::On))?;

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Mill `drill` no longer rapids to the hole bottom. Each hole is now a rapid to clearance and to the R plane (job retract height), a plunge feed to depth (pecking when `step_down` is less than `depth`), an optional `dwell`, and a rapid out. Every release from v0.1.0 to v0.8.0 rapided to depth; do not run mill drill output from those versions.
+- `campanion run` now rejects any mill toolpath with a rapid that ends below the R plane (job retract height) or below the cut surface inside the part, or that traverses below it; the IR verifier's rapid-height findings were computed but never enforced.
+- `surface` rapids no longer traverse at the job clearance when that is below the top of the STL model; they now stay at or above the model top. Every release from v0.3.0 to v0.8.0 could rapid across the part when the clearance was below the model top (for example a multi-operation surface job with default heights); regenerate that output.
+- `rough` ramp and helix entries no longer rapid down below the R plane to the previous level; they start on the safe plane and feed down along the entry. `waterline` rapids stay at or above the model top when the retract height is below it.
+
+### Changed
+
+- `examples/tilted.job.json` drills the side plane again, now that mill drill feeds to depth.
+
 ## 0.8.0 — 2026-10-24
 
 Milestone M11 Part C, items 8–10: rotary kinematics as data, indexed 3+2 tilted work planes with Haas and LinuxCNC posts, and angled turning with a B head.

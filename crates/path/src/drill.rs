@@ -1,14 +1,18 @@
-//! Drill positions collected from circles and explicit points.
+//! Drill positions collected from circles and explicit points, and the motion that cuts them.
 //!
-//! A hit is a position. [`DrillCycle`] is the cycle marker carried with those positions:
-//! peck depth, retract and dwell are data. This module does not expand a cycle into feeds
-//! and it does not emit machine codes.
+//! A hit is a position. [`DrillCycle`] carries peck depth, retract and dwell.
+//! [`Drilling::toolpath`] is hole positions only and must not be posted. [`Drilling::expand`]
+//! writes the motion: a rapid at clearance, a rapid at the R plane, a feed into the hole, and a
+//! rapid back out. Between pecks the tool retracts all the way to the R plane and feeds back in.
+//! [`DrillCycle::retract_distance`] is not used for that pull-back (full retract, G83 style).
+//! This module does not emit machine codes.
 
 use campanion_geom::{Contour, Point, Segment, Tolerance};
 
 use crate::Result;
 use crate::check::{self, finite, non_negative, positive};
-use crate::toolpath::{Move, Point3, Toolpath};
+use crate::pass_depths;
+use crate::toolpath::{CutKind, Move, Point3, Toolpath};
 
 const TAU: f64 = std::f64::consts::TAU;
 
@@ -104,9 +108,68 @@ pub struct Drilling {
 }
 
 impl Drilling {
-    /// Rapids to each hole, in order. The cycle is not expanded into moves.
+    /// Hole positions only. One rapid per hit, at the hole bottom.
+    ///
+    /// This must not be posted. Use [`Self::expand`] for motion.
     pub fn toolpath(&self) -> &Toolpath {
         &self.toolpath
+    }
+
+    /// Safe motion for every hole, in order.
+    ///
+    /// `z` on a hit is the hole bottom. For each hole the moves are:
+    ///
+    /// 1. Rapid to `(x, y, clearance)`, so XY travel stays at clearance.
+    /// 2. Rapid to `(x, y, r_plane)`. This is as low as a rapid goes.
+    /// 3. Feed to each peck depth. With no peck depth, that is one feed to the bottom.
+    ///    Otherwise the depths are [`pass_depths`] of `top_z - bottom`, mapped with
+    ///    `top_z - depth`, and the last depth is exactly the bottom. After every peck except
+    ///    the last, rapid back to the R plane. The next peck feeds in from there.
+    /// 4. Dwell, when [`DrillCycle::dwell_seconds`] is `Some(seconds)` and `seconds > 0`.
+    /// 5. Rapid straight out to `(x, y, clearance)` along the hole axis.
+    ///
+    /// [`DrillCycle::retract_distance`] is not used. The pull-back between pecks is a full
+    /// retract to the R plane, G83 style, not a short chip-break distance. Nothing rapids
+    /// below the R plane.
+    ///
+    /// `feed_kind` is the [`CutKind`] of every feed into the hole.
+    pub fn expand(&self, top_z: f64, r_plane: f64, clearance: f64, feed_kind: CutKind) -> Result<Toolpath> {
+        if !r_plane.is_finite() || !clearance.is_finite() {
+            return Err(check::invalid("R plane and clearance must be finite"));
+        }
+        finite(top_z, "top z")?;
+        if clearance < r_plane {
+            return Err(check::invalid("clearance must be at or above the R plane"));
+        }
+        if r_plane < top_z {
+            return Err(check::invalid("R plane must be above the hole bottom"));
+        }
+        let mut moves = Vec::new();
+        for hit in &self.hits {
+            let x = hit.position.x();
+            let y = hit.position.y();
+            let bottom = hit.position.z();
+            if r_plane <= bottom {
+                return Err(check::invalid("R plane must be above the hole bottom"));
+            }
+            let levels = hole_levels(self.cycle.peck(), top_z, bottom)?;
+            let last = levels.len().saturating_sub(1);
+            check::push(&mut moves, Move::Rapid { to: Point3::new(x, y, clearance)? })?;
+            check::push(&mut moves, Move::Rapid { to: Point3::new(x, y, r_plane)? })?;
+            for (index, level) in levels.iter().copied().enumerate() {
+                check::push(&mut moves, Move::Linear { to: Point3::new(x, y, level)?, kind: feed_kind })?;
+                if index != last {
+                    check::push(&mut moves, Move::Rapid { to: Point3::new(x, y, r_plane)? })?;
+                }
+            }
+            if let Some(seconds) = self.cycle.dwell_seconds()
+                && seconds > 0.0
+            {
+                check::push(&mut moves, Move::Dwell { seconds })?;
+            }
+            check::push(&mut moves, Move::Rapid { to: Point3::new(x, y, clearance)? })?;
+        }
+        Toolpath::new(moves)
     }
 
     pub fn hits(&self) -> &[DrillHit] {
@@ -209,6 +272,19 @@ impl DrillOp {
         }
         Ok(Drilling { toolpath: Toolpath::new(moves)?, hits, cycle: self.cycle })
     }
+}
+
+/// Peck Z levels for one hole. The last entry is exactly `bottom`.
+fn hole_levels(peck: Option<f64>, top_z: f64, bottom: f64) -> Result<Vec<f64>> {
+    let Some(peck) = peck else {
+        return Ok(vec![bottom]);
+    };
+    let mut levels: Vec<f64> = pass_depths(top_z - bottom, peck)?.into_iter().map(|depth| top_z - depth).collect();
+    match levels.last_mut() {
+        Some(last) => *last = bottom,
+        None => levels.push(bottom),
+    }
+    Ok(levels)
 }
 
 fn passes_filter(diameter: f64, min_diameter: Option<f64>, max_diameter: Option<f64>) -> bool {
@@ -382,5 +458,95 @@ mod tests {
         let long = Contour::try_new(segments, false, &Tolerance::default()).unwrap();
         let err = DrillOp::new(DrillCycle::new()).generate(std::slice::from_ref(&long), &[]).unwrap_err();
         assert!(err.to_string().contains("too many segments") || err.to_string().contains("closed"), "{err}");
+    }
+
+    fn pt(x: f64, y: f64, z: f64) -> Point3 {
+        Point3::new(x, y, z).unwrap()
+    }
+
+    fn one_hole(cycle: DrillCycle, z: f64) -> Drilling {
+        DrillOp::new(cycle).z(z).generate(&[], &[Point::new(4.0, 7.0).unwrap()]).unwrap()
+    }
+
+    #[test]
+    fn expand_without_peck_lists_the_moves_for_one_hole() {
+        let path = one_hole(DrillCycle::new(), -3.0).expand(0.0, 2.0, 5.0, CutKind::Plunge).unwrap();
+        assert_eq!(
+            path.moves(),
+            &[
+                Move::Rapid { to: pt(4.0, 7.0, 5.0) },
+                Move::Rapid { to: pt(4.0, 7.0, 2.0) },
+                Move::Linear { to: pt(4.0, 7.0, -3.0), kind: CutKind::Plunge },
+                Move::Rapid { to: pt(4.0, 7.0, 5.0) },
+            ]
+        );
+    }
+
+    #[test]
+    fn expand_peck_feeds_each_level_and_reenters_from_the_r_plane() {
+        // Depth 3 mm, peck 1 mm, stock at 0: levels -1, -2, -3. A short retract distance is ignored.
+        let cycle = DrillCycle::new().peck_depth(1.0).retract(0.2);
+        let path = one_hole(cycle, -3.0).expand(0.0, 2.0, 5.0, CutKind::Plunge).unwrap();
+        assert_eq!(
+            path.moves(),
+            &[
+                Move::Rapid { to: pt(4.0, 7.0, 5.0) },
+                Move::Rapid { to: pt(4.0, 7.0, 2.0) },
+                Move::Linear { to: pt(4.0, 7.0, -1.0), kind: CutKind::Plunge },
+                Move::Rapid { to: pt(4.0, 7.0, 2.0) },
+                Move::Linear { to: pt(4.0, 7.0, -2.0), kind: CutKind::Plunge },
+                Move::Rapid { to: pt(4.0, 7.0, 2.0) },
+                Move::Linear { to: pt(4.0, 7.0, -3.0), kind: CutKind::Plunge },
+                Move::Rapid { to: pt(4.0, 7.0, 5.0) },
+            ]
+        );
+    }
+
+    #[test]
+    fn expand_dwells_after_the_last_level() {
+        let cycle = DrillCycle::new().peck_depth(1.0).dwell(0.5);
+        let path = one_hole(cycle, -3.0).expand(0.0, 2.0, 5.0, CutKind::Plunge).unwrap();
+        let dwell_at = path.moves().iter().position(|mv| matches!(mv, Move::Dwell { seconds } if (*seconds - 0.5).abs() < 1e-12)).expect("dwell");
+        let last_feed =
+            path.moves().iter().rposition(|mv| matches!(mv, Move::Linear { to, .. } if (to.z() + 3.0).abs() < 1e-12)).expect("final feed");
+        assert_eq!(dwell_at, last_feed + 1);
+        assert!(matches!(path.moves().get(dwell_at + 1), Some(Move::Rapid { to }) if (to.z() - 5.0).abs() < 1e-12));
+        assert_eq!(path.moves().iter().filter(|mv| matches!(mv, Move::Dwell { .. })).count(), 1);
+
+        let silent = one_hole(DrillCycle::new().dwell(0.0), -3.0).expand(0.0, 2.0, 5.0, CutKind::Plunge).unwrap();
+        assert!(silent.moves().iter().all(|mv| !matches!(mv, Move::Dwell { .. })));
+    }
+
+    #[test]
+    fn expand_rapids_stay_at_or_above_the_r_plane() {
+        let cycle = DrillCycle::new().peck_depth(1.0).dwell(0.5);
+        let path = one_hole(cycle, -3.0).expand(0.0, 2.0, 5.0, CutKind::Plunge).unwrap();
+        let mut exceptions = Vec::new();
+        let mut fed_below = false;
+        for mv in path.moves() {
+            match *mv {
+                Move::Rapid { to } if to.z() < 2.0 => exceptions.push(to.z()),
+                Move::Linear { to, .. } if to.z() < 2.0 => fed_below = true,
+                _ => {}
+            }
+        }
+        assert!(fed_below, "the plunge has to go below the R plane");
+        assert!(exceptions.is_empty(), "exceptions: none, found {exceptions:?}");
+    }
+
+    #[test]
+    fn expand_rejects_a_low_r_plane_a_low_clearance_and_a_non_finite_height() {
+        let drilling = one_hole(DrillCycle::new(), -3.0);
+        let cases = [
+            (0.0, -3.0, 5.0, "R plane must be above the hole bottom"),
+            (0.0, -0.5, 5.0, "R plane must be above the hole bottom"),
+            (0.0, 2.0, 1.0, "clearance must be at or above the R plane"),
+            (0.0, f64::NAN, 5.0, "R plane and clearance must be finite"),
+            (0.0, 2.0, f64::INFINITY, "R plane and clearance must be finite"),
+        ];
+        for (top_z, r_plane, clearance, needle) in cases {
+            let err = drilling.expand(top_z, r_plane, clearance, CutKind::Plunge).unwrap_err();
+            assert_eq!(err, PathError::InvalidInput(needle.into()), "{needle}");
+        }
     }
 }
