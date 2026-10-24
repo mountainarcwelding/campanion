@@ -354,7 +354,9 @@ fn verify_event(event: &Event, open: &mut Vec<ProcessKind>, out: &mut VerifyRepo
         | Event::CAxis { .. }
         | Event::SpindleBrake { .. }
         | Event::LiveToolOn { .. }
-        | Event::LiveToolOff => {}
+        | Event::LiveToolOff
+        | Event::FaceInterpolation { .. }
+        | Event::CylinderInterpolation { .. } => {}
     }
 }
 

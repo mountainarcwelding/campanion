@@ -28,8 +28,9 @@
 //!   not written.
 //! - Comments use parentheses. Parentheses in the source text are removed. Line breaks in that
 //!   text become spaces.
-//! - Coolant, probe, custom, sync, C-axis, spindle-brake and live-tool events are comments, so
-//!   the block order stays visible. They are not machine codes.
+//! - Coolant, probe, custom, sync, C-axis, spindle-brake, live-tool, face-interpolation and
+//!   cylinder-interpolation events are comments, so the block order stays visible. They are not
+//!   machine codes.
 //! - Every coordinate, offset, feed and dwell is written with four digits after the decimal point.
 //!   A number that would print as `-0.0000`, including a negative zero and a value that rounds to
 //!   zero at that precision, is written as `0.0000`.
@@ -355,6 +356,14 @@ impl Writer {
                 self.line(&format!("(live tool {verb} {rpm})"));
             }
             Event::LiveToolOff => self.line("(live tool off)"),
+            Event::FaceInterpolation { on } => {
+                let verb = if *on { "on" } else { "off" };
+                self.line(&format!("(face interpolation {verb})"));
+            }
+            Event::CylinderInterpolation { radius } => match radius {
+                Some(radius) => self.line(&format!("(cylinder interpolation {radius})")),
+                None => self.line("(cylinder interpolation off)"),
+            },
         }
         Ok(())
     }
