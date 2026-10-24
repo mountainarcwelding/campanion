@@ -13,7 +13,8 @@
 //! `I` `J` `K` are centre offsets from the stored start. `arc_flip` swaps G2 and G3 back to the
 //! IR sense on ZX arcs only. `G53` is a machine move and is not returned. `G28` is a reference
 //! return and is not returned. `U` and `W` are accepted only on that block. `G50` (spindle cap)
-//! and `G98` (Fanuc and Haas feed per minute) are not moves. A cylinder `on` line such as
+//! and `G98` (Fanuc and Haas feed per minute) are not moves. The thread feed word, such as G99,
+//! is not a move. A cylinder `on` line such as
 //! `G107 Y0 C0 R20.` is not a move and does not change the modal C word.
 //!
 //! A lathe post with `c_axis` treats that letter as a modal angle. Rapid and linear moves return
@@ -119,6 +120,8 @@ struct Parser<'a> {
     on_sub: bool,
     /// Current B-head angle, degrees. A channel start returns it to 0.
     b_deg: f64,
+    /// True after the thread feed word (`G99` on Haas) until `lathe.feed_mode`.
+    thread_feed_on: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -135,6 +138,7 @@ impl<'a> Parser<'a> {
             cyl_mode: false,
             on_sub: false,
             b_deg: 0.0,
+            thread_feed_on: false,
         }
     }
 
@@ -229,6 +233,8 @@ impl<'a> Parser<'a> {
         let mut motions = 0u8;
         let mut inverse_time = self.inverse_time;
         let thread_code = self.thread_code();
+        let thread_feed = self.thread_feed_code();
+        let lathe_feed = self.lathe_feed_code();
         for &code in &g_codes {
             if self.post.rotary.as_ref().is_some_and(|rotary| rotary.on_code() == Some(code)) {
                 inverse_time = true;
@@ -244,6 +250,13 @@ impl<'a> Parser<'a> {
             }
             if self.is_lathe_inverse_off(code) {
                 inverse_time = false;
+                continue;
+            }
+            if lathe_feed == Some(code) {
+                self.thread_feed_on = false;
+            }
+            if thread_feed == Some(code) {
+                self.thread_feed_on = true;
                 continue;
             }
             match code {
@@ -322,6 +335,11 @@ impl<'a> Parser<'a> {
             }
             self.plane = plane;
             return Ok(Some(ReadMove::Dwell { seconds }));
+        }
+        let explicit_feed = g_codes.iter().any(|code| matches!(*code, 1..=3));
+        let modal_feed = has_axis && matches!(motion, Some(Motion::Linear | Motion::Cw | Motion::Ccw));
+        if self.thread_feed_on && !threading && (explicit_feed || modal_feed) {
+            return Err(invalid("feed move in thread feed mode"));
         }
         if threading {
             if !has_axis {
@@ -432,6 +450,17 @@ impl<'a> Parser<'a> {
     fn thread_code(&self) -> Option<u16> {
         let thread = self.post.lathe.as_ref()?.thread.as_ref()?;
         g_code_number(&thread.code)
+    }
+
+    /// Thread feed word, such as `G99`, when the post names one. Not a move.
+    fn thread_feed_code(&self) -> Option<u16> {
+        let mode = &self.post.lathe.as_ref()?.thread.as_ref()?.feed_mode;
+        if mode.is_empty() { None } else { g_code_number(mode) }
+    }
+
+    fn lathe_feed_code(&self) -> Option<u16> {
+        let mode = &self.post.lathe.as_ref()?.feed_mode;
+        if mode.is_empty() { None } else { g_code_number(mode) }
     }
 
     fn thread_lead_letter(&self) -> Option<char> {

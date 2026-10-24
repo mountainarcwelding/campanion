@@ -197,6 +197,8 @@ struct Writer<'a> {
     /// Last `G0` or `G1`, cleared by an arc so the next line is not modal.
     linear: Option<&'static str>,
     feed: Option<String>,
+    /// True after `lathe.thread.feed_mode` until `lathe.feed_mode` is written again.
+    thread_feed_on: bool,
     line_no: u32,
     on: Vec<Active>,
     thc_phase: ThcPhase,
@@ -263,6 +265,7 @@ impl<'a> Writer<'a> {
             plane,
             linear: None,
             feed: None,
+            thread_feed_on: false,
             line_no: post.line_numbers.start,
             on: Vec::new(),
             thc_phase: ThcPhase::Idle,
@@ -312,6 +315,7 @@ impl<'a> Writer<'a> {
         self.plane = self.channel_plane;
         self.linear = None;
         self.feed = None;
+        self.thread_feed_on = false;
         self.on.clear();
         self.thc_phase = ThcPhase::Idle;
         self.last_speed.clear();
@@ -405,6 +409,7 @@ impl<'a> Writer<'a> {
                 ClBlock::Event(event) => self.event(event)?,
             }
         }
+        self.restore_feed_mode()?;
         Ok(())
     }
 
@@ -513,6 +518,10 @@ impl<'a> Writer<'a> {
         if !matches!(self.cart, CartMode::Off) && matches!(motion, ClMotion::Thread { .. }) {
             return Err(invalid("thread move during interpolation"));
         }
+        // Rapids stay in the thread feed mode. G0 has no feed word.
+        if matches!(motion, ClMotion::Linear { .. } | ClMotion::Arc { .. } | ClMotion::Helix { .. }) {
+            self.restore_feed_mode()?;
+        }
         if self.interp_fallback() {
             return self.fallback_motion(motion);
         }
@@ -545,6 +554,12 @@ impl<'a> Writer<'a> {
         let lathe = self.post.lathe.as_ref().ok_or_else(|| unsupported(format!("post `{}` does not support threading", self.post.id())))?;
         let thread =
             lathe.thread.as_ref().ok_or_else(|| unsupported(format!("post `{}` does not support synchronised threading", self.post.id())))?;
+        if !thread.feed_mode.is_empty() && !self.thread_feed_on {
+            let mode = thread.feed_mode.clone();
+            self.templates("lathe.thread.feed_mode", &[mode], &[("date-free!", "")])?;
+            self.thread_feed_on = true;
+            self.feed = None;
+        }
         if !(lead.is_finite() && lead > 0.0) {
             return Err(invalid("thread lead must be positive"));
         }
@@ -565,6 +580,19 @@ impl<'a> Writer<'a> {
         self.angle = posted.angle;
         self.force_axes = false;
         self.emit_words(&words)
+    }
+
+    /// Write `lathe.feed_mode` after a thread run so the next feed move is not left in G99.
+    fn restore_feed_mode(&mut self) -> Result<()> {
+        if !self.thread_feed_on {
+            return Ok(());
+        }
+        let lathe = self.post.lathe.as_ref().ok_or_else(|| invalid("thread feed mode needs a lathe post"))?;
+        let mode = lathe.feed_mode.clone();
+        self.templates("lathe.feed_mode", &[mode], &[("date-free!", "")])?;
+        self.thread_feed_on = false;
+        self.feed = None;
+        Ok(())
     }
 
     fn require_rpm_binding(&self) -> Result<()> {
