@@ -363,7 +363,8 @@ fn verify_event(event: &Event, bound_spindle: Option<&str>, open: &mut Vec<Proce
         | Event::ChuckClamp { .. }
         | Event::SpindleSync { .. }
         | Event::SpindleRun { .. }
-        | Event::SpindleMove { .. } => {}
+        | Event::SpindleMove { .. }
+        | Event::HeadIndex { .. } => {}
     }
 }
 

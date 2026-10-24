@@ -1,7 +1,7 @@
 {
   "id": "linuxcnc_lathe",
   "name": "LinuxCNC lathe",
-  "description": "Millimetre LinuxCNC lathe dialect. Absolute moves, diameter mode (G7), ZX plane (G18) and feed per minute (G94). Constant surface speed is G96 D max-rpm S metres/min; direct rpm is G97. Tool change is T and M6, then G43. IJK arcs in the ZX plane. Single-point threading is G33 with the lead on K. The live tool is spindle 1 (M3, M4 and M5 with $1) and a C move uses inverse-time feed (G93). The C-axis switch and brake are left empty because LinuxCNC does them in HAL or a user M-code, and a custom post can fill them.",
+  "description": "Millimetre LinuxCNC lathe dialect. Absolute moves, diameter mode (G7), ZX plane (G18) and feed per minute (G94). Constant surface speed is G96 D max-rpm S metres/min; direct rpm is G97. Tool change is T and M6, then G43. IJK arcs in the ZX plane. Single-point threading is G33 with the lead on K. The live tool is spindle 1 (M3, M4 and M5 with $1) and a C move uses inverse-time feed (G93). The C-axis switch and brake are left empty because LinuxCNC does them in HAL or a user M-code, and a custom post can fill them. The B joint and pivot length are machine-specific; LinuxCNC has no TCP here, so pivot length must be set in the post.",
   "references": [
     "M3/M4/M5 $n select spindle n (live tool = spindle 1): https://linuxcnc.org/docs/stable/html/gcode/m-code.html",
     "G93 inverse time feed: https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g93-g94-g95",
@@ -56,6 +56,7 @@
     "brake": { "clamp": [], "release": [] },
     "live_tool": { "forward": ["S{rpm} $1", "M3 $1"], "reverse": ["S{rpm} $1", "M4 $1"], "stop": ["M5 $1"], "feed_mode": "" },
     "y_axis": { "letter": "Y", "face_plane": "G17", "side_plane": "G19", "turn_plane": "G18" },
-    "c_feed": "inverse_time"
+    "c_feed": "inverse_time",
+    "b_head": { "index": ["G0 B{b}"], "mode": "pivot", "pivot_length": 0 }
   }
 }

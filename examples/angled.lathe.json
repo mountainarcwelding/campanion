@@ -1,0 +1,50 @@
+{
+  "format": "campanion-lathe/1",
+  "source": { "path": "shaft.dxf", "layer": "PROFILE" },
+  "units": "mm",
+  "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
+  "spindle": { "max_rpm": 3000 },
+  "head": { "b_axis": { "min_deg": -120, "max_deg": 120, "pivot_length": 0 } },
+  "tools": [
+    {
+      "id": 1,
+      "station": 1,
+      "shape": "c80",
+      "nose_radius": 0.8,
+      "orientation_deg": 45,
+      "hand": "right",
+      "tip": "centre"
+    },
+    {
+      "id": 2,
+      "station": 2,
+      "shape": "c80",
+      "nose_radius": 0.8,
+      "orientation_deg": 15,
+      "hand": "right",
+      "tip": "centre"
+    }
+  ],
+  "operations": [
+    {
+      "name": "finish",
+      "type": "finish",
+      "tool_id": 1,
+      "side": "outside",
+      "feed": 120,
+      "speed": { "rpm": 1500 },
+      "b_deg": 0
+    },
+    {
+      "name": "chamfer",
+      "type": "finish",
+      "tool_id": 2,
+      "side": "outside",
+      "feed": 100,
+      "speed": { "rpm": 1200 },
+      "b_deg": 30
+    }
+  ],
+  "tolerance": { "linear": 0.001, "chord": 0.01 },
+  "clearance": 2.0
+}

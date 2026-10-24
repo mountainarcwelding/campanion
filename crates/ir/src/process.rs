@@ -330,6 +330,8 @@ pub enum CoolantMode {
 /// at most 99999. A live-tool event does not require a turning setup.
 /// [`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]
 /// hand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.
+/// [`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is
+/// `(cos b_deg, 0, sin b_deg)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
@@ -466,6 +468,15 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feed: Option<f64>,
     },
+    /// Index the named head's B axis, in degrees.
+    ///
+    /// `b_deg` is finite. The tool axis from the tip toward the pivot is `(cos b_deg, 0, sin b_deg)`.
+    HeadIndex {
+        /// Head name.
+        head: String,
+        /// Head angle, degrees.
+        b_deg: f64,
+    },
 }
 
 impl Event {
@@ -532,6 +543,10 @@ impl Event {
                 if let Some(feed) = feed {
                     positive(*feed, "spindle move feed")?;
                 }
+            }
+            Self::HeadIndex { head, b_deg } => {
+                required_name(head, "head name")?;
+                finite(*b_deg, "head angle")?;
             }
         }
         Ok(())

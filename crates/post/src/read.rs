@@ -117,6 +117,8 @@ struct Parser<'a> {
     cyl_mode: bool,
     /// True after a `sub_spindle.select` line, until a `deselect` line.
     on_sub: bool,
+    /// Current B-head angle, degrees. A channel start returns it to 0.
+    b_deg: f64,
 }
 
 impl<'a> Parser<'a> {
@@ -132,10 +134,12 @@ impl<'a> Parser<'a> {
             face_mode: false,
             cyl_mode: false,
             on_sub: false,
+            b_deg: 0.0,
         }
     }
 
     fn line(&mut self, raw: &str) -> Result<Option<ReadMove>> {
+        self.note_channel_line(raw);
         let stripped = strip_comments(raw);
         if stripped.trim() == "%" {
             return Ok(None);
@@ -202,6 +206,7 @@ impl<'a> Parser<'a> {
                         || self.is_rotary_letter(letter)
                         || self.is_c_letter(letter)
                         || self.is_y_letter(letter)
+                        || self.is_b_head_letter(letter)
                         || self.is_transfer_letter(letter) => {}
                 letter => return Err(invalid(format!("unexpected word {letter}"))),
             }
@@ -298,6 +303,11 @@ impl<'a> Parser<'a> {
         // U0 W0). Neither block is a part-frame point.
         if self.post.is_lathe() && (g_codes.contains(&28) || g_codes.contains(&53)) {
             return Ok(None);
+        }
+        if self.has_b_head()
+            && let Some(value) = unique(&words, 'B')?
+        {
+            self.b_deg = value;
         }
         let axis_values = [unique(&words, axes[0])?, unique(&words, axes[1])?, unique(&words, axes[2])?];
         let has_axis = axis_values.iter().any(Option::is_some);
@@ -540,7 +550,7 @@ impl<'a> Parser<'a> {
             if self.mirroring() && axes_present[2].is_some() {
                 end[2] = -end[2];
             }
-            return Ok(end);
+            return Ok(self.unpivot(end, axes_present));
         };
         let second = axis_letters(self.post)[1];
         if letter != second
@@ -551,7 +561,49 @@ impl<'a> Parser<'a> {
         if self.mirroring() && axes_present[2].is_some() {
             end[2] = -end[2];
         }
-        Ok(end)
+        Ok(self.unpivot(end, axes_present))
+    }
+
+    /// Reverse a pivot-mode shift on the axes this block wrote. Face and cylinder frames are left alone.
+    fn unpivot(&self, mut end: Xyz, axes_present: [Option<f64>; 3]) -> Xyz {
+        let Some(b_head) = self.post.lathe.as_ref().and_then(|lathe| lathe.b_head.as_ref()) else {
+            return end;
+        };
+        let (dr, dz) = crate::def::b_pivot_offset(self.b_deg, &b_head.mode, b_head.pivot_length);
+        if axes_present[0].is_some() {
+            end[0] -= dr;
+        }
+        if axes_present[2].is_some() {
+            end[2] -= dz;
+        }
+        end
+    }
+
+    fn has_b_head(&self) -> bool {
+        self.post.lathe.as_ref().is_some_and(|lathe| lathe.b_head.is_some())
+    }
+
+    fn is_b_head_letter(&self, letter: char) -> bool {
+        letter == 'B' && self.has_b_head()
+    }
+
+    /// A channel section starts at B = 0, matching the writer.
+    fn note_channel_line(&mut self, raw: &str) {
+        let Some(channels) = self.post.lathe.as_ref().and_then(|lathe| lathe.channels.as_ref()) else {
+            return;
+        };
+        let body = block_body(self.post, raw);
+        let count = u32::from(channels.count);
+        for number in 1..=count {
+            let label = number.to_string();
+            for line in &channels.start {
+                let rendered = line.replace("{channel}", &label).replace("{date-free!}", "");
+                if rendered.trim() == body {
+                    self.b_deg = 0.0;
+                    return;
+                }
+            }
+        }
     }
 
     /// A select line enters the sub frame. A deselect line leaves it. Moves in between are un-mirrored
