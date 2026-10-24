@@ -69,6 +69,37 @@ While the active spindle is the sub, `CAxis`, `SpindleBrake`, `LiveToolOn`, `Fac
 
 `haas_lathe` selects with `G55` then `G14` and deselects with `G15` then `G54`. `mirror_z` is false: G14 mirrors Z on the control (Haas NGC lathe manual 96-8910 §7.1.8; G14 secondary spindle swap; cancelled by G15/M30/reset). G55 is the secondary-spindle work offset in the §7.1.72 example. `fanuc_lathe`, `linuxcnc_lathe` and `grbl_lathe` leave `sub_spindle` unset.
 
+### Part transfer
+
+`lathe.transfer` is optional. Without it, `ChuckClamp`, `SpindleSync`, `SpindleRun` and `SpindleMove` are `post `<id>` has no part transfer`.
+
+```json
+{
+  "spindle": "sub",
+  "clamp_main": ["M10"],
+  "unclamp_main": ["M11"],
+  "clamp_sub": ["M110"],
+  "unclamp_sub": ["M111"],
+  "sub_cw": ["M143 P{rpm}"],
+  "sub_ccw": ["M144 P{rpm}"],
+  "sub_stop": ["M145"],
+  "sync_on": ["G199"],
+  "sync_on_phase": ["G199 R{phase}"],
+  "sync_off": ["G198"],
+  "move_rapid": ["G00 B{z}"],
+  "move_feed": ["G01 B{z} F{feed}"],
+  "move_machine": ["G00 G53 B{z}"]
+}
+```
+
+`spindle` is the IR name served by the secondary lines. `clamp_main` and `unclamp_main` serve spindle `main`. The other chuck, run and move lines serve `transfer.spindle`. A `ChuckClamp`, `SpindleMove` or `SpindleRun` that names any other spindle is `post `<id>` has no spindle `<name>``. The missing-transfer error wins when the post has no `transfer` block.
+
+`{rpm}` on `sub_cw` and `sub_ccw`, `{phase}` on `sync_on_phase`, `{z}` on the move lines and `{feed}` on `move_feed` use the lathe number format: a whole number is an integer, and any other number uses the feed decimals. `{z}` may be negative. An empty list writes nothing. `SpindleRun` with `rpm` 0 writes `sub_stop` on the secondary spindle and `spindle_off` on `main`. A positive `rpm` on `main` writes the `rpm` lines (`G97 S{rpm}` on Haas) and then `spindle_cw` or `spindle_ccw` from the event's `reverse` flag, not from the binding. `SpindleSync` with `engage` true and a phase writes `sync_on_phase`. Without a phase it writes `sync_on`. `engage` false writes `sync_off`. `SpindleMove` with `machine` true writes `move_machine` even when a feed is set. A feed and `machine` false writes `move_feed`. Otherwise the move is `move_rapid`.
+
+Read-back accepts these lines as pass-through. A housing move is not a part-frame point. `G53` on that move still does not change the modal motion. A `G00` or `G01` housing move does, so the next part rapid or feed stays in step with the reader.
+
+`haas_lathe` uses the object above. M10/M11 are the main chuck, M110/M111 the secondary chuck (the spring ejector acts when those jaws open), M143/M144/M145 the secondary spindle with the speed on P, G199/G198 synchronous control with an optional R phase, and B the secondary housing. Those codes are cited in `references` from Haas NGC lathe manual 96-8910 §8.1.6, §8.1.35, §8.1.44, §7.1.71-72 and §6.34. `fanuc_lathe`, `linuxcnc_lathe` and `grbl_lathe` leave `transfer` unset. While the sub is selected (`sub_spindle.select`, Haas `G14`), a `SpindleRun` on the sub uses the main spindle lines (`M3`/`M4`/`M5`) instead, because Haas alarms on M143/M144/M145 under G14 (manual 96-8910 §7.1.8).
+
 ### Mill-turn (C axis and live tools)
 
 A turning program can engage a spindle as a positioning C axis, clamp its brake, and run a live (driven) tool. The IR events are:
@@ -161,6 +192,6 @@ X stays on `diameter_mode`. Y is never doubled. Read-back keeps Y modal when `y_
 
 `fanuc_lathe` is Fanuc G-code system A. The file is percent-delimited, like the Fanuc mill post: program `O0001`, sequence numbers from `N10` in steps of 10, and a maximum line length of 80. `G21` selects millimetres, `G40` cancels tool-nose compensation and `G80` cancels a canned cycle. `G18` selects the ZX plane. Feed per minute is `G98`. `G99` is left out, because that word is millimetres per revolution and the IR feed is millimetres per minute. `G90` is left out: on this control it is an outer and inner diameter cutting cycle, and `X` and `Z` are already absolute. Constant surface speed writes `G50 S{max_rpm}` and then `G96 S{surface}` (`S` is metres per minute under `G21`). Direct rpm is `G97 S{rpm}`. The spindle words are `M3`, `M4` and `M5`. The tool word is `T{tool2}{offset2}` (`T0101` for tool 1). Arcs are `I` and `K`, and `I` is a radius. The program ends with `M30` and `%`.
 
-`haas_lathe` follows the Haas lathe operator manual and the same percent-delimited shape as the Haas mill post: program `O00001`, sequence numbers from `N10` in steps of 10, and a maximum line length of 80. The safety block is `G21 G18 G40 G80`. The lathe `plane` word writes `G18` again on the next line. Feed per minute is `G98`, written from `feed_mode`. `G99` is left out, because the IR feed is millimetres per minute. Constant surface speed is `G50 S{max_rpm}` then `G96 S{surface}`. Direct rpm is `G97 S{rpm}`. The tool word is `T{tool2}{offset2}`. Home moves X to the machine zero, then Z. The program ends with `M30` and `%`. Live tooling, the C axis, G112 face interpolation and G107 cylinder interpolation use the codes in Mill-turn above, and the post cites them in `references`. Sub-spindle select is `G55` then `G14`; `G15` then `G54` returns to the main. `mirror_z` is false because G14 mirrors Z on the control. Face interpolation writes `G17`, `G112`, then `G113`, `G18`, with X as a radius. Cylinder interpolation writes `G19`, `M15`, `G107 Y0 C0 R{radius}`, then `G107`, `G18`, and X stays a diameter.
+`haas_lathe` follows the Haas lathe operator manual and the same percent-delimited shape as the Haas mill post: program `O00001`, sequence numbers from `N10` in steps of 10, and a maximum line length of 80. The safety block is `G21 G18 G40 G80`. The lathe `plane` word writes `G18` again on the next line. Feed per minute is `G98`, written from `feed_mode`. `G99` is left out, because the IR feed is millimetres per minute. Constant surface speed is `G50 S{max_rpm}` then `G96 S{surface}`. Direct rpm is `G97 S{rpm}`. The tool word is `T{tool2}{offset2}`. Home moves X to the machine zero, then Z. The program ends with `M30` and `%`. Live tooling, the C axis, G112 face interpolation and G107 cylinder interpolation use the codes in Mill-turn above, and the post cites them in `references`. Sub-spindle select is `G55` then `G14`; `G15` then `G54` returns to the main. `mirror_z` is false because G14 mirrors Z on the control. Part transfer uses M10/M11, M110/M111, M143/M144/M145, G199/G198 and B, cited in `references`. Face interpolation writes `G17`, `G112`, then `G113`, `G18`, with X as a radius. Cylinder interpolation writes `G19`, `M15`, `G107 Y0 C0 R{radius}`, then `G107`, `G18`, and X stays a diameter.
 
 `grbl_lathe` is grblHAL in lathe mode. It has no line numbers and no program number. `G7` selects diameter mode, `G18` the ZX plane and `G94` feed per minute. Constant surface speed is `G96 D{max_rpm} S{surface}`. Direct rpm is `G97 S{rpm}`. Tool change is `T{tool} M6`. A manual tool change is expected. There is no home block. Comments are in parentheses, as in the Grbl mill post. The program ends with `M30`.

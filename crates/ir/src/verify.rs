@@ -102,6 +102,7 @@ pub enum Issue {
         tolerance: f64,
     },
     /// [`Event::ProcessOn`] has no later [`Event::ProcessOff`] for the same process.
+    /// A spindle process also closes when [`Event::SpindleRun`] stops the toolpath's bound spindle.
     ProcessNotClosed {
         /// Toolpath index, when the process was left open on a toolpath.
         toolpath: Option<usize>,
@@ -216,7 +217,8 @@ pub fn verify_with(program: &Program, options: &VerifyOptions) -> VerifyReport {
     // The tip carries across toolpaths in program order. The program's first motion still has no start.
     let mut cursor = None;
     for (index, path) in program.toolpaths().iter().enumerate() {
-        verify_toolpath(index, path, heights, &mut cursor, &mut out);
+        let bound = program.turning().and_then(|turning| turning.binding_for(index as u32)).map(|binding| binding.spindle());
+        verify_toolpath(index, path, bound, heights, &mut cursor, &mut out);
     }
     for channel_program in program.channel_programs() {
         verify_channel(program.machine(), channel_program, heights, &mut out);
@@ -295,12 +297,12 @@ fn raise_z(max_z: &mut Option<f64>, z: f64) {
     });
 }
 
-fn verify_toolpath(index: usize, path: &ClPath, heights: Heights, cursor: &mut Option<Vec3>, out: &mut VerifyReport) {
+fn verify_toolpath(index: usize, path: &ClPath, bound_spindle: Option<&str>, heights: Heights, cursor: &mut Option<Vec3>, out: &mut VerifyReport) {
     let mut open: Vec<ProcessKind> = Vec::new();
     for (block_index, block) in path.blocks().iter().enumerate() {
         match block {
             ClBlock::Motion(motion) => verify_cl_motion(index, block_index, motion, cursor, heights, out),
-            ClBlock::Event(event) => verify_event(event, &mut open, out),
+            ClBlock::Event(event) => verify_event(event, bound_spindle, &mut open, out),
         }
     }
     close_processes(&open, Some(index), None, out);
@@ -317,19 +319,20 @@ fn verify_channel(machine: Option<&Machine>, program: &ChannelProgram, heights: 
     for (block_index, block) in program.blocks().iter().enumerate() {
         match block {
             AxisBlock::Motion(motion) => verify_axis_motion(machine, channel, channel_id, block_index, motion, &mut joints, heights, out),
-            AxisBlock::Event(event) => verify_event(event, &mut open, out),
+            AxisBlock::Event(event) => verify_event(event, None, &mut open, out),
         }
     }
     close_processes(&open, None, Some(channel_id), out);
 }
 
-fn verify_event(event: &Event, open: &mut Vec<ProcessKind>, out: &mut VerifyReport) {
+fn verify_event(event: &Event, bound_spindle: Option<&str>, open: &mut Vec<ProcessKind>, out: &mut VerifyReport) {
     match event {
         Event::ProcessOn { process, .. } => open.push(process.clone()),
-        Event::ProcessOff { process } => {
-            if let Some(index) = open.iter().rposition(|open_process| open_process == process) {
-                open.remove(index);
-            }
+        Event::ProcessOff { process } => close_process(open, process),
+        // A transfer part-off turns the spindle on and leaves it running. The later stop of the
+        // bound spindle is the close. Stopping the other spindle does not.
+        Event::SpindleRun { spindle, rpm, .. } if *rpm == 0.0 && bound_spindle == Some(spindle.as_str()) => {
+            close_process(open, &ProcessKind::Spindle);
         }
         Event::Dwell { seconds } => match check::non_negative(*seconds, "dwell") {
             Ok(seconds) => add_time(out, seconds),
@@ -356,7 +359,17 @@ fn verify_event(event: &Event, open: &mut Vec<ProcessKind>, out: &mut VerifyRepo
         | Event::LiveToolOn { .. }
         | Event::LiveToolOff
         | Event::FaceInterpolation { .. }
-        | Event::CylinderInterpolation { .. } => {}
+        | Event::CylinderInterpolation { .. }
+        | Event::ChuckClamp { .. }
+        | Event::SpindleSync { .. }
+        | Event::SpindleRun { .. }
+        | Event::SpindleMove { .. } => {}
+    }
+}
+
+fn close_process(open: &mut Vec<ProcessKind>, process: &ProcessKind) {
+    if let Some(index) = open.iter().rposition(|open_process| open_process == process) {
+        open.remove(index);
     }
 }
 
@@ -873,6 +886,7 @@ mod tests {
     use crate::motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole};
     use crate::process::{Event, ProcessKind, ProcessParams};
     use crate::program::Program;
+    use crate::turning::{TurnBinding, TurningSetup};
 
     fn tip(x: f64, y: f64, z: f64) -> Pose {
         Pose::new(Vec3::new(x, y, z).expect("tip"), Vec3::Z).expect("pose")
@@ -987,6 +1001,35 @@ mod tests {
             }
             other => panic!("expected discontinuity, got {other:?}"),
         }
+    }
+
+    fn bound_main(blocks: Vec<ClBlock>) -> Program {
+        let setup = TurningSetup::single(None, 3_000.0)
+            .expect("setup")
+            .with_binding(TurnBinding::try_new(0, "main", "turret1", 0).expect("binding"))
+            .expect("binding");
+        Program::try_new(None, Vec::new(), None, vec![path(blocks)], Vec::new(), Vec::new(), None)
+            .expect("program")
+            .with_turning(Some(setup))
+            .expect("turning")
+    }
+
+    #[test]
+    fn spindle_stop_on_the_bound_spindle_closes_the_process() {
+        let stopped = vec![
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() }),
+            ClBlock::Event(Event::SpindleRun { spindle: "sub".into(), rpm: 0.0, reverse: false }),
+            ClBlock::Event(Event::SpindleRun { spindle: "main".into(), rpm: 0.0, reverse: false }),
+        ];
+        let report = verify(&bound_main(stopped));
+        assert!(report.issues().iter().all(|issue| !matches!(issue, Issue::ProcessNotClosed { .. })), "{:?}", report.issues());
+
+        let other_spindle = vec![
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() }),
+            ClBlock::Event(Event::SpindleRun { spindle: "sub".into(), rpm: 0.0, reverse: false }),
+        ];
+        let open_report = verify(&bound_main(other_spindle));
+        assert!(open_report.issues().iter().any(|issue| matches!(issue, Issue::ProcessNotClosed { process: ProcessKind::Spindle, .. })));
     }
 
     #[test]

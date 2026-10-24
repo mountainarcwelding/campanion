@@ -728,7 +728,7 @@
       ]
     },
     "Event": {
-      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.",
+      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.\n[`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]\nhand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -1061,6 +1061,125 @@
           },
           "required": [
             "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Clamp (`true`) or unclamp (`false`) the named chuck.",
+          "properties": {
+            "clamp": {
+              "description": "`true` clamps. `false` unclamps.",
+              "type": "boolean"
+            },
+            "spindle": {
+              "description": "Spindle name.",
+              "type": "string"
+            },
+            "type": {
+              "const": "chuck_clamp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "spindle",
+            "clamp"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Engage or cancel synchronous spindle control.\n\n`phase_deg` is only allowed when `engage` is true. It is finite and in `0..360`.",
+          "properties": {
+            "engage": {
+              "description": "`true` engages sync. `false` cancels it.",
+              "type": "boolean"
+            },
+            "phase_deg": {
+              "description": "Phase in degrees. Absent when sync has no phase, and when sync is cancelled.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "spindle_sync",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "engage"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Run or stop a spindle that is not the active binding's spindle.\n\n`rpm` 0 stops the spindle. `reverse` selects the reverse direction when `rpm` is above 0.",
+          "properties": {
+            "reverse": {
+              "description": "`true` runs reverse. Ignored when `rpm` is 0.",
+              "type": "boolean"
+            },
+            "rpm": {
+              "description": "Revolutions per minute. Zero stops the spindle.",
+              "format": "double",
+              "type": "number"
+            },
+            "spindle": {
+              "description": "Spindle name.",
+              "type": "string"
+            },
+            "type": {
+              "const": "spindle_run",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "spindle",
+            "rpm",
+            "reverse"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Move a spindle housing along Z.\n\n`feed` absent is a rapid. `machine` selects machine coordinates.",
+          "properties": {
+            "feed": {
+              "description": "Feed, millimetres per minute. Absent is a rapid.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "machine": {
+              "description": "`true` is a machine-coordinate move.",
+              "type": "boolean"
+            },
+            "spindle": {
+              "description": "Spindle name.",
+              "type": "string"
+            },
+            "type": {
+              "const": "spindle_move",
+              "type": "string"
+            },
+            "z": {
+              "description": "Housing position along Z, millimetres.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "spindle",
+            "z",
+            "machine"
           ],
           "type": "object"
         }

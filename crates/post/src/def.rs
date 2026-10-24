@@ -20,8 +20,8 @@
 //!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
-//! `{offset2}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
-//! `cylinder_interp` are optional mill-turn blocks. `c_axis.engage`, `c_axis.disengage`,
+//! `{offset2}`, `{phase}`, `{z}`, `{feed}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
+//! `cylinder_interp` are optional mill-turn blocks. `transfer` is an optional part-transfer block. `c_axis.engage`, `c_axis.disengage`,
 //! `brake.clamp` and `brake.release` may be empty; an empty list writes nothing. Live-tool
 //! `forward`, `reverse` and `stop` must not be empty. Live-tool `{rpm}` is a whole number.
 //! `c_feed` is `per_minute` or `inverse_time`. Cylinder `on` lines may use `{radius}` and
@@ -45,6 +45,9 @@ const LATHE_CSS: &[&str] = &["surface", "max_rpm", "date-free!"];
 const LATHE_RPM: &[&str] = &["rpm", "date-free!"];
 const LATHE_TOOL: &[&str] = &["tool", "tool2", "offset2", "date-free!"];
 const LATHE_CYLINDER: &[&str] = &["radius", "diameter", "date-free!"];
+const LATHE_PHASE: &[&str] = &["phase", "date-free!"];
+const LATHE_MOVE: &[&str] = &["z", "date-free!"];
+const LATHE_MOVE_FEED: &[&str] = &["z", "feed", "date-free!"];
 
 /// How circular moves are written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,6 +346,49 @@ pub(crate) struct LatheOutput {
     /// on this spindle. Haas leaves `mirror_z` false because G14 mirrors Z on the control.
     #[serde(default)]
     pub(crate) sub_spindle: Option<SubSpindleOutput>,
+    /// Part transfer between `main` and [`TransferOutput::spindle`].
+    ///
+    /// Absent: chuck, sync, spindle-run and spindle-move events are rejected.
+    #[serde(default)]
+    pub(crate) transfer: Option<TransferOutput>,
+}
+
+/// Chuck, sync, secondary-spindle run and housing-move lines for a part transfer.
+///
+/// `{rpm}` is allowed on `sub_cw` and `sub_ccw`. `{phase}` is allowed on `sync_on_phase`.
+/// `{z}` is allowed on every move list. `{feed}` is allowed on `move_feed`. Every list may be
+/// empty, and then that event writes nothing. `spindle` is the IR name served by the sub lines.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TransferOutput {
+    /// IR spindle name these secondary lines serve, for example `sub`.
+    pub(crate) spindle: String,
+    /// Clamp the main chuck.
+    pub(crate) clamp_main: Vec<String>,
+    /// Unclamp the main chuck.
+    pub(crate) unclamp_main: Vec<String>,
+    /// Clamp the secondary chuck.
+    pub(crate) clamp_sub: Vec<String>,
+    /// Unclamp the secondary chuck.
+    pub(crate) unclamp_sub: Vec<String>,
+    /// Secondary spindle forward. `{rpm}` is the speed.
+    pub(crate) sub_cw: Vec<String>,
+    /// Secondary spindle reverse. `{rpm}` is the speed.
+    pub(crate) sub_ccw: Vec<String>,
+    /// Secondary spindle stop.
+    pub(crate) sub_stop: Vec<String>,
+    /// Engage synchronous spindle control with no phase.
+    pub(crate) sync_on: Vec<String>,
+    /// Engage synchronous spindle control at `{phase}` degrees.
+    pub(crate) sync_on_phase: Vec<String>,
+    /// Cancel synchronous spindle control.
+    pub(crate) sync_off: Vec<String>,
+    /// Rapid the spindle housing. `{z}` is the position.
+    pub(crate) move_rapid: Vec<String>,
+    /// Feed the spindle housing. `{z}` is the position and `{feed}` is the feed.
+    pub(crate) move_feed: Vec<String>,
+    /// Rapid the spindle housing in machine coordinates. `{z}` is the position.
+    pub(crate) move_machine: Vec<String>,
 }
 
 fn default_c_feed() -> String {
@@ -651,6 +697,22 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_token("lathe.sub_spindle.spindle", &sub.spindle, 64)?;
         check_templates("lathe.sub_spindle.select", &sub.select, LATHE_BARE)?;
         check_templates("lathe.sub_spindle.deselect", &sub.deselect, LATHE_BARE)?;
+    }
+    if let Some(transfer) = &lathe.transfer {
+        check_token("lathe.transfer.spindle", &transfer.spindle, 64)?;
+        check_templates("lathe.transfer.clamp_main", &transfer.clamp_main, LATHE_BARE)?;
+        check_templates("lathe.transfer.unclamp_main", &transfer.unclamp_main, LATHE_BARE)?;
+        check_templates("lathe.transfer.clamp_sub", &transfer.clamp_sub, LATHE_BARE)?;
+        check_templates("lathe.transfer.unclamp_sub", &transfer.unclamp_sub, LATHE_BARE)?;
+        check_templates("lathe.transfer.sub_cw", &transfer.sub_cw, LATHE_RPM)?;
+        check_templates("lathe.transfer.sub_ccw", &transfer.sub_ccw, LATHE_RPM)?;
+        check_templates("lathe.transfer.sub_stop", &transfer.sub_stop, LATHE_BARE)?;
+        check_templates("lathe.transfer.sync_on", &transfer.sync_on, LATHE_BARE)?;
+        check_templates("lathe.transfer.sync_on_phase", &transfer.sync_on_phase, LATHE_PHASE)?;
+        check_templates("lathe.transfer.sync_off", &transfer.sync_off, LATHE_BARE)?;
+        check_templates("lathe.transfer.move_rapid", &transfer.move_rapid, LATHE_MOVE)?;
+        check_templates("lathe.transfer.move_feed", &transfer.move_feed, LATHE_MOVE_FEED)?;
+        check_templates("lathe.transfer.move_machine", &transfer.move_machine, LATHE_MOVE)?;
     }
     Ok(())
 }
