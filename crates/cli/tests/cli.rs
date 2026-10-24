@@ -60,7 +60,7 @@ fn help_lists_commands() {
         assert!(stdout.contains(word), "help missing {word}: {stdout}");
     }
     assert!(stdout.contains("campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]"), "{stdout}");
-    assert!(stdout.contains("campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]"), "{stdout}");
+    assert!(stdout.contains("campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]"), "{stdout}");
     assert!(stdout.contains("campanion post IR.json --post ID|FILE.json [-o OUT]"), "{stdout}");
     assert!(stdout.contains("campanion posts"), "{stdout}");
 }

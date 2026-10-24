@@ -43,7 +43,7 @@ Usage:
   campanion ir [--job FILE]
   campanion ngc [--job FILE]
   campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]
-  campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json]
+  campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]
   campanion post IR.json --post ID|FILE.json [-o OUT]
   campanion posts
   campanion verify FILE [--mesh PART.stl --tool ball:3|flat:3|bull:3,1]
@@ -71,6 +71,8 @@ lathe   Import a campanion-lathe/1 job and write turning toolpaths. Units are mi
         Posted text is read back and compared at the job chord tolerance.
         A mismatch exits 1 and nothing is written.
         Verify errors are printed and the status is 1. See docs/job-file.md.
+        --up-axis is z, y or auto (default z) for a .step or .stp source. auto trusts the exporter
+        header and turns Y up onto Z. A non-STEP source ignores the flag.
         Face, rough and finish paths are checked for insert and holder gouges.
         A gouge is printed and the status is 1. Nothing is written.
 post    Post an IR JSON file. --post is an id or a file ending in .json, same as run.
