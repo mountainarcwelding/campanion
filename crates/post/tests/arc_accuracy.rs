@@ -243,6 +243,16 @@ fn rounded_tail_of_a_small_near_full_arc() {
 }
 
 #[test]
+fn tiny_tail_after_a_semicircle() {
+    for (x, y, z) in [(0.0, 0.0, 0.0), (0.044, 128.797, -19.128)] {
+        assert_mill_arc_compared_at(
+            ArcCase { x, y, z, radius: 3.840314957415096, sweep: 3.142022240534382, ccw: false, feed: 50.0 },
+            Some(ARC_TOLERANCE),
+        );
+    }
+}
+
+#[test]
 fn fitted_short_arcs_compare_on_every_mill_post() {
     let options = PostOptions { arc_tolerance: ARC_TOLERANCE };
     for sweep in [0.0071_f64, 0.0301] {
