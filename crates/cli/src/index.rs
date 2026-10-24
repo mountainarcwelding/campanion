@@ -295,7 +295,7 @@ fn map_block(block: &ClBlock, setup: &RotarySetup, angle_deg: f64, chord_mm: f64
 }
 
 #[derive(Clone, Copy)]
-enum Curve {
+pub(crate) enum Curve {
     Arc,
     Helix,
 }
@@ -332,7 +332,7 @@ fn map_curve(
     linearize_curve(to, plane, center, sense, sweep, feed, role, setup, angle_deg, chord_mm, cursor)
 }
 
-fn curve_block(
+pub(crate) fn curve_block(
     curve: Curve,
     to: Pose,
     plane: Plane,
@@ -382,7 +382,7 @@ fn linearize_curve(
     Ok(blocks)
 }
 
-fn curve_samples(
+pub(crate) fn curve_samples(
     start: Vec3,
     end: Vec3,
     plane: Plane,
@@ -464,13 +464,13 @@ fn plane_sweep(su: f64, sv: f64, eu: f64, ev: f64, cu: f64, cv: f64, sense: ArcS
     if sweep.is_finite() && sweep > 0.0 { Ok(sweep) } else { Err(CliError::run("index arc sweep is not usable")) }
 }
 
-fn append_rapid(path: &ClPath, to: Pose) -> Result<ClPath, CliError> {
+pub(crate) fn append_rapid(path: &ClPath, to: Pose) -> Result<ClPath, CliError> {
     let mut blocks = path.blocks().to_vec();
     blocks.push(ClBlock::Motion(ClMotion::Rapid { to, feed: None }));
     rebuild(path, blocks)
 }
 
-fn prepend_rapid(path: &ClPath, to: Pose) -> Result<ClPath, CliError> {
+pub(crate) fn prepend_rapid(path: &ClPath, to: Pose) -> Result<ClPath, CliError> {
     let mut blocks = Vec::with_capacity(path.blocks().len().saturating_add(1));
     blocks.push(ClBlock::Motion(ClMotion::Rapid { to, feed: None }));
     blocks.extend(path.blocks().iter().cloned());
@@ -482,7 +482,7 @@ fn rapid_path(tool_id: Option<u32>, feeds: Feeds, to: Pose) -> Result<ClPath, Cl
         .map_err(CliError::from)
 }
 
-fn rebuild(path: &ClPath, blocks: Vec<ClBlock>) -> Result<ClPath, CliError> {
+pub(crate) fn rebuild(path: &ClPath, blocks: Vec<ClBlock>) -> Result<ClPath, CliError> {
     ClPath::try_new(path.name().map(str::to_string), path.tool_id(), path.compensation(), path.feeds(), path.pierce(), path.tabs().to_vec(), blocks)
         .map_err(CliError::from)
 }
@@ -540,7 +540,7 @@ fn block_pose(block: &ClBlock) -> Option<Pose> {
     }
 }
 
-fn plane_normal(plane: Plane) -> Vec3 {
+pub(crate) fn plane_normal(plane: Plane) -> Vec3 {
     match plane {
         Plane::Xy => Vec3::Z,
         Plane::Zx => Vec3::Y,
@@ -549,7 +549,7 @@ fn plane_normal(plane: Plane) -> Vec3 {
 }
 
 /// `(plane, flip)`. `flip` is set when `normal` points opposite the plane's view direction.
-fn plane_from_normal(normal: Vec3) -> Option<(Plane, bool)> {
+pub(crate) fn plane_from_normal(normal: Vec3) -> Option<(Plane, bool)> {
     let axes = [
         (0.0, 0.0, 1.0, Plane::Xy, false),
         (0.0, 0.0, -1.0, Plane::Xy, true),
@@ -573,7 +573,7 @@ fn near(normal: Vec3, x: f64, y: f64, z: f64) -> bool {
     dx * dx + dy * dy + dz * dz <= PLANE_EPS * PLANE_EPS
 }
 
-fn apply_flip(sense: ArcSense, flip: bool) -> ArcSense {
+pub(crate) fn apply_flip(sense: ArcSense, flip: bool) -> ArcSense {
     if !flip {
         return sense;
     }

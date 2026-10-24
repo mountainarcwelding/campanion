@@ -95,7 +95,8 @@
 //! file. `solution` is `nearest` (the default), `first_positive` or `first_negative`. An
 //! operation may set `plane` (`origin`, `normal`, optional `x_dir`). `origin` scales with
 //! `units`; the directions are normalised. A plane needs kinematics, and kinematics cannot be
-//! combined with `rotary`. Planning of tilted planes comes later. See `docs/job-file.md`.
+//! combined with `rotary`. A 2D operation with `plane` is planned in that view and mapped
+//! into the part frame. `surface`, `rough` and `waterline` reject `plane`. See `docs/job-file.md`.
 
 use std::fmt;
 use std::fs::File;
@@ -539,6 +540,11 @@ pub struct WorkPlane {
 }
 
 impl WorkPlane {
+    /// Unit `normal` and an in-plane unit `x_dir`.
+    pub(crate) fn new(origin: Vec3, normal: Vec3, x_dir: Vec3) -> Self {
+        Self { origin, normal, x_dir }
+    }
+
     /// Plane origin, millimetres, part frame.
     pub fn origin(self) -> Vec3 {
         self.origin
@@ -2540,6 +2546,9 @@ fn unsupported_plane(kind: &OperationKind) -> Option<&'static str> {
     match kind {
         OperationKind::Wrap => Some("wrap"),
         OperationKind::RotaryFinish => Some("rotary_finish"),
+        OperationKind::Surface => Some("surface"),
+        OperationKind::Rough => Some("rough"),
+        OperationKind::Waterline => Some("waterline"),
         _ => None,
     }
 }
@@ -4893,6 +4902,16 @@ mod tests {
         );
         let err = load(&write_job("plane-rotary-finish", &finish)).expect_err("rotary finish");
         assert_eq!(invalid_detail(&err), "operation `spin`: plane is not supported on rotary_finish");
+
+        let surface = kin_job(
+            "mm",
+            "",
+            "",
+            "",
+            r#"{"name":"cap","type":"surface","tool_id":1,"stepover":1,"plane":{"origin":[0,0,0],"normal":[0,0,1]},"feeds":{"cut":1}}"#,
+        );
+        let err = load(&write_job("plane-surface", &surface)).expect_err("surface");
+        assert_eq!(invalid_detail(&err), "operation `cap`: plane is not supported on surface");
 
         let tilt = kin_job(
             "mm",

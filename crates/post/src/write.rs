@@ -49,6 +49,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     check_thread_support(program, post)?;
     check_lathe_program(program, post)?;
     check_rotary_program(program, post)?;
+    check_tilted_plane(program, post)?;
     let sections = crate::balance::channel_sections(program, post)?;
     let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning());
     let name = sanitize(program.name().unwrap_or(""));
@@ -2471,6 +2472,32 @@ fn motion_pose(motion: &ClMotion) -> Pose {
         | ClMotion::Helix { to, .. }
         | ClMotion::Thread { to, .. } => *to,
     }
+}
+
+/// A tilted mill axis has no rotary angle and no turning setup. Posts still write part +Z only.
+fn check_tilted_plane(program: &Program, post: &PostDef) -> Result<()> {
+    if program.turning().is_some() || program.rotary().is_some() {
+        return Ok(());
+    }
+    if tool_axis_tilted(program) {
+        return Err(unsupported(format!("post `{}` has no tilted-plane output", post.id())));
+    }
+    Ok(())
+}
+
+fn tool_axis_tilted(program: &Program) -> bool {
+    program.toolpaths().iter().any(|path| path.blocks().iter().any(block_axis_tilted))
+}
+
+fn block_axis_tilted(block: &ClBlock) -> bool {
+    let ClBlock::Motion(motion) = block else {
+        return false;
+    };
+    let axis = motion_pose(motion).axis();
+    let dx = axis.x();
+    let dy = axis.y();
+    let dz = axis.z() - 1.0;
+    dx * dx + dy * dy + dz * dz > 1e-18
 }
 
 fn check_rotary_program(program: &Program, post: &PostDef) -> Result<()> {

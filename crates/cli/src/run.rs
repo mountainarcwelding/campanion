@@ -24,7 +24,8 @@
 //! error. The V-bit's largest cutting diameter is the tool diameter, stock Z is 0, and the job
 //! tolerance is used. The pass is linked the same way as an engrave.
 //! Drill cycles are not in this job version: each hole is a rapid to the final depth, not an
-//! expanded peck.
+//! expanded peck. A contour that is not a circle is skipped, so a layer can hold holes and other
+//! profiles together.
 //! `campanion_ir::verify_with` runs before anything is written. Safe height is the job clearance
 //! and retract height is the job retract. Issues are printed and the process exits 1.
 //!
@@ -62,8 +63,10 @@
 //! appended to the operation being left and a rotary rapid at the new angle is prepended to the
 //! next one. Jobs without `rotary` stay 3-axis and are not mapped.
 //!
-//! A job with `kinematics` and no `plane` is planned in that same part frame. The program stores
-//! the five-axis setup. An operation that sets `plane` is not planned yet.
+//! A job with `kinematics` stores the five-axis setup. An operation that sets `plane` is planned
+//! in that view and mapped into the part frame. When the frame changes, a rapid to the job
+//! clearance along the plane normal is appended to the operation being left and prepended to the
+//! next one. The first tilted operation gets only the approach rapid.
 //!
 //! A wrap needs that rotary setup. Drawing X is the distance along the axis and drawing Y is
 //! the arc length around the cylinder, each plus the operation offset. The path is built in
@@ -98,6 +101,7 @@ use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::index::{self, IndexedOp};
 use crate::job::read_text;
 use crate::jobfile::{self, Finish, JobFile, JobTool, Operation, OperationKind};
+use crate::plane::{self, ViewFrame};
 use crate::report;
 use crate::rotary;
 use crate::rough;
@@ -135,9 +139,6 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         None => None,
     };
     let job = jobfile::load(&args.job).map_err(show)?;
-    if let Some(operation) = job.operations().iter().find(|operation| operation.plane().is_some()) {
-        return Err(CliError::run(format!("operation `{}`: tilted planes are not planned yet", operation.name())));
-    }
     let source = jobfile::source_path(&job);
     if job.source().is_stl() {
         let bytes = read_bytes(&source)?;
@@ -362,7 +363,9 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
     }
     let corners = if job.rotary().is_some() { Some(stock.corners()?) } else { None };
     let safe_z = job.rotary().map(|setup| swept_clearance(job, &setup, corners.as_deref(), &[]));
+    let plane_job = job.five_axis().is_some();
     let mut groups = Vec::new();
+    let mut plane_groups = Vec::new();
     for (op, contours) in &selected {
         let Some(tool) = job.tool(op.tool_id()) else {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
@@ -391,11 +394,24 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
                 wrap::cut(&mut paths, op, tool, contours, &setup, job.tolerance().chord(), safe)?;
             }
         }
-        if matches!(op.kind(), OperationKind::Wrap) {
+        if plane_job {
+            let frame = match op.plane() {
+                Some(plane) => Some(ViewFrame::from_plane(plane)?),
+                None => None,
+            };
+            if let Some(frame) = frame {
+                paths = plane::map_paths_to_part(&paths, &frame, job.tolerance().chord())?;
+            }
+            plane_groups.push((frame, paths));
+        } else if matches!(op.kind(), OperationKind::Wrap) {
             groups.push(index::part_frame_op(op.tool_id(), op.feeds(), paths)?);
         } else {
             groups.push(indexed_op(op, paths));
         }
+    }
+    if plane_job {
+        let paths = plane::link_frames(plane_groups, job.clearance())?;
+        return finish_paths(job, paths, None);
     }
     finish_program(job, groups, corners.as_deref(), &[])
 }
@@ -469,7 +485,6 @@ fn mesh_vertices(mesh: &Mesh) -> Result<Vec<Vec3>, CliError> {
 
 /// Part-frame program. Without a rotary setup the toolpaths are stored as planned.
 fn finish_program(job: &JobFile, groups: Vec<IndexedOp>, stock_corners: Option<&[Vec3]>, mesh_vertices: &[Vec3]) -> Result<Document, CliError> {
-    let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
     let (paths, rotary) = match job.rotary() {
         None => (groups.into_iter().flat_map(|group| group.paths).collect::<Vec<_>>(), None),
         Some(setup) => {
@@ -477,6 +492,12 @@ fn finish_program(job: &JobFile, groups: Vec<IndexedOp>, stock_corners: Option<&
             (index::frame_operations(&setup, groups, safe_z, job.tolerance().chord())?, Some(setup))
         }
     };
+    finish_paths(job, paths, rotary)
+}
+
+/// Shared tail of [`finish_program`]. `rotary` stays `None` for a three-axis or five-axis job.
+fn finish_paths(job: &JobFile, paths: Vec<ClPath>, rotary: Option<RotarySetup>) -> Result<Document, CliError> {
+    let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
     if paths.len() > MAX_TOOLPATHS {
         return Err(CliError::invalid(format!("too many toolpaths: {} > {MAX_TOOLPATHS}", paths.len())));
     }
@@ -717,11 +738,27 @@ fn drill_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
         return Err(op_err(cut.op, "depth plan is empty"));
     };
     let points: &[campanion_geom::Point] = &[];
-    let drilling = DrillOp::new(DrillCycle::new()).z(z).tolerance(cut.tolerance).generate(cut.contours, points).map_err(|err| op_err(cut.op, err))?;
+    let mut circles = Vec::new();
+    for contour in cut.contours {
+        match DrillOp::new(DrillCycle::new()).z(z).tolerance(cut.tolerance).generate(std::slice::from_ref(contour), points) {
+            Ok(drilling) if !drilling.hits().is_empty() => circles.push(contour.clone()),
+            Ok(_) => {}
+            Err(err) if is_not_circle(&err) => {}
+            Err(err) => return Err(op_err(cut.op, err)),
+        }
+    }
+    // No circles: ask again with the original contours so the error names the first rejection.
+    let selected = if circles.is_empty() { cut.contours } else { circles.as_slice() };
+    let drilling = DrillOp::new(DrillCycle::new()).z(z).tolerance(cut.tolerance).generate(selected, points).map_err(|err| op_err(cut.op, err))?;
     if drilling.hits().is_empty() {
         return Err(op_err(cut.op, "drill produced no holes"));
     }
     push_doc(paths, Document::from_toolpath(drilling.toolpath(), cut.import)?)
+}
+
+fn is_not_circle(err: &impl std::fmt::Display) -> bool {
+    let text = err.to_string();
+    text.contains("not a circle") || text.contains("not a full circle")
 }
 
 /// One V-bit plunge per closed contour, then the same clearance link an engrave uses.
@@ -1228,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn tilted_plane_is_not_planned_yet() {
+    fn flat_plane_is_planned_in_the_part_frame() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let folder = dir("kin-tilt");
         fs::copy(root.join("examples/sample.dxf"), folder.join("sample.dxf")).expect("dxf");
@@ -1236,11 +1273,10 @@ mod tests {
         let hash = hash_bytes(&fs::read(folder.join("sample.dxf")).expect("bytes"));
         let plane = r#","plane":{"origin":[0,0,0],"normal":[0,0,1]}"#;
         fs::write(folder.join("job.json"), job_text(&hash, r#","kinematics":"table_table_bc.kin.json""#, plane)).expect("job");
-        match run(&args(&folder.join("job.json"), &folder.join("out.ngc"), &folder.join("out.ir.json"))) {
-            Ok(_) => panic!("tilted plane was planned"),
-            Err(err) => assert_eq!(err.to_string(), "operation `inner`: tilted planes are not planned yet"),
-        }
-        assert!(!folder.join("out.ngc").exists());
+        must_run(&args(&folder.join("job.json"), &folder.join("out.ngc"), &folder.join("out.ir.json")));
+        let ir: serde_json::Value = serde_json::from_str(&fs::read_to_string(folder.join("out.ir.json")).expect("ir")).expect("json");
+        assert_eq!(ir["program"]["five_axis"]["kinematics"]["name"], "table_table_bc");
+        assert!(folder.join("out.ngc").is_file());
     }
 
     fn must_run(args: &[OsString]) {
