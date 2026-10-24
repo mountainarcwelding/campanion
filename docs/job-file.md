@@ -506,7 +506,7 @@ fields are rejected with a message that names the key. Every number must be fini
 millimetres. Feeds are millimetres per minute. Constant surface speed is metres per minute.
 Direct spindle speed is revolutions per minute.
 
-`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off. `examples/shaft_fillet.lathe.json` is the same part with an R3 front fillet, read from `examples/shaft_fillet.step`; that job needs SolidCraft's `solidcraft-cli`.
+`examples/shaft.lathe.json` faces, centre-drills, roughs and finishes the half-profile in `examples/shaft.dxf` (a Ø30 journal at the front that steps up to Ø40 toward the chuck), then grooves the Ø40, single-point threads the Ø30 journal as M30×2.5, and parts off. `examples/shaft_fillet.lathe.json` is the same part with an R3 front fillet, read from `examples/shaft_fillet.step`; that job needs SolidCraft's `solidcraft-cli`. `examples/millturn.lathe.json` faces that shaft, then drills four holes on the front face and cuts an axial slot on the Ø40, with the spindle indexed as C.
 
 ```json
 {
@@ -534,9 +534,9 @@ Direct spindle speed is revolutions per minute.
 | `source` | yes | Half-profile. `path` is relative to the job file, the same rules as a mill job (no absolute path, 1 to 4096 bytes). |
 | `units` | yes | Only `mm`. |
 | `stock` | yes | Bar or tube, plus `front_allowance`. |
-| `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. |
-| `tools` | yes | Inserts, at most 256. May be empty when `operations` is empty. |
-| `operations` | yes | Face, rough, finish, thread, groove, part and drill, in order, at most 1024. |
+| `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. Optional `c_axis` (boolean, default false). `true` builds spindle `main` with C axis id 0. |
+| `tools` | yes | Inserts and live tools, at most 256. May be empty when `operations` is empty. |
+| `operations` | yes | Face, rough, finish, thread, groove, part, drill, `live_drill` and `live_slot`, in order, at most 1024. |
 | `tolerance` | no | `linear` (default 1e-6, must be positive) is the profile and finish tolerance. `chord` (default 0.01) is the post read-back tolerance and the gouge tolerance. The finished section is sampled at `chord`. `angular` is accepted, must be `>= 0`, and is not used. |
 | `clearance` | yes | Approach gap, millimetres, `>= 0`. Roughing retracts by the same distance. |
 
@@ -551,11 +551,13 @@ Drawing X is Z and drawing Y is the radius for `.dxf` and `.svg`. Z = 0 is the f
 
 `stock.kind` is `bar` (`diameter`, `length`, `front_allowance`) or `tube` (`outer_diameter`, `inner_diameter`, `length`, `front_allowance`). Diameters and `length` are positive. `front_allowance` is `>= 0`. The IR stock still occupies Z in `[-length, 0]`; the allowance is only the facing depth, from `+front_allowance` down to 0. A tube's inner diameter must be below its outer diameter.
 
-Each tool is one insert on head `turret1` (12 stations, no live tooling). `id` is the tool-table id. `station` is 1 to 12, and ids and stations are unique. `shape` is `c80`, `d55`, `v35`, `w80`, `t60`, `s90`, `r`, `groove` or `thread`. A groove needs a positive `width`; other shapes may set it. `nose_radius` is positive. `orientation_deg` is the bisector from the nose into the holder, measured from +Z toward +X, in −360 to 360. A right-hand outside tool turning toward the chuck has its holder up and toward +Z, so 45° is the usual outside orientation: an 80° insert at 45° leads at 95° and clears the end by 5°. 135° points the holder toward the chuck and gouges a shoulder. `hand` is `left`, `right` or `neutral`. `tip` is `centre` or `imaginary`. `holder`, when set, is `{ "width", "length" }`. Both are positive millimetres. The holder is a rectangle of that width, centred on the bisector, starting at the back of the insert and extending `length` into the shank. The tool table stores no milling diameter.
+Each tool sits on head `turret1` (12 stations). `id` is the tool-table id. `station` is 1 to 12, and ids and stations are unique. An insert tool has `shape` `c80`, `d55`, `v35`, `w80`, `t60`, `s90`, `r`, `groove` or `thread`. A groove needs a positive `width`; other shapes may set it. `nose_radius` is positive. `orientation_deg` is the bisector from the nose into the holder, measured from +Z toward +X, in −360 to 360. A right-hand outside tool turning toward the chuck has its holder up and toward +Z, so 45° is the usual outside orientation: an 80° insert at 45° leads at 95° and clears the end by 5°. 135° points the holder toward the chuck and gouges a shoulder. `hand` is `left`, `right` or `neutral`. `tip` is `centre` or `imaginary`. `holder`, when set, is `{ "width", "length" }`. Both are positive millimetres. The holder is a rectangle of that width, centred on the bisector, starting at the back of the insert and extending `length` into the shank. An insert's tool-table entry stores no milling diameter, and the insert is mounted on the station.
+
+A live tool replaces the insert. Its keys are `id`, `station`, `live` (`axial` or `radial`), `kind` (`drill` or `endmill`), `diameter` (positive, at most 1000000 mm), optional `point_angle_deg` and optional `max_rpm` (positive, at most 100000). `point_angle_deg` is drill only, defaults to 118, and must be between 0 and 180. It is checked and then dropped: a live hole does not add a point allowance. Any insert key (`shape`, `nose_radius`, `orientation_deg`, `hand`, `tip`, `width`, `holder`) on a tool that has `live` is an error. A live tool is not mounted as an insert and is not gouge-checked. Its diameter is stored on the tool table. When any tool is live, the head's `live_tooling` flag is true.
 
 `tip: "imaginary"` programs the theoretical sharp corner. The IR insert offset is `(dx, dz)` in `(X, Z)`, from [`Insert::tip_offset`](../crates/ir/src/turning.rs): `(-r·sign(sin o), -r·sign(cos o))`, with `sign(0) = 0`. The turning path stores that pair as `dz`, `dx`. At 45° both components are `−nose_radius`. At 135° `dx` is `−nose_radius` and `dz` is `+nose_radius`. `tip: "centre"` programs the nose centre.
 
-`speed` is either `{ "css": metres_per_minute }` or `{ "rpm": revolutions_per_minute }`, not both. CSS uses the spindle `max_rpm` as its cap. The speed is stored on the toolpath binding (spindle `main`, head `turret1`, channel 0), not on the process-on parameters.
+`speed` is either `{ "css": metres_per_minute }` or `{ "rpm": revolutions_per_minute }`, not both. CSS uses the spindle `max_rpm` as its cap. The speed is stored on the toolpath binding (spindle `main`, head `turret1`, channel 0), not on the process-on parameters. A live cycle's binding stores no speed. Its `rpm` is the live-tool speed, not a turning-spindle speed.
 
 Operations, in cut order. Names are unique and non-empty.
 
@@ -621,8 +623,47 @@ Diameters in a thread, groove or part operation are job diameters. The cycle see
 | `through` | no | When true, the tip goes deeper by the point length. Default `false`. |
 | `feed`, `rpm` | yes | `rpm` is revolutions per minute. |
 
-`campanion lathe` checks each face, rough and finish path against the finished profile. The profile is the polyline sampled at `tolerance.chord`. The insert flank length is 4 mm, and the tool's `holder` is included when the tool has one. Samples are `min(0.25, chord * 10)` millimetres apart. A hit deeper than `chord` is a gouge. Each gouge is one stderr line, `gouge operation NAME z Z x X depth DEPTH KIND`, with `KIND` one of `nose`, `edge` or `holder` and the numbers printed to six decimal places. A gouge exits 1 and writes nothing. Thread, groove, part and drill are not checked: those inserts are meant to enter the profile.
+`live_drill` and `live_slot` need `spindle.c_axis` true. A front cycle needs an axial live tool. An OD cycle needs a radial live tool. There is no Y axis and no C interpolation. C changes only on a rapid at the clearance point, while the spindle brake is released. The pose axis is +Z for an axial tool and +X for a radial tool. `Pose.rotary` is the C angle in degrees. `rpm` is positive and at most 100000, and must not exceed the tool's `max_rpm` when that is set. `feed` is millimetres per minute. Unknown keys are rejected the same way as on any other operation.
 
-Each operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`).
+`live_drill` drills each position in order. At most 64 positions. `c` is finite and in −99999 to 99999. The tip stops at the programmed depth. No point allowance is added.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool_id`, `face` | yes | `face` is `front` or `od`. |
+| `positions` | yes | Front: `[{ "c", "r" }]`, `r` the tool-centre radius and `>= 0`. OD: `[{ "c", "z" }]`, `z` the tool-centre Z. |
+| `depth` | yes | How far the tip goes past the surface. Front bottom Z is `z_start - depth`. OD bottom radius is `diameter / 2 - depth` and must be `>= 0`. |
+| `z_start` | front | Z of the face. Not accepted on an OD drill. |
+| `diameter` | od | Diameter of the surface being drilled. Not accepted on a front drill. |
+| `peck` | no | Positive peck. Omit for one feed to the bottom. Between pecks the tool rapids back to the clearance point. After the last peck it feeds back out at the cut feed. |
+| `retract` | no | Clearance gap, `>= 0`. Default is the job `clearance`. |
+| `rpm`, `feed` | yes | Live-tool rpm and cutting feed. |
+
+Front clearance is Z `z_start + retract` at the hole radius. Moves from one front hole to the next rapid at that Z. OD clearance is radius `diameter / 2 + retract` at the hole Z.
+
+`live_slot` cuts one indexed slot. The brake stays clamped for the whole slot. The tool plunges at `from`, feeds to `to`, steps down, and feeds back. The last pass stops exactly at `depth`. It then feeds out to clearance. `step_down` defaults to `depth`, which is one pass. There is no `retract` key: the gap is the job `clearance`.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `tool_id`, `face`, `c` | yes | `c` is the index angle in degrees. |
+| `from`, `to` | yes | Front: tool-centre radii, `>= 0`. OD: tool-centre Z. Either order. |
+| `depth` | yes | Same depth rule as `live_drill`. |
+| `step_down` | no | Maximum thickness of one pass. Default `depth`. |
+| `z_start` | front | Z of the face. Passes sit at `z_start - k * step_down`. |
+| `diameter` | od | Surface diameter. Passes sit at radius `diameter / 2 - k * step_down`. |
+| `rpm`, `feed` | yes | Same as `live_drill`. |
+
+`campanion lathe` checks each face, rough and finish path against the finished profile. The profile is the polyline sampled at `tolerance.chord`. The insert flank length is 4 mm, and the tool's `holder` is included when the tool has one. Samples are `min(0.25, chord * 10)` millimetres apart. A hit deeper than `chord` is a gouge. Each gouge is one stderr line, `gouge operation NAME z Z x X depth DEPTH KIND`, with `KIND` one of `nose`, `edge` or `holder` and the numbers printed to six decimal places. A gouge exits 1 and writes nothing. Thread, groove, part, drill and the live cycles are not checked: those tools are meant to enter the profile, or they are not inserts.
+
+Each turning operation is one toolpath. The first time a tool id appears, the path starts with a tool change. Then the spindle turns on, the moves run (the first of those is a rapid to the path start), and the spindle turns off at the end of that path. Nose compensation is already in the coordinates (`compensation: computed`). A live cycle uses the same tool-change rule and the same compensation, and it does not turn the work spindle on. Its blocks are C-axis engage on spindle `main`, live tool on forward at `rpm`, then for each hole or for the slot a rapid to the clearance point at the new C, brake clamp, the feed (pecking retracts all the way to the clearance point between pecks), a feed back out, a rapid to clearance when that point is not already the end of the feed, and brake release. Then the live tool stops and C disengages.
 
 Without `--post`, `-o` is the RS274/NGC test sink. ZX arcs are `G18`. That sink is not a post for a machine, and it rejects synchronised thread moves, so a job that threads needs `--post`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`); direct rpm is `G97`. A thread is `G33` with the lead on `K` for LinuxCNC and grblHAL, and `G32` with the lead on `F` for Fanuc and Haas. X in the IR stays a radius. Posted text is read back at `tolerance.chord`. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1; nothing is written in that case either. A face, rough or finish gouge is printed on its own, one line per gouge, and the status is 1. `--ir` writes the IR JSON after a successful `-o`, and the two paths must differ. The IR stores the finished section on `turning.section`, sampled from the loaded profile at `tolerance.chord`.
+
+### Haas output
+
+`haas_lathe` writes an indexed live cycle as `M154` then `G28 H0.` to engage C, `M155` to disengage, `M14` to clamp the spindle brake and `M15` to release it, `P<rpm> M133` to start the live tool forward, and `M135` to stop it. Posted X is a diameter. The work spindle is not started with `M3` while C is engaged.
+
+- https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html
+- https://www.haascnc.com/service/codes-settings.type=gcode.machine=lathe.value=G107.html
+- https://www.haascnc.com/service/codes-settings.type=mcode.machine=lathe.value=M133.html
+- https://www.haascnc.com/service/service-content/guide-procedures/lathe---m-codes.html
+- https://www.haascnc.com/service/service-content/guide-procedures/lathe---g-codes.html

@@ -35,6 +35,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - `examples/wrap.job.json` wraps `examples/wrap.svg` onto a 40 mm cylinder about A. Drawing X is the distance along the axis and drawing Y is the arc length around the surface. See [Wrapping](docs/job-file.md#wrapping).
 - `examples/rotary.job.json` finishes `examples/rotary.stl` with a 3 mm ball, zigzag. The mesh is a vase revolved about X. See [Rotary finishing](docs/job-file.md#rotary-finishing).
 - `examples/shaft.lathe.json` faces, roughs and finishes the stepped shaft in `examples/shaft.dxf`. See [Lathe jobs](docs/job-file.md#lathe-jobs).
+- `examples/millturn.lathe.json` indexes C for a front live drill and an OD live slot on that shaft (no Y, no interpolation).
 
 ```sh
 cargo run -p campanion-cli -- lathe examples/shaft.lathe.json -o out.ngc --ir out.json --post linuxcnc_lathe

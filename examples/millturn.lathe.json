@@ -1,0 +1,71 @@
+{
+  "format": "campanion-lathe/1",
+  "source": { "path": "shaft.dxf", "layer": "PROFILE" },
+  "units": "mm",
+  "stock": { "kind": "bar", "diameter": 50, "length": 60, "front_allowance": 1.0 },
+  "spindle": { "max_rpm": 3000, "c_axis": true },
+  "tools": [
+    {
+      "id": 1,
+      "station": 1,
+      "shape": "c80",
+      "nose_radius": 0.8,
+      "orientation_deg": 45,
+      "hand": "right",
+      "tip": "centre"
+    },
+    {
+      "id": 2,
+      "station": 2,
+      "live": "axial",
+      "kind": "drill",
+      "diameter": 6,
+      "max_rpm": 5000
+    },
+    {
+      "id": 3,
+      "station": 3,
+      "live": "radial",
+      "kind": "endmill",
+      "diameter": 8,
+      "max_rpm": 4000
+    }
+  ],
+  "operations": [
+    { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 150, "speed": { "css": 200 } },
+    {
+      "name": "front_holes",
+      "type": "live_drill",
+      "tool_id": 2,
+      "face": "front",
+      "z_start": 0,
+      "positions": [
+        { "c": 0, "r": 10 },
+        { "c": 90, "r": 10 },
+        { "c": 180, "r": 10 },
+        { "c": 270, "r": 10 }
+      ],
+      "depth": 12,
+      "peck": 4,
+      "retract": 2,
+      "rpm": 2500,
+      "feed": 80
+    },
+    {
+      "name": "od_slot",
+      "type": "live_slot",
+      "tool_id": 3,
+      "face": "od",
+      "diameter": 40,
+      "c": 0,
+      "from": -45,
+      "to": -55,
+      "depth": 2,
+      "step_down": 1,
+      "rpm": 1800,
+      "feed": 120
+    }
+  ],
+  "tolerance": { "linear": 0.001, "chord": 0.01 },
+  "clearance": 2.0
+}
