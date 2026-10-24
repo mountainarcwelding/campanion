@@ -98,7 +98,7 @@ While the active spindle is the sub, `CAxis`, `SpindleBrake`, `LiveToolOn`, `Fac
 
 Read-back accepts these lines as pass-through. A housing move is not a part-frame point. `G53` on that move still does not change the modal motion. A `G00` or `G01` housing move does, so the next part rapid or feed stays in step with the reader.
 
-`haas_lathe` uses the object above. M10/M11 are the main chuck, M110/M111 the secondary chuck (the spring ejector acts when those jaws open), M143/M144/M145 the secondary spindle with the speed on P, G199/G198 synchronous control with an optional R phase, and B the secondary housing. Those codes are cited in `references` from Haas NGC lathe manual 96-8910 §8.1.6, §8.1.35, §8.1.44, §7.1.71-72 and §6.34. `fanuc_lathe`, `linuxcnc_lathe` and `grbl_lathe` leave `transfer` unset.
+`haas_lathe` uses the object above. M10/M11 are the main chuck, M110/M111 the secondary chuck (the spring ejector acts when those jaws open), M143/M144/M145 the secondary spindle with the speed on P, G199/G198 synchronous control with an optional R phase, and B the secondary housing. Those codes are cited in `references` from Haas NGC lathe manual 96-8910 §8.1.6, §8.1.35, §8.1.44, §7.1.71-72 and §6.34. `fanuc_lathe`, `linuxcnc_lathe` and `grbl_lathe` leave `transfer` unset. While the sub is selected (`sub_spindle.select`, Haas `G14`), a `SpindleRun` on the sub uses the main spindle lines (`M3`/`M4`/`M5`) instead, because Haas alarms on M143/M144/M145 under G14 (manual 96-8910 §7.1.8).
 
 ### Mill-turn (C axis and live tools)
 
