@@ -241,6 +241,7 @@ Part C: B-axis heads and 5-axis milling
 9. **Indexed 3+2:** tilted work planes (G68.2 or the LinuxCNC equivalent, or explicit rotated
    coordinates), any 2.5D/3-axis op on a tilted plane, with a reachability and limit check.
 10. **Angled turning and boring with a B head** (insert orientation follows B).
+
 Haas ST/DS lathe completion (ahead of items 11–13; checked against the Haas NGC lathe operator's manual):
 - **H1. Threading feed mode and tailstock:** `haas_lathe` writes G99 around G32 thread passes (Haas
   requires feed per revolution for G32) and G98 after; a tailstock operation advances with M21 and
@@ -254,6 +255,7 @@ Haas ST/DS lathe completion (ahead of items 11–13; checked against the Haas NG
   its C-axis addressing is confirmed.
 - **H4. Optional threading and cycles:** multi-start and taper threads, canned G76 and G71/G70
   output.
+
 11. **Continuous 5-axis:** tool-axis control (lead/tilt, toward point/curve, swarf on ruled
     surfaces), axis smoothing and singularity handling near B=0.
 12. **TCP and non-TCP posts:** G43.4/TCPC and LinuxCNC TCP kinematics, or the post doing the
