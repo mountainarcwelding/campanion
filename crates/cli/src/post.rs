@@ -43,6 +43,11 @@ pub(crate) fn load_spec(spec: &Path) -> Result<PostDef, CliError> {
 pub(crate) fn render(program: &Program, post: &PostDef, tolerance_mm: f64) -> Result<String, CliError> {
     let options = campanion_post::PostOptions { arc_tolerance: tolerance_mm };
     let text = campanion_post::post_program(program, post, &options).map_err(|err| CliError::run(format!("post `{}`: {err}", post.id())))?;
+    // Indexed 3+2 writes rotary words and work-offset codes that read-back does not parse.
+    if post.has_five_axis() && program.five_axis().is_some() {
+        print_channel_balance(program)?;
+        return Ok(text);
+    }
     let moves =
         campanion_post::read_back(&text, post).map_err(|err| CliError::run(format!("post `{}` output could not be read back: {err}", post.id())))?;
     campanion_post::compare(program, &moves, tolerance_mm, post)

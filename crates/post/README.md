@@ -33,6 +33,34 @@ A feed that keeps the angle uses the normal millimetres-per-minute word.
 
 An arc or helix whose start and end angles are equal is written as an arc in the machine frame when the rotated plane is still XY, ZX, or YZ. The centre is `rotate_point` of the part-frame centre. A reversed plane normal swaps G2 and G3. Any other rotary arc is linearised to the arc tolerance first, then each point is mapped with `part_to_machine`.
 
+## Five-axis 3+2 (five_axis)
+
+`five_axis` is optional. Without it, a tilted tool axis is `post `<id>` has no tilted-plane output`. A program whose tool axis is tilted and that has no five-axis setup is `program has tilted tool axes but no kinematics`.
+
+```json
+{
+  "mode": "work",
+  "decimals": 3,
+  "retract": ["G53 G00 Z0."],
+  "index": ["G00 {rotaries}"],
+  "on": ["G254"],
+  "off": ["G255"]
+}
+```
+
+- `mode` — `work` or `machine`.
+- `decimals` — digits on each rotary word. The number style matches the post (`decimal_point`, `trailing_zeros`).
+- `retract`, `on`, `off` — lines with no placeholders. `on` and `off` may be empty.
+- `index` — every line contains `{rotaries}`. That expands to the rotary words in kinematics order, for example `B30. C45.`. The letter is `RotaryJoint.letter`.
+
+`mode` `work` allows table joints only. A head joint is `post `<id>` work mode needs table rotaries only`. The control applies the rotary-centre offsets, so the post ignores pivots: each written point is the part tip rotated about the origin by the table angles, outer joint last. `haas_umc` uses this with G254. G254 is positioning only: index the rotaries, then turn it on; the first move is X and Y in one block and Z in the next; cancel with G255 before any later rotary move. G53 is not affected. The kinematics file must match the machine. This output has not been proven on a machine.
+
+`mode` `machine` writes the gauge point from the kinematics inverse at tool length 0, so the pivots are in the coordinates and the tool length stays with G43. `linuxcnc_5ax` uses this. There is no TCP. The kinematics file's pivots must be measured from the G54 origin. `on` and `off` are empty.
+
+The writer starts at rotary angles `[0, 0]` and tool axis +Z. Before the first motion of a toolpath, if that pose's axis differs by more than 1e-9 or this is the first toolpath of a five-axis program, it writes `off` when a frame is already active, then `retract`, solves `Kinematics::choose` for that pose at tool length 0, writes `index`, writes `on`, and marks the frame active. The first motion after an index is two rapids: X and Y, then Z. Later poses in that toolpath must keep the axis chosen at the start. A change is `toolpath N changes tool axis inside a 3+2 move`. At program end, an active frame writes `off`, then `retract`, then `index` with every angle 0, before `program_end`.
+
+An arc that is cardinal in the written frame (XY, ZX, or YZ) stays an arc. Any other arc is chorded at the arc tolerance. With a zero tolerance that arc is `arc is not in a cardinal plane after the 3+2 rotation`. Read-back does not apply to a five-axis post.
+
 ## Lathe posts
 
 `lathe` is optional. A program with a turning setup is a lathe program: its poses are part-frame. `tip.x()` is a radius in millimetres and `tip.z()` runs along the spindle. `tip.y()` is 0 unless the head carries Y and `lathe.y_axis` is set. The post applies diameter mode. The IR does not.

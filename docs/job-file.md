@@ -448,7 +448,9 @@ Load failures:
 - `operation `<name>`: plane is not supported on waterline`
 - `operation `<name>`: ` followed by the kinematics error when that pose is not reachable
 
-`examples/tilted.job.json` profiles `examples/sample.dxf` flat, profiles it again on a 30° plane, and drills a side plane. A post still writes a tool axis of part +Z. A tilted axis fails with `post `<id>` has no tilted-plane output`.
+`examples/tilted.job.json` profiles `examples/sample.dxf` flat, profiles it again on a 30° plane, and drills a side plane. A post with no `five_axis` block still rejects a tilted tool axis with `post `<id>` has no tilted-plane output`.
+
+A post with `five_axis` writes indexed 3+2. Before the first move of a toolpath whose tool axis changed, and before the first toolpath of a five-axis program, it retracts, indexes the rotaries, and turns the frame on. `mode` `work` writes the part tip rotated about the origin by the table angles (the control applies the rotary centres). `mode` `machine` writes the gauge point from the kinematics inverse with tool length 0. The first move after an index is a rapid in X and Y, then a rapid in Z. At the end the frame is cancelled, the tool retracts, and the rotaries return to zero. `haas_umc` is work mode (G254/G255). `linuxcnc_5ax` is machine mode. The kinematics file has to match the machine; this output has not been proven on a machine.
 
 ## Limits
 

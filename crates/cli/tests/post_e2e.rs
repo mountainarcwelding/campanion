@@ -154,10 +154,12 @@ fn posts_lists_every_builtin() -> Result<(), String> {
     if ids
         != [
             "linuxcnc",
+            "linuxcnc_5ax",
             "grbl",
             "mach3",
             "fanuc",
             "haas",
+            "haas_umc",
             "plasma",
             "grbl_laser",
             "linuxcnc_lathe",

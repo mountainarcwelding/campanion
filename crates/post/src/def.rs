@@ -115,6 +115,9 @@ pub struct PostDef {
     /// Fourth-axis words. Absent on a post that rejects rotary programs.
     #[serde(default)]
     pub(crate) rotary: Option<RotaryOutput>,
+    /// Indexed 3+2. Absent when a tilted tool axis is rejected.
+    #[serde(default)]
+    pub(crate) five_axis: Option<FiveAxisOutput>,
     /// Lathe words. Absent on a mill post. A turning program requires this block.
     #[serde(default)]
     pub(crate) lathe: Option<LatheOutput>,
@@ -625,12 +628,18 @@ impl PostDef {
         check_dwell_word(&self.dwell.word, &self.axis_letters, &self.line_numbers.prefix)?;
         check_rotary(&mut self)?;
         check_lathe(&self)?;
+        check_five_axis(&self)?;
         Ok(self)
     }
 
     /// True when this post writes a turning program.
     pub fn is_lathe(&self) -> bool {
         self.lathe.is_some()
+    }
+
+    /// True when this post writes indexed 3+2 (`five_axis`).
+    pub fn has_five_axis(&self) -> bool {
+        self.five_axis.is_some()
     }
 
     /// Rotary axes this post writes, in the order the JSON lists them.
@@ -1044,6 +1053,57 @@ fn check_program_number(post: &PostDef) -> Result<()> {
         }
         None if used => return Err(field("program_number", "required when a template uses {program_number}")),
         None => {}
+    }
+    Ok(())
+}
+
+/// Indexed 3+2. `mode` `work` rotates the part tip about the origin. `mode` `machine` writes
+/// the gauge point from the kinematics inverse. `{rotaries}` is the only index placeholder.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FiveAxisOutput {
+    /// `work` or `machine`.
+    pub(crate) mode: FiveAxisMode,
+    /// Digits on each rotary word.
+    pub(crate) decimals: u8,
+    /// Machine retract before a rotary index. No placeholders.
+    pub(crate) retract: Vec<String>,
+    /// Rotary index. Every line contains `{rotaries}`.
+    pub(crate) index: Vec<String>,
+    /// Frame on, after the index. Empty writes nothing. No placeholders.
+    pub(crate) on: Vec<String>,
+    /// Frame off, before the next index. Empty writes nothing. No placeholders.
+    pub(crate) off: Vec<String>,
+}
+
+/// Where a 3+2 post reads coordinates while the frame is active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FiveAxisMode {
+    /// Part tip rotated by the table angles about the work origin. Pivots are left to the control.
+    Work,
+    /// Gauge point from [`campanion_ir::Kinematics::inverse`] with tool length 0.
+    Machine,
+}
+
+fn check_five_axis(post: &PostDef) -> Result<()> {
+    let Some(five) = &post.five_axis else {
+        return Ok(());
+    };
+    if five.decimals > 8 {
+        return Err(field("five_axis.decimals", "must be 0..=8"));
+    }
+    check_templates("five_axis.retract", &five.retract, &[])?;
+    check_templates("five_axis.on", &five.on, &[])?;
+    check_templates("five_axis.off", &five.off, &[])?;
+    if five.index.is_empty() {
+        return Err(field("five_axis.index", "needs at least one line"));
+    }
+    check_templates("five_axis.index", &five.index, &["rotaries"])?;
+    for line in &five.index {
+        if !line.contains("{rotaries}") {
+            return Err(field("five_axis.index", "requires {rotaries}"));
+        }
     }
     Ok(())
 }
