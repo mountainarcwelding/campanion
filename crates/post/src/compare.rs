@@ -39,7 +39,11 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
     }
     let drop_z = post.drop_z();
     let setup = program.rotary();
-    let angle_tol = post.rotary.as_ref().map(|rotary| rotary::angle_tolerance(rotary.decimals)).unwrap_or(0.001);
+    let angle_tol = if program.turning().is_some() && post.lathe.as_ref().is_some_and(|lathe| lathe.c_axis.is_some()) {
+        rotary::angle_tolerance(post.linear_decimals())
+    } else {
+        post.rotary.as_ref().map(|rotary| rotary::angle_tolerance(rotary.decimals)).unwrap_or(0.001)
+    };
     let motions: Vec<&ReadMove> = moves.iter().filter(|move_| is_motion(move_)).collect();
     let mut cursor = 0usize;
     let mut part: Option<Xyz> = None;
@@ -235,7 +239,8 @@ fn consume_curve(
     drop_z: bool,
     check: CurveCheck<'_>,
 ) -> Result<()> {
-    let rotary_curve = check.start_angle.is_some() || check.end_angle.is_some();
+    // Lathe C is already in the part frame. Only a mill rotary setup remaps the curve.
+    let rotary_curve = check.setup.is_some() && (check.start_angle.is_some() || check.end_angle.is_some());
     let start = project(start, drop_z);
     let end = project(end, drop_z);
     let center = project(center, drop_z);
@@ -455,11 +460,12 @@ fn map_tip(got: Xyz, got_angle: Option<f64>, expect_angle: Option<f64>, setup: O
     let Some(_) = expect_angle else {
         return Ok(got);
     };
+    // A turning C angle is already a part-frame coordinate. There is no rotary setup to invert.
+    let Some(setup) = setup else {
+        return Ok(got);
+    };
     let Some(angle) = got_angle else {
         return Err(invalid(format!("motion {index}: missing rotary angle")));
-    };
-    let Some(setup) = setup else {
-        return Err(invalid("rotary angle needs a rotary setup"));
     };
     rotary::part_tip_at(setup, got, angle)
 }

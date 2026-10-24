@@ -1,7 +1,13 @@
 {
   "id": "haas_lathe",
   "name": "Haas lathe",
-  "description": "Millimetre Haas lathe dialect. Percent-delimited program O00001 with sequence numbers. Diameter mode is the control default. The safety block is G21 G18 G40 G80. Feed per minute is G98 on the following word. G99 is left out, because the IR feed is millimetres per minute and G99 would be millimetres per revolution. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is the tool and offset in two digits (T0101). Arcs are I and K, I a radius. Single-point threading is G32 with the lead on F. Home is G53 G0 X0, then G53 G0 Z0, in machine coordinates. The program ends with M30 and %. No rotary axis.",
+  "description": "Millimetre Haas lathe dialect. Percent-delimited program O00001 with sequence numbers. Diameter mode is the control default. The safety block is G21 G18 G40 G80. Feed per minute is G98 on the following word. G99 is left out, because the IR feed is millimetres per minute and G99 would be millimetres per revolution. Constant surface speed is G50 S max-rpm, then G96 S metres per minute. Direct rpm is G97. The spindle is M3, M4 or M5. The tool word is the tool and offset in two digits (T0101). Arcs are I and K, I a radius. Single-point threading is G32 with the lead on F. Home is G53 G0 X0, then G53 G0 Z0, in machine coordinates. The program ends with M30 and %. No rotary axis. Live tooling and C axis codes are cited in `references`.",
+  "references": [
+    "M133/M134/M135 P<rpm> live tool fwd/rev/stop: https://www.haascnc.com/service/codes-settings.type=mcode.machine=lathe.value=M133.html",
+    "M154/M155 C axis engage/disengage, G28 H0. unwinds C: https://www.haascnc.com/service/service-content/guide-procedures/lathe---m-codes.html and Haas NGC Lathe Operator's Manual (96-8910) G82/G83 live examples",
+    "M14/M15 main spindle brake: Haas NGC Lathe Operator's Manual M-code list",
+    "C axis, H incremental C, Setting 102 C feed: https://www.haascnc.com/service/online-operator-s-manuals/lathe-operator-s-manual/lathe---options-programming.html"
+  ],
   "program_number": "00001",
   "units": "mm",
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
@@ -46,6 +52,9 @@
     "tool_change": ["T{tool2}{offset2}"],
     "arc_flip": false,
     "home": ["G53 G0 X0", "G53 G0 Z0"],
-    "thread": { "code": "G32", "lead_word": "F" }
+    "thread": { "code": "G32", "lead_word": "F" },
+    "c_axis": { "letter": "C", "engage": ["M154", "G28 H0."], "disengage": ["M155"] },
+    "brake": { "clamp": ["M14"], "release": ["M15"] },
+    "live_tool": { "forward": ["P{rpm} M133"], "reverse": ["P{rpm} M134"], "stop": ["M135"], "feed_mode": "G98" }
   }
 }

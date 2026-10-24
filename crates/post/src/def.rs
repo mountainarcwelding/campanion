@@ -20,7 +20,9 @@
 //!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
-//! `{offset2}` and `{date-free!}`, each only on the lines that name that value.
+//! `{offset2}` and `{date-free!}`, each only on the lines that name that value. `c_axis`,
+//! `brake` and `live_tool` are optional mill-turn blocks. Live-tool `{rpm}` is a whole number.
+//! `references` cites the codes and is never written to the program.
 
 use std::collections::BTreeMap;
 
@@ -108,6 +110,9 @@ pub struct PostDef {
     /// Lathe words. Absent on a mill post. A turning program requires this block.
     #[serde(default)]
     pub(crate) lathe: Option<LatheOutput>,
+    /// Citations for the codes this post writes. Never copied into the program.
+    #[serde(default)]
+    pub(crate) references: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -302,6 +307,60 @@ pub(crate) struct LatheOutput {
     /// Synchronised feed for threading. Absent: the post rejects thread moves.
     #[serde(default)]
     pub(crate) thread: Option<ThreadOutput>,
+    /// Positioning C axis. Absent: a C angle or a C-axis event is rejected.
+    #[serde(default)]
+    pub(crate) c_axis: Option<CAxisOutput>,
+    /// Spindle brake while the C axis holds. Absent: a brake event is rejected.
+    #[serde(default)]
+    pub(crate) brake: Option<BrakeOutput>,
+    /// Driven tool. Absent: a live-tool event is rejected.
+    #[serde(default)]
+    pub(crate) live_tool: Option<LiveToolOutput>,
+}
+
+/// Engage and disengage a spindle as a positioning axis.
+///
+/// `letter` is the modal word on `G0` and `G1` while the axis is engaged. `engage` and
+/// `disengage` take no placeholders.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CAxisOutput {
+    /// One uppercase ASCII letter, for example `C`.
+    pub(crate) letter: String,
+    /// Written when the spindle becomes a positioning axis.
+    pub(crate) engage: Vec<String>,
+    /// Written when the spindle returns to turning. Clears the modal C word.
+    pub(crate) disengage: Vec<String>,
+}
+
+/// Clamp or release the spindle brake.
+///
+/// Both line lists take no placeholders.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BrakeOutput {
+    /// Written to clamp the brake.
+    pub(crate) clamp: Vec<String>,
+    /// Written to release the brake.
+    pub(crate) release: Vec<String>,
+}
+
+/// Start and stop a live (driven) tool.
+///
+/// `forward` and `reverse` may use `{rpm}`, written as a whole number. `stop` and `feed_mode`
+/// take no placeholders. `feed_mode` is written once before the first start when it is non-empty
+/// and differs from [`LatheOutput::feed_mode`].
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveToolOutput {
+    /// Live tool forward. `{rpm}` is the speed.
+    pub(crate) forward: Vec<String>,
+    /// Live tool reverse. `{rpm}` is the speed.
+    pub(crate) reverse: Vec<String>,
+    /// Live tool stop.
+    pub(crate) stop: Vec<String>,
+    /// Feed-mode word for live tooling, such as `G98`.
+    pub(crate) feed_mode: String,
 }
 
 fn default_z_mode() -> String {
@@ -313,6 +372,7 @@ impl PostDef {
         check_token("id", &self.id, 64)?;
         check_text("name", &self.name, 1, 128)?;
         check_text("description", &self.description, 0, 1024)?;
+        check_references(&self.references)?;
         if self.units != "mm" {
             return Err(field("units", "only mm is supported"));
         }
@@ -437,6 +497,51 @@ fn check_lathe(post: &PostDef) -> Result<()> {
     check_templates("lathe.home", &lathe.home, LATHE_BARE)?;
     if let Some(thread) = &lathe.thread {
         check_thread_output(thread)?;
+    }
+    if let Some(c_axis) = &lathe.c_axis {
+        check_c_letter(&c_axis.letter)?;
+        check_templates("lathe.c_axis.engage", &c_axis.engage, LATHE_BARE)?;
+        check_templates("lathe.c_axis.disengage", &c_axis.disengage, LATHE_BARE)?;
+    }
+    if let Some(brake) = &lathe.brake {
+        check_templates("lathe.brake.clamp", &brake.clamp, LATHE_BARE)?;
+        check_templates("lathe.brake.release", &brake.release, LATHE_BARE)?;
+    }
+    if let Some(live) = &lathe.live_tool {
+        check_templates("lathe.live_tool.forward", &live.forward, LATHE_RPM)?;
+        check_templates("lathe.live_tool.reverse", &live.reverse, LATHE_RPM)?;
+        check_templates("lathe.live_tool.stop", &live.stop, LATHE_BARE)?;
+        check_templates("lathe.live_tool.feed_mode", std::slice::from_ref(&live.feed_mode), LATHE_BARE)?;
+    }
+    Ok(())
+}
+
+/// `C` is allowed. Axis letters and the words a block already uses are not.
+fn check_c_letter(letter: &str) -> Result<()> {
+    const MESSAGE: &str = "must be one uppercase ASCII letter and not X, Y, Z, I, J, K, F, S, T, M, G, N, O, P";
+    const BANNED: &str = "XYZIJKFSTMGNOP";
+    let mut chars = letter.chars();
+    let Some(ch) = chars.next() else {
+        return Err(field("lathe.c_axis.letter", MESSAGE));
+    };
+    if chars.next().is_some() || !ch.is_ascii_uppercase() || BANNED.contains(ch) {
+        return Err(field("lathe.c_axis.letter", MESSAGE));
+    }
+    Ok(())
+}
+
+fn check_references(refs: &[String]) -> Result<()> {
+    if refs.len() > 32 {
+        return Err(field("references", "at most 32 entries"));
+    }
+    for entry in refs {
+        let count = entry.chars().count();
+        if !(1..=256).contains(&count) {
+            return Err(field("references", "each entry must be 1..=256 characters"));
+        }
+        if entry.chars().any(char::is_control) {
+            return Err(field("references", "contains a control character"));
+        }
     }
     Ok(())
 }

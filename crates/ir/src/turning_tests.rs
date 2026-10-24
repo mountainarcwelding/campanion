@@ -6,7 +6,7 @@ use crate::Result;
 use crate::geom::{ArcSense, Plane, Pose, Vec3};
 use crate::machine::{Axis, AxisKind, AxisLetter, AxisName, Channel, KinematicNode, Machine};
 use crate::motion::{ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole};
-use crate::process::{Event, Tool};
+use crate::process::{Event, LiveDirection, Tool};
 use crate::program::{Document, Program};
 use crate::rotary::{RotaryAxisKind, RotaryDirection, RotarySetup};
 use crate::turning::{
@@ -745,4 +745,93 @@ proptest! {
 
 fn near_radius(value: f64, radius: f64) -> bool {
     value == 0.0 || (value - radius).abs() <= 1e-9 || (value + radius).abs() <= 1e-9
+}
+
+fn try_event(event: Event) -> Result<ClPath> {
+    ClPath::try_new(Some("turn".into()), None, CompensationMode::Off, feeds(), None, Vec::new(), vec![ClBlock::Event(event)])
+}
+
+fn c_setup() -> TurningSetup {
+    let spindle = Spindle::try_new("main", Some(0), 0.0, 3_000.0).expect("spindle");
+    let head = head_named("turret1", 12, true);
+    let binding = TurnBinding::try_new(0, "main", "turret1", 0).expect("binding");
+    setup_with(vec![spindle], vec![head], Vec::new(), vec![binding]).expect("setup")
+}
+
+fn plain_setup() -> TurningSetup {
+    let binding = TurnBinding::try_new(0, "main", "turret1", 0).expect("binding");
+    setup_with(vec![spindle_named("main")], vec![head_named("turret1", 4, false)], Vec::new(), vec![binding]).expect("setup")
+}
+
+#[test]
+fn mill_turn_events_round_trip_and_reject_bad_spindles_and_rpm() {
+    let events = [
+        Event::CAxis { spindle: "main".into(), engage: true },
+        Event::CAxis { spindle: "main".into(), engage: false },
+        Event::SpindleBrake { spindle: "main".into(), clamp: true },
+        Event::SpindleBrake { spindle: "main".into(), clamp: false },
+        Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward },
+        Event::LiveToolOn { rpm: 100_000.0, direction: LiveDirection::Reverse },
+        Event::LiveToolOff,
+    ];
+    for event in events {
+        let json = serde_json::to_string(&event).expect("json");
+        let back: Event = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, event, "{json}");
+    }
+    let forward = serde_json::to_string(&Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }).expect("json");
+    assert!(forward.contains("\"type\":\"live_tool_on\""), "{forward}");
+    assert!(forward.contains("\"direction\":\"forward\""), "{forward}");
+    let reverse = serde_json::to_string(&Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Reverse }).expect("json");
+    assert!(reverse.contains("\"direction\":\"reverse\""), "{reverse}");
+    assert!(serde_json::to_string(&Event::LiveToolOff).expect("json").contains("\"type\":\"live_tool_off\""));
+    assert!(serde_json::to_string(&Event::CAxis { spindle: "main".into(), engage: true }).expect("json").contains("\"type\":\"c_axis\""));
+    assert!(
+        serde_json::to_string(&Event::SpindleBrake { spindle: "main".into(), clamp: false }).expect("json").contains("\"type\":\"spindle_brake\"")
+    );
+    assert!(serde_json::from_str::<Event>(r#"{"type":"live_tool_on","rpm":1.0,"direction":"forward","extra":1}"#).is_err());
+    assert!(serde_json::from_str::<Event>(r#"{"type":"c_axis","spindle":"main","engage":true,"nope":1}"#).is_err());
+    assert!(serde_json::from_str::<Event>(r#"{"type":"spindle_brake","spindle":"main","clamp":true,"nope":1}"#).is_err());
+
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Reverse }),
+        ClBlock::Event(Event::LiveToolOff),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = program_with(vec![tool(1)], vec![path_with(Some(1), blocks)], c_setup(), None).expect("program");
+    round_trip(&Document::new(program).expect("document"));
+
+    let unknown = path_with(None, vec![ClBlock::Event(Event::CAxis { spindle: "other".into(), engage: true })]);
+    assert_err(program_with(Vec::new(), vec![unknown], plain_setup(), None), "unknown spindle other");
+    let bare_brake = path_with(None, vec![ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true })]);
+    assert_err(program_with(Vec::new(), vec![bare_brake], plain_setup(), None), "spindle main has no C axis");
+    let bare_axis = path_with(None, vec![ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false })]);
+    assert_err(program_with(Vec::new(), vec![bare_axis], plain_setup(), None), "spindle main has no C axis");
+
+    assert_err(try_event(Event::LiveToolOn { rpm: 0.0, direction: LiveDirection::Forward }), "must be positive");
+    assert_err(try_event(Event::LiveToolOn { rpm: -5.0, direction: LiveDirection::Forward }), "must be positive");
+    assert_err(try_event(Event::LiveToolOn { rpm: f64::NAN, direction: LiveDirection::Reverse }), "must be finite");
+    assert_err(try_event(Event::LiveToolOn { rpm: f64::INFINITY, direction: LiveDirection::Forward }), "must be finite");
+    assert_err(try_event(Event::LiveToolOn { rpm: 100_000.1, direction: LiveDirection::Forward }), "above 100000");
+    assert!(try_event(Event::LiveToolOn { rpm: 100_000.0, direction: LiveDirection::Forward }).is_ok());
+    assert_err(try_event(Event::CAxis { spindle: String::new(), engage: true }), "empty");
+    assert_err(try_event(Event::SpindleBrake { spindle: String::new(), clamp: false }), "empty");
+
+    let live_only = vec![ClBlock::Event(Event::LiveToolOn { rpm: 800.0, direction: LiveDirection::Forward }), ClBlock::Event(Event::LiveToolOff)];
+    Program::try_new(Some("mill".into()), Vec::new(), None, vec![path_with(None, live_only)], Vec::new(), Vec::new(), None).expect("no turning");
+
+    let over = pose_xz(10.0, 0.0, 1.0).with_rotary(100_000.0).expect("pose");
+    let over_block = ClBlock::Motion(ClMotion::Rapid { to: over, feed: None });
+    assert_err(program_with(Vec::new(), vec![path_with(None, vec![over_block])], m10(None), None), "outside -99999..=99999");
+    let under = pose_xz(10.0, 0.0, 1.0).with_rotary(-100_000.0).expect("pose");
+    let under_block = ClBlock::Motion(ClMotion::Rapid { to: under, feed: None });
+    assert_err(program_with(Vec::new(), vec![path_with(None, vec![under_block])], m10(None), None), "outside -99999..=99999");
+    let edge = pose_xz(10.0, 0.0, 1.0).with_rotary(99_999.0).expect("pose");
+    program_with(Vec::new(), vec![path_with(None, vec![ClBlock::Motion(ClMotion::Rapid { to: edge, feed: None })])], m10(None), None).expect("max c");
+    let neg = pose_xz(10.0, 0.0, 1.0).with_rotary(-99_999.0).expect("pose");
+    let neg_block = ClBlock::Motion(ClMotion::Linear { to: neg, feed: 10.0, role: MoveRole::Cut });
+    program_with(Vec::new(), vec![path_with(None, vec![neg_block])], m10(None), None).expect("min c");
 }

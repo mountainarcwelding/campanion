@@ -10,6 +10,10 @@
 //! `arc_flip` swaps G2 and G3 back to the IR sense. `G53` is a machine move and is not returned.
 //! `G28` is a reference return and is not returned. `U` and `W` are accepted only on that block.
 //! `G50` (spindle cap) and `G98` (Fanuc and Haas feed per minute) are not moves.
+//!
+//! A lathe post with `c_axis` treats that letter as a modal angle. Rapid and linear moves return
+//! it on `rotary`. `M` lines, `P` and `H` words, and `G28 H0.` are not moves. `G28 H0.` does not
+//! change the modal C word: the axis letter is `C`, not `H`.
 
 use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 
@@ -26,7 +30,7 @@ pub enum ReadMove {
         end: Xyz,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
-        /// Modal A/B angle in degrees after this block. `None` when the post has no rotary word yet.
+        /// Modal A/B or lathe C angle in degrees after this block.
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
         inverse_time: bool,
@@ -37,7 +41,7 @@ pub enum ReadMove {
         end: Xyz,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
-        /// Modal A/B angle in degrees after this block. `None` when the post has no rotary word yet.
+        /// Modal A/B or lathe C angle in degrees after this block.
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
         inverse_time: bool,
@@ -54,7 +58,7 @@ pub enum ReadMove {
         radius: Option<f64>,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
-        /// Modal A/B angle in degrees after this block. `None` when the post has no rotary word yet.
+        /// Modal A/B or lathe C angle in degrees after this block.
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
         inverse_time: bool,
@@ -70,7 +74,7 @@ pub enum ReadMove {
         end: Xyz,
         /// Lead, millimetres per spindle revolution.
         lead: f64,
-        /// Modal A/B angle in degrees after this block.
+        /// Modal A/B or lathe C angle in degrees after this block.
         rotary: Option<f64>,
         /// Modal inverse-time state after this block.
         inverse_time: bool,
@@ -167,7 +171,7 @@ impl<'a> Parser<'a> {
                 'T' => saw_t = true,
                 'I' | 'J' | 'K' | 'R' | 'F' | 'S' | 'H' | 'D' | 'P' => {}
                 'U' | 'W' if self.post.is_lathe() => {}
-                letter if axes.contains(&letter) || letter == dwell_letter || self.is_rotary_letter(letter) => {}
+                letter if axes.contains(&letter) || letter == dwell_letter || self.is_rotary_letter(letter) || self.is_c_letter(letter) => {}
                 letter => return Err(invalid(format!("unexpected word {letter}"))),
             }
         }
@@ -387,7 +391,28 @@ impl<'a> Parser<'a> {
         (letter == 'A' && rotary.supports(RotaryAxisKind::A)) || (letter == 'B' && rotary.supports(RotaryAxisKind::B))
     }
 
+    fn c_axis_letter(&self) -> Option<char> {
+        self.post.lathe.as_ref()?.c_axis.as_ref()?.letter.chars().next()
+    }
+
+    fn is_c_letter(&self, letter: char) -> bool {
+        self.c_axis_letter() == Some(letter)
+    }
+
     fn rotary_word(&self, words: &[(char, f64)]) -> Result<Option<f64>> {
+        let mill = self.mill_rotary_word(words)?;
+        let c = match self.c_axis_letter() {
+            Some(letter) => unique(words, letter)?,
+            None => None,
+        };
+        match (mill, c) {
+            (Some(_), Some(_)) => Err(invalid("block has both a rotary word and a C word")),
+            (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
+            (None, None) => Ok(None),
+        }
+    }
+
+    fn mill_rotary_word(&self, words: &[(char, f64)]) -> Result<Option<f64>> {
         let Some(rotary) = &self.post.rotary else {
             return Ok(None);
         };

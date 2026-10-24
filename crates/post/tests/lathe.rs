@@ -5,10 +5,11 @@
 use std::path::PathBuf;
 
 use campanion_ir::{
-    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Document, Event, Feeds, Hand, Head, HeadAxis, Insert, InsertShape, MoveRole,
-    Plane, Pose, ProcessKind, ProcessParams, Program, Spindle, SpindleSpeed, Tool, TurnBinding, TurnInsert, TurnStock, TurningSetup, Vec3,
+    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Document, Event, Feeds, Hand, Head, HeadAxis, Insert, InsertShape,
+    LiveDirection, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program, Spindle, SpindleSpeed, Tool, TurnBinding, TurnInsert, TurnStock,
+    TurningSetup, Vec3,
 };
-use campanion_post::{PostDef, PostOptions, builtin, compare, load_post, post_program, read_back};
+use campanion_post::{PostDef, PostOptions, ReadMove, builtin, compare, load_post, post_program, read_back};
 
 fn options() -> PostOptions {
     PostOptions { arc_tolerance: 0.05 }
@@ -607,4 +608,243 @@ fn thread_under_css_or_without_a_thread_post_errors_without_panic() {
     }
     let edge = ClPath::try_new(None, None, CompensationMode::Off, feeds(), None, Vec::new(), vec![thread_move(9.0, -1.0, 1_000.0)]);
     assert!(edge.is_ok(), "lead 1000 is the limit");
+}
+
+fn haas_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("../posts/haas_lathe.json")).expect("json")
+}
+
+fn haas_lathe() -> PostDef {
+    builtin("haas_lathe").expect("haas_lathe")
+}
+
+fn c_pose(x: f64, z: f64, c: f64) -> Pose {
+    xz(x, z).with_rotary(c).expect("c")
+}
+
+fn rapid_c(x: f64, z: f64, c: f64) -> ClBlock {
+    ClBlock::Motion(ClMotion::Rapid { to: c_pose(x, z, c), feed: None })
+}
+
+fn linear_c(x: f64, z: f64, c: f64, feed: f64) -> ClBlock {
+    ClBlock::Motion(ClMotion::Linear { to: c_pose(x, z, c), feed, role: MoveRole::Cut })
+}
+
+fn millturn_setup() -> TurningSetup {
+    let spindle = Spindle::try_new("main", Some(0), 0.0, 3_000.0).expect("spindle");
+    let head = Head::try_new("turret1", vec![HeadAxis::X, HeadAxis::Z], 12, true).expect("head");
+    let binding = TurnBinding::try_new(0, "main", "turret1", 0).expect("binding");
+    TurningSetup::try_new(vec![spindle], vec![head], None, Vec::new(), vec![binding]).expect("turning")
+}
+
+fn millturn_program(blocks: Vec<ClBlock>) -> Program {
+    let tool = Tool::try_new(1, Some("live".into()), None, None).expect("tool");
+    Program::try_new(Some("millturn".into()), vec![tool], None, vec![path(None, Some(1), blocks)], Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_turning(Some(millturn_setup()))
+        .expect("turning")
+}
+
+fn mill_program(event: Event) -> Program {
+    Program::try_new(Some("mill".into()), Vec::new(), None, vec![path(None, None, vec![ClBlock::Event(event)])], Vec::new(), Vec::new(), None)
+        .expect("program")
+}
+
+fn assert_in_order(text: &str, needles: &[&str]) {
+    let mut rest = text;
+    for needle in needles {
+        let found = rest.find(needle);
+        assert!(found.is_some(), "{needle} missing in {rest}");
+        let found = found.expect("present");
+        rest = &rest[found + needle.len()..];
+    }
+}
+
+#[test]
+fn haas_millturn_writes_c_brake_and_live_tool_and_reads_back() {
+    let blocks = vec![
+        ClBlock::Event(Event::ToolChange { tool_id: 1 }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(20.0, 2.0, 0.0),
+        ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        linear_c(20.0, -5.0, 0.0, 100.0),
+        rapid_c(20.0, 2.0, 0.0),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+        rapid_c(20.0, 2.0, 90.0),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        linear_c(20.0, -5.0, 90.0, 100.0),
+        rapid_c(20.0, 2.0, 90.0),
+        ClBlock::Event(Event::LiveToolOff),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+    ];
+    let program = millturn_program(blocks);
+    let post = haas_lathe();
+    assert!(post.description().contains("cited in `references`"), "{}", post.description());
+    let text = post_program(&program, &post, &options()).expect("post");
+    let golden = include_str!("golden/millturn.haas_lathe.nc");
+    assert_eq!(text, golden);
+    assert_in_order(&text, &["M154", "G28 H0.", "C0.", "P1500 M133", "M14", "M15", "C90.", "M14", "M135", "M15", "M155"]);
+    assert_eq!(text.matches("G98").count(), 1, "{text}");
+    assert!(!text.contains("haascnc.com"), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn haas_non_moves_keep_modal_c() {
+    let post = haas_lathe();
+    let parked = read_back("M154\nG28 H0.\nP1500 M133\nM14\nM15\nM135\nM155\n", &post).expect("read");
+    assert_eq!(parked.len(), 6, "{parked:?}");
+    assert!(parked.iter().all(|move_| matches!(move_, ReadMove::Other { .. })), "{parked:?}");
+    let held = read_back("G0 X40. Z2. C90.\nG28 H0.\nG1 X40. Z-5. F100\n", &post).expect("held");
+    let ReadMove::Linear { rotary, .. } = &held[1] else {
+        panic!("expected a feed, got {held:?}");
+    };
+    assert_eq!(*rotary, Some(90.0));
+}
+
+#[test]
+fn millturn_rejects_c_without_engage_spindle_while_engaged_and_missing_blocks() {
+    let haas = haas_lathe();
+    let bare_c = post_program(&millturn_program(vec![rapid_c(20.0, 2.0, 0.0)]), &haas, &options()).expect_err("c");
+    assert!(bare_c.to_string().contains("C angle needs the C axis engaged"), "{bare_c}");
+
+    let spinning = millturn_program(vec![ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }), spindle_on(Some(1_000.0))]);
+    let spin_err = post_program(&spinning, &haas, &options()).expect_err("spin");
+    assert!(spin_err.to_string().contains("turning spindle start while the C axis is engaged"), "{spin_err}");
+
+    let fanuc = builtin("fanuc_lathe").expect("fanuc_lathe");
+    let live = lathe_program(
+        vec![rapid(10.0, 1.0), ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward })],
+        turning(None, false),
+    );
+    let live_err = post_program(&live, &fanuc, &options()).expect_err("live");
+    assert!(live_err.to_string().contains("has no live tooling"), "{live_err}");
+
+    let brake = millturn_program(vec![ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true })]);
+    let brake_err = post_program(&brake, &fanuc, &options()).expect_err("brake");
+    assert!(brake_err.to_string().contains("has no spindle brake"), "{brake_err}");
+
+    let foreign = post_program(&millturn_program(vec![rapid_c(10.0, 1.0, 15.0)]), &fanuc, &options()).expect_err("no c");
+    assert!(foreign.to_string().contains("has no C axis"), "{foreign}");
+
+    let mill = builtin("linuxcnc").expect("linuxcnc");
+    let events = [
+        Event::CAxis { spindle: "main".into(), engage: true },
+        Event::SpindleBrake { spindle: "main".into(), clamp: false },
+        Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Reverse },
+        Event::LiveToolOff,
+    ];
+    for event in events {
+        let err = post_program(&mill_program(event), &mill, &options()).expect_err("mill");
+        assert!(err.to_string().contains("does not support mill-turn spindle modes"), "{err}");
+    }
+}
+
+#[test]
+fn millturn_rejects_c_move_while_brake_clamped() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(20.0, 2.0, 0.0),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        rapid_c(20.0, 2.0, 90.0),
+    ];
+    let err = post_program(&millturn_program(blocks), &haas_lathe(), &options()).expect_err("clamped");
+    assert!(err.to_string().contains("C move with the spindle brake clamped"), "{err}");
+}
+
+#[test]
+fn millturn_stops_the_live_tool_and_disengages_c_before_home() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(20.0, 2.0, 0.0),
+        ClBlock::Event(Event::LiveToolOn { rpm: 1_200.0, direction: LiveDirection::Reverse }),
+        linear_c(20.0, -5.0, 0.0, 80.0),
+    ];
+    let program = millturn_program(blocks);
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(text.contains("P1200 M134"), "{text}");
+    let m135 = text.find("M135").expect("stop");
+    let m155 = text.find("M155").expect("disengage");
+    let home = text.find("G53").expect("home");
+    assert!(m135 < m155 && m155 < home, "{text}");
+    assert_eq!(text.matches("M135").count(), 1, "{text}");
+    assert_eq!(text.matches("M155").count(), 1, "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn engaged_arc_stays_in_zx_without_a_c_word() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(10.0, 0.0, 0.0),
+        ClBlock::Motion(ClMotion::Arc {
+            to: c_pose(5.0, -5.0, 0.0),
+            plane: Plane::Zx,
+            center: Vec3::new(5.0, 0.0, 0.0).expect("centre"),
+            sense: ArcSense::Ccw,
+            feed: 80.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let program = millturn_program(blocks);
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let arc = text.lines().find(|line| line.split_whitespace().any(|word| word == "G2" || word == "G3")).expect("arc");
+    assert!(!arc.split_whitespace().any(|word| word.starts_with('C')), "{text}");
+    assert!(arc.split_whitespace().any(|word| word.starts_with('I')), "{arc}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn disengage_clears_modal_c_and_a_different_feed_mode_is_written_once() {
+    let blocks = vec![
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(20.0, 2.0, 0.0),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
+        ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
+        rapid_c(20.0, 2.0, 0.0),
+    ];
+    let text = post_program(&millturn_program(blocks), &haas_lathe(), &options()).expect("post");
+    assert_eq!(text.lines().filter(|line| line.contains("C0.")).count(), 2, "{text}");
+
+    let mut raw = haas_json();
+    raw["lathe"]["live_tool"]["feed_mode"] = serde_json::json!("G99");
+    let post = post_from(raw);
+    let live = vec![
+        ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }),
+        ClBlock::Event(Event::LiveToolOn { rpm: 800.5, direction: LiveDirection::Reverse }),
+    ];
+    let posted = post_program(&millturn_program(live), &post, &options()).expect("feed");
+    assert_eq!(posted.matches("G99").count(), 1, "{posted}");
+    assert!(posted.contains("P1500 M133"), "{posted}");
+    assert!(posted.contains("P801 M134"), "{posted}");
+    let g99 = posted.find("G99").expect("g99");
+    let forward = posted.find("P1500 M133").expect("forward");
+    let reverse = posted.find("P801 M134").expect("reverse");
+    assert!(g99 < forward && forward < reverse, "{posted}");
+}
+
+#[test]
+fn post_rejects_a_bad_c_axis_letter_and_references_that_are_too_long() {
+    for letter in ["c", "X", "CC", ""] {
+        let mut raw = haas_json();
+        raw["lathe"]["c_axis"]["letter"] = serde_json::json!(letter);
+        let err = load_post(&raw.to_string()).expect_err(letter);
+        let text = err.to_string();
+        assert!(text.contains("lathe.c_axis.letter"), "{letter}: {text}");
+        assert!(text.contains("must be one uppercase ASCII letter and not X, Y, Z, I, J, K, F, S, T, M, G, N, O, P"), "{letter}: {text}");
+    }
+    let mut raw = haas_json();
+    raw["references"] = serde_json::json!(["x".repeat(257)]);
+    let err = load_post(&raw.to_string()).expect_err("long");
+    let text = err.to_string();
+    assert!(text.contains("references") && text.contains("1..=256"), "{text}");
+
+    let mut raw = haas_json();
+    raw["references"] = serde_json::json!(vec!["cited".to_string(); 33]);
+    let err = load_post(&raw.to_string()).expect_err("count");
+    assert!(err.to_string().contains("at most 32"), "{err}");
 }

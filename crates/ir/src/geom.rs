@@ -71,7 +71,9 @@ impl Vec3 {
 /// direction). It is stored as given; a unit vector is the convention.
 ///
 /// `rotary` is the machine A/B angle in degrees when the program has a [`crate::RotarySetup`].
-/// It may exceed 360 for multi-turn motion. A pose with no rotary angle is a 3-axis pose.
+/// It may exceed 360 for multi-turn motion. In a turning program it is the C angle in degrees:
+/// finite, and at most 99999 in absolute value. A pose with no rotary angle does not command
+/// that axis.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Pose {
@@ -98,12 +100,14 @@ impl Pose {
         self.axis
     }
 
-    /// Machine A/B angle in degrees, when this pose is indexed or continuously rotated.
+    /// Machine A/B angle in degrees, or the C angle in a turning program.
     pub fn rotary(self) -> Option<f64> {
         self.rotary
     }
 
-    /// Set the machine A/B angle in degrees. The value must be finite.
+    /// Set the machine A/B angle, or the C angle in a turning program, in degrees.
+    ///
+    /// The value must be finite. A turning program also requires `|c| <= 99999`.
     pub fn with_rotary(self, deg: f64) -> Result<Self> {
         let pose = Self { rotary: Some(deg), ..self };
         pose.check()?;

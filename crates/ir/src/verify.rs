@@ -346,7 +346,15 @@ fn verify_event(event: &Event, open: &mut Vec<ProcessKind>, out: &mut VerifyRepo
                 note_pose(*pose, out);
             }
         }
-        Event::ToolChange { .. } | Event::Coolant { .. } | Event::Comment { .. } | Event::Custom { .. } | Event::Sync { .. } => {}
+        Event::ToolChange { .. }
+        | Event::Coolant { .. }
+        | Event::Comment { .. }
+        | Event::Custom { .. }
+        | Event::Sync { .. }
+        | Event::CAxis { .. }
+        | Event::SpindleBrake { .. }
+        | Event::LiveToolOn { .. }
+        | Event::LiveToolOff => {}
     }
 }
 

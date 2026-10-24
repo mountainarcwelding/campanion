@@ -292,6 +292,16 @@ pub(crate) fn check_params(params: &BTreeMap<String, ParamValue>) -> Result<()> 
     Ok(())
 }
 
+/// Direction of a live (driven) tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveDirection {
+    /// Tool spins in the forward direction.
+    Forward,
+    /// Tool spins in the reverse direction.
+    Reverse,
+}
+
 /// Coolant, air or process assist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -311,6 +321,11 @@ pub enum CoolantMode {
 }
 
 /// One non-motion step.
+///
+/// In a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and
+/// [`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.
+/// `Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value
+/// at most 99999. A live-tool event does not require a turning setup.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
@@ -367,6 +382,29 @@ pub enum Event {
         /// Sync point id.
         id: u32,
     },
+    /// Use the named spindle as a positioning C axis (`engage: true`) or return it to turning (`false`).
+    CAxis {
+        /// Spindle name.
+        spindle: String,
+        /// `true` engages the C axis. `false` returns the spindle to turning.
+        engage: bool,
+    },
+    /// Clamp (`true`) or release (`false`) the named spindle's brake while the C axis holds position.
+    SpindleBrake {
+        /// Spindle name.
+        spindle: String,
+        /// `true` clamps the brake. `false` releases it.
+        clamp: bool,
+    },
+    /// Start the live (driven) tool. `rpm` > 0, finite, at most 100000.
+    LiveToolOn {
+        /// Revolutions per minute.
+        rpm: f64,
+        /// Forward or reverse.
+        direction: LiveDirection,
+    },
+    /// Stop the live tool.
+    LiveToolOff,
 }
 
 impl Event {
@@ -394,6 +432,16 @@ impl Event {
                 required_name(name, "custom event name")?;
                 check_params(params)?;
             }
+            Self::CAxis { spindle, .. } | Self::SpindleBrake { spindle, .. } => {
+                required_name(spindle, "spindle name")?;
+            }
+            Self::LiveToolOn { rpm, .. } => {
+                let rpm = positive(*rpm, "live tool rpm")?;
+                if rpm > 100_000.0 {
+                    return Err(check::invalid("live tool rpm is above 100000"));
+                }
+            }
+            Self::LiveToolOff => {}
         }
         Ok(())
     }

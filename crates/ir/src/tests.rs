@@ -349,7 +349,8 @@ fn old_ir_files_load_and_reserialize_byte_identically() {
 #[test]
 fn rotary_pose_without_setup_is_rejected() {
     let pose = Pose::new(Vec3::ZERO, Vec3::Z).expect("pose").with_rotary(0.0).expect("angle");
-    let err = Program::try_new(None, Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), None).expect_err("setup");
+    let program = Program::try_new(None, Vec::new(), None, vec![rapid_path(pose)], Vec::new(), Vec::new(), None).expect("intermediate");
+    let err = Document::new(program).expect_err("setup");
     assert!(err.to_string().contains("block 0"), "{err}");
     assert!(err.to_string().contains("rotary setup"), "{err}");
 }
