@@ -15,6 +15,7 @@ mod gouge;
 mod index;
 mod job;
 mod lathe;
+mod live_mill;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
 mod jobfile;

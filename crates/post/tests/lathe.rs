@@ -756,6 +756,8 @@ fn haas_axial_xy_arc_writes_g17_and_reads_back() {
             feed: 100.0,
             role: MoveRole::Cut,
         }),
+        // X changes after G17. Diameter mode still doubles it; face interpolation would not.
+        ClBlock::Motion(ClMotion::Linear { to: axial_pose(8.0, 10.0, -5.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
     ];
     let program = millturn_y_program(blocks);

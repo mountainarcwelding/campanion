@@ -16,7 +16,9 @@
 //! spindle. An indexed live drill or slot
 //! changes the tool the same way, engages C, starts the live tool, clamps the brake around each
 //! feed, then stops the live tool and disengages C. `live_flat` engages C, rapids to the flat,
-//! clamps, then starts the live tool, and mills in Y. That binding stores no spindle speed. The IR
+//! clamps, then starts the live tool, and mills in Y. `live_mill` engages C, rapids to clearance,
+//! starts the live tool, and cuts a drawing under face or cylinder interpolation (or in Y when
+//! the operation sets `y_axis`). That binding stores no spindle speed. The IR
 //! stores the main finished section on the turning setup, sampled from the main profile at the
 //! job chord tolerance.
 //!
@@ -52,6 +54,7 @@ use serde_json::{Map, Value};
 use crate::error::CliError;
 use crate::job::{as_bool, as_f64, as_str, as_u32, check_keys, object, optional, read_text, require, required_name};
 use crate::jobfile::DEFAULT_JOB_CHORD_MM;
+use crate::live_mill::{MillFrame, MillInterp, MillProgram, MillSpec, MillStrategy, build as build_mill, load_contours, profile_side};
 
 const FORMAT_TAG: &str = "campanion-lathe/1";
 const MAX_TOOLS: usize = 256;
@@ -312,6 +315,23 @@ enum Operation {
         step_down: Option<f64>,
         stepover: f64,
     },
+    LiveMill {
+        name: String,
+        spindle: WorkSpindle,
+        tool_id: u32,
+        rpm: f64,
+        feed: f64,
+        face: LiveFace,
+        drawing: String,
+        layer: Option<String>,
+        strategy: MillStrategy,
+        depth: f64,
+        step_down: f64,
+        z_start: f64,
+        diameter: f64,
+        y_axis: bool,
+        c_deg: f64,
+    },
 }
 
 impl Operation {
@@ -326,7 +346,8 @@ impl Operation {
             | Self::Drill { name, .. }
             | Self::LiveDrill { name, .. }
             | Self::LiveSlot { name, .. }
-            | Self::LiveFlat { name, .. } => name,
+            | Self::LiveFlat { name, .. }
+            | Self::LiveMill { name, .. } => name,
         }
     }
 
@@ -341,7 +362,8 @@ impl Operation {
             | Self::Drill { spindle, .. }
             | Self::LiveDrill { spindle, .. }
             | Self::LiveSlot { spindle, .. }
-            | Self::LiveFlat { spindle, .. } => *spindle,
+            | Self::LiveFlat { spindle, .. }
+            | Self::LiveMill { spindle, .. } => *spindle,
         }
     }
 
@@ -356,7 +378,8 @@ impl Operation {
             | Self::Drill { tool_id, .. }
             | Self::LiveDrill { tool_id, .. }
             | Self::LiveSlot { tool_id, .. }
-            | Self::LiveFlat { tool_id, .. } => *tool_id,
+            | Self::LiveFlat { tool_id, .. }
+            | Self::LiveMill { tool_id, .. } => *tool_id,
         }
     }
 
@@ -370,7 +393,8 @@ impl Operation {
             | Self::Drill { feed, .. }
             | Self::LiveDrill { feed, .. }
             | Self::LiveSlot { feed, .. }
-            | Self::LiveFlat { feed, .. } => *feed,
+            | Self::LiveFlat { feed, .. }
+            | Self::LiveMill { feed, .. } => *feed,
             Self::Thread { .. } => THREAD_RECORD_FEED,
         }
     }
@@ -385,7 +409,7 @@ impl Operation {
             | Self::Groove { speed, .. }
             | Self::Part { speed, .. }
             | Self::Drill { speed, .. } => Some(*speed),
-            Self::LiveDrill { .. } | Self::LiveSlot { .. } | Self::LiveFlat { .. } => None,
+            Self::LiveDrill { .. } | Self::LiveSlot { .. } | Self::LiveFlat { .. } | Self::LiveMill { .. } => None,
         }
     }
 
@@ -397,9 +421,13 @@ impl Operation {
         matches!(self, Self::LiveFlat { .. })
     }
 
+    fn is_mill(&self) -> bool {
+        matches!(self, Self::LiveMill { .. })
+    }
+
     fn live_rpm(&self) -> Option<f64> {
         match self {
-            Self::LiveDrill { rpm, .. } | Self::LiveSlot { rpm, .. } | Self::LiveFlat { rpm, .. } => Some(*rpm),
+            Self::LiveDrill { rpm, .. } | Self::LiveSlot { rpm, .. } | Self::LiveFlat { rpm, .. } | Self::LiveMill { rpm, .. } => Some(*rpm),
             _ => None,
         }
     }
@@ -409,6 +437,7 @@ impl Operation {
             Self::LiveDrill { params, .. } => Some(params.face),
             Self::LiveSlot { params, .. } => Some(params.face),
             Self::LiveFlat { .. } => Some(LiveFace::Od),
+            Self::LiveMill { face, .. } => Some(*face),
             _ => None,
         }
     }
@@ -546,6 +575,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         };
         check_tool_use(operation, tool, c_axis)?;
         check_flat(operation, tool, &head, clearance)?;
+        check_mill_head(operation, &head)?;
     }
     Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, sub, head, tools, operations, linear, chord, clearance })
 }
@@ -663,18 +693,31 @@ fn parse_axis(text: &str) -> Result<MeshAxis, CliError> {
 }
 
 fn source_path_text(value: &Value) -> Result<&str, CliError> {
+    relative_path_text(value, "source")
+}
+
+fn drawing_path_text(value: &Value) -> Result<&str, CliError> {
+    let text = relative_path_text(value, "drawing")?;
+    let ext = Path::new(text).extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    match ext.to_ascii_lowercase().as_str() {
+        "dxf" | "svg" => Ok(text),
+        _ => Err(CliError::invalid("drawing path must end in .dxf or .svg")),
+    }
+}
+
+fn relative_path_text<'a>(value: &'a Value, what: &str) -> Result<&'a str, CliError> {
     let Some(text) = value.as_str() else {
-        return Err(CliError::invalid("source path must be a string"));
+        return Err(CliError::invalid(format!("{what} path must be a string")));
     };
     if text.is_empty() || text.len() > MAX_SOURCE_PATH {
-        return Err(CliError::invalid(format!("source path must be 1 to {MAX_SOURCE_PATH} bytes")));
+        return Err(CliError::invalid(format!("{what} path must be 1 to {MAX_SOURCE_PATH} bytes")));
     }
     if text.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
-        return Err(CliError::invalid("source path has a control character"));
+        return Err(CliError::invalid(format!("{what} path has a control character")));
     }
     let path = Path::new(text);
     if path.is_absolute() {
-        return Err(CliError::invalid("source path must be relative to the job file"));
+        return Err(CliError::invalid(format!("{what} path must be relative to the job file")));
     }
     let mut named = false;
     for component in path.components() {
@@ -682,12 +725,12 @@ fn source_path_text(value: &Value) -> Result<&str, CliError> {
             Component::Normal(_) => named = true,
             Component::CurDir | Component::ParentDir => {}
             Component::RootDir | Component::Prefix(_) => {
-                return Err(CliError::invalid("source path must be relative to the job file"));
+                return Err(CliError::invalid(format!("{what} path must be relative to the job file")));
             }
         }
     }
     if !named {
-        return Err(CliError::invalid("source path must name a file"));
+        return Err(CliError::invalid(format!("{what} path must name a file")));
     }
     Ok(text)
 }
@@ -913,19 +956,14 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
     let map = object(value, "operation")?;
     let op_type = as_str(require(map, "type")?, "operation type")?;
     let has_sub = sub_rpm.is_some();
-    if op_type == "live_mill" {
-        let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
-        if !names.insert(name.clone()) {
-            return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
-        }
-        parse_work_spindle(map, &name, has_sub, true)?;
-        return Err(CliError::invalid(format!("unknown operation type `{op_type}`")));
-    }
     if op_type == "live_drill" || op_type == "live_slot" {
         return parse_live_operation(map, op_type, clearance, names, has_sub);
     }
     if op_type == "live_flat" {
         return parse_live_flat(map, names, has_sub);
+    }
+    if op_type == "live_mill" {
+        return parse_live_mill(map, names, has_sub);
     }
     let allowed: &[&str] = match op_type {
         "face" => &["name", "type", "tool_id", "spindle", "step_z", "feed", "speed"],
@@ -1263,6 +1301,100 @@ fn parse_live_flat(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_s
     })
 }
 
+fn parse_live_mill(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_sub: bool) -> Result<Operation, CliError> {
+    if map.contains_key("spindle") {
+        let early = map.get("name").and_then(Value::as_str).unwrap_or("live_mill");
+        parse_work_spindle(map, early, has_sub, true)?;
+    }
+    let face = parse_live_face(as_str(require(map, "face")?, "face")?)?;
+    let strategy_text = as_str(require(map, "strategy")?, "strategy")?;
+    if strategy_text != "profile" && strategy_text != "pocket" {
+        return Err(CliError::invalid(format!("unknown strategy `{strategy_text}`")));
+    }
+    let y_axis = if face == LiveFace::Front {
+        match optional(map, "y_axis") {
+            Some(value) => as_bool(value, "y_axis")?,
+            None => false,
+        }
+    } else {
+        false
+    };
+    if face == LiveFace::Front && !y_axis && map.contains_key("c") {
+        return Err(CliError::invalid("c is only valid when y_axis is true"));
+    }
+    let mut allowed = vec!["name", "type", "tool_id", "spindle", "face", "drawing", "layer", "strategy", "depth", "step_down", "rpm", "feed"];
+    match face {
+        LiveFace::Front => {
+            allowed.push("z_start");
+            allowed.push("y_axis");
+            if y_axis {
+                allowed.push("c");
+            }
+        }
+        LiveFace::Od => allowed.push("diameter"),
+    }
+    if strategy_text == "profile" {
+        allowed.push("side");
+    } else {
+        allowed.push("stepover");
+    }
+    check_keys(map, &allowed, "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    let spindle = parse_work_spindle(map, &name, has_sub, true)?;
+    let depth = positive(require(map, "depth")?, "depth")?;
+    let step_down = match optional(map, "step_down") {
+        Some(value) => positive(value, "step_down")?,
+        None => depth,
+    };
+    let (z_start, diameter) = match face {
+        LiveFace::Front => (as_f64(require(map, "z_start")?, "z_start")?, 0.0),
+        LiveFace::Od => (0.0, positive(require(map, "diameter")?, "diameter")?),
+    };
+    let c_deg = if y_axis {
+        match optional(map, "c") {
+            Some(value) => as_f64(value, "c")?,
+            None => 0.0,
+        }
+    } else {
+        0.0
+    };
+    if y_axis && c_deg.abs() > 99_999.0 {
+        return Err(CliError::invalid(format!("operation {name}: c is outside -99999..=99999")));
+    }
+    let strategy = if strategy_text == "profile" {
+        MillStrategy::Profile { side: profile_side(as_str(require(map, "side")?, "side")?)? }
+    } else {
+        let stepover = match optional(map, "stepover") {
+            Some(value) => as_f64(value, "stepover")?,
+            None => 0.4,
+        };
+        if !(stepover > 0.0 && stepover <= 1.0) {
+            return Err(CliError::invalid("stepover fraction must be in (0, 1]"));
+        }
+        MillStrategy::Pocket { stepover }
+    };
+    Ok(Operation::LiveMill {
+        name,
+        spindle,
+        tool_id: as_u32(require(map, "tool_id")?, "tool_id")?,
+        rpm: parse_live_rpm(require(map, "rpm")?)?,
+        feed: positive(require(map, "feed")?, "feed")?,
+        face,
+        drawing: drawing_path_text(require(map, "drawing")?)?.to_string(),
+        layer: optional_layer(map)?,
+        strategy,
+        depth,
+        step_down,
+        z_start,
+        diameter,
+        y_axis,
+        c_deg,
+    })
+}
+
 fn parse_live_face(text: &str) -> Result<LiveFace, CliError> {
     match text {
         "front" => Ok(LiveFace::Front),
@@ -1352,6 +1484,17 @@ fn check_flat(operation: &Operation, tool: &LatheTool, head: &LatheHead, clearan
         if y < y_min - 1e-9 || y > y_max + 1e-9 {
             return Err(CliError::invalid(format!("operation {name}: Y {} outside head travel", format_travel(y))));
         }
+    }
+    Ok(())
+}
+
+/// `y_axis` on a front mill needs a head that lists Y. Travel is checked after the drawing is cut.
+fn check_mill_head(operation: &Operation, head: &LatheHead) -> Result<(), CliError> {
+    let Operation::LiveMill { name, y_axis, .. } = operation else {
+        return Ok(());
+    };
+    if *y_axis && !head.y_axis {
+        return Err(CliError::invalid(format!("operation {name}: y_axis needs head.y_axis")));
     }
     Ok(())
 }
@@ -1500,6 +1643,8 @@ fn build_document(
         };
         let toolpath = if operation.is_flat() {
             flat_toolpath(job, operation, &mut previous)?
+        } else if operation.is_mill() {
+            mill_toolpath(job_path, job, operation, &mut previous)?
         } else if operation.is_live() {
             let motion = live_motion(operation)?;
             let rpm = operation.live_rpm().ok_or_else(|| CliError::run(format!("internal: operation {} has no live rpm", operation.name())))?;
@@ -1546,7 +1691,8 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
         | Operation::Drill { .. }
         | Operation::LiveDrill { .. }
         | Operation::LiveSlot { .. }
-        | Operation::LiveFlat { .. } => None,
+        | Operation::LiveFlat { .. }
+        | Operation::LiveMill { .. } => None,
     }
 }
 
@@ -1641,7 +1787,7 @@ fn front_allowance(job: &LatheJob, spindle: WorkSpindle) -> Result<f64, CliError
 }
 
 fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) -> Result<TurnPath, CliError> {
-    if operation.is_live() {
+    if operation.is_live() || operation.is_mill() {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
     }
     let (insert, tip, nose_radius, _) = require_insert(job, operation)?;
@@ -1765,7 +1911,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
             };
             centre_drill(&params).map_err(|err| op_fail(name, err))
         }
-        Operation::LiveDrill { .. } | Operation::LiveSlot { .. } | Operation::LiveFlat { .. } => {
+        Operation::LiveDrill { .. } | Operation::LiveSlot { .. } | Operation::LiveFlat { .. } | Operation::LiveMill { .. } => {
             Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())))
         }
     }
@@ -1879,6 +2025,73 @@ fn flat_blocks(name: &str, tool_id: u32, feed: f64, rpm: f64, path: &FlatPath, p
     blocks.push(ClBlock::Event(Event::CAxis { spindle: SPINDLE.to_string(), engage: false }));
     let feeds = Feeds::try_new(feed, None, None, None, None)?;
     Ok(ClPath::try_new(Some(name.to_string()), Some(tool_id), CompensationMode::Computed, feeds, None, Vec::new(), blocks)?)
+}
+
+fn mill_toolpath(job_path: &Path, job: &LatheJob, operation: &Operation, previous: &mut Option<u32>) -> Result<ClPath, CliError> {
+    let Operation::LiveMill { name, tool_id, rpm, feed, face, drawing, layer, strategy, depth, step_down, z_start, diameter, y_axis, c_deg, .. } =
+        operation
+    else {
+        return Err(CliError::run(format!("internal: operation {} is not a live mill", operation.name())));
+    };
+    let tool = job.tools.iter().find(|tool| tool.id == *tool_id).ok_or_else(|| CliError::run(format!("operation {name}: missing tool {tool_id}")))?;
+    let ToolBody::Live { diameter: tool_diameter, .. } = &tool.body else {
+        return Err(CliError::run(format!("operation {name}: tool {tool_id} is not a live tool")));
+    };
+    let contours = load_contours(name, job_path, drawing, layer.as_deref(), job.linear)?;
+    let frame = match (*face, *y_axis) {
+        (LiveFace::Od, _) => MillFrame::Od { diameter: *diameter },
+        (LiveFace::Front, true) => MillFrame::FrontY { z_start: *z_start, c_deg: *c_deg },
+        (LiveFace::Front, false) => MillFrame::Front { z_start: *z_start },
+    };
+    let y_limits = if *y_axis { job.head.y_min.zip(job.head.y_max) } else { None };
+    let spec = MillSpec {
+        name: name.clone(),
+        tool_diameter: *tool_diameter,
+        feed: *feed,
+        depth: *depth,
+        step_down: *step_down,
+        clearance: job.clearance,
+        tolerance: job.linear,
+        strategy: *strategy,
+        frame,
+        contours,
+        y_limits,
+    };
+    let program = build_mill(&spec)?;
+    mill_blocks(name, *tool_id, *feed, *rpm, &program, previous)
+}
+
+/// Tool change, C engage, the clearance rapid, live tool on, interpolation, the cut, interpolation
+/// off, live tool off, C disengage. The brake stays released: interpolation rejects a clamp.
+fn mill_blocks(name: &str, tool_id: u32, feed: f64, rpm: f64, program: &MillProgram, previous: &mut Option<u32>) -> Result<ClPath, CliError> {
+    let mut blocks = Vec::with_capacity(program.approach.len().saturating_add(program.motions.len()).saturating_add(6));
+    if *previous != Some(tool_id) {
+        blocks.push(ClBlock::Event(Event::ToolChange { tool_id }));
+        *previous = Some(tool_id);
+    }
+    blocks.push(ClBlock::Event(Event::CAxis { spindle: SPINDLE.to_string(), engage: true }));
+    for motion in &program.approach {
+        blocks.push(ClBlock::Motion(motion.clone()));
+    }
+    blocks.push(ClBlock::Event(Event::LiveToolOn { rpm, direction: LiveDirection::Forward }));
+    match program.interpolation {
+        Some(MillInterp::Face) => blocks.push(ClBlock::Event(Event::FaceInterpolation { on: true })),
+        Some(MillInterp::Cylinder { radius }) => blocks.push(ClBlock::Event(Event::CylinderInterpolation { radius: Some(radius) })),
+        None => {}
+    }
+    for motion in &program.motions {
+        blocks.push(ClBlock::Motion(motion.clone()));
+    }
+    match program.interpolation {
+        Some(MillInterp::Face) => blocks.push(ClBlock::Event(Event::FaceInterpolation { on: false })),
+        Some(MillInterp::Cylinder { .. }) => blocks.push(ClBlock::Event(Event::CylinderInterpolation { radius: None })),
+        None => {}
+    }
+    blocks.push(ClBlock::Event(Event::LiveToolOff));
+    blocks.push(ClBlock::Event(Event::CAxis { spindle: SPINDLE.to_string(), engage: false }));
+    let feeds = Feeds::try_new(feed, None, None, None, None).map_err(|err| geometry_err(name, err))?;
+    ClPath::try_new(Some(name.to_string()), Some(tool_id), CompensationMode::Computed, feeds, None, Vec::new(), blocks)
+        .map_err(|err| geometry_err(name, err))
 }
 
 fn flat_block(step: &FlatStep, feed: f64) -> Result<ClBlock, CliError> {
