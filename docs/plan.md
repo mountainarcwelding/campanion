@@ -171,7 +171,7 @@ Done when: property tests show indexing round-trips and unwrapping a wrap gives 
 path, rotary finishing passes the gouge check, and every 4-axis post has golden files.
 Releases: v0.5.0, including continuous rotary finishing and the viewer.
 
-### M10: Turning (in progress)
+### M10: Turning (done except item 2's STEP section, carried into v0.7.0)
 Lathe work on the main spindle with one turret, X and Z only. The setup model is built so live
 tooling, Y, B and a sub-spindle (M11) slot in without a rewrite.
 - **Machine model:** a lathe machine has named spindles (`main`, later `sub`), each with its own
@@ -195,12 +195,63 @@ tooling, Y, B and a sub-spindle (M11) slot in without a rewrite.
    with golden files and read-back.
 7. **Viewer:** an XZ half-section showing stock, the part and the removed region.
 Releases: v0.6.0 after 1, 2, 3 and 6; v0.6.1 after 4, 5 and 7.
+Status: done in v0.6.1 except the revolved section from STEP in item 2 (DXF, SVG and STL
+profiles are in). That item moves to M11 Part A, first in v0.7.0.
 
-### M11: 5-axis and advanced turning
+### M11: 5-axis and advanced turning (in progress)
 Aimed at mill-turn machines in the class of the Haas ST and DS lines: live tooling with C and
 Y, sub-spindle work and part transfer, synchronised channels, and B-axis heads. Simultaneous
 5-axis milling (indexed 3+2 first, then continuous with tool-axis control and collision checks)
-belongs here too. The detailed breakdown is proposed when M10 is done.
+belongs here too.
+
+Post order: **Haas first, then LinuxCNC.** Each part lands with a Haas mill-turn post (ST/DS
+class: M154/M155 C-axis, M133/M134/M135 live tool, G112, G107, Y axis, sub-spindle sync), with
+every code checked against Haas's public operator's manual and G/M-code reference pages and cited
+in the post data or docs. The LinuxCNC equivalent follows in the same release where it fits, or
+in the next.
+
+Part A: live tooling on the main spindle (the IR already has C per spindle and optional Y per head)
+0. **STEP section for turning (from M10.2):** `campanion lathe` reads a revolved half-profile
+   from a STEP part through `solidcraft-cli`, reusing the STEP path and `--up-axis` of
+   `campanion run`.
+1. **Spindle modes in the IR and posts:** spindle-as-C (C-axis mode on/off, Haas M154/M155;
+   LinuxCNC as a rotary axis), live-tool spindle speed and direction (Haas M133/M134/M135) as
+   post data, C clamp/unclamp.
+2. **Face and OD milling/drilling at indexed C:** face drill patterns, cross holes, flats and hex
+   at a fixed C, polar coordinates. Reuses the 2.5D ops; the post maps the part frame to X
+   (diameter), C and Z.
+3. **Polar and cylindrical interpolation:** G112 (XC) and G107 (ZC) as post options, each with
+   an explicit XC or ZC fallback through the M9 wrap path.
+4. **Y-axis milling on the turret (ST-Y and DS class):** off-centre pockets and flats with real Y;
+   head reach and travel limits come from the machine model.
+
+Part B: sub-spindle and channels
+5. **Sub-spindle setups:** a second work zero, the Z direction flipped, the sub's C axis;
+   operations bound to `sub`.
+6. **Part transfer as an operation:** spindle sync (M-code data), sub approach and clamp,
+   part-off with the sub holding, pull and eject. Simulated as a two-spindle timeline in the
+   viewer.
+7. **Two-channel programs (upper/lower turret):** channel assignment per operation, sync points
+   (wait codes as post data), and a balance/timing report. Single-channel posts reject
+   multichannel programs.
+
+Part C: B-axis heads and 5-axis milling
+8. **Kinematics as data:** a B head on a mill-turn and table-table/head-table 5-axis mills:
+   pivot lengths, axis limits, solution choice. Forward/inverse kinematics with property tests.
+9. **Indexed 3+2:** tilted work planes (G68.2 or the LinuxCNC equivalent, or explicit rotated
+   coordinates), any 2.5D/3-axis op on a tilted plane, with a reachability and limit check.
+10. **Angled turning and boring with a B head** (insert orientation follows B).
+11. **Continuous 5-axis:** tool-axis control (lead/tilt, toward point/curve, swarf on ruled
+    surfaces), axis smoothing and singularity handling near B=0.
+12. **TCP and non-TCP posts:** G43.4/TCPC and LinuxCNC TCP kinematics, or the post doing the
+    inverse kinematics; inverse-time feed where the control needs it.
+13. **Collision checks** for holder/head against stock, fixture and part for 5-axis and
+    mill-turn, plus a viewer machine simulation (kinematic model, not a full machine CAD).
+
+Also open from M10: canned `G76` threading as a post option.
+
+Releases: v0.7.0 after 0–4 (Haas post; LinuxCNC as soon as it is ready), v0.7.1 after 5–7,
+v0.8.0 after 8–10, v0.8.1 after 11–13.
 
 ### M12: Additive and non-planar slicing
 See the additive entry under Later; it becomes M12 after M11.
@@ -257,3 +308,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   viewer are in. `examples/rotary.job.json` is the rotary finish. Order from here: M10 turning,
   then M11 5-axis and advanced turning (mill-turn, live tooling, sub-spindle, B-axis), then M12
   additive and non-planar slicing.
+- 2026-10-23: M10 done (v0.6.1) except the STEP section, which moves to M11 v0.7.0. M11 broken
+  down into Parts A–C. Mill-turn posts: Haas first, then LinuxCNC. 5-axis milling stays in M11.
