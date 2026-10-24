@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Posting `examples/dome_rough.job.json` (and other programs with very short fitted arcs) no longer fails read-back with "point is off the arc". The read-back comparator ignored the travel of arcs shorter than the tolerance and used angle limits tighter than endpoint rounding.
+- A post no longer writes an arc whose end rounds onto its start (a controller cuts that as a full circle). A short one is written as a feed line within the arc tolerance when an axis still moves, and omitted when the rounded end is already the current position. Otherwise posting fails with "arc end rounds onto its start". The read-back comparator now rejects an arc block with equal endpoints unless the program arc is a full circle.
+- A split arc no longer emits a feed that repeats the current position, and read-back finishes the arc only after its last block. A short final piece is not left over as the next move.
+
 ## 0.8.1 — 2026-10-24
 
 Safety patch. Do not run mill drill output from v0.1.0–v0.8.0, or surface output from v0.3.0–v0.8.0 whose job clearance is below the top of the STL model; regenerate it with 0.8.1.

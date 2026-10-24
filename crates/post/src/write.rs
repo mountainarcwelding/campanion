@@ -877,6 +877,7 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    /// A controller reads equal endpoints as a full circle.
     fn one_arc(
         &mut self,
         sense: campanion_ir::ArcSense,
@@ -888,6 +889,56 @@ impl<'a> Writer<'a> {
         feed: f64,
         angle: Option<f64>,
     ) -> Result<()> {
+        let rounded = self.round_xyz(end)?;
+        if geom::in_plane_len(plane, start, rounded) <= 1e-12 && sweep < std::f64::consts::TAU - 1e-9 {
+            let radius = geom::in_plane_len(plane, start, center);
+            let sagitta = radius * (1.0 - (sweep * 0.5).cos());
+            if angle.is_none()
+                && !self.frame_active
+                && self.turning.is_none()
+                && sweep <= std::f64::consts::PI
+                && sagitta <= self.options.arc_tolerance
+            {
+                // Repeating every rounded axis is not a move. A feed here is taken as the next
+                // program block. A helix that still changes an axis stays a feed line.
+                if geom::dist3(start, rounded) <= 1e-12 {
+                    self.exact = Some(end);
+                    return Ok(());
+                }
+                return self.linear_move("G1", plain(end), Some(feed));
+            }
+            return Err(invalid("arc end rounds onto its start"));
+        }
+        // Rounded `R` can bow a minor arc past the program sweep. A chord within two quanta of
+        // the diameter is read back as exactly 180°. Write that piece as lines instead.
+        if self.post.arc_mode() == ArcMode::R && angle.is_none() && sweep <= std::f64::consts::PI {
+            let curve_start = self.exact.unwrap_or(start);
+            let ir_radius = geom::in_plane_len(plane, curve_start, center);
+            let posted_radius = geom::in_plane_len(plane, start, center);
+            let chord = geom::in_plane_len(plane, start, rounded);
+            if chord > 1e-9 && ir_radius > 1e-12 {
+                let magnitude = posted_radius.max(chord * 0.5);
+                let quantum = 10_f64.powi(-i32::from(self.post.decimals.linear));
+                let r_text = self.format_axis(magnitude, self.post.decimals.linear)?;
+                let r_written = r_text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+                let written = self.written_sense(sense, plane);
+                let over = match geom::center_from_radius(start, rounded, r_written, written, plane, quantum) {
+                    Ok(read_center) => {
+                        let controller = geom::forward_delta(
+                            geom::angle_of(plane, start, read_center),
+                            geom::angle_of(plane, rounded, read_center),
+                            matches!(written, campanion_ir::ArcSense::Ccw),
+                        );
+                        let allowance = 4.0 * quantum / ir_radius + 1e-3;
+                        controller > sweep + allowance
+                    }
+                    Err(_) => true,
+                };
+                if over {
+                    return self.linearise_curve(sense, plane, curve_start, end, center, sweep, feed);
+                }
+            }
+        }
         let mut words = Vec::new();
         if self.post.planes && self.plane != Some(plane) {
             words.push(plane_word(plane).to_string());

@@ -34,14 +34,7 @@ fn is_rapid_safety(stderr: &str) -> bool {
 
 fn is_post_skip(stderr: &str) -> bool {
     // A post that has no axis, or that rejects rotary or tilted output, is not a safety failure.
-    // Roughing arcs in the unchanged plunge path also fail post read-back with "point is off
-    // the arc" (`does not match the program`). That is the post, not a rapid below the plane.
-    stderr.contains("has no")
-        || stderr.contains("does not support")
-        || stderr.contains("not supported")
-        || stderr.contains("rejects")
-        || stderr.contains("does not match the program")
-        || stderr.contains("point is off the arc")
+    stderr.contains("has no") || stderr.contains("does not support") || stderr.contains("not supported") || stderr.contains("rejects")
 }
 
 fn mill_post_ids() -> Result<Vec<String>, String> {
