@@ -230,10 +230,17 @@ impl Kinematics {
         for angles in wrapped {
             let at_origin = Joints { xyz: Vec3::ZERO, angles };
             let pose0 = self.forward(&at_origin, tool_length)?;
+            // Drop a branch that does not put the spindle on the target axis.
+            if norm(sub(pose0.axis, target)) > 1e-9 {
+                continue;
+            }
             let table = self.chain(&at_origin, Carrier::Table)?;
             let xyz = map_direction(&table, sub(pose.tip, pose0.tip));
             xyz.check("joint position")?;
             solutions.push(Joints { xyz, angles });
+        }
+        if solutions.is_empty() {
+            return Err(tool_axis_error(target, "not reachable"));
         }
         solutions.sort_by(|left, right| {
             left.angles[0]
@@ -552,31 +559,55 @@ fn sp1(w: Vec3, u: Vec3, v: Vec3) -> Option<SolvedAngle> {
 }
 
 /// Solutions `(x, y)` of `R(wa, x) R(wb, y) p = q`. `wa` and `wb` are unit and not parallel.
+///
+/// `c = R(wb, y) p` shares its `wa` component with `q`. The old residual
+/// `sqrt(|p|^2 - |c_plane|^2)` underflows once the perpendicular part is below about `1e-8`:
+/// the squared length rounds it away and the tilt comes back as 0, so the axis misses by more
+/// than `1e-9`. Build `c` from the perpendicular part of `q` instead, which keeps a small tilt.
 fn sp2(wa: Vec3, wb: Vec3, p: Vec3, q: Vec3) -> Vec<(SolvedAngle, SolvedAngle)> {
     let d = dot(wa, wb);
-    let den = d * d - 1.0;
-    let alpha = (d * dot(wb, p) - dot(wa, q)) / den;
-    let beta = (d * dot(wa, q) - dot(wb, p)) / den;
-    let n = cross(wa, wb);
-    let n2 = dot(n, n);
-    let g2 = (dot(p, p) - alpha * alpha - beta * beta - 2.0 * alpha * beta * d) / n2;
-    if g2 < -EPS {
+    let qa = dot(wa, q);
+    let pb = dot(wb, p);
+    let q_perp = sub(q, scale(wa, qa));
+    let rho = norm(q_perp);
+    let wb_perp = sub(wb, scale(wa, d));
+    let wb_len = norm(wb_perp);
+    if wb_len <= EPS {
         return Vec::new();
     }
-    let g = g2.max(0.0).sqrt();
-    let signs: &[f64] = if g < EPS { &[1.0] } else { &[1.0, -1.0] };
+    if rho == 0.0 {
+        // `q` is parallel to `wa`, so `c` is too. The angle about `wa` is free.
+        return solved_pair(wa, wb, p, q, scale(wa, qa)).into_iter().collect();
+    }
+    let cos_phi = (pb - d * qa) / (rho * wb_len);
+    if cos_phi.abs() > 1.0 + SP1_TOL {
+        return Vec::new();
+    }
+    let cos_phi = cos_phi.clamp(-1.0, 1.0);
+    let sin_abs = ((1.0 - cos_phi) * (1.0 + cos_phi)).max(0.0).sqrt();
+    let e1 = scale(wb_perp, 1.0 / wb_len);
+    let e2 = cross(wa, e1);
+    let e2_len = norm(e2);
+    if e2_len <= EPS {
+        return Vec::new();
+    }
+    let e2 = scale(e2, 1.0 / e2_len);
+    let signs: &[f64] = if sin_abs <= EPS { &[1.0] } else { &[1.0, -1.0] };
     let mut out = Vec::new();
-    for s in signs {
-        let c = add(add(scale(wa, alpha), scale(wb, beta)), scale(n, s * g));
-        let Some(y) = sp1(wb, p, c) else {
-            continue;
-        };
-        let Some(x) = sp1(wa, c, q) else {
-            continue;
-        };
-        out.push((x, y));
+    for sign in signs {
+        let dir = add(scale(e1, cos_phi), scale(e2, sign * sin_abs));
+        let c = add(scale(wa, qa), scale(dir, rho));
+        if let Some(pair) = solved_pair(wa, wb, p, q, c) {
+            out.push(pair);
+        }
     }
     out
+}
+
+fn solved_pair(wa: Vec3, wb: Vec3, p: Vec3, q: Vec3, c: Vec3) -> Option<(SolvedAngle, SolvedAngle)> {
+    let y = sp1(wb, p, c)?;
+    let x = sp1(wa, c, q)?;
+    Some((x, y))
 }
 
 fn apply_angle(solved: SolvedAngle, sign: f64, hint: f64) -> f64 {

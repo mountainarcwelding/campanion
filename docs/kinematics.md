@@ -17,6 +17,34 @@ The files in `crates/ir/kinematics/` are illustrative examples. They are not a d
 
 `angles[i]` on a joint position belongs to `rotaries[i]`. With one rotary the other angle is 0.
 
+## Inverse solutions
+
+`Kinematics::inverse` returns every joint solution for a tool pose in the part frame. It solves the rotary angles that carry `spindle_axis` onto the requested tool axis, then the gauge position that puts the tip on the requested point. `tool_length` is the length `forward` uses, in millimetres, finite and non-negative.
+
+`hint` is a pair of angles in `rotaries` order. A joint the tool axis does not determine takes its angle from `hint`. Each returned solution lies inside the joint travel limits. An unlimited joint is reported in `(-180, 180]`. Solutions are sorted by `(|angles[0]|, angles[0], angles[1])`.
+
+A zero tool axis is rejected with `tool axis is zero`. No orientation solution is `tool axis (I, J, K) is not reachable`. An orientation that misses every travel limit is `tool axis (I, J, K) is outside the rotary limits`. `I`, `J` and `K` are the normalised target axis, six digits past the decimal.
+
+## Solution choice
+
+`Kinematics::choose` returns one solution from `inverse`.
+
+| Choice | Hint | Selection |
+| --- | --- | --- |
+| `Nearest(prev)` | `prev` | Minimises the larger of the two absolute angle differences from `prev`. Equal distances keep inverse order. |
+| `FirstPositive` | `[0, 0]` | First solution whose first angle is at least `-1e-9` degrees. Otherwise the first solution. |
+| `FirstNegative` | `[0, 0]` | First solution whose first angle is at most `1e-9` degrees. Otherwise the first solution. |
+
+The result is inside the joint travel limits, because `inverse` only returns solutions that are.
+
+## Singularities
+
+Some poses leave an angle free: every value of that joint produces the same tool axis. Inverse copies each free angle from `hint`.
+
+That happens when the tilt is 0° or 180°. The spindle stays on a rotary axis, so the joint about that direction does not move the tool axis. On the examples the singular tilt is `A` for `table_table_ac`, `B` for `table_table_bc`, `A` for `head_head_ac`, and `B` for `head_table_bc` (table `C` is the free joint). It also happens when the two rotary axes are parallel: only the combined angle is fixed, and the inner joint keeps the hint. If the spindle is parallel to those axes as well, both angles keep the hint.
+
+`Nearest(prev)` passes `prev` as the hint, so a free joint keeps its angle from `prev`. `FirstPositive` and `FirstNegative` hint `[0, 0]`, so a free joint is 0 unless selection picks another returned solution.
+
 ## JSON
 
 Unknown fields are rejected. `spindle_axis` is optional and defaults to +Z `(0, 0, 1)`. Each axis is normalised on load. A zero axis is rejected.

@@ -492,6 +492,79 @@ fn parallel_axes_keep_the_hint_split() {
     assert_inverse_contains(&free, pt(7.0, 1.0, -2.0), [12.0, -40.0], 22.0);
 }
 
+fn assert_forward_inverse_roundtrip(
+    kin: &Kinematics,
+    xyz: Vec3,
+    angles: [f64; 2],
+    tool_length: f64,
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    proptest::prop_assert!(kin.within_limits(angles), "{} {angles:?}", kin.name);
+    let pose = match kin.forward(&joints(xyz, angles), tool_length) {
+        Ok(pose) => pose,
+        Err(err) => return Err(proptest::test_runner::TestCaseError::fail(format!("{} forward {err}", kin.name))),
+    };
+    let sols = match kin.inverse(&pose, tool_length, angles) {
+        Ok(sols) => sols,
+        Err(err) => {
+            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                "{} inverse {err}; angles {angles:?} tip {:?} axis {:?}",
+                kin.name, pose.tip, pose.axis
+            )));
+        }
+    };
+    proptest::prop_assert!(!sols.is_empty(), "{} produced no solution", kin.name);
+    for sol in &sols {
+        let back = match kin.forward(sol, tool_length) {
+            Ok(back) => back,
+            Err(err) => return Err(proptest::test_runner::TestCaseError::fail(format!("{} forward of {:?} {err}", kin.name, sol.angles))),
+        };
+        let tip_gap = gap(back.tip, pose.tip);
+        let axis_gap = gap(back.axis, pose.axis);
+        proptest::prop_assert!(
+            tip_gap <= 1e-6 && axis_gap <= 1e-9,
+            "{} tip gap {tip_gap} axis gap {axis_gap}; angles {angles:?} solution {:?} tip {:?} axis {:?}",
+            kin.name,
+            sol.angles,
+            back.tip,
+            back.axis
+        );
+    }
+    let chosen = match kin.choose(&pose, tool_length, Choice::Nearest(angles)) {
+        Ok(chosen) => chosen,
+        Err(err) => return Err(proptest::test_runner::TestCaseError::fail(format!("{} choose {err}", kin.name))),
+    };
+    proptest::prop_assert!(kin.within_limits(chosen.angles), "{} nearest {:?} -> {:?}", kin.name, angles, chosen.angles);
+    Ok(())
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn example_inverse_roundtrip_and_nearest_stays_inside_limits(
+        x in -500.0f64..500.0,
+        y in -500.0f64..500.0,
+        z in -500.0f64..500.0,
+        free in -179.0f64..=179.0,
+        free_b in -179.0f64..=179.0,
+        b_table in -35.0f64..=120.0,
+        b_head in -110.0f64..=110.0,
+        tool_length in 0.0f64..200.0,
+    ) {
+        let xyz = pt(x, y, z);
+        let samples = [
+            (TABLE_TABLE_AC, [free, free_b]),
+            (TABLE_TABLE_BC, [b_table, free]),
+            (HEAD_TABLE_BC, [free, b_head]),
+            (HEAD_HEAD_AC, [free, free_b]),
+        ];
+        for (text, angles) in samples {
+            let kin = load(text);
+            assert_forward_inverse_roundtrip(&kin, xyz, angles, tool_length)?;
+        }
+    }
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(80))]
 
