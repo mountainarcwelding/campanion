@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::check::{self, optional_name};
 use crate::geom::{Pose, Vec3};
+use crate::kinematics::FiveAxisSetup;
 use crate::machine::{Channel, Machine};
 use crate::motion::{AxisBlock, ChannelProgram, ClBlock, ClMotion, ClPath};
 use crate::process::{Event, Tool};
@@ -77,6 +78,9 @@ pub struct Program {
     rotary: Option<RotarySetup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     turning: Option<TurningSetup>,
+    /// Five-axis kinematics. Absent on a 3-axis or rotary-table program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    five_axis: Option<FiveAxisSetup>,
 }
 
 impl Program {
@@ -89,7 +93,7 @@ impl Program {
         syncs: Vec<SyncPoint>,
         rotary: Option<RotarySetup>,
     ) -> Result<Self> {
-        let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary, turning: None };
+        let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary, turning: None, five_axis: None };
         // A thread move, and a pose angle that a later [`Self::with_turning`] reads as C, are legal
         // on this intermediate. [`Self::with_turning`] and [`Document::new`] reject a thread, or an
         // angle, when the finished program still has neither a turning setup nor a rotary setup.
@@ -133,6 +137,20 @@ impl Program {
         Ok(program)
     }
 
+    /// Five-axis kinematics, when this program names a machine model.
+    pub fn five_axis(&self) -> Option<&FiveAxisSetup> {
+        self.five_axis.as_ref()
+    }
+
+    /// Store five-axis kinematics and re-validate.
+    ///
+    /// A program that already has a rotary setup is rejected: the two setups name different machines.
+    pub fn with_five_axis(self, setup: FiveAxisSetup) -> Result<Self> {
+        let program = Self { five_axis: Some(setup), ..self };
+        program.check()?;
+        Ok(program)
+    }
+
     /// Lathe setup, when this program is a turning program.
     pub fn turning(&self) -> Option<&TurningSetup> {
         self.turning.as_ref()
@@ -161,8 +179,14 @@ impl Program {
         if self.rotary.is_some() && self.turning.is_some() {
             return Err(check::invalid("rotary and turning setups cannot be combined yet"));
         }
+        if self.rotary.is_some() && self.five_axis.is_some() {
+            return Err(check::invalid("a program cannot have both a rotary setup and five-axis kinematics"));
+        }
         if let Some(setup) = self.rotary {
             setup.check()?;
+        }
+        if let Some(setup) = &self.five_axis {
+            setup.kinematics.check()?;
         }
         check_rotary_poses(self.rotary.as_ref(), self.turning.is_some(), &self.toolpaths)?;
         if let Some(turning) = &self.turning {

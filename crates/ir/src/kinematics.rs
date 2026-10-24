@@ -110,6 +110,43 @@ pub enum Choice {
     FirstNegative,
 }
 
+/// Which inverse solution a five-axis program keeps.
+///
+/// [`Self::choice`] turns the policy into the [`Choice`] [`Kinematics::choose`] takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SolutionPolicy {
+    /// [`Choice::Nearest`] using the previous joint angles.
+    Nearest,
+    /// [`Choice::FirstPositive`].
+    FirstPositive,
+    /// [`Choice::FirstNegative`].
+    FirstNegative,
+}
+
+impl SolutionPolicy {
+    /// [`Choice`] for this policy. `previous` is the hint for [`Self::Nearest`].
+    pub fn choice(self, previous: [f64; 2]) -> Choice {
+        match self {
+            Self::Nearest => Choice::Nearest(previous),
+            Self::FirstPositive => Choice::FirstPositive,
+            Self::FirstNegative => Choice::FirstNegative,
+        }
+    }
+}
+
+/// Kinematics and the rule that picks one inverse solution.
+///
+/// Posts run the inverse. The part-frame toolpaths do not store joint angles.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FiveAxisSetup {
+    /// One or two rotary joints and the spindle direction.
+    pub kinematics: Kinematics,
+    /// How to pick one inverse solution.
+    pub policy: SolutionPolicy,
+}
+
 impl Kinematics {
     /// Parse JSON, normalise each rotary axis and `spindle_axis`, then [`Self::check`].
     pub fn from_json(text: &str) -> Result<Self> {
@@ -687,6 +724,18 @@ fn tool_axis_error(axis: Vec3, kind: &str) -> crate::IrError {
     check::invalid(
         format!("tool axis ({:.6}, {:.6}, {:.6}) is {kind}", comp_for_error(axis.x()), comp_for_error(axis.y()), comp_for_error(axis.z()),),
     )
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::{Choice, SolutionPolicy};
+
+    #[test]
+    fn policy_builds_the_matching_choice() {
+        assert_eq!(SolutionPolicy::Nearest.choice([1.0, -2.0]), Choice::Nearest([1.0, -2.0]));
+        assert_eq!(SolutionPolicy::FirstPositive.choice([4.0, 5.0]), Choice::FirstPositive);
+        assert_eq!(SolutionPolicy::FirstNegative.choice([4.0, 5.0]), Choice::FirstNegative);
+    }
 }
 
 #[cfg(test)]

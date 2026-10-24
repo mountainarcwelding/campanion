@@ -402,6 +402,49 @@ Zs is the greater of the job safe height and the swept radius plus the rapid cle
 
 A post with no `rotary` field rejects a program that contains any rotary angle, with `post `<id>` does not support a rotary axis`. A setup whose poses carry no angle still posts. LinuxCNC, Fanuc and Haas write axis A: machine `X` `Y` `Z` from `part_to_machine`, and inverse-time feed (`G93`, back to `G94` when the angle holds) when a feed changes the angle. Mach3 writes axis A and keeps the IR feed number (degrees per minute). Grbl, plasma and the Grbl laser post have no rotary axis. The length used for inverse time is the straight-line distance between the part-frame tips; see the post crate README.
 
+## Kinematics and tilted planes (3+2)
+
+`kinematics` is a path, relative to the job file's directory, of a kinematics JSON file. `solution` chooses the inverse solution a later post keeps. Planning of a tilted plane is not in this version: `campanion run` rejects a job that sets `plane`.
+
+```json
+"kinematics": "table_table_bc.kin.json",
+"solution": "nearest"
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `kinematics` | no | Path of the kinematics file, relative to the job file. Loaded with the IR parser. Cannot be combined with `rotary`. |
+| `solution` | no | `nearest` (the default), `first_positive` or `first_negative`. Requires `kinematics`. |
+
+An operation may set `plane`. The operation is planned in that plane's view (view X is `x_dir`, view Z is `normal`, view origin is `origin`), and each pose is mapped back into the part frame. In the part frame the tool axis is the plane normal and the pose has no rotary angle. That planner is still to come.
+
+```json
+"plane": { "origin": [0, 0, 0], "normal": [0, 1, 0], "x_dir": [1, 0, 0] }
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `origin` | yes | `[x, y, z]` of the plane origin. A length in `units`. |
+| `normal` | yes | `[i, j, k]` tool axis in the part frame. A direction, not scaled. Stored as a unit vector. |
+| `x_dir` | no | `[i, j, k]` view +X. A direction, not scaled. Stored as a unit vector in the plane. Omitted, part +X is projected onto the plane. When the normal is within 1e-9 of ±X, part +Y is projected instead. |
+
+`plane` needs `kinematics`. It cannot be combined with `index_deg`. It is not supported on `wrap` or `rotary_finish`. On load, every operation is checked against the kinematics: a plane uses its origin and normal, and an operation without a plane uses tool axis +Z. A job with kinematics and no plane is planned in the part frame, and the program stores the five-axis setup.
+
+Load failures:
+
+- `kinematics: ` followed by the read or parse error
+- `solution needs a kinematics file`
+- `kinematics and rotary cannot be combined`
+- `operation `<name>`: plane needs a kinematics file`
+- `operation `<name>`: plane normal is zero`
+- `operation `<name>`: plane x_dir is parallel to the normal`
+- `operation `<name>`: plane and index_deg cannot be combined`
+- `operation `<name>`: plane is not supported on wrap`
+- `operation `<name>`: plane is not supported on rotary_finish`
+- `operation `<name>`: ` followed by the kinematics error when that pose is not reachable
+
+`campanion run` fails a tilted plane with `operation `<name>`: tilted planes are not planned yet`.
+
 ## Limits
 
 Hostile numbers and sizes fail the load instead of being passed on:

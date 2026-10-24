@@ -62,6 +62,9 @@
 //! appended to the operation being left and a rotary rapid at the new angle is prepended to the
 //! next one. Jobs without `rotary` stay 3-axis and are not mapped.
 //!
+//! A job with `kinematics` and no `plane` is planned in that same part frame. The program stores
+//! the five-axis setup. An operation that sets `plane` is not planned yet.
+//!
 //! A wrap needs that rotary setup. Drawing X is the distance along the axis and drawing Y is
 //! the arc length around the cylinder, each plus the operation offset. The path is built in
 //! the part frame, so it is not mapped again. Rapids sit at the index safe radius, which uses
@@ -132,6 +135,9 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         None => None,
     };
     let job = jobfile::load(&args.job).map_err(show)?;
+    if let Some(operation) = job.operations().iter().find(|operation| operation.plane().is_some()) {
+        return Err(CliError::run(format!("operation `{}`: tilted planes are not planned yet", operation.name())));
+    }
     let source = jobfile::source_path(&job);
     if job.source().is_stl() {
         let bytes = read_bytes(&source)?;
@@ -474,7 +480,10 @@ fn finish_program(job: &JobFile, groups: Vec<IndexedOp>, stock_corners: Option<&
     if paths.len() > MAX_TOOLPATHS {
         return Err(CliError::invalid(format!("too many toolpaths: {} > {MAX_TOOLPATHS}", paths.len())));
     }
-    let program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), rotary)?;
+    let mut program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), rotary)?;
+    if let Some(setup) = job.five_axis() {
+        program = program.with_five_axis(setup.clone())?;
+    }
     Ok(Document::new(program)?)
 }
 
@@ -1154,4 +1163,89 @@ fn show(err: impl std::fmt::Display) -> CliError {
 
 fn op_err(op: &Operation, err: impl std::fmt::Display) -> CliError {
     CliError::run(format!("operation {}: {err}", op.name()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use crate::jobfile::hash_bytes;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn ticks() -> u128 {
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or(0)
+    }
+
+    fn dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("campanion-{name}-{}", ticks()));
+        fs::create_dir_all(&path).expect("dir");
+        path
+    }
+
+    fn args(job: &Path, ngc: &Path, ir: &Path) -> Vec<OsString> {
+        vec![
+            job.as_os_str().to_os_string(),
+            OsString::from("-o"),
+            ngc.as_os_str().to_os_string(),
+            OsString::from("--ir"),
+            ir.as_os_str().to_os_string(),
+        ]
+    }
+
+    fn job_text(hash: &str, kinematics: &str, plane: &str) -> String {
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"sample.dxf","hash":"{hash}"}},"units":"mm"{kinematics},"tools":[{{"id":1,"diameter":6}}],"operations":[{{"name":"inner","type":"profile","layers":["INNER"],"side":"inside","tool_id":1,"depth":3,"step_down":3{plane},"feeds":{{"cut":1000,"plunge":300}}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn kinematics_without_a_plane_plans_like_a_three_axis_job() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let plain_dir = dir("kin-plain");
+        let kin_dir = dir("kin-five");
+        fs::copy(root.join("examples/sample.dxf"), plain_dir.join("sample.dxf")).expect("dxf");
+        fs::copy(root.join("examples/sample.dxf"), kin_dir.join("sample.dxf")).expect("dxf");
+        fs::copy(root.join("examples/table_table_bc.kin.json"), kin_dir.join("table_table_bc.kin.json")).expect("kin");
+        let hash = hash_bytes(&fs::read(plain_dir.join("sample.dxf")).expect("bytes"));
+        fs::write(plain_dir.join("job.json"), job_text(&hash, "", "")).expect("job");
+        fs::write(kin_dir.join("job.json"), job_text(&hash, r#","kinematics":"table_table_bc.kin.json""#, "")).expect("job");
+        let plain_ngc = plain_dir.join("out.ngc");
+        let kin_ngc = kin_dir.join("out.ngc");
+        let plain_ir = plain_dir.join("out.ir.json");
+        let kin_ir = kin_dir.join("out.ir.json");
+        must_run(&args(&plain_dir.join("job.json"), &plain_ngc, &plain_ir));
+        must_run(&args(&kin_dir.join("job.json"), &kin_ngc, &kin_ir));
+        assert_eq!(fs::read(&plain_ngc).expect("plain ngc"), fs::read(&kin_ngc).expect("kin ngc"));
+        let plain_value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&plain_ir).expect("plain ir")).expect("plain json");
+        let mut kin_value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&kin_ir).expect("kin ir")).expect("kin json");
+        let program = kin_value["program"].as_object_mut().expect("program");
+        let five = program.remove("five_axis").expect("five_axis");
+        assert_eq!(five["policy"], "nearest");
+        assert_eq!(five["kinematics"]["name"], "table_table_bc");
+        assert_eq!(kin_value, plain_value);
+    }
+
+    #[test]
+    fn tilted_plane_is_not_planned_yet() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let folder = dir("kin-tilt");
+        fs::copy(root.join("examples/sample.dxf"), folder.join("sample.dxf")).expect("dxf");
+        fs::copy(root.join("examples/table_table_bc.kin.json"), folder.join("table_table_bc.kin.json")).expect("kin");
+        let hash = hash_bytes(&fs::read(folder.join("sample.dxf")).expect("bytes"));
+        let plane = r#","plane":{"origin":[0,0,0],"normal":[0,0,1]}"#;
+        fs::write(folder.join("job.json"), job_text(&hash, r#","kinematics":"table_table_bc.kin.json""#, plane)).expect("job");
+        match run(&args(&folder.join("job.json"), &folder.join("out.ngc"), &folder.join("out.ir.json"))) {
+            Ok(_) => panic!("tilted plane was planned"),
+            Err(err) => assert_eq!(err.to_string(), "operation `inner`: tilted planes are not planned yet"),
+        }
+        assert!(!folder.join("out.ngc").exists());
+    }
+
+    fn must_run(args: &[OsString]) {
+        if let Err(err) = run(args) {
+            panic!("{err}");
+        }
+    }
 }

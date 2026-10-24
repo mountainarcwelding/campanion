@@ -4,6 +4,7 @@
 
 ### Added
 
+- Indexed 3+2: a job can name a kinematics file, a solution policy and a tilted work plane, and the IR program stores that five-axis setup.
 - Angled turning and boring with a B head: a lathe job can set `head.b_axis` and `b_deg` on face, rough, finish, groove and part, and a lathe post can index B.
 - Rotary kinematics as data: joint definitions, validation, forward kinematics from joint angles to a tool pose, inverse kinematics, and solution choice.
 
