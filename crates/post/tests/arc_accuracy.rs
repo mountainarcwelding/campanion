@@ -156,7 +156,8 @@ proptest! {
                 }
                 Ok(text) => {
                     let moves = read_back(&text, &post).map_err(|err| format!("{id} read: {err}")).expect("read");
-                    compare(&program, &moves, quantum, &post).map_err(|err| format!("{id} compare: {err}\n{text}")).expect("compare");
+                    // The CLI compares at the tolerance it posts with. Arc blocks are held to the quantum by controller_ok.
+                    compare(&program, &moves, ARC_TOLERANCE, &post).map_err(|err| format!("{id} compare: {err}\n{text}")).expect("compare");
                     controller_ok(&moves, &case, quantum).map_err(|err| format!("{id} controller: {err}\n{text}")).expect("controller");
                 }
             }
@@ -180,6 +181,10 @@ fn zero_chord_arc_is_a_feed_line() {
 }
 
 fn assert_mill_arc(case: ArcCase) {
+    assert_mill_arc_compared_at(case, None);
+}
+
+fn assert_mill_arc_compared_at(case: ArcCase, compare_tol: Option<f64>) {
     let program = program_of(&case);
     let options = PostOptions { arc_tolerance: ARC_TOLERANCE };
     for id in builtin_ids() {
@@ -190,7 +195,7 @@ fn assert_mill_arc(case: ArcCase) {
         let text = post_program(&program, &post, &options).map_err(|err| format!("{id}: {err}")).expect("post");
         let moves = read_back(&text, &post).map_err(|err| format!("{id} read: {err}")).expect("read");
         let quantum = 10_f64.powi(-(post.linear_decimals() as i32));
-        compare(&program, &moves, quantum, &post).map_err(|err| format!("{id} compare: {err}\n{text}")).expect("compare");
+        compare(&program, &moves, compare_tol.unwrap_or(quantum), &post).map_err(|err| format!("{id} compare: {err}\n{text}")).expect("compare");
         controller_ok(&moves, &case, quantum).map_err(|err| format!("{id} controller: {err}\n{text}")).expect("controller");
     }
 }
@@ -203,6 +208,38 @@ fn split_arc_tail_at_the_origin() {
 #[test]
 fn split_arc_tail_away_from_the_origin() {
     assert_mill_arc(ArcCase { x: -14.007, y: -78.572, z: 7.182, radius: 0.026821555229418526, sweep: 3.169811299437078, ccw: false, feed: 50.0 });
+}
+
+#[test]
+fn rounded_end_past_a_small_arc() {
+    assert_mill_arc_compared_at(
+        ArcCase {
+            x: -152.4374666862885,
+            y: -16.75023462615537,
+            z: 0.0,
+            radius: 0.010705459890257212,
+            sweep: 2.636285683136079,
+            ccw: false,
+            feed: 50.0,
+        },
+        Some(ARC_TOLERANCE),
+    );
+}
+
+#[test]
+fn rounded_tail_of_a_small_near_full_arc() {
+    assert_mill_arc_compared_at(
+        ArcCase {
+            x: -22.774264601009403,
+            y: 46.61343560944223,
+            z: 0.0,
+            radius: 0.010427771318676952,
+            sweep: 5.80245671977469,
+            ccw: true,
+            feed: 50.0,
+        },
+        Some(ARC_TOLERANCE),
+    );
 }
 
 #[test]

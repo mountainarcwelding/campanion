@@ -640,6 +640,11 @@ fn on_curve(point: Xyz, start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: 
     if geom::dist3(point, start) <= tol {
         return true;
     }
+    // Rounding can also leave the last posted point slightly past the programmed end. On a small
+    // radius that is more angle than the window below allows.
+    if geom::dist3(point, end) <= tol {
+        return true;
+    }
     let radius = geom::in_plane_len(plane, start, center);
     if (geom::in_plane_len(plane, point, center) - radius).abs() > tol {
         return false;
