@@ -1,0 +1,18 @@
+{
+  "name": "head_head_ac",
+  "spindle_axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+  "rotaries": [
+    {
+      "letter": "C",
+      "carrier": "head",
+      "axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+      "pivot": { "x": 0.0, "y": 0.0, "z": 80.0 }
+    },
+    {
+      "letter": "A",
+      "carrier": "head",
+      "axis": { "x": 1.0, "y": 0.0, "z": 0.0 },
+      "pivot": { "x": 0.0, "y": 40.0, "z": 120.0 }
+    }
+  ]
+}

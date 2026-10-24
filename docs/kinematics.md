@@ -1,0 +1,61 @@
+# Kinematics
+
+A kinematics file describes one or two rotary joints and the spindle direction at zero head angles. Angles are degrees. A rotation is right-handed about the joint axis. Lengths are millimetres.
+
+The files in `crates/ir/kinematics/` are illustrative examples. They are not a description of any real machine.
+
+`Kinematics` is not stored on a toolpath document. Load one with `Kinematics::from_json`.
+
+## Frames
+
+- At all angles zero the part frame equals the machine frame.
+- Rotaries are listed outer first: within the table joints, the one mounted on the machine base comes first; within the head joints, the one mounted on the Z slide comes first. Table and head joints may be interleaved in the list; only the order within each carrier matters.
+- A table joint pivot is in machine coordinates at all angles zero. A second table joint's axis and pivot are given at zero angles and are carried by the first.
+- A head joint pivot is relative to the gauge point (the point XYZ positions) at zero head angles. A second head joint is carried by the first.
+- At zero head angles the tool tip is `gauge point - tool_length * spindle_axis`, and the tool axis is `spindle_axis`.
+- Forward: `T_table = R_t1 * R_t2` (each `R` about its pivot and axis by its angle, using the zero-pose definitions). Head `H = R_h1 * R_h2` (about pivots relative to the gauge point). `tip_machine = xyz + H(-L * spindle_axis)` and `axis_machine = rot(H) * spindle_axis`. `tip_part = T_table^-1 * tip_machine` and `axis_part = rot(T_table)^-1 * axis_machine`.
+
+`angles[i]` on a joint position belongs to `rotaries[i]`. With one rotary the other angle is 0.
+
+## JSON
+
+Unknown fields are rejected. `spindle_axis` is optional and defaults to +Z `(0, 0, 1)`. Each axis is normalised on load. A zero axis is rejected.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `name` | yes | Non-empty name. Quoted in validation errors. |
+| `rotaries` | yes | One or two joints. Outer joint first within each carrier. |
+| `spindle_axis` | no | Tool axis at zero head angles. Default +Z. |
+| `rotaries[].letter` | yes | `A`, `B` or `C`. A letter is used once. |
+| `rotaries[].carrier` | yes | `table` or `head`. |
+| `rotaries[].axis` | yes | Direction of the axis. Right-hand rotation. Not zero. |
+| `rotaries[].pivot` | yes | A point on the axis line, in the frame described above. |
+| `rotaries[].limits` | no | `{ "min_deg", "max_deg" }`, inclusive, `min_deg < max_deg`. Omitted means unlimited. |
+
+### Example
+
+`crates/ir/kinematics/head_table_bc.json` is a mill-turn layout: C is a table joint about Z (a work spindle), and B is a head joint about Y whose pivot sits 150 mm above the gauge point. B travels from -110° to 110°. C is unlimited. The numbers are an example, not a measured machine.
+
+```json
+{
+  "name": "head_table_bc",
+  "spindle_axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+  "rotaries": [
+    {
+      "letter": "C",
+      "carrier": "table",
+      "axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+      "pivot": { "x": 0.0, "y": 0.0, "z": 0.0 }
+    },
+    {
+      "letter": "B",
+      "carrier": "head",
+      "axis": { "x": 0.0, "y": 1.0, "z": 0.0 },
+      "pivot": { "x": 0.0, "y": 0.0, "z": 150.0 },
+      "limits": { "min_deg": -110.0, "max_deg": 110.0 }
+    }
+  ]
+}
+```
+
+At `B = 90°` and `C = 0°` the tool axis in the part frame is +X. That is a right-hand rotation of +Z about +Y.
