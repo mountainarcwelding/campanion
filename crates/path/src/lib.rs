@@ -4,7 +4,7 @@
 //! Profiles, pockets, facing, drilling, engraving and chamfers build those moves. A profile either offsets the
 //! contour here (computed compensation, through [`campanion_geom`]) or leaves the path on the
 //! contour and records a left/right flag for a later IR. Ordering links those features.
-//! Depth passes repeat a closed contour downward.
+//! Depth passes repeat a closed contour downward. A profile with tabs may also repeat an open contour.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -23,7 +23,7 @@ mod tool;
 mod toolpath;
 
 pub use chamfer::{Chamfer, ChamferOp};
-pub use depth::{DepthEntry, DepthPlan, depth_toolpath, pass_depths};
+pub use depth::{DepthEntry, DepthPlan, DepthTabs, depth_toolpath, pass_depths};
 pub use drill::{DrillCycle, DrillHit, DrillOp, Drilling};
 pub use engrave::{Engrave, EngraveOp};
 pub use face::{Face, FaceOp};

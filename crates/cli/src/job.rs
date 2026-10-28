@@ -407,7 +407,7 @@ fn parse_lead(value: Option<&Value>) -> Result<Lead, CliError> {
     }
 }
 
-fn parse_tabs(value: Option<&Value>) -> Result<Option<TabSpec>, CliError> {
+pub(crate) fn parse_tabs(value: Option<&Value>) -> Result<Option<TabSpec>, CliError> {
     let Some(value) = value else {
         return Ok(None);
     };

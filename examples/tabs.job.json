@@ -1,0 +1,21 @@
+{
+  "format": "campanion-job/1",
+  "source": { "path": "sample.dxf", "hash": "cee9f36f5ba230a2" },
+  "units": "mm",
+  "tools": [
+    { "id": 1, "diameter": 6.0, "speed": 12000 }
+  ],
+  "operations": [
+    {
+      "name": "outer",
+      "type": "profile",
+      "layers": ["OUTER"],
+      "side": "outside",
+      "tool_id": 1,
+      "depth": 3.0,
+      "step_down": 3.0,
+      "tabs": { "count": 4, "width": 8.0, "height": 1.0 },
+      "feeds": { "cut": 1000.0, "plunge": 300.0 }
+    }
+  ]
+}

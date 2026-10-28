@@ -7,6 +7,15 @@
 - A lathe STEP section keeps a radial end face when a seam pulls it off Z, so `examples/shaft_fillet.lathe.json` runs with solidcraft-cli. It failed with "the two halves of the section differ".
 - A ramp or helix entry stays at or below `angle_deg` on every posted descent. The first pass is sized from the retract height, so a ramp that starts above the stock is not the stock step over a length meant for a shorter drop (#91).
 - Pocket rings stay at most one stepover apart, so the band between an outer wall and an island is cut when it is narrower than two stepovers (#90).
+- Profile-document tabs are crossed by feed moves along the compensated contour at `z + height` (lines, arcs and corners), never as a rapid or a chord (fixes #95). A full-depth tab feeds up to the retract height, rapids there, and feeds back down. Profiles rapid to the pierce point at the clearance height and down to the retract height before feeding to depth; the profile document accepts optional `heights`. The verifier rejects an XY rapid below the retract height.
+
+### Changed
+
+- Tab `width` is the bridge left on the part, measured along the part edge. On a straight edge the tool-centre gap is that width plus the tool diameter. Profile-document tab gaps are wider by the tool diameter than in 0.8.4.
+
+### Added
+
+- Run jobs accept `tabs` on a profile operation. Bridges match a profile document: a pass below the tab top feeds along the compensated contour, and a full-depth tab rapids at the retract height (#95).
 
 ## 0.8.4 — 2026-10-28
 
@@ -19,7 +28,6 @@ Safety patch. Do not run tabbed profile-document output, or multi-tool `campanio
 
 ### Fixed
 
-- Profile-document tabs are crossed by feed moves along the compensated contour at `z + height` (lines, arcs and corners), never as a rapid or a chord (fixes #95). A full-depth tab feeds up to the retract height, rapids there, and feeds back down. Profiles rapid to the pierce point at the clearance height and down to the retract height before feeding to depth; the profile document accepts optional `heights`. The verifier rejects an XY rapid below the retract height.
 - `campanion run` writes a tool-change event at the start of the first toolpath and whenever the tool id changes, so mill posts emit `T{tool} M6` (fixes #94). Consecutive toolpaths that share a tool get one change. A spindle operation with no speed fails `run --post` when that post's spindle-on template uses `{speed}`.
 - Full circles post on every mill post at any coordinates: a closed arc whose end lies within 1e-9 of a radius of its start is one full turn in the toolpath, the writer, and read-back (fixes #92). `examples/step.job.json` now posts on every mill post.
 

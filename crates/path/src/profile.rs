@@ -22,8 +22,10 @@
 //! A line lead lies on the path tangent. A perpendicular lead lies on the normal, on the waste
 //! side. An arc lead is a quarter turn (`π/2`) that meets the path with the same tangent; its
 //! centre is on the waste side, one radius out. Overcut, on a closed profile, keeps cutting
-//! along the contour past the start. Tabs are gaps measured by arc length. They are not placed
-//! on the lead-in span or on the overcut, both measured from the start along the path.
+//! along the contour past the start. A tab `width` is the bridge left on the part, measured
+//! along the part edge. The tool-centre gap is that width plus the tool diameter on a straight
+//! edge, and at least that on arcs and corners. Tabs are not placed on the lead-in span or on
+//! the overcut, both measured from the start along the path.
 //!
 //! A tab with a positive `height` is crossed at `z + height` as feed, following the compensated
 //! contour exactly (lines, arcs and corners). Climbing onto the tab and dropping off it is a
@@ -37,7 +39,7 @@
 //! retract height is above the stock top unless the caller sets a lower plane on purpose. No
 //! rapid that changes XY ends below the retract height.
 
-use campanion_geom::{Contour, Orientation, Point, Tolerance, Vec2};
+use campanion_geom::{Contour, Orientation, Point, Segment, Tolerance, Vec2};
 
 use crate::curve::{self, Location};
 use crate::tool::{Compensation, ControllerSide, Tool};
@@ -112,12 +114,14 @@ pub enum TabLayout {
 
 /// Tabs (bridges) left uncut along the profile.
 ///
-/// A positive [`Self::height`] raises the tool by that amount and feeds along the compensated
-/// contour at the raised Z. `None` or 0 is a full-depth tab: feed up to the retract height, rapid
-/// across at that height, and plunge back.
+/// [`Self::width`] is the bridge left on the part, measured along the part edge. The tool-centre
+/// gap is longer by the tool diameter on a straight edge. A positive [`Self::height`] raises the
+/// tool by that amount and feeds along the compensated contour at the raised Z. `None` or 0 is a
+/// full-depth tab: feed up to the retract height, rapid across at that height, and plunge back.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabSpec {
     layout: TabLayout,
+    /// Bridge left on the part, millimetres along the part edge.
     width: f64,
     /// Lift while crossing the gap, millimetres. `None` or 0 is a full-depth tab.
     height: Option<f64>,
@@ -152,7 +156,10 @@ impl TabSpec {
     }
 }
 
-/// One tab gap, measured along the compensated contour from the cut start.
+/// One tool-centre gap, measured along the compensated contour from the cut start.
+///
+/// [`Self::width`] is the lift along the tool path. On a straight edge that is the part-edge
+/// bridge plus the tool diameter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tab {
     start: f64,
@@ -327,8 +334,14 @@ impl ProfileOp {
         let lead_in_span = lead_span(self.lead_in)?;
         let _lead_out_span = lead_span(self.lead_out)?;
         let skip = lead_in_span.max(overcut);
+        let cutter = self.tool.compensation_distance()? * 2.0;
+        // Controller compensation and `side: on` program the part edge. A computed offset path
+        // is the tool centre, so arc length there scales against the part edge.
+        let on_contour =
+            matches!(self.side, ProfileSide::On) || matches!(self.compensation, Compensation::Controller(_)) || magnitude <= self.tolerance.linear();
+        let material_right = matches!(self.direction, CutDirection::Climb);
         let tabs = match self.tabs {
-            Some(spec) => place_tabs(&path, spec, skip)?,
+            Some(spec) => layout_tabs(&path, spec, skip, cutter, material_right, on_contour)?,
             None => Vec::new(),
         };
         let controller_side = match self.compensation {
@@ -506,8 +519,25 @@ fn automatic_start(contour: &Contour, tolerance: &Tolerance) -> Result<Location>
     curve::sharpest_corner(contour)?.ok_or_else(|| invalid("contour has no start point"))
 }
 
-fn place_tabs(contour: &Contour, spec: TabSpec, skip: f64) -> Result<Vec<Tab>> {
+/// One span of the compensated contour.
+///
+/// `scale` maps tool-centre arc length onto the part edge. A straight edge is 1. An outside
+/// arc is the part radius over the path radius. A round corner of about the tool radius is 0,
+/// because that fillet is a point on the part.
+struct PathSpan {
+    s0: f64,
+    s1: f64,
+    scale: f64,
+    linear: bool,
+}
+
+/// Place tool-centre gaps so each one leaves a bridge of `spec.width` on the part.
+///
+/// `cutter` is the tool diameter or the kerf. On a straight edge the gap is `width + cutter`.
+/// `material_right` is climb. `on_contour` means the path already follows the part edge.
+pub(crate) fn layout_tabs(contour: &Contour, spec: TabSpec, skip: f64, cutter: f64, material_right: bool, on_contour: bool) -> Result<Vec<Tab>> {
     let width = positive(spec.width, "tab width")?;
+    let cutter = non_negative(cutter, "tab cutter")?;
     let height = match spec.height {
         None => None,
         Some(height) => Some(non_negative(height, "tab height")?),
@@ -520,22 +550,31 @@ fn place_tabs(contour: &Contour, spec: TabSpec, skip: f64) -> Result<Vec<Tab>> {
         return Err(invalid("lead-in and overcut cover the whole contour; no room for tabs"));
     }
     let usable = total - skip;
-    let centers = tab_centers(spec.layout, usable, width, skip)?;
+    let min_gap = width + cutter;
+    let centers = tab_centers(spec.layout, usable, min_gap, skip, cutter)?;
+    let spans = path_spans(contour, cutter * 0.5, material_right, on_contour)?;
     let mut tabs = Vec::with_capacity(centers.len());
     let mut prev_end = skip;
     for center in centers {
-        let start = center - width * 0.5;
-        let end = center + width * 0.5;
+        let (start, end) = bridge_gap(contour, &spans, center, width, cutter, total)?;
         if start < prev_end - 1e-6 || end > total + 1e-6 {
             return Err(invalid("tab overlaps the lead-in or another tab"));
         }
-        tabs.push(Tab { start, width, height });
+        let mut gap = end - start;
+        if gap + 1e-6 < min_gap {
+            return Err(invalid("tabs are wider than the contour"));
+        }
+        // A straight retreat is width + cutter. Collapsing the ulp keeps that gap exact.
+        if (gap - min_gap).abs() <= 1e-9 {
+            gap = min_gap;
+        }
+        tabs.push(Tab { start, width: gap, height });
         prev_end = end;
     }
     Ok(tabs)
 }
 
-fn tab_centers(layout: TabLayout, usable: f64, width: f64, skip: f64) -> Result<Vec<f64>> {
+fn tab_centers(layout: TabLayout, usable: f64, min_gap: f64, skip: f64, cutter: f64) -> Result<Vec<f64>> {
     match layout {
         TabLayout::Count(0) => Err(invalid("tab count must be positive")),
         TabLayout::Count(count) => {
@@ -543,15 +582,20 @@ fn tab_centers(layout: TabLayout, usable: f64, width: f64, skip: f64) -> Result<
                 return Err(invalid(format!("too many tabs: {count} > {MAX_TABS}")));
             }
             let count_f = count as f64;
-            if count_f * width >= usable {
+            if count_f * min_gap >= usable {
                 return Err(invalid("tabs are wider than the contour"));
             }
             Ok((0..count).map(|i| skip + (i as f64 + 0.5) * (usable / count_f)).collect())
         }
         TabLayout::Spacing(spacing) => {
             let spacing = positive(spacing, "tab spacing")?;
-            if spacing <= width {
-                return Err(invalid("tab spacing must be greater than the tab width"));
+            if spacing <= min_gap {
+                let message = if cutter > 1e-12 {
+                    "tab spacing must be greater than the tab width plus the tool diameter"
+                } else {
+                    "tab spacing must be greater than the tab width"
+                };
+                return Err(invalid(message));
             }
             let count_f = (usable / spacing).floor();
             if !count_f.is_finite() || count_f < 1.0 {
@@ -564,6 +608,182 @@ fn tab_centers(layout: TabLayout, usable: f64, width: f64, skip: f64) -> Result<
             Ok((0..count).map(|i| skip + (i as f64 + 0.5) * spacing).collect())
         }
     }
+}
+
+fn path_spans(contour: &Contour, radius: f64, material_right: bool, on_contour: bool) -> Result<Vec<PathSpan>> {
+    let mut spans = Vec::new();
+    let mut s = 0.0;
+    for seg in contour.segments() {
+        let len = seg.length();
+        if !len.is_finite() {
+            return Err(invalid("segment length is not finite"));
+        }
+        let s1 = s + len;
+        if len > 1e-15 {
+            spans.push(PathSpan { s0: s, s1, scale: span_scale(*seg, radius, material_right, on_contour), linear: matches!(seg, Segment::Line(_)) });
+        }
+        s = s1;
+    }
+    Ok(spans)
+}
+
+/// Part-edge length per unit of tool-centre length. Clamped to `[0, 1]`, so an inside arc,
+/// where the part edge is longer than the tool path, keeps a slightly longer bridge.
+fn span_scale(seg: Segment, radius: f64, material_right: bool, on_contour: bool) -> f64 {
+    if on_contour || radius <= 1e-12 {
+        return 1.0;
+    }
+    let Segment::Arc(arc) = seg else {
+        return 1.0;
+    };
+    let rc = arc.radius();
+    if !rc.is_finite() || rc <= 1e-9 {
+        return 0.0;
+    }
+    // Positive sweep is counter-clockwise, so the centre is to the left of travel.
+    let centre_on_right = arc.sweep() < 0.0;
+    let centre_on_material = centre_on_right == material_right;
+    let scale = if centre_on_material { (rc - radius) / rc } else { (rc + radius) / rc };
+    if scale.is_finite() { scale.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+/// Tool-centre interval whose uncut part edge is `width`, pulled back by the cutter radius.
+fn bridge_gap(contour: &Contour, spans: &[PathSpan], center: f64, width: f64, cutter: f64, total: f64) -> Result<(f64, f64)> {
+    let half = width * 0.5;
+    let back = walk_part(spans, center, half, false)?;
+    let fore = walk_part(spans, center, half, true)?;
+    let radius = cutter * 0.5;
+    let start = retreat(contour, spans, back, radius, false, total)?;
+    let end = retreat(contour, spans, fore, radius, true, total)?;
+    if end + 1e-9 < start {
+        return Err(invalid("tabs are wider than the contour"));
+    }
+    Ok((start.max(0.0), end.min(total)))
+}
+
+/// Walk from `cursor` until `left` millimetres of part edge have been covered.
+fn walk_part(spans: &[PathSpan], mut cursor: f64, mut left: f64, forward: bool) -> Result<f64> {
+    if left <= 1e-15 {
+        return Ok(cursor);
+    }
+    if forward {
+        for span in spans {
+            if span.s1 <= cursor + 1e-15 {
+                continue;
+            }
+            let from = cursor.max(span.s0);
+            let available = span.s1 - from;
+            if span.scale <= 1e-15 {
+                cursor = span.s1;
+                continue;
+            }
+            let part = available * span.scale;
+            if part + 1e-12 >= left {
+                return Ok((from + left / span.scale).min(span.s1));
+            }
+            left -= part;
+            cursor = span.s1;
+        }
+    } else {
+        for span in spans.iter().rev() {
+            if span.s0 >= cursor - 1e-15 {
+                continue;
+            }
+            let to = cursor.min(span.s1);
+            let available = to - span.s0;
+            if available <= 1e-15 {
+                continue;
+            }
+            if span.scale <= 1e-15 {
+                cursor = span.s0;
+                continue;
+            }
+            let part = available * span.scale;
+            if part + 1e-12 >= left {
+                return Ok((to - left / span.scale).max(span.s0));
+            }
+            left -= part;
+            cursor = span.s0;
+        }
+    }
+    Err(invalid("tabs are wider than the contour"))
+}
+
+/// Pull a bridge end out until the cutter disc no longer reaches it.
+///
+/// A retreat that stays on lines moves by exactly the tool radius, so a straight edge and a
+/// `side: on` line leave a tool-centre gap of `width + cutter`. A curve keeps going until the
+/// straight-line distance to the bridge end is the tool radius.
+fn retreat(contour: &Contour, spans: &[PathSpan], inner: f64, radius: f64, forward: bool, total: f64) -> Result<f64> {
+    if radius <= 1e-12 {
+        return Ok(inner.clamp(0.0, total));
+    }
+    let sign = if forward { 1.0 } else { -1.0 };
+    let target = inner + sign * radius;
+    if target < -1e-9 || target > total + 1e-9 {
+        return Err(invalid("tabs are wider than the contour"));
+    }
+    let target = target.clamp(0.0, total);
+    if interval_is_linear(spans, inner, target) {
+        return Ok(target);
+    }
+    euclidean_retreat(contour, inner, radius, sign, total)
+}
+
+fn interval_is_linear(spans: &[PathSpan], a: f64, b: f64) -> bool {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let length = hi - lo;
+    if length <= 1e-15 {
+        return true;
+    }
+    let mut covered = 0.0;
+    let mut linear = true;
+    for span in spans {
+        let start = lo.max(span.s0);
+        let end = hi.min(span.s1);
+        if end - start > 1e-15 {
+            covered += end - start;
+            if !span.linear {
+                linear = false;
+            }
+        }
+    }
+    linear && covered + 1e-9 >= length
+}
+
+fn euclidean_retreat(contour: &Contour, inner: f64, radius: f64, sign: f64, total: f64) -> Result<f64> {
+    let keep = curve::point_at_length(contour, inner.clamp(0.0, total))?;
+    let room = if sign > 0.0 { total - inner } else { inner };
+    if !(room.is_finite() && room > 1e-12) {
+        return Err(invalid("tabs are wider than the contour"));
+    }
+    let at = |distance: f64| -> Result<Point> {
+        let s = (inner + sign * distance).clamp(0.0, total);
+        curve::point_at_length(contour, s)
+    };
+    let mut hi = radius.max(1e-6).min(room);
+    let mut guard = 0;
+    loop {
+        let dist = keep.distance(at(hi)?);
+        if dist >= radius {
+            break;
+        }
+        if hi + 1e-12 >= room || guard >= 64 {
+            return Err(invalid("tabs are wider than the contour"));
+        }
+        hi = (hi * 2.0).min(room);
+        guard += 1;
+    }
+    let mut lo = 0.0;
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        if keep.distance(at(mid)?) >= radius {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Ok((inner + sign * hi).clamp(0.0, total))
 }
 
 fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> Result<(Toolpath, Point3)> {
@@ -586,17 +806,7 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     emit_lead(op.lead_in, start, travel, waste_left, false, z, CutKind::LeadIn, &mut moves)?;
 
     let length = path.length()?;
-    let mut cursor = 0.0;
-    for tab in tabs {
-        if tab.start > cursor + 1e-9 {
-            emit_span(path, cursor, tab.start, z, CutKind::Cut, &mut moves)?;
-        }
-        emit_gap(path, tab, z, retract, &mut moves)?;
-        cursor = tab.start + tab.width;
-    }
-    if length > cursor + 1e-9 {
-        emit_span(path, cursor, length, z, CutKind::Cut, &mut moves)?;
-    }
+    emit_tabbed_span(path, 0.0, length, z, CutKind::Cut, tabs, retract, &mut moves)?;
     if overcut > 0.0 {
         emit_span(path, 0.0, overcut, z, CutKind::Cut, &mut moves)?;
     }
@@ -630,26 +840,190 @@ fn push_segment(seg: campanion_geom::Segment, z: f64, kind: CutKind, moves: &mut
     Ok(())
 }
 
-fn emit_gap(path: &Contour, tab: &Tab, z: f64, retract: f64, moves: &mut Vec<Move>) -> Result<()> {
-    let from = curve::point_at_length(path, tab.start)?;
-    let to = curve::point_at_length(path, tab.start + tab.width)?;
-    let end_s = tab.start + tab.width;
-    if let Some(height) = tab.height.filter(|height| *height > 0.0) {
+/// Cut from `s_from` to `s_to` at `z`, lifting across every tab the span meets.
+///
+/// `s_to` may be less than `s_from`; the span is then walked backward. A positive tab height
+/// follows the contour at `z + height`. Omitted or non-positive height is a full-depth crossing
+/// at `retract`.
+pub(crate) fn emit_tabbed_span(
+    path: &Contour,
+    s_from: f64,
+    s_to: f64,
+    z: f64,
+    kind: CutKind,
+    tabs: &[Tab],
+    retract: f64,
+    moves: &mut Vec<Move>,
+) -> Result<()> {
+    if (s_to - s_from).abs() <= 1e-9 {
+        return Ok(());
+    }
+    if s_to + 1e-9 >= s_from {
+        emit_tabbed_forward(path, s_from, s_to, z, kind, tabs, retract, moves)
+    } else {
+        emit_tabbed_backward(path, s_from, s_to, z, kind, tabs, retract, moves)
+    }
+}
+
+fn emit_tabbed_forward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, tabs: &[Tab], retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+    let mut cursor = s0;
+    for tab in tabs {
+        let start = tab.start();
+        let end = start + tab.width();
+        if end <= cursor + 1e-9 || start >= s1 - 1e-9 {
+            continue;
+        }
+        if start > cursor + 1e-9 {
+            let cut_to = start.min(s1);
+            emit_span(path, cursor, cut_to, z, kind, moves)?;
+            cursor = cut_to;
+        }
+        if cursor >= s1 - 1e-9 {
+            break;
+        }
+        let leave = end.min(s1);
+        if leave > cursor + 1e-9 {
+            emit_crossing(path, cursor, leave, z, tab.height(), retract, moves)?;
+            cursor = leave;
+        }
+    }
+    if s1 > cursor + 1e-9 {
+        emit_span(path, cursor, s1, z, kind, moves)?;
+    }
+    Ok(())
+}
+
+fn emit_tabbed_backward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, tabs: &[Tab], retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+    let mut cursor = s0;
+    for tab in tabs.iter().rev() {
+        let start = tab.start();
+        let end = start + tab.width();
+        if start >= cursor - 1e-9 || end <= s1 + 1e-9 {
+            continue;
+        }
+        if end < cursor - 1e-9 {
+            let cut_to = end.max(s1);
+            emit_span_backward(path, cursor, cut_to, z, kind, moves)?;
+            cursor = cut_to;
+        }
+        if cursor <= s1 + 1e-9 {
+            break;
+        }
+        let leave = start.max(s1);
+        if cursor > leave + 1e-9 {
+            emit_crossing(path, cursor, leave, z, tab.height(), retract, moves)?;
+            cursor = leave;
+        }
+    }
+    if cursor > s1 + 1e-9 {
+        emit_span_backward(path, cursor, s1, z, kind, moves)?;
+    }
+    Ok(())
+}
+
+/// Feed up, follow or rapid from `s_from` to `s_to`, and feed back to `z`.
+pub(crate) fn emit_crossing(path: &Contour, s_from: f64, s_to: f64, z: f64, height: Option<f64>, retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+    if (s_from - s_to).abs() <= 1e-9 {
+        return Ok(());
+    }
+    let from = curve::point_at_length(path, s_from)?;
+    let to = curve::point_at_length(path, s_to)?;
+    if let Some(height) = height.filter(|height| *height > 0.0) {
         let raised = z + height;
         push_vertical(moves, from, raised, CutKind::Retract)?;
-        emit_span(path, tab.start, end_s, raised, CutKind::Retract, moves)?;
+        if s_to >= s_from {
+            emit_span(path, s_from, s_to, raised, CutKind::Retract, moves)?;
+        } else {
+            emit_span_backward(path, s_from, s_to, raised, CutKind::Retract, moves)?;
+        }
         push_vertical(moves, to, z, CutKind::Plunge)?;
     } else {
-        // Full-depth tab: feed up to the retract height (already there when the cut is higher),
-        // rapid across, and plunge back. The rapid stays off the stock top.
+        // Full-depth tab: feed up to the retract height, rapid across, and plunge back.
         let cross = retract.max(z);
         push_vertical(moves, from, cross, CutKind::Retract)?;
         if !same_xy(from, to) {
-            push(moves, Move::Rapid { to: point3(to, cross)? })?;
+            push_rapid(moves, to, cross)?;
         }
         push_vertical(moves, to, z, CutKind::Plunge)?;
     }
     Ok(())
+}
+
+fn emit_span_backward(path: &Contour, s_from: f64, s_to: f64, z: f64, kind: CutKind, moves: &mut Vec<Move>) -> Result<()> {
+    if s_from <= s_to + 1e-9 {
+        return Ok(());
+    }
+    let segs = curve::subdivide(path, s_to, s_from)?;
+    for seg in segs.into_iter().rev() {
+        push_segment(seg.reversed(), z, kind, moves)?;
+    }
+    Ok(())
+}
+
+/// Arc length at which travel in `forward` leaves the tab that contains `s`.
+///
+/// The boundary in the direction of travel counts as inside, so a plunge on that point is moved
+/// past the tab before it descends.
+pub(crate) fn covering_tab_end(tabs: &[Tab], s: f64, forward: bool) -> Option<f64> {
+    for tab in tabs {
+        let start = tab.start();
+        let end = start + tab.width();
+        if forward {
+            if s >= start - 1e-6 && s < end - 1e-9 {
+                return Some(end);
+            }
+        } else if s <= end + 1e-6 && s > start + 1e-9 {
+            return Some(start);
+        }
+    }
+    None
+}
+
+/// Distance along `forward` from `s` to the next tab boundary, or to the end of the contour.
+pub(crate) fn room_to_tab(tabs: &[Tab], s: f64, forward: bool, length: f64) -> f64 {
+    if forward {
+        let mut room = (length - s).max(0.0);
+        for tab in tabs {
+            if tab.start() > s + 1e-9 {
+                room = room.min(tab.start() - s);
+            }
+        }
+        room.max(0.0)
+    } else {
+        let mut room = s.max(0.0);
+        for tab in tabs {
+            let end = tab.start() + tab.width();
+            if end < s - 1e-9 {
+                room = room.min(s - end);
+            }
+        }
+        room.max(0.0)
+    }
+}
+
+/// Rotate a closed contour so its start is not inside a tab. Tab arc lengths move with it.
+///
+/// An open contour is unchanged: the caller starts cutting at [`covering_tab_end`].
+pub(crate) fn move_entry_past_tab(contour: &Contour, tabs: &mut [Tab], tolerance: &Tolerance) -> Result<Contour> {
+    let Some(end) = covering_tab_end(tabs, 0.0, true) else {
+        return Ok(contour.clone());
+    };
+    if end <= 1e-6 || !contour.is_closed() {
+        return Ok(contour.clone());
+    }
+    let length = contour.length()?;
+    if !length.is_finite() || end >= length - 1e-6 {
+        return Ok(contour.clone());
+    }
+    let point = curve::point_at_length(contour, end)?;
+    let location = curve::closest_location(contour, point, tolerance)?;
+    let rotated = curve::rotate_closed(contour, &location, tolerance)?;
+    for tab in tabs.iter_mut() {
+        let start = (tab.start - end).rem_euclid(length);
+        *tab = Tab { start, width: tab.width, height: tab.height };
+    }
+    tabs.sort_by(|a, b| a.start.total_cmp(&b.start));
+    Ok(rotated)
 }
 
 /// Finite clearance and retract. Retract is at least the stock top; clearance is at least retract.
@@ -1052,8 +1426,9 @@ mod tests {
         let plain = inside_climb().generate(&shape).unwrap();
         let with = inside_climb().tabs(TabSpec::count(4, 2.0)).generate(&shape).unwrap();
         assert_eq!(with.tabs().len(), 4);
+        // Inside offset is straight. Diameter 2, so each tool-centre gap is the 2 mm bridge plus 2 mm.
         let sum: f64 = with.tabs().iter().map(|tab| tab.width()).sum();
-        near(sum, 8.0, 1e-12);
+        near(sum, 16.0, 1e-9);
         near(plain.toolpath().cutting_length().unwrap() - with.toolpath().cutting_length().unwrap(), sum, 1e-6);
         let rapids = with.toolpath().moves().iter().filter(|mv| matches!(mv, Move::Rapid { .. })).count();
         assert_eq!(rapids, 7, "clearance, retract, one rapid per full-depth tab, and the final retract");
@@ -1075,7 +1450,7 @@ mod tests {
             }
         }
         assert_eq!(lifts, 4);
-        near(plain.toolpath().cutting_length().unwrap() - lifted.toolpath().cutting_length().unwrap(), 8.0, 1e-6);
+        near(plain.toolpath().cutting_length().unwrap() - lifted.toolpath().cutting_length().unwrap(), 16.0, 1e-6);
         let lifted_rapids = lifted.toolpath().moves().iter().filter(|mv| matches!(mv, Move::Rapid { .. })).count();
         assert_eq!(lifted_rapids, 3, "clearance, retract, and the final retract; a raised tab is feed");
     }
@@ -1086,12 +1461,12 @@ mod tests {
         let profile = inside_climb().lead_in(Lead::Line { length: 10.0 }).tabs(TabSpec::count(4, 1.0)).generate(&rect(20.0, 10.0)).unwrap();
         assert!(profile.tabs().iter().all(|tab| tab.start() >= 10.0 - 1e-9), "{:?}", profile.tabs());
         let sum: f64 = profile.tabs().iter().map(|tab| tab.width()).sum();
-        near(sum, 4.0, 1e-12);
+        near(sum, 12.0, 1e-9);
 
-        // Usable length is 42. Spacing 10 yields floor(42/10) = 4 tabs, each of width 2. Sum 8.
+        // Usable length is 42. Spacing 10 yields floor(42/10) = 4 tabs. Each bridge is 2 mm and the tool is 2 mm, so each gap is 4. Sum 16.
         let spaced = inside_climb().lead_in(Lead::Line { length: 10.0 }).tabs(TabSpec::spacing(10.0, 2.0)).generate(&rect(20.0, 10.0)).unwrap();
         assert_eq!(spaced.tabs().len(), 4);
-        near(spaced.tabs().iter().map(|tab| tab.width()).sum::<f64>(), 8.0, 1e-12);
+        near(spaced.tabs().iter().map(|tab| tab.width()).sum::<f64>(), 16.0, 1e-9);
         assert!(spaced.tabs().iter().all(|tab| tab.start() >= 10.0 - 1e-9));
     }
 
@@ -1422,6 +1797,201 @@ mod tests {
     }
 
     #[test]
+    fn tab_width_is_the_uncut_bridge_on_the_part_edge() {
+        let diameter = 6.0;
+        let plate = notched_plate();
+        // The #95 plate. A bridge narrower than the tool still has to leave material.
+        assert_uncut_bridges(&plate, diameter, ProfileSide::Outside, CutDirection::Climb, 6, 10.0, false);
+        assert_uncut_bridges(&plate, diameter, ProfileSide::Outside, CutDirection::Climb, 4, 3.0, false);
+        assert_uncut_bridges(&plate, diameter, ProfileSide::Outside, CutDirection::Climb, 4, diameter, false);
+
+        let circle = circle_contour(30.0);
+        assert_uncut_bridges(&circle, diameter, ProfileSide::Outside, CutDirection::Climb, 4, 8.0, false);
+        assert_uncut_bridges(&circle, diameter, ProfileSide::Outside, CutDirection::Climb, 4, 2.0, false);
+        assert_uncut_bridges(&circle, diameter, ProfileSide::Outside, CutDirection::Conventional, 4, 8.0, false);
+        assert_uncut_bridges(&circle, diameter, ProfileSide::On, CutDirection::Climb, 3, 5.0, false);
+
+        // Long edges, so each bridge sits on a line. The tool-centre gap is width plus the diameter.
+        assert_uncut_bridges(&rect(200.0, 40.0), diameter, ProfileSide::On, CutDirection::Climb, 4, 8.0, true);
+    }
+
+    #[test]
+    fn tabs_must_leave_room_for_the_bridge_and_the_tool() {
+        let shape = rect(20.0, 10.0);
+        // Spacing is above the 1 mm bridge and within the 2 mm tool.
+        let spacing = inside_climb().tabs(TabSpec::spacing(2.5, 1.0)).generate(&shape).unwrap_err();
+        assert!(spacing.to_string().contains("tab spacing must be greater than the tab width plus the tool diameter"), "{spacing}");
+        // 8 * 5 mm fits in the 52 mm offset. 8 * (5 + 2) mm does not.
+        let wide = inside_climb().tabs(TabSpec::count(8, 5.0)).generate(&shape).unwrap_err();
+        assert!(wide.to_string().contains("tabs are wider than the contour"), "{wide}");
+    }
+
+    fn assert_uncut_bridges(
+        part: &Contour,
+        diameter: f64,
+        side: ProfileSide,
+        direction: CutDirection,
+        count: usize,
+        width: f64,
+        exact_line_gap: bool,
+    ) {
+        assert_eq!(part.orientation(&Tolerance::default()).unwrap(), Orientation::CounterClockwise);
+        let profile = ProfileOp::new(Tool::Diameter { diameter }, Compensation::Computed, side, direction)
+            .z(-10.0)
+            .tabs(TabSpec::count(count, width))
+            .generate(part)
+            .unwrap_or_else(|err| panic!("{side:?} {direction:?} width {width}: {err}"));
+        assert_eq!(profile.tabs().len(), count, "{:?}", profile.tabs());
+        for tab in profile.tabs() {
+            assert!(tab.width() + 1e-6 >= width + diameter, "gap {} is shorter than bridge {width} plus tool {diameter}", tab.width());
+            if exact_line_gap {
+                near(tab.width(), width + diameter, 1e-6);
+            }
+        }
+        let runs = uncut_runs(part, &profile, diameter * 0.5, matches!(side, ProfileSide::On), -10.0, width);
+        assert_eq!(runs.len(), count, "width {width} {side:?} bridges {runs:?} tabs {:?}", profile.tabs());
+        for run in &runs {
+            assert!(*run + 1e-6 >= width, "uncut bridge {run} is shorter than {width}");
+        }
+    }
+
+    fn circle_contour(r: f64) -> Contour {
+        let east = Point::new(r, 0.0).unwrap();
+        let west = Point::new(-r, 0.0).unwrap();
+        Contour::try_new(
+            vec![
+                Segment::Arc(campanion_geom::Arc::from_bulge(east, west, 1.0).unwrap()),
+                Segment::Arc(campanion_geom::Arc::from_bulge(west, east, 1.0).unwrap()),
+            ],
+            true,
+            &Tolerance::default(),
+        )
+        .unwrap()
+    }
+
+    /// Length of each full-depth region where the cutter misses the part edge.
+    fn uncut_runs(part: &Contour, profile: &Profile, radius: f64, on_edge: bool, cut_z: f64, width: f64) -> Vec<f64> {
+        let cuts = full_depth_cuts(profile, cut_z);
+        let total = part.length().unwrap();
+        let step = (width * 0.25).clamp(0.05, 0.5);
+        let n = ((total / step).ceil() as usize).max(8);
+        let s_at = |i: usize| total * (i as f64) / (n as f64);
+        let bridged = |s: f64| !kerf_is_cut(part, s, &cuts, radius, on_edge);
+        let flags: Vec<bool> = (0..=n).map(|i| bridged(s_at(i))).collect();
+        if flags.iter().all(|flag| *flag) {
+            return vec![total];
+        }
+        // A bridge may cross the seam of a closed contour. The sample at 0 and the sample at the end are the same point.
+        let wrap = part.is_closed() && flags[0] && flags[n];
+        let mut runs = Vec::new();
+        let mut i = 0;
+        if wrap {
+            while i <= n && flags[i] {
+                i += 1;
+            }
+        }
+        while i <= n {
+            if !flags[i] {
+                i += 1;
+                continue;
+            }
+            let start_i = i;
+            while i <= n && flags[i] {
+                i += 1;
+            }
+            let end_i = i - 1;
+            let s0 = if start_i == 0 { 0.0 } else { bridged_edge(&bridged, s_at(start_i - 1), s_at(start_i)) };
+            let s1 = if end_i >= n { total } else { bridged_edge(&bridged, s_at(end_i + 1), s_at(end_i)) };
+            let mut len = s1 - s0;
+            if wrap && end_i >= n {
+                let mut k = 0;
+                while k <= n && flags[k] {
+                    k += 1;
+                }
+                let prefix = if k == 0 || k > n { 0.0 } else { bridged_edge(&bridged, s_at(k), s_at(k - 1)) };
+                len = (total - s0) + prefix;
+            }
+            if len > 1e-3 {
+                runs.push(len);
+            }
+        }
+        runs
+    }
+
+    fn bridged_edge(bridged: &impl Fn(f64) -> bool, outside: f64, inside: f64) -> f64 {
+        let mut lo = outside;
+        let mut hi = inside;
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if bridged(mid) { hi = mid } else { lo = mid }
+        }
+        hi
+    }
+
+    fn kerf_is_cut(part: &Contour, s: f64, cuts: &[Segment], radius: f64, on_edge: bool) -> bool {
+        let p = curve::point_at_length(part, s).unwrap();
+        let centre = if on_edge {
+            p
+        } else {
+            let tangent = curve::tangent_at_length(part, s).unwrap();
+            let left = curve::left_normal(tangent).unwrap();
+            Point::new(p.x() - left.x() * radius, p.y() - left.y() * radius).unwrap()
+        };
+        let limit = radius + 1e-9;
+        cuts.iter().any(|seg| seg.distance_to_point(centre) <= limit)
+    }
+
+    fn full_depth_cuts(profile: &Profile, z: f64) -> Vec<Segment> {
+        let mut cuts = Vec::new();
+        let mut cursor: Option<Point3> = None;
+        for mv in profile.toolpath().moves() {
+            match *mv {
+                Move::Linear { to, kind: CutKind::Cut } if cursor.is_some_and(|from| at_cut_z(from, z) && at_cut_z(to, z)) => {
+                    let from = cursor.unwrap();
+                    let a = Point::new(from.x(), from.y()).unwrap();
+                    let b = Point::new(to.x(), to.y()).unwrap();
+                    if a.distance(b) > 1e-12 {
+                        cuts.push(Segment::Line(Line::new(a, b).unwrap()));
+                    }
+                }
+                Move::Arc { to, centre, ccw, kind: CutKind::Cut } if cursor.is_some_and(|from| at_cut_z(from, z) && at_cut_z(to, z)) => {
+                    let from = cursor.unwrap();
+                    let start = Point::new(from.x(), from.y()).unwrap();
+                    let end = Point::new(to.x(), to.y()).unwrap();
+                    let center = Point::new(centre.x(), centre.y()).unwrap();
+                    if let Some(seg) = cut_arc(start, end, center, ccw) {
+                        cuts.push(seg);
+                    }
+                }
+                _ => {}
+            }
+            if let Some(to) = move_end(*mv) {
+                cursor = Some(to);
+            }
+        }
+        cuts
+    }
+
+    fn at_cut_z(point: Point3, z: f64) -> bool {
+        (point.z() - z).abs() <= 1e-6
+    }
+
+    fn cut_arc(start: Point, end: Point, centre: Point, ccw: bool) -> Option<Segment> {
+        let radius = start.distance(centre);
+        if radius <= 1e-12 || start.distance(end) <= 1e-8 {
+            return None;
+        }
+        let a0 = (start.y() - centre.y()).atan2(start.x() - centre.x());
+        let a1 = (end.y() - centre.y()).atan2(end.x() - centre.x());
+        let turn = if ccw { (a1 - a0).rem_euclid(std::f64::consts::TAU) } else { (a0 - a1).rem_euclid(std::f64::consts::TAU) };
+        let sweep = if ccw { turn } else { -turn };
+        if sweep.abs() < 1e-12 {
+            return None;
+        }
+        campanion_geom::Arc::new(centre, radius, a0, sweep).ok().map(Segment::Arc)
+    }
+
+    #[test]
     fn self_intersecting_contour_does_not_panic() {
         let p = |x, y| Point::new(x, y).unwrap();
         let edge = |a, b| Segment::Line(Line::new(a, b).unwrap());
@@ -1689,7 +2259,7 @@ mod tests {
             l_notch in proptest::bool::ANY,
             climb in proptest::bool::ANY,
         ) {
-            proptest::prop_assume!(count as f64 * width < 0.35 * 2.0 * (w + h));
+            proptest::prop_assume!(count as f64 * (width + diameter) < 0.5 * 2.0 * (w + h));
             let part = if l_notch {
                 let notch = (w.min(h) * 0.4).clamp(8.0, 24.0);
                 l_shape(w, h, notch)
