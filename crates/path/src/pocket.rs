@@ -19,7 +19,7 @@
 //! Corner clean-up is not implemented. [`PocketOp::corner_cleanup`] makes [`PocketOp::generate`]
 //! return [`crate::PathError::NotSupported`].
 
-use campanion_geom::{Arc, BoundingBox, Containment, Contour, Point, Region, Segment, Tolerance, Vec2, offset_region};
+use campanion_geom::{Arc, BoundingBox, Containment, Contour, Point, Region, Segment, Tolerance, Vec2, cmp_float_key, offset_region};
 
 use crate::check::{self, finite, non_negative, positive};
 use crate::tool::Tool;
@@ -460,7 +460,7 @@ fn clip_line(
             params.extend(line_hits(anchor, dir, s0, s1, hole, tolerance)?);
         }
     }
-    params.sort_by(f64::total_cmp);
+    sort_params(&mut params);
     let eps = linear_eps(tolerance);
     let unique = dedup_sorted(&params, eps);
     let mut spans = Vec::new();
@@ -670,6 +670,14 @@ fn regions_bounds(regions: &[Region]) -> Result<BoundingBox> {
         });
     }
     bounds.ok_or_else(|| invalid("offset produced no region"))
+}
+
+/// Ascending parameters. Keys inside the float-key band keep the earlier hit.
+fn sort_params(params: &mut Vec<f64>) {
+    let mut indexed: Vec<(usize, f64)> = params.iter().copied().enumerate().collect();
+    indexed.sort_by(|left, right| cmp_float_key(left.1, right.1).then(left.0.cmp(&right.0)));
+    params.clear();
+    params.extend(indexed.into_iter().map(|(_, value)| value));
 }
 
 fn dedup_sorted(values: &[f64], eps: f64) -> Vec<f64> {

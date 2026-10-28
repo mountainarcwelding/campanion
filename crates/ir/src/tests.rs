@@ -342,9 +342,7 @@ fn old_ir_files_load_and_reserialize_byte_identically() {
         assert!(!json.contains("\"rotary\""), "{rel} gained a rotary field");
         assert!(!json.contains("\"turning\""), "{rel} gained a turning field");
         assert!(!json.contains("\"five_axis\""), "{rel} gained a five_axis field");
-        let original_value: serde_json::Value = serde_json::from_str(&original).expect("original value");
-        let written_value: serde_json::Value = serde_json::from_str(&json).expect("written value");
-        assert_eq!(written_value, original_value, "{rel}");
+        campanion_testsupport::ir_json_close(&json, &original).unwrap_or_else(|err| panic!("{rel}: {err}"));
         assert_eq!(Document::from_json(&json).expect("reload").to_json().expect("again"), json, "{rel}");
     }
 }

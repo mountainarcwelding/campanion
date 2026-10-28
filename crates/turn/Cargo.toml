@@ -18,4 +18,5 @@ campanion-ir.workspace = true
 campanion-mesh.workspace = true
 
 [dev-dependencies]
+campanion-testsupport.workspace = true
 proptest = { version = "1.12", default-features = false, features = ["std"] }

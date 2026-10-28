@@ -1,5 +1,7 @@
 //! Parallel (raster) finishing. Each pass is a straight tool-tip polyline on a [`crate::DropCutter`].
 
+use campanion_geom::{max_beats, min_beats};
+
 use crate::{DropCutter, Result, Vec3, invalid};
 
 /// Most raster lines in one finish. A hostile stepover fails instead of allocating without bound.
@@ -270,35 +272,60 @@ fn split_at(dc: &DropCutter, points: &[Vec3], start: usize, end: usize, a: Vec3,
 }
 
 fn farthest_over(points: &[Vec3], start: usize, end: usize, a: Vec3, b: Vec3, tolerance: f64) -> Option<usize> {
-    let mut max_dev = tolerance;
-    let mut found = None;
+    let mut best: Option<(usize, f64)> = None;
     for index in (start + 1)..end {
-        let dev = points.get(index).map(|point| z_deviation(*point, a, b)).unwrap_or(0.0);
-        if dev > max_dev {
-            max_dev = dev;
-            found = Some(index);
+        let Some(point) = points.get(index) else {
+            continue;
+        };
+        let dev = z_deviation(*point, a, b);
+        if !(dev > tolerance) {
+            continue;
+        }
+        let xy = (point.x, point.y);
+        let take = match best {
+            None => true,
+            Some((best_index, best_dev)) => {
+                let Some(best_point) = points.get(best_index) else {
+                    continue;
+                };
+                max_beats(dev, xy, index, best_dev, (best_point.x, best_point.y), best_index)
+            }
+        };
+        if take {
+            best = Some((index, dev));
         }
     }
-    found
+    best.map(|(index, _)| index)
 }
 
 fn nearest_to_mid(points: &[Vec3], start: usize, end: usize) -> Result<usize> {
     let (a, b) = ends(points, start, end)?;
     let mid_x = (a.x + b.x) * 0.5;
     let mid_y = (a.y + b.y) * 0.5;
-    let mut best_index = None;
-    let mut best_dist = f64::INFINITY;
+    let mut best: Option<(usize, f64)> = None;
     for index in (start + 1)..end {
         let Some(point) = points.get(index) else {
             continue;
         };
         let dist = (point.x - mid_x).hypot(point.y - mid_y);
-        if dist < best_dist {
-            best_dist = dist;
-            best_index = Some(index);
+        if !dist.is_finite() {
+            continue;
+        }
+        let xy = (point.x, point.y);
+        let take = match best {
+            None => true,
+            Some((best_index, best_dist)) => {
+                let Some(best_point) = points.get(best_index) else {
+                    continue;
+                };
+                min_beats(dist, xy, index, best_dist, (best_point.x, best_point.y), best_index)
+            }
+        };
+        if take {
+            best = Some((index, dist));
         }
     }
-    best_index.ok_or_else(|| invalid("raster segment has no interior point"))
+    best.map(|(index, _)| index).ok_or_else(|| invalid("raster segment has no interior point"))
 }
 
 /// Dyadic samples of chord `a`–`b` stay within `tolerance` of [`DropCutter::tip_z_or`].

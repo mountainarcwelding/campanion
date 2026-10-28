@@ -10,7 +10,9 @@
 //! leading rapid is replaced by that link. After the last feature the tool retracts to clearance.
 //! [`OrderedCuts::rapid_length`] is the sum of every rapid in the linked toolpath.
 
-use campanion_geom::{BoundingBox, Containment, Contour, Point, Segment, Tolerance};
+use std::cmp::Ordering;
+
+use campanion_geom::{BoundingBox, Containment, Contour, Point, Segment, Tolerance, cmp_float_key, min_beats};
 
 use crate::Result;
 use crate::check::{self, finite};
@@ -281,7 +283,12 @@ fn nearest(group: &[usize], mut from: Point, entries: &[Point], exits: &[Point])
             }
             let replace = match best {
                 None => true,
-                Some((_, best_index, best_dist)) => dist + 1e-12 < best_dist || ((dist - best_dist).abs() <= 1e-12 && index < best_index),
+                Some((_, best_index, best_dist)) => {
+                    let Some(best_entry) = entries.get(best_index) else {
+                        return Err(check::invalid("feature index is out of range"));
+                    };
+                    min_beats(dist, (entry.x(), entry.y()), index, best_dist, (best_entry.x(), best_entry.y()), best_index)
+                }
             };
             if replace {
                 best = Some((pos, index, dist));
@@ -316,7 +323,7 @@ fn two_opt(order: &mut [usize], origin: Point, entries: &[Point], exits: &[Point
                 let before = tour_length(order, origin, entries, exits);
                 order[i..=j].reverse();
                 let after = tour_length(order, origin, entries, exits);
-                if after + 1e-9 < before {
+                if cmp_float_key(after, before) == Ordering::Less {
                     improved = true;
                 } else {
                     order[i..=j].reverse();
@@ -621,5 +628,35 @@ mod tests {
         assert!(none.toolpath().is_empty());
         near(none.rapid_length(), 0.0);
         assert!(none.sequence().is_empty());
+    }
+
+    #[test]
+    fn equal_distance_neighbours_follow_rounded_position_not_ulp_noise() {
+        let tol = Tolerance::default();
+        let start = Point::new(0.0, 0.0).unwrap();
+        // Squares centred on the axes. Entries are equidistant; the low corner is first.
+        let low = square(0.0, -20.0, 2.0, 2.0);
+        let high = square(0.0, 20.0, 2.0, 2.0);
+        let ordered = order_and_link(&[feature(&high, -1.0), feature(&low, -1.0)], start, 5.0, &tol).unwrap();
+        assert_eq!(ordered.sequence(), &[1, 0]);
+
+        let left = square(-20.0, 0.0, 2.0, 2.0);
+        let right = square(20.0, 0.0, 2.0, 2.0);
+        let ordered = order_and_link(&[feature(&right, -1.0), feature(&left, -1.0)], start, 5.0, &tol).unwrap();
+        assert_eq!(ordered.sequence(), &[1, 0]);
+
+        // Six ulps closer is still the same distance, so the high square must not jump ahead.
+        let mut y = 20.0_f64;
+        for _ in 0..6 {
+            y = y.next_down();
+        }
+        let nudged = square(0.0, y, 2.0, 2.0);
+        let ordered = order_and_link(&[feature(&nudged, -1.0), feature(&low, -1.0)], start, 5.0, &tol).unwrap();
+        assert_eq!(ordered.sequence(), &[1, 0]);
+
+        // A clearly nearer square stays first even though its corner sorts higher.
+        let near = square(0.0, 2.0, 2.0, 2.0);
+        let ordered = order_and_link(&[feature(&low, -1.0), feature(&near, -1.0)], start, 5.0, &tol).unwrap();
+        assert_eq!(ordered.sequence(), &[1, 0]);
     }
 }

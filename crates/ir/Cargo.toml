@@ -19,5 +19,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 campanion-geom.workspace = true
+campanion-testsupport.workspace = true
 # `std` only: the default set pulls `fork`/`timeout` (process spawning), which these tests do not need.
 proptest = { version = "1.12", default-features = false, features = ["std"] }

@@ -25,6 +25,7 @@ campanion-path = { path = "crates/path" }
 campanion-ir = { path = "crates/ir" }
 campanion-post = { path = "crates/post" }
 campanion-turn = { path = "crates/turn" }
+campanion-testsupport = { path = "crates/testsupport" }
 campanion-cli = { path = "crates/cli" }
 
 [workspace.lints.rust]

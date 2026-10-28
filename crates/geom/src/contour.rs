@@ -129,6 +129,38 @@ impl Contour {
         let segments = self.segments.iter().rev().map(|seg| seg.reversed()).collect();
         Self { segments, closed: self.closed }
     }
+
+    /// Rotate a closed contour onto a start vertex that does not follow libm noise.
+    ///
+    /// The vertex with the least (x, y), after rounding each coordinate to 1e-6 mm, wins.
+    /// Equal rounded coordinates keep the earlier vertex. An open contour is unchanged.
+    pub fn with_stable_start(&self) -> Self {
+        if !self.closed || self.segments.len() < 2 {
+            return self.clone();
+        }
+        let mut best = 0usize;
+        for index in 1..self.segments.len() {
+            let (Some(here), Some(champ)) = (self.segments.get(index), self.segments.get(best)) else {
+                continue;
+            };
+            let here_xy = (here.start().x(), here.start().y());
+            let champ_xy = (champ.start().x(), champ.start().y());
+            if crate::cmp_xy_rounded(here_xy, champ_xy).then(index.cmp(&best)) == std::cmp::Ordering::Less {
+                best = index;
+            }
+        }
+        if best == 0 {
+            return self.clone();
+        }
+        let mut segments = Vec::with_capacity(self.segments.len());
+        if let Some(tail) = self.segments.get(best..) {
+            segments.extend_from_slice(tail);
+        }
+        if let Some(head) = self.segments.get(..best) {
+            segments.extend_from_slice(head);
+        }
+        Self { segments, closed: self.closed }
+    }
 }
 
 pub(crate) fn ensure_connected(end: Point, start: Point, tol: f64) -> Result<()> {
@@ -248,5 +280,65 @@ mod tests {
         let err = Contour::try_new(vec![a, b], false, &Tolerance::default()).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("do not connect"), "{text}");
+    }
+
+    fn closed_poly(points: &[(f64, f64)]) -> Contour {
+        let p = |x, y| Point::new(x, y).unwrap();
+        let line = |a, b| Segment::Line(Line::new(a, b).unwrap());
+        let mut segs = Vec::new();
+        for pair in points.windows(2) {
+            segs.push(line(p(pair[0].0, pair[0].1), p(pair[1].0, pair[1].1)));
+        }
+        let (Some(first), Some(last)) = (points.first(), points.last()) else {
+            panic!("polygon needs vertices");
+        };
+        segs.push(line(p(last.0, last.1), p(first.0, first.1)));
+        Contour::try_new(segs, true, &Tolerance::default()).unwrap()
+    }
+
+    #[test]
+    fn stable_start_follows_the_low_vertex_under_mirror_and_ulp_noise() {
+        // Diamond. The west vertex is the unique rounded-lex start, whichever vertex is first.
+        let diamond = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)];
+        for shift in 0..diamond.len() {
+            let mut pts = diamond.to_vec();
+            pts.rotate_left(shift);
+            let start = closed_poly(&pts).with_stable_start().segments().first().unwrap().start();
+            assert!((start.x() + 1.0).abs() < 1e-12 && start.y().abs() < 1e-12, "shift {shift}");
+        }
+        // Five ulps toward zero still round to the same micrometre and still beat the mirrors.
+        let mut west_x = -1.0_f64;
+        for _ in 0..5 {
+            west_x = west_x.next_up();
+        }
+        let noisy = [(1.0, 0.0), (0.0, 1.0), (west_x, 0.0), (0.0, -1.0)];
+        for bump in -5_i32..=5 {
+            let mut moved = noisy;
+            let mut west = west_x;
+            for _ in 0..bump.unsigned_abs() {
+                west = if bump > 0 { west.next_up() } else { west.next_down() };
+                for pt in &mut moved {
+                    pt.0 = if bump > 0 { pt.0.next_up() } else { pt.0.next_down() };
+                }
+            }
+            for shift in 0..moved.len() {
+                let mut pts = moved;
+                pts.rotate_left(shift);
+                let start = closed_poly(&pts).with_stable_start().segments().first().unwrap().start();
+                assert!((start.x() - west).abs() < 1e-15, "shift {shift} bump {bump} start {}", start.x());
+            }
+        }
+        // A vertex a tenth of a millimetre lower wins even when it is last.
+        let clear = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (-0.1, 0.5)];
+        let start = closed_poly(&clear).with_stable_start().segments().first().unwrap().start();
+        assert!((start.x() + 0.1).abs() < 1e-12);
+
+        let open = Contour::try_new(
+            vec![Segment::Line(Line::new(Point::new(1.0, 0.0).unwrap(), Point::new(-5.0, 0.0).unwrap()).unwrap())],
+            false,
+            &Tolerance::default(),
+        )
+        .unwrap();
+        assert!((open.with_stable_start().segments()[0].start().x() - 1.0).abs() < 1e-12);
     }
 }

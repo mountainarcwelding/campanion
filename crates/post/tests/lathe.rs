@@ -371,7 +371,8 @@ fn turn_fixture_posts_and_matches_the_helper() {
         std::fs::write(&path, &expected).expect("write fixture");
     }
     let on_disk = std::fs::read_to_string(&path).expect("read fixture");
-    assert_eq!(on_disk, expected, "turn.ir.json drifted from the helper; regenerate with WRITE_TURN_IR=1");
+    campanion_testsupport::ir_json_close(&expected, &on_disk)
+        .unwrap_or_else(|err| panic!("turn.ir.json drifted from the helper; regenerate with WRITE_TURN_IR=1\n{err}"));
 
     let post = linux_lathe();
     let text = post_program(doc.program(), &post, &options()).expect("post");

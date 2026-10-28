@@ -16,6 +16,7 @@ mod point;
 mod polyline;
 mod region;
 mod segment;
+mod tie;
 mod tolerance;
 mod util;
 
@@ -29,6 +30,7 @@ pub use point::{Point, Vec2};
 pub use polyline::{Polyline, Vertex};
 pub use region::{Region, boolean_regions};
 pub use segment::Segment;
+pub use tie::{cmp_float_key, cmp_xy_rounded, float_keys_equal, max_beats, min_beats, select_max_by_key, select_min_by_key};
 pub use tolerance::Tolerance;
 
 /// Crate version from the package manifest.

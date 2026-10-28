@@ -320,25 +320,16 @@ fn feed_has_xy(block: &Value, from: (f64, f64, f64), to: (f64, f64, f64)) -> Res
     Ok(radius > 1.0e-6 || chord > 1.0e-6)
 }
 
-fn assert_same_bytes(actual: &[u8], expected: &[u8]) -> Result<(), String> {
-    if actual == expected {
-        return Ok(());
-    }
-    let shared = actual.len().min(expected.len());
-    let at = (0..shared).find(|index| actual[*index] != expected[*index]).unwrap_or(shared);
-    Err(format!("IR differs at byte {at}: actual {} bytes, golden {} bytes", actual.len(), expected.len()))
-}
-
 #[test]
 fn plunge_entry_ir_matches_golden() -> Result<(), String> {
     let root = workspace_root()?;
     let ngc_path = temp_path("campanion-rough-plunge.ngc");
     let ir_path = temp_path("campanion-rough-plunge.json");
     run_job(&root, "examples/dome_rough.job.json", &ngc_path, &ir_path)?;
-    let actual = std::fs::read(&ir_path).map_err(|err| format!("read ir: {err}"))?;
+    let actual = std::fs::read_to_string(&ir_path).map_err(|err| format!("read ir: {err}"))?;
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/dome_rough.ir.json");
-    let expected = std::fs::read(&golden).map_err(|err| format!("read golden: {err}"))?;
-    assert_same_bytes(&actual, &expected)
+    let expected = std::fs::read_to_string(&golden).map_err(|err| format!("read golden: {err}"))?;
+    campanion_testsupport::ir_json_close(&actual, &expected)
 }
 
 #[test]

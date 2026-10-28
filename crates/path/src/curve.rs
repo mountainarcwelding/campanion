@@ -3,7 +3,7 @@
 //! Arc parameter math follows the same sweep rules as `campanion-geom` (signed sweep, positive
 //! counter-clockwise, angles from +X).
 
-use campanion_geom::{Arc, Contour, Line, Point, Segment, Tolerance, Vec2};
+use campanion_geom::{Arc, Contour, Line, Point, Segment, Tolerance, Vec2, max_beats, min_beats};
 
 use crate::{PathError, Result};
 
@@ -26,7 +26,7 @@ pub(crate) fn closest_location(contour: &Contour, point: Point, tolerance: &Tole
         let distance = at.distance(point);
         let replace = match best {
             None => true,
-            Some((so_far, _)) => distance < so_far,
+            Some((so_far, loc)) => min_beats(distance, (at.x(), at.y()), index, so_far, (loc.point.x(), loc.point.y()), loc.index),
         };
         if replace {
             best = Some((distance, Location { index, t, point: at }));
@@ -37,8 +37,7 @@ pub(crate) fn closest_location(contour: &Contour, point: Point, tolerance: &Tole
 
 /// Midpoint of the longest line. `None` when every edge is an arc or shorter than `min_length`.
 pub(crate) fn longest_line_midpoint(contour: &Contour, min_length: f64) -> Result<Option<Location>> {
-    let mut best_len = min_length;
-    let mut best: Option<Location> = None;
+    let mut best: Option<(f64, Location)> = None;
     for (index, seg) in contour.segments().iter().copied().enumerate() {
         let Segment::Line(line) = seg else {
             continue;
@@ -47,23 +46,26 @@ pub(crate) fn longest_line_midpoint(contour: &Contour, min_length: f64) -> Resul
         if !len.is_finite() {
             return Err(PathError::InvalidInput("segment length is not finite".into()));
         }
-        if len > best_len {
-            best_len = len;
-            best = Some(Location { index, t: 0.5, point: line.start().midpoint(line.end()) });
+        let mid = line.start().midpoint(line.end());
+        let take = match &best {
+            None => campanion_geom::cmp_float_key(len, min_length) == std::cmp::Ordering::Greater,
+            Some((best_len, loc)) => max_beats(len, (mid.x(), mid.y()), index, *best_len, (loc.point.x(), loc.point.y()), loc.index),
+        };
+        if take {
+            best = Some((len, Location { index, t: 0.5, point: mid }));
         }
     }
-    Ok(best)
+    Ok(best.map(|(_, loc)| loc))
 }
 
-/// Vertex with the largest absolute turn. Ties keep the earliest vertex.
+/// Vertex with the largest absolute turn. A tied turn prefers the lower rounded position, then the earlier vertex.
 pub(crate) fn sharpest_corner(contour: &Contour) -> Result<Option<Location>> {
     let segs = contour.segments();
     let n = segs.len();
     if n == 0 {
         return Ok(None);
     }
-    let mut best_turn = -1.0;
-    let mut best: Option<Location> = None;
+    let mut best: Option<(f64, Location)> = None;
     for index in 0..n {
         if !contour.is_closed() && index == 0 {
             continue;
@@ -75,9 +77,13 @@ pub(crate) fn sharpest_corner(contour: &Contour) -> Result<Option<Location>> {
         let incoming = end_tangent_of(prev)?;
         let outgoing = start_tangent_of(here)?;
         let turn = incoming.cross(outgoing).atan2(incoming.dot(outgoing)).abs();
-        if turn > best_turn {
-            best_turn = turn;
-            best = Some(Location { index, t: 0.0, point: here.start() });
+        let at = here.start();
+        let take = match &best {
+            None => true,
+            Some((best_turn, loc)) => max_beats(turn, (at.x(), at.y()), index, *best_turn, (loc.point.x(), loc.point.y()), loc.index),
+        };
+        if take {
+            best = Some((turn, Location { index, t: 0.0, point: at }));
         }
     }
     if best.is_none()
@@ -85,7 +91,7 @@ pub(crate) fn sharpest_corner(contour: &Contour) -> Result<Option<Location>> {
     {
         return Ok(Some(Location { index: 0, t: 0.0, point: first.start() }));
     }
-    Ok(best)
+    Ok(best.map(|(_, loc)| loc))
 }
 
 pub(crate) fn rotate_closed(contour: &Contour, loc: &Location, tolerance: &Tolerance) -> Result<Contour> {
