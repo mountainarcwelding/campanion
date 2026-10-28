@@ -11,7 +11,10 @@
 //!
 //! Stock Z is 0. A depth pass cuts at `z = -pass` (Z is up). For a linked profile, pocket, or
 //! engrave the tool rapids at clearance, rapids down to the job retract height, and then feeds
-//! the plunge or ramp. Those link rapids stay at or above the retract height. After linking, the
+//! the plunge, ramp or helix. A ramp or helix is planned from that retract height when it is
+//! above the stock, so the first descent covers the whole drop and stays at or below the entry
+//! angle. Later passes start at the previous level. The ramp follows the compensated contour.
+//! Those link rapids stay at or above the retract height. After linking, the
 //! operation's process timing is applied: process on and the pierce dwell at the pierce height
 //! before the plunge, and process off and the post delay before the rapid retract to clearance.
 //! The first toolpath, and each later toolpath whose tool id differs from the previous one, starts
@@ -103,8 +106,8 @@ use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, RotarySetup, Vec3};
 use campanion_mesh::Mesh;
 use campanion_path::{
-    ChamferOp, CutKind, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming,
-    ProfileSide, Tool as PathTool, Toolpath, apply_timing,
+    ChamferOp, CutKind, DepthEntry, DepthPlan, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent,
+    ProcessTiming, ProfileSide, Tool as PathTool, Toolpath, apply_timing,
 };
 use campanion_post::PostDef;
 
@@ -898,7 +901,19 @@ fn depth_at_retract(cut: &Cut<'_>, contour: &Contour) -> Result<Toolpath, CliErr
 }
 
 fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> Result<Toolpath, CliError> {
-    let plan = DepthPlan::new(0.0, total, step_down, cut.op.entry());
+    let mut plan = DepthPlan::new(0.0, total, step_down, cut.op.entry());
+    // Linking rapids to the retract height and the entry feed starts there. A ramp or helix
+    // planned from the stock surface would be posted from that higher Z over a length sized
+    // for the stock step, and the first descent would be steeper than angle_deg. Size the
+    // first descent for the whole drop. Later passes already start at the previous level.
+    // A pocket area pass does not come through here: it plunges from the retract height.
+    // A pocket wall finish does, and uses the same entry.
+    if matches!(cut.op.entry(), DepthEntry::Ramp { .. } | DepthEntry::Helix { .. }) {
+        let retract = retract_z(cut.job);
+        if retract > 0.0 {
+            plan = plan.entry_start(retract);
+        }
+    }
     let path = campanion_path::depth_toolpath(contour, &plan, &cut.tolerance).map_err(|err| op_err(cut.op, err))?;
     clearance_retracts(cut, path.moves())
 }

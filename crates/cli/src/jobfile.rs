@@ -12,6 +12,8 @@
 //! XY plane as radians on [`DepthEntry::Ramp`]. A helix stores a unit-scaled `radius` and the
 //! same angle; one turn drops `2π r tan(angle)` millimetres, which is [`DepthEntry::Helix`]'s
 //! pitch. The angle is in `(0, 90]` degrees. The radius is positive and at most 1e6 mm.
+//! `campanion run` sizes the first ramp or helix from the retract height when that height is
+//! above the stock, so the posted descent stays within the angle.
 //!
 //! A STEP source, a path ending in `.step` or `.stp` in any case, must include `face`: a
 //! point `[x, y, z]` on the planar face to cut. Those coordinates are millimetres in model
