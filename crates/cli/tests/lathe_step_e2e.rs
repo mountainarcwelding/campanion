@@ -322,6 +322,61 @@ fn solidcraft_cli() -> Option<PathBuf> {
     None
 }
 
+/// `solidcraft-cli --version`, first line `solidcraft-cli <version>`.
+struct SolidcraftVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    /// SemVer pre-release (`0.25.0-dev`). A build suffix (`0.25.1+githash`) stays stable.
+    pre: bool,
+    label: String,
+}
+
+/// 0.25 and newer on the stable line section this solid. A 0.24.x develop build, and a
+/// pre-release, may still import it as surfaces.
+fn expects_shaft_section(version: &SolidcraftVersion) -> bool {
+    !version.pre && (version.major > 0 || version.minor >= 25)
+}
+
+fn parse_solidcraft_version(text: &str) -> Option<SolidcraftVersion> {
+    let line = text.lines().next()?.trim();
+    let mut words = line.split_whitespace();
+    if words.next() != Some("solidcraft-cli") {
+        return None;
+    }
+    let token = words.next()?;
+    if words.next().is_some() {
+        return None;
+    }
+    let (without_build, _) = token.split_once('+').unwrap_or((token, ""));
+    let (core, pre) = match without_build.split_once('-') {
+        Some((core, pre)) if !core.is_empty() && !pre.is_empty() => (core, true),
+        Some(_) => return None,
+        None => (without_build, false),
+    };
+    let mut numbers = core.split('.');
+    let major = numbers.next()?.parse().ok()?;
+    let minor = numbers.next()?.parse().ok()?;
+    let patch = match numbers.next() {
+        Some(value) => value.parse().ok()?,
+        None => 0,
+    };
+    if numbers.next().is_some() {
+        return None;
+    }
+    Some(SolidcraftVersion { major, minor, patch, pre, label: token.to_string() })
+}
+
+fn solidcraft_version(cli: &Path) -> Result<SolidcraftVersion, String> {
+    let output = Command::new(cli).arg("--version").output().map_err(|err| format!("solidcraft-cli --version: {err}"))?;
+    let stdout = output_text(&output.stdout)?;
+    if !output.status.success() {
+        let stderr = output_text(&output.stderr)?;
+        return Err(format!("solidcraft-cli --version exited {:?}\n{stdout}{stderr}", output.status.code()));
+    }
+    parse_solidcraft_version(&stdout).ok_or_else(|| format!("cannot parse solidcraft-cli --version: {stdout}"))
+}
+
 struct Posted {
     status: Option<i32>,
     stderr: String,
@@ -426,11 +481,37 @@ fn shaft_fillet_fixture_posts_on_three_lathes() -> Result<(), String> {
 }
 
 #[test]
+fn solidcraft_version_gate_requires_0_25_stable() {
+    let stable = parse_solidcraft_version("solidcraft-cli 0.25.1\n").expect("0.25.1");
+    assert_eq!((stable.major, stable.minor, stable.patch, stable.pre), (0, 25, 1, false));
+    assert!(expects_shaft_section(&stable));
+    assert!(expects_shaft_section(&parse_solidcraft_version("solidcraft-cli 0.25.0\n").expect("0.25.0")));
+    assert!(expects_shaft_section(&parse_solidcraft_version("solidcraft-cli 0.26\n").expect("0.26")));
+    assert!(expects_shaft_section(&parse_solidcraft_version("solidcraft-cli 1.0.0\n").expect("1.0")));
+    assert!(expects_shaft_section(&parse_solidcraft_version("solidcraft-cli 0.25.1+githash\n").expect("build")));
+
+    let develop = parse_solidcraft_version("solidcraft-cli 0.24.0\n").expect("0.24.0");
+    assert_eq!((develop.major, develop.minor, develop.patch), (0, 24, 0));
+    assert!(!expects_shaft_section(&develop));
+    assert!(!expects_shaft_section(&parse_solidcraft_version("solidcraft-cli 0.24.99\n").expect("0.24.99")));
+    assert!(!expects_shaft_section(&parse_solidcraft_version("solidcraft-cli 0.25.0-dev\n").expect("pre")));
+    assert!(!expects_shaft_section(&parse_solidcraft_version("solidcraft-cli 0.25.1-rc.1+build\n").expect("rc")));
+
+    assert!(parse_solidcraft_version("solidcraft 0.25.1\n").is_none());
+    assert!(parse_solidcraft_version("solidcraft-cli\n").is_none());
+    assert!(parse_solidcraft_version("solidcraft-cli 0.25.1 extra\n").is_none());
+    assert!(parse_solidcraft_version("solidcraft-cli 0.25.1-\n").is_none());
+    assert!(parse_solidcraft_version("").is_none());
+}
+
+#[test]
 fn shaft_fillet_runs_when_solidcraft_cli_present() -> Result<(), String> {
-    if solidcraft_cli().is_none() {
+    let Some(cli) = solidcraft_cli() else {
         eprintln!("skipping: solidcraft-cli not found");
         return Ok(());
-    }
+    };
+    let version = solidcraft_version(&cli)?;
+    let require_section = expects_shaft_section(&version);
     let job = example_job()?;
     for post in ["haas_lathe", "linuxcnc_lathe", "fanuc_lathe"] {
         let posted = post_job(&format!("real-{post}"), &job, post, None)?;
@@ -441,14 +522,15 @@ fn shaft_fillet_runs_when_solidcraft_cli_present() -> Result<(), String> {
             assert_shaft_profile(&posted.ir).map_err(|err| format!("{post}: {err}"))?;
             continue;
         }
-        // A kernel that cannot build this solid returns a section with no wall between the
-        // end faces. That is not a turned half-profile, and it must stay an error.
+        // A 0.24 develop build imports this solid as surfaces. The section is then only the
+        // end faces and the shoulders, which is not a turned half-profile. 0.25 and newer on
+        // the stable line must section it and post.
         let clear = "the section does not give one half-profile from the axis back to the axis";
-        if posted.stderr.contains(clear) && !posted.stderr.contains("differ by") {
-            eprintln!("skipping posts: solidcraft-cli section is not a half-profile");
+        if !require_section && posted.stderr.contains(clear) && !posted.stderr.contains("differ by") {
+            eprintln!("skipping posts: solidcraft-cli {} section is not a half-profile", version.label);
             return Ok(());
         }
-        return Err(format!("{post} exit {:?} stderr {}", posted.status, posted.stderr));
+        return Err(format!("{post} with solidcraft-cli {} exit {:?} stderr {}", version.label, posted.status, posted.stderr));
     }
     Ok(())
 }
