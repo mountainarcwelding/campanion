@@ -289,12 +289,15 @@ ENDDXF
 }
 
 fn write_executable(path: &Path, body: &str) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::write(path, body).map_err(|err| err.to_string())?;
-    let mut perms = std::fs::metadata(path).map_err(|err| err.to_string())?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).map_err(|err| err.to_string())?;
+    // The executable is copied into place by a child process. A file this process had open for
+    // writing can be inherited by a test running in parallel that forks at that moment, and exec
+    // then fails with ETXTBSY ("Text file busy").
+    let source = path.with_extension("src");
+    std::fs::write(&source, body).map_err(|err| err.to_string())?;
+    let status = std::process::Command::new("install").arg("-m").arg("755").arg(&source).arg(path).status().map_err(|err| err.to_string())?;
+    if !status.success() {
+        return Err(format!("install {} failed: {status}", path.display()));
+    }
     Ok(())
 }
 

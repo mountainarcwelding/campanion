@@ -702,13 +702,14 @@ mod tests {
 
     #[cfg(unix)]
     fn write_cli(dir: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
+        // The executable is copied into place by a child process. A file this process had open for
+        // writing can be inherited by a test running in parallel that forks at that moment, and exec
+        // then fails with ETXTBSY ("Text file busy").
         let path = dir.join("solidcraft-cli");
-        fs::write(&path, body).expect("write fake cli");
-        let mut perms = fs::metadata(&path).expect("cli metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).expect("chmod");
+        let source = dir.join("solidcraft-cli.src");
+        fs::write(&source, body).expect("write fake cli");
+        let status = std::process::Command::new("install").arg("-m").arg("755").arg(&source).arg(&path).status().expect("run install");
+        assert!(status.success(), "install fake cli: {status}");
         path
     }
 
