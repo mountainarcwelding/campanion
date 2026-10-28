@@ -76,6 +76,9 @@ lengths in `units`, positive, and at most 1e6 mm after conversion. The same rule
 job: a diameter is a rotating cutter, a kerf is a kerf-only process, and the path offset is half
 of that value.
 
+`speed` is optional. It is a spindle speed in rpm: positive, finite, and at most 100000. It is not
+scaled by `units`. Omitted, the tool has no speed. An operation may set `speed` too; see below.
+
 `shape` is optional and only meaningful on a diameter tool. `"flat"` is the default. `"ball"` is a
 ball nose whose sphere radius is half the diameter. `{"bull": corner_radius}` is a bull nose;
 `corner_radius` is a length in `units`, greater than 0 and strictly less than the tool radius.
@@ -95,6 +98,7 @@ unique within that operation. The same layer may appear on two operations.
 | `layers` | yes, except surface, rough, waterline and rotary finish | One or more layer names. A surface, a rough, a waterline or a rotary finish rejects `layers`. |
 | `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface, rough, waterline, wrap and rotary finish. |
 | `tool_id` | yes | `id` of a tool in this file. |
+| `speed` | no | Spindle speed in rpm: positive, finite, and at most 100000. Not scaled by `units`. When set, it overrides `tools[].speed` for this operation. Omitted, the tool's speed is used. See [Spindle speed](#spindle-speed) and [Tool changes](#tool-changes). |
 | `depth` | yes, except chamfer, surface, rough, waterline and rotary finish | Positive distance downward, in `units`. Not an absolute Z. On a profile, pocket, drill, engrave or face this is below the stock surface. On a wrap it is below the cylinder surface. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface, a rough, a waterline or a rotary finish rejects `depth`. |
 | `step_down` | yes, except chamfer, surface and rotary finish | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface or a rotary finish rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. On a drill it is the peck depth: when it is less than `depth` the drill pecks, and otherwise the drill feeds to depth in one move. |
 | `dwell` | drill only | Seconds to pause at the bottom of a drill, from 0 to 3600 inclusive. Not scaled by `units`. Rejected on every other kind. Omitted, the drill does not pause. |
@@ -130,6 +134,28 @@ unique within that operation. The same layer may appear on two operations.
 `depth` and `step_down` must be a legal `campanion-path` depth plan: positive, at most 1e6 mm,
 and at most 1024 passes. Five millimetres at a two millimetre step is three passes (2, 4, 5).
 When `finish.step_down` is set, it must satisfy the same rule against `depth`.
+
+### Tool changes
+
+`campanion run` writes a tool-change event (`Event::ToolChange`) at the start of the first
+toolpath and at the start of each later toolpath whose tool id differs from the previous
+toolpath. Consecutive toolpaths that use the same tool get one change. Every mill operation
+kind does this: profile, pocket, face, drill, chamfer, engrave, surface, rough, waterline,
+wrap, rotary finish, and indexed or tilted work. A post that has a `tool_change` template
+emits it (`T{tool} M6` on mach3, linuxcnc and haas; haas also writes `G43 H{tool}`). Lathe
+jobs already write a tool change when the tool id changes; that path is unchanged.
+
+### Spindle speed
+
+`tools[].speed` and `operations[].speed` are rpm. The operation value wins when both are set.
+`run` copies the resolved speed onto each process-on event so a post writes `M3 S{speed}`.
+
+A job that omits both still parses. When `run --post` uses a mill post whose spindle-on
+template substitutes `{speed}` (mach3, linuxcnc, haas, and the other mill posts) and a
+spindle operation (a diameter tool) has no speed, `run` fails with
+`operation <name>: no spindle speed; set tools[].speed or operations[].speed` and writes
+nothing. A kerf (torch) operation does not need a speed. Without `--post`, the test-sink NGC
+does not require one.
 
 Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
 removes that remaining stock.

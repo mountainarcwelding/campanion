@@ -13,7 +13,8 @@
     {
       "id": 1,
       "diameter": 6.0,
-      "shape": "flat"
+      "shape": "flat",
+      "speed": 12000
     }
   ],
   "operations": [

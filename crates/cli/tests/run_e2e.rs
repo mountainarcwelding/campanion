@@ -416,6 +416,9 @@ fn parse_words(code: &str) -> Result<Words, String> {
             'I' | 'J' | 'K' => {
                 parse_number(rest)?;
             }
+            'T' => {
+                parse_code(rest)?;
+            }
             _ => return Err(format!("unsupported word `{word}`")),
         }
     }

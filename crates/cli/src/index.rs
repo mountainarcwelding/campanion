@@ -47,7 +47,8 @@ pub(crate) struct IndexChange {
 ///
 /// Indexed work is still in the machine view, at one [`Self::angle_deg`]. A wrap is already in
 /// the part frame (`part_frame`): [`Self::angle_deg`] is the first motion's rotary angle, and
-/// the last motion may sit at a different angle.
+/// the last motion may sit at a different angle. [`Self::tool_id`] is copied onto each path;
+/// `run` prepends a tool-change event from that id after the paths are framed.
 pub(crate) struct IndexedOp {
     pub angle_deg: f64,
     pub tool_id: Option<u32>,

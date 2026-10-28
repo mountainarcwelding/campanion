@@ -5,6 +5,11 @@
 ### Added
 
 - Lathe `part` option `catch` with a `parts_catcher` size check; `haas_lathe` writes M36 before the part-off plunge and M37 after the retract.
+- Mill jobs accept optional `tools[].speed` and `operations[].speed` (rpm). The operation value wins. `campanion run` copies the resolved speed onto process-on so posts write `M3 S{speed}`.
+
+### Fixed
+
+- `campanion run` writes a tool-change event at the start of the first toolpath and whenever the tool id changes, so mill posts emit `T{tool} M6` (fixes #94). Consecutive toolpaths that share a tool get one change. A spindle operation with no speed fails `run --post` when that post's spindle-on template uses `{speed}`.
 
 ## 0.8.3 — 2026-10-24
 

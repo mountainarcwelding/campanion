@@ -51,6 +51,12 @@
 //! A tool may set `shape`: `"flat"` (the default), `"ball"`, or `{"bull": corner_radius}`.
 //! A shape other than flat is only used by a surface, rough, waterline or rotary finish operation.
 //! Two-dimensional operations keep the flat diameter offset.
+//! A tool may set `speed`, a spindle speed in rpm: positive, finite, and at most 100000. An
+//! operation may set `speed` too; the operation value wins. Omitted, there is no speed. Speed is
+//! not scaled by `units`. `campanion run` copies the resolved speed onto process-on. When the
+//! chosen post's spindle-on template uses `{speed}` and a spindle operation has none, `run` fails
+//! and names the operation. Consecutive toolpaths that share a tool get one tool-change event;
+//! the first toolpath, and each later toolpath whose tool differs, get a change.
 //!
 //! A face clears the bounding box of its layers. `angle_deg` is 0 or 90 and is stored as
 //! radians. `margin` grows that box on every side. `stepover` defaults to three quarters of
@@ -149,6 +155,8 @@ const DEFAULT_ROUGH_GRID_MM: f64 = 0.5;
 const DEFAULT_WATERLINE_GRID_MM: f64 = 0.25;
 const MAX_FEED_MM_PER_MIN: f64 = 1.0e9;
 const MAX_DELAY_S: f64 = 1.0e6;
+/// Spindle speed ceiling, in rpm. The same cap a live-tool rpm uses.
+const MAX_SPINDLE_RPM: f64 = 100_000.0;
 const MAX_TOOLS: usize = 256;
 const MAX_OPERATIONS: usize = 1_024;
 const MAX_LAYERS: usize = 64;
@@ -333,6 +341,8 @@ pub struct JobTool {
     path_tool: PathTool,
     ir: IrTool,
     shape: ToolShape,
+    /// Spindle speed in rpm. `None` when the file omits `tools[].speed`.
+    speed: Option<f64>,
 }
 
 impl JobTool {
@@ -358,6 +368,11 @@ impl JobTool {
     /// Cutter profile. Omitted `shape` is [`ToolShape::Flat`]. A 2D operation ignores this.
     pub fn shape(&self) -> ToolShape {
         self.shape
+    }
+
+    /// Spindle speed in rpm. `None` when the file omits `speed`.
+    pub fn speed(&self) -> Option<f64> {
+        self.speed
     }
 }
 
@@ -484,6 +499,8 @@ impl Finish {
 /// file omitted it. A job with a rotary setup then runs the operation at 0°. A wrap rejects
 /// `index_deg`. [`Self::cylinder_diameter`] is set only on a wrap. [`Self::u_offset`] and
 /// [`Self::v_offset`] are 0 on every other kind.
+/// [`Self::speed`] is the operation spindle speed in rpm. `None` means the file omitted
+/// `operations[].speed`; [`Self::resolved_speed`] then uses the tool's speed.
 /// [`Self::plane`] is the tilted work plane. `None` means the file omitted `plane`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
@@ -531,6 +548,8 @@ pub struct Operation {
     rotary_geom: Option<RotaryFinishGeom>,
     /// Tilted work plane. `None` when the file omits `plane`.
     plane: Option<WorkPlane>,
+    /// Spindle speed in rpm. `None` when the file omits `operations[].speed`.
+    speed: Option<f64>,
 }
 
 /// Work plane for one indexed 3+2 operation.
@@ -768,6 +787,24 @@ impl Operation {
     /// Tilted work plane. `None` when the file omits `plane`.
     pub fn plane(&self) -> Option<WorkPlane> {
         self.plane
+    }
+
+    /// Spindle speed in rpm from the operation. `None` when the file omits `operations[].speed`.
+    pub fn speed(&self) -> Option<f64> {
+        self.speed
+    }
+
+    /// Operation speed if the file sets one, otherwise the tool's speed.
+    pub fn resolved_speed(&self, tool: &JobTool) -> Option<f64> {
+        self.speed.or(tool.speed())
+    }
+
+    /// [`Self::params`] with [`Self::resolved_speed`] copied onto `speed` when it is set.
+    pub fn params_with_speed(&self, tool: &JobTool) -> Result<ProcessParams, campanion_ir::IrError> {
+        match self.resolved_speed(tool) {
+            Some(rpm) => self.params.clone().speed(Some(rpm)),
+            None => Ok(self.params.clone()),
+        }
     }
 }
 
@@ -1197,15 +1234,17 @@ fn parse_tools(value: &Value, scale: f64) -> Result<Vec<JobTool>, JobFileError> 
 
 fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> {
     let map = object(value, "tool").map_err(from_cli)?;
-    check_keys(map, &["id", "diameter", "kerf", "shape"], "tool").map_err(from_cli)?;
+    check_keys(map, &["id", "diameter", "kerf", "shape", "speed"], "tool").map_err(from_cli)?;
     let mut scaled = map.clone();
     scaled.remove("shape");
+    scaled.remove("speed");
     scale_key(&mut scaled, "diameter", scale)?;
     scale_key(&mut scaled, "kerf", scale)?;
     let parsed = parse_tool(&Value::Object(scaled)).map_err(from_cli)?;
     parsed.path_tool().compensation_distance().map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
     let shape = parse_tool_shape(optional(map, "shape"), parsed.ir().diameter(), scale)?;
-    Ok(JobTool { id: parsed.ir().id(), path_tool: parsed.path_tool(), ir: parsed.ir().clone(), shape })
+    let speed = parse_rpm(optional(map, "speed"))?;
+    Ok(JobTool { id: parsed.ir().id(), path_tool: parsed.path_tool(), ir: parsed.ir().clone(), shape, speed })
 }
 
 /// `"flat"`, `"ball"`, or `{"bull": corner_radius}`. The corner radius is a length in file units.
@@ -1294,6 +1333,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "angle_step_deg",
             "direction",
             "plane",
+            "speed",
         ],
         "operation",
     )
@@ -1301,23 +1341,24 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let name_value = require(map, "name").map_err(from_cli)?;
     let name = required_name(as_str(name_value, "operation name").map_err(from_cli)?, "operation name").map_err(from_cli)?;
     let index_deg = parse_index_deg(optional(map, "index_deg"))?;
+    let speed = parse_rpm(optional(map, "speed"))?;
     let kind = parse_kind(map)?;
     let dwell = parse_dwell(optional(map, "dwell"), kind)?;
     let plane = take_plane(&name, map, &kind, index_deg.is_some(), scale)?;
     if matches!(kind, OperationKind::Surface) {
-        return Ok(attach_plane(with_index(finish_surface(name, map, scale, tools)?, index_deg), plane));
+        return Ok(attach_plane(with_speed(with_index(finish_surface(name, map, scale, tools)?, index_deg), speed), plane));
     }
     if matches!(kind, OperationKind::Rough) {
-        return Ok(attach_plane(with_index(finish_rough(name, map, scale, tools)?, index_deg), plane));
+        return Ok(attach_plane(with_speed(with_index(finish_rough(name, map, scale, tools)?, index_deg), speed), plane));
     }
     if matches!(kind, OperationKind::Waterline) {
-        return Ok(attach_plane(with_index(finish_waterline(name, map, scale, tools)?, index_deg), plane));
+        return Ok(attach_plane(with_speed(with_index(finish_waterline(name, map, scale, tools)?, index_deg), speed), plane));
     }
     if matches!(kind, OperationKind::Wrap) {
-        return Ok(attach_plane(finish_wrap(name, map, scale, tools)?, plane));
+        return Ok(attach_plane(with_speed(finish_wrap(name, map, scale, tools)?, speed), plane));
     }
     if matches!(kind, OperationKind::RotaryFinish) {
-        return Ok(attach_plane(finish_rotary(name, map, scale, tools)?, plane));
+        return Ok(attach_plane(with_speed(finish_rotary(name, map, scale, tools)?, speed), plane));
     }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
@@ -1395,6 +1436,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         wrap_geom: None,
         rotary_geom: None,
         plane,
+        speed,
     })
 }
 
@@ -1509,6 +1551,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         wrap_geom: None,
         rotary_geom: None,
         plane: None,
+        speed: None,
     })
 }
 
@@ -1630,6 +1673,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         wrap_geom: None,
         rotary_geom: None,
         plane: None,
+        speed: None,
     })
 }
 
@@ -1750,6 +1794,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         wrap_geom: None,
         rotary_geom: None,
         plane: None,
+        speed: None,
     })
 }
 
@@ -1841,6 +1886,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         wrap_geom: Some(WrapGeom { diameter, u_offset, v_offset }),
         rotary_geom: None,
         plane: None,
+        speed: None,
     })
 }
 
@@ -1958,12 +2004,30 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         wrap_geom: None,
         rotary_geom: Some(RotaryFinishGeom { u_min, u_max, angle_step_deg, travel }),
         plane: None,
+        speed: None,
     })
 }
 
 fn with_index(mut operation: Operation, index_deg: Option<f64>) -> Operation {
     operation.index_deg = index_deg;
     operation
+}
+
+fn with_speed(mut operation: Operation, speed: Option<f64>) -> Operation {
+    operation.speed = speed;
+    operation
+}
+
+/// Spindle rpm. Omitted is `None`. The number is not scaled by `units`.
+fn parse_rpm(value: Option<&Value>) -> Result<Option<f64>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let rpm = as_f64(value, "speed").map_err(from_cli)?;
+    if !(rpm > 0.0 && rpm <= MAX_SPINDLE_RPM) {
+        return Err(JobFileError::invalid("speed must be positive and at most 100000"));
+    }
+    Ok(Some(rpm))
 }
 
 /// `index_deg` is a finite number of degrees. It is not scaled by `units`.
@@ -2899,6 +2963,7 @@ mod tests {
         assert_eq!(diameter.path_tool(), PathTool::Diameter { diameter: 6.0 });
         assert_eq!(diameter.ir().diameter(), Some(6.0));
         assert_eq!(diameter.ir().kerf(), None);
+        assert_eq!(diameter.speed(), None);
         let kerf = job.tool(2).expect("tool 2");
         assert_eq!(kerf.path_tool(), PathTool::Kerf { width: 1.2 });
         assert_eq!(kerf.ir().kerf(), Some(1.2));
@@ -2916,6 +2981,8 @@ mod tests {
         assert!(ops[0].params().pierce_process_on_during_delay());
         assert!(!ops[0].params().post_process_on_during_delay());
         assert_eq!(ops[0].params().pierce_height_z(), None);
+        assert_eq!(ops[0].speed(), None);
+        assert_eq!(ops[0].resolved_speed(diameter), None);
         assert_eq!(ops[0].entry(), DepthEntry::Plunge);
         assert_eq!(ops[1].kind(), OperationKind::Drill);
         assert_eq!(ops[1].entry(), DepthEntry::Plunge);
@@ -2931,6 +2998,73 @@ mod tests {
         let empty = load(&write_job("empty", &envelope("plate.dxf", "[]", "[]"))).expect("empty");
         assert!(empty.tools().is_empty());
         assert!(empty.operations().is_empty());
+    }
+
+    #[test]
+    fn parses_tool_and_operation_speed() {
+        let text = r#"{
+          "format": "campanion-job/1",
+          "source": { "path": "plate.dxf", "hash": "cbf29ce484222325" },
+          "units": "mm",
+          "tools": [
+            { "id": 1, "diameter": 6.0, "speed": 12000 },
+            { "id": 2, "diameter": 3.0, "speed": 8000 }
+          ],
+          "operations": [
+            {
+              "name": "slot",
+              "type": "pocket",
+              "layers": ["SLOT"],
+              "tool_id": 2,
+              "depth": 3.0,
+              "step_down": 1.5,
+              "feeds": { "cut": 1500.0 }
+            },
+            {
+              "name": "outline",
+              "type": "profile",
+              "layers": ["OUTLINE"],
+              "side": "outside",
+              "tool_id": 1,
+              "depth": 6.0,
+              "step_down": 3.0,
+              "speed": 9000,
+              "feeds": { "cut": 1500.0 }
+            }
+          ]
+        }"#;
+        let job = load(&write_job("speed", text)).expect("load");
+        let tool1 = job.tool(1).expect("tool 1");
+        let tool2 = job.tool(2).expect("tool 2");
+        assert_eq!(tool1.speed(), Some(12000.0));
+        assert_eq!(tool2.speed(), Some(8000.0));
+        let ops = job.operations();
+        assert_eq!(ops[0].speed(), None);
+        assert_eq!(ops[0].resolved_speed(tool2), Some(8000.0));
+        assert_eq!(ops[1].speed(), Some(9000.0));
+        assert_eq!(ops[1].resolved_speed(tool1), Some(9000.0));
+        let params = ops[1].params_with_speed(tool1).expect("params");
+        assert_eq!(params.speed_value(), Some(9000.0));
+
+        let ceiling = envelope("plate.dxf", r#"[{"id":1,"diameter":6,"speed":100000}]"#, "[]");
+        load(&write_job("speed-max", &ceiling)).expect("100000 rpm");
+
+        for (label, tools) in [
+            ("zero", r#"[{"id":1,"diameter":6,"speed":0}]"#),
+            ("negative", r#"[{"id":1,"diameter":6,"speed":-1}]"#),
+            ("too-fast", r#"[{"id":1,"diameter":6,"speed":100001}]"#),
+        ] {
+            let err = load(&write_job(label, &envelope("plate.dxf", tools, "[]"))).expect_err(label);
+            assert!(err.to_string().contains("speed must be positive and at most 100000"), "{label}: {err}");
+        }
+
+        let op_job = envelope(
+            "plate.dxf",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"a","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"speed":0,"feeds":{"cut":1}}]"#,
+        );
+        let err = load(&write_job("op-zero", &op_job)).expect_err("op zero");
+        assert!(err.to_string().contains("speed must be positive and at most 100000"), "{err}");
     }
 
     #[test]

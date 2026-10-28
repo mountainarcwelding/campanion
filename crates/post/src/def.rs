@@ -720,6 +720,11 @@ impl PostDef {
         self.decimals.linear
     }
 
+    /// True when the spindle-on template substitutes `{speed}`.
+    pub fn spindle_on_needs_speed(&self) -> bool {
+        self.process.get("spindle").is_some_and(|words| words.on.iter().any(|line| line.contains("{speed}")))
+    }
+
     pub(crate) fn arc_mode(&self) -> ArcMode {
         match self.arcs.mode.as_str() {
             "r" => ArcMode::R,

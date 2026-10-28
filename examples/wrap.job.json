@@ -18,7 +18,8 @@
   "tools": [
     {
       "id": 1,
-      "diameter": 3.0
+      "diameter": 3.0,
+      "speed": 12000
     }
   ],
   "operations": [

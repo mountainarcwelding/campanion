@@ -18,7 +18,8 @@
     {
       "id": 1,
       "diameter": 3.0,
-      "shape": "ball"
+      "shape": "ball",
+      "speed": 12000
     }
   ],
   "operations": [

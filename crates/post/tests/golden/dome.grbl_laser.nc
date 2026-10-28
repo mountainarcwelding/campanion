@@ -4,6 +4,7 @@ G90
 G17
 M4 S0
 (toolpath dome)
+(tool 1)
 G0 X-20 Y-20
 (power missing, using S1000)
 M4 S1000

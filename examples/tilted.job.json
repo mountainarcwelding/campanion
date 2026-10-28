@@ -4,7 +4,7 @@
   "units": "mm",
   "kinematics": "table_table_bc.kin.json",
   "tools": [
-    { "id": 1, "diameter": 6.0 }
+    { "id": 1, "diameter": 6.0, "speed": 12000 }
   ],
   "operations": [
     {
