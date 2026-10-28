@@ -1,6 +1,7 @@
-//! A spindle stays on through one tool's depth passes and operations (GitHub issue #93).
+//! A spindle stays on through one tool's depth passes and operations (refs #93).
 //!
-//! Laser and plasma keep a process-on and process-off at every cut.
+//! Laser and plasma posts cycle every process, including spindle, off before a rapid and on
+//! again before the next feed. A torch process keeps that per-cut cycle in the IR as well.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -330,6 +331,101 @@ fn plasma_still_stops_at_each_cut_before_the_lift() -> Result<(), String> {
     }
     if program.cut_off_z.len() != 2 || program.lifts_after_off != 2 {
         return Err(format!("plasma off z {:?} lifts {}\n{nc}", program.off_z, program.lifts_after_off));
+    }
+    Ok(())
+}
+
+fn is_sequence_word(word: &str) -> bool {
+    word.starts_with('N') && word[1..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// Every G0 is dark, and every feed is lit. At least one dark rapid sits between two cuts.
+fn assert_process_off_before_travel(nc: &str, post: &str) -> Result<(), String> {
+    let mut motion: Option<u8> = None;
+    let mut lit = false;
+    let mut ons = 0usize;
+    let mut offs = 0usize;
+    let mut cuts = 0usize;
+    let mut travels = 0usize;
+    let mut pending = false;
+    for (index, raw) in nc.lines().enumerate() {
+        let line_no = index + 1;
+        let code = strip_comments(raw);
+        if code.is_empty() {
+            continue;
+        }
+        let words: Vec<&str> = code.split_whitespace().filter(|word| !is_sequence_word(word)).collect();
+        if let Some(code) = words.iter().find_map(|word| word_number(word, 'M'))
+            && code.fract() == 0.0
+        {
+            let m = code as u16;
+            let speed = words.iter().find_map(|word| word_number(word, 'S'));
+            if m == 5 {
+                if !lit {
+                    return Err(format!("{post} line {line_no}: M5 while the process is already off\n{raw}"));
+                }
+                lit = false;
+                offs += 1;
+            } else if m == 3 || (m == 4 && speed != Some(0.0)) {
+                lit = true;
+                ons += 1;
+            }
+        }
+        if let Some(code) = words.iter().find_map(|word| word_number(word, 'G'))
+            && code.fract() == 0.0
+            && (0.0..4.0).contains(&code)
+        {
+            motion = Some(code as u8);
+        }
+        let moved = words.iter().any(|word| matches!(word.chars().next(), Some('X' | 'Y' | 'Z')));
+        if !moved {
+            continue;
+        }
+        let mode = motion.ok_or_else(|| format!("{post} line {line_no}: move before a G code\n{raw}"))?;
+        if mode == 0 {
+            if lit {
+                return Err(format!("{post} line {line_no}: G0 while the torch or beam is on\n{nc}"));
+            }
+            if cuts > 0 {
+                pending = true;
+            }
+        } else if matches!(mode, 1..=3) {
+            if !lit {
+                return Err(format!("{post} line {line_no}: cut while the torch or beam is off\n{nc}"));
+            }
+            if pending {
+                travels += 1;
+                pending = false;
+            }
+            cuts += 1;
+        }
+    }
+    if ons < 2 || offs != ons || travels < 1 {
+        return Err(format!("{post}: {ons} starts, {offs} stops, {travels} dark rapids between cuts\n{nc}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn spindle_process_cycles_per_cut_on_plasma_and_laser() -> Result<(), String> {
+    let dir = temp_dir("campanion-spindle-per-cut")?;
+    let hash = write_svg(&dir, "pockets.svg", POCKETS_SVG)?;
+    let job = job_json("pockets.svg", &hash, r#"[{"id":1,"diameter":6.0,"speed":12000}]"#, &pocket_ops(r#"["RING","SQUARE"]"#, ""));
+    for post in ["plasma", "grbl_laser"] {
+        let nc = run_job(&dir, &job, &format!("out-{post}.nc"), Some(post))?;
+        assert_process_off_before_travel(&nc, post)?;
+    }
+    for post in ["mach3", "linuxcnc", "haas", "grbl"] {
+        let nc = run_job(&dir, &job, &format!("out-{post}.nc"), Some(post))?;
+        let program = read_program(&nc, false).map_err(|err| format!("{post}: {err}"))?;
+        let ons = program.events.iter().filter(|event| matches!(event, Ev::On(_))).count();
+        let offs = count(&program.events, &Ev::Off);
+        if ons != 1 || offs != 1 {
+            return Err(format!("{post}: {ons} M3 and {offs} M5, expected 1 and 1\n{nc}"));
+        }
+        if program.off_z.iter().any(|z| *z <= 0.0) {
+            return Err(format!("{post}: M5 at {:?}, expected Z above the stock\n{nc}", program.off_z));
+        }
     }
     Ok(())
 }

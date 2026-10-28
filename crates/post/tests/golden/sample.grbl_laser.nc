@@ -9,15 +9,24 @@ G0 X17 Y30
 (power missing, using S1000)
 M4 S1000
 G3 X17 Y30 I-2 J0 F1000
+M5
 G0 X40 Y28
+(power missing, using S1000)
+M4 S1000
 G1 X60 Y28
 G3 X60 Y32 I0 J2
 G1 X40 Y32
 G3 X40 Y28 I0 J-2
+M5
 G0 X87 Y30
+(power missing, using S1000)
+M4 S1000
 G3 X87 Y30 I-2 J0
+M5
 (toolpath outer)
 G0 X0 Y-3
+(power missing, using S1000)
+M4 S1000
 G2 X-3 Y0 I0 J3
 G1 X-3 Y60
 G2 X0 Y63 I3 J0

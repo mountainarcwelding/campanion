@@ -182,14 +182,17 @@ fn posts_lists_every_builtin() -> Result<(), String> {
 
 #[test]
 fn post_on_committed_ir_matches_run() -> Result<(), String> {
+    // The post fixtures keep a per-cut process cycle for the golden files. `run` holds a spindle
+    // before it writes IR, so this posts the IR that same run just wrote.
     let root = workspace_root()?;
     let job = sample_job(&root)?;
-    let ir = committed_ir(&root)?;
     for id in ["linuxcnc", "grbl"] {
         let from_run_path = temp_path(&format!("campanion-post-match-run-{id}.nc"));
+        let ir_path = temp_path(&format!("campanion-post-match-{id}.ir.json"));
         let from_post_path = temp_path(&format!("campanion-post-match-post-{id}.nc"));
-        run_ok(&["run", &job, "-o", &path_arg(&from_run_path)?, "--post", id])?;
+        run_ok(&["run", &job, "-o", &path_arg(&from_run_path)?, "--ir", &path_arg(&ir_path)?, "--post", id])?;
         let from_run = std::fs::read_to_string(&from_run_path).map_err(|err| format!("{id}: {err}"))?;
+        let ir = path_arg(&ir_path)?;
         let printed = run_ok(&["post", &ir, "--post", id])?;
         let from_post = text(&printed.stdout)?;
         if from_run != from_post {

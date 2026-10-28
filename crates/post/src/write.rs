@@ -203,6 +203,8 @@ struct Writer<'a> {
     thread_feed_on: bool,
     line_no: u32,
     on: Vec<Active>,
+    /// Processes a per-cut post turned off before a rapid. Restored before the next feed.
+    suspended: Vec<Active>,
     thc_phase: ThcPhase,
     last_speed: String,
     last_power: String,
@@ -271,6 +273,7 @@ impl<'a> Writer<'a> {
             thread_feed_on: false,
             line_no: post.line_numbers.start,
             on: Vec::new(),
+            suspended: Vec::new(),
             thc_phase: ThcPhase::Idle,
             last_speed: String::new(),
             last_power: "0".to_string(),
@@ -320,6 +323,7 @@ impl<'a> Writer<'a> {
         self.feed = None;
         self.thread_feed_on = false;
         self.on.clear();
+        self.suspended.clear();
         self.thc_phase = ThcPhase::Idle;
         self.last_speed.clear();
         self.last_power = "0".to_string();
@@ -513,6 +517,13 @@ impl<'a> Writer<'a> {
     }
 
     fn motion(&mut self, motion: &ClMotion) -> Result<()> {
+        if self.per_cut() {
+            if matches!(motion, ClMotion::Rapid { .. }) {
+                self.suspend_processes()?;
+            } else {
+                self.resume_processes()?;
+            }
+        }
         if self.split_next {
             self.split_next = false;
             let posted = self.posted_end(motion_pose(motion))?;
@@ -1516,13 +1527,17 @@ impl<'a> Writer<'a> {
             Event::ProcessOn { process, params } => {
                 let lines = self.process_words(process)?.on.clone();
                 let speed = format_speed(params.speed_value())?;
-                // A spindle that is already running at this speed stays on: another process-on is not a
-                // second start. A different speed writes the on template again (M3 S) and does not stop.
-                // Torch, laser and other processes still emit every on and off so a pierce or a torch cycle
-                // stays per cut.
-                if self.turning.is_none()
+                let key = process_key(process);
+                if self.per_cut() {
+                    self.suspended.retain(|active| active.key != key);
+                }
+                // A hold post leaves a spindle that is already running at this speed on. Another
+                // process-on is not a second start. A different speed writes the on template again
+                // and does not stop. A per_cut post writes every on, including a repeated spindle.
+                if !self.per_cut()
+                    && self.turning.is_none()
                     && matches!(process, ProcessKind::Spindle)
-                    && self.on.iter().any(|active| active.key == process_key(process) && active.speed == speed)
+                    && self.on.iter().any(|active| active.key == key && active.speed == speed)
                 {
                     return Ok(());
                 }
@@ -1539,8 +1554,17 @@ impl<'a> Writer<'a> {
                 )
             }
             Event::ProcessOff { process } => {
+                let key = process_key(process);
+                let suspended = self.suspended.iter().any(|active| active.key == key);
+                let running = self.on.iter().any(|active| active.key == key);
+                // A per-cut rapid already wrote these off lines. The IR stop must not write them again.
+                if suspended && !running {
+                    self.suspended.retain(|active| active.key != key);
+                    return Ok(());
+                }
+                self.suspended.retain(|active| active.key != key);
                 let lines = self.process_words(process)?.off.clone();
-                let active = self.on.iter().find(|on| on.key == process_key(process)).cloned();
+                let active = self.on.iter().find(|on| on.key == key).cloned();
                 let speed = active.as_ref().map(|on| on.speed.clone()).unwrap_or_default();
                 let power = active.as_ref().map(|on| on.power.clone()).unwrap_or_else(|| "0".to_string());
                 self.thc_before_off()?;
@@ -1659,6 +1683,54 @@ impl<'a> Writer<'a> {
     fn note_off(&mut self, process: &ProcessKind) {
         let key = process_key(process);
         self.on.retain(|on| on.key != key);
+    }
+
+    /// True when a running process must turn off before a rapid and on again before the next feed.
+    fn per_cut(&self) -> bool {
+        self.turning.is_none() && self.post.cycles_per_cut()
+    }
+
+    /// Turn running processes off before a rapid. `thc.off` is written first, as on an explicit stop.
+    fn suspend_processes(&mut self) -> Result<()> {
+        if self.on.is_empty() {
+            return Ok(());
+        }
+        self.thc_before_off()?;
+        let active = std::mem::take(&mut self.on);
+        for item in &active {
+            let lines = self.lines_for_key(&item.key, false)?;
+            self.emit_process("process.off", &lines, &item.speed, &item.power)?;
+        }
+        self.suspended.extend(active);
+        Ok(())
+    }
+
+    /// Turn processes suspended for travel back on before a feed. No pierce dwell is added here.
+    fn resume_processes(&mut self) -> Result<()> {
+        if self.suspended.is_empty() {
+            return Ok(());
+        }
+        let active = std::mem::take(&mut self.suspended);
+        for item in active {
+            let lines = self.lines_for_key(&item.key, true)?;
+            self.emit_process("process.on", &lines, &item.speed, &item.power)?;
+            self.last_speed.clone_from(&item.speed);
+            self.last_power.clone_from(&item.power);
+            self.on.push(item);
+        }
+        self.arm_thc();
+        Ok(())
+    }
+
+    fn lines_for_key(&self, key: &str, on: bool) -> Result<Vec<String>> {
+        let Some(words) = self.post.process.get(key).or_else(|| self.post.process.get("other")) else {
+            return Err(invalid(format!("process.{key} has no template")));
+        };
+        Ok(if on { words.on.clone() } else { words.off.clone() })
+    }
+
+    fn emit_process(&mut self, field_name: &str, lines: &[String], speed: &str, power: &str) -> Result<()> {
+        self.templates(field_name, lines, &[("speed", speed), ("power", power), ("program_name", ""), ("date-free!", "")])
     }
 
     fn arm_thc(&mut self) {
@@ -2432,6 +2504,8 @@ impl<'a> Writer<'a> {
     }
 
     fn stop_processes(&mut self) -> Result<()> {
+        // A per-cut rapid already stopped these. The program end must not start them again.
+        self.suspended.clear();
         self.thc_before_off()?;
         let on = std::mem::take(&mut self.on);
         for active in on {

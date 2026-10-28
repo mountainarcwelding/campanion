@@ -3843,6 +3843,10 @@
             "role": "retract"
           },
           {
+            "type": "process_off",
+            "process": "spindle"
+          },
+          {
             "type": "rapid",
             "to": {
               "tip": {
@@ -3925,6 +3929,21 @@
               "rotary": 90.0
             },
             "feed": null
+          },
+          {
+            "type": "process_on",
+            "process": "spindle",
+            "params": {
+              "speed": 12000.0,
+              "power": null,
+              "pierce_delay_s": 0.0,
+              "pierce_process_on_during_delay": true,
+              "post_delay_s": 0.0,
+              "post_process_on_during_delay": false,
+              "pierce_height": null,
+              "cut_height": null,
+              "extra": {}
+            }
           },
           {
             "type": "linear",
@@ -6066,6 +6085,10 @@
             "role": "retract"
           },
           {
+            "type": "process_off",
+            "process": "spindle"
+          },
+          {
             "type": "rapid",
             "to": {
               "tip": {
@@ -6081,10 +6104,6 @@
               "rotary": 90.0
             },
             "feed": null
-          },
-          {
-            "type": "process_off",
-            "process": "spindle"
           }
         ]
       }
