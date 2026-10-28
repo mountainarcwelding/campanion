@@ -8,6 +8,7 @@
 - A ramp or helix entry stays at or below `angle_deg` on every posted descent. The first pass is sized from the retract height, so a ramp that starts above the stock is not the stock step over a length meant for a shorter drop (#91).
 - Profile-document tabs are crossed by feed moves along the compensated contour at `z + height` (lines, arcs and corners), never as a rapid or a chord (fixes #95). A full-depth tab feeds up to the retract height, rapids there, and feeds back down. Profiles rapid to the pierce point at the clearance height and down to the retract height before feeding to depth; the profile document accepts optional `heights`. The verifier rejects an XY rapid below the retract height.
 - Pocket rings stay at most one stepover apart, so the band between an outer wall and an island is cut when it is narrower than two stepovers, and split and leftover regions always get a pass (#90).
+- Pocket area passes honour `entry`: a ramp or helix from the retract height, or an error when that entry does not fit, and a feed between rings at the same depth when the link stays in the pocket (#89).
 
 ### Changed
 

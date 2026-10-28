@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 885814423a4b6e12cef9c43f068f5d9fdf19ba7e043d2f19bbf5554aafa315b7 # shrinks to width = 22.343343428381743, height = 48.828696746338174, kind = 2, diameter = 4.750103730694528, fraction = 0.6464345802283563, island = true, shift_x = 0.0, shift_y = 0.08538001473554664
+cc ceeb2f47ba97eee451d4c6575b287bf34477190d48f14e1c5bba5e342d8ac65a # shrinks to width = 24.0, height = 24.0, kind = 1, diameter = 2.0, fraction = 0.35, island = false, shift_x = 0.0, shift_y = 0.0, angle_deg = 20.0, helix = false
