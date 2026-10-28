@@ -46,17 +46,30 @@ pub enum DepthEntry {
 /// deeper than this plan's total when a roughing link stops short of the floor. A positive tab
 /// height leaves a bridge whose top is `stock_z - (depth - height)`. Passes above that top are
 /// not interrupted. Omitted or zero height lifts every pass to `retract`.
+///
+/// `cutter` is the tool diameter or the kerf. [`TabSpec::width`] is the bridge left on the part.
+/// On a straight edge the tool-centre gap is that width plus `cutter`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DepthTabs {
     spec: TabSpec,
     depth: f64,
     retract: f64,
+    cutter: f64,
+    on_contour: bool,
 }
 
 impl DepthTabs {
     /// `depth` and `retract` are millimetres. `retract` is an absolute Z.
-    pub fn new(spec: TabSpec, depth: f64, retract: f64) -> Self {
-        Self { spec, depth, retract }
+    ///
+    /// `cutter` is the tool diameter or the kerf. Zero stores a tool-centre gap equal to the bridge.
+    pub fn new(spec: TabSpec, depth: f64, retract: f64, cutter: f64) -> Self {
+        Self { spec, depth, retract, cutter, on_contour: false }
+    }
+
+    /// The path already follows the part edge (`side: on`), so tab length is measured there.
+    pub fn on_contour(mut self, on_contour: bool) -> Self {
+        self.on_contour = on_contour;
+        self
     }
 
     pub fn spec(self) -> TabSpec {
@@ -571,7 +584,8 @@ fn prepare_tabs(contour: &Contour, plan: &DepthPlan, tolerance: &Tolerance) -> R
     if op_depth <= 0.0 || op_depth > MAX_MM {
         return Err(check::invalid("tab depth must be positive"));
     }
-    let mut tabs = layout_tabs(contour, requested.spec(), 0.0)?;
+    // Run profiles climb, so the material stays on the right of travel.
+    let mut tabs = layout_tabs(contour, requested.spec(), 0.0, requested.cutter, true, requested.on_contour)?;
     let contour = move_entry_past_tab(contour, &mut tabs, tolerance)?;
     let length = contour.length()?;
     if !length.is_finite() || length <= tolerance.linear() {
@@ -1397,7 +1411,8 @@ mod tests {
     fn tabs_spare_passes_above_the_bridge_and_follow_the_contour() {
         let shape = rect(80.0, 40.0);
         let spec = crate::TabSpec::count(4, 8.0).height(3.0);
-        let plan = DepthPlan::new(0.0, 12.0, 4.0, DepthEntry::Plunge).with_tabs(crate::DepthTabs::new(spec, 12.0, 2.0));
+        // Cutter 0 keeps the tool-centre gap equal to the bridge width.
+        let plan = DepthPlan::new(0.0, 12.0, 4.0, DepthEntry::Plunge).with_tabs(crate::DepthTabs::new(spec, 12.0, 2.0, 0.0));
         let path = depth_toolpath(&shape, &plan, &Tolerance::default()).unwrap();
         let shallow = xy_travel_at(&path, -4.0);
         let mid = xy_travel_at(&path, -8.0);
@@ -1414,7 +1429,7 @@ mod tests {
     fn full_depth_tabs_rapid_at_retract_and_open_contours_reverse() {
         let shape = rect(40.0, 20.0);
         let spec = crate::TabSpec::count(2, 6.0).height(0.0);
-        let plan = DepthPlan::new(0.0, 6.0, 6.0, DepthEntry::Plunge).with_tabs(crate::DepthTabs::new(spec, 6.0, 2.0));
+        let plan = DepthPlan::new(0.0, 6.0, 6.0, DepthEntry::Plunge).with_tabs(crate::DepthTabs::new(spec, 6.0, 2.0, 0.0));
         let path = depth_toolpath(&shape, &plan, &Tolerance::default()).unwrap();
         let _ = xy_travel_at(&path, -6.0);
         let mut saw = false;
@@ -1442,7 +1457,7 @@ mod tests {
         )
         .unwrap();
         let spec = crate::TabSpec::count(2, 5.0).height(2.0);
-        let plan = DepthPlan::new(0.0, 4.0, 2.0, DepthEntry::Plunge).with_tabs(crate::DepthTabs::new(spec, 4.0, 2.0));
+        let plan = DepthPlan::new(0.0, 4.0, 2.0, DepthEntry::Plunge).with_tabs(crate::DepthTabs::new(spec, 4.0, 2.0, 0.0));
         let path = depth_toolpath(&open, &plan, &Tolerance::default()).unwrap();
         // Tab top is -2, so the -2 pass is whole and the -4 pass lifts along that same Z.
         assert!(xy_travel_at(&path, -2.0) > 100.0, "open pass at the tab top");
@@ -1454,13 +1469,14 @@ mod tests {
     fn ramp_and_helix_keep_the_bridge() {
         let shape = rect(60.0, 30.0);
         let spec = crate::TabSpec::count(3, 6.0).height(2.0);
-        let ramp =
-            DepthPlan::new(0.0, 8.0, 8.0, DepthEntry::Ramp { max_angle: 10.0_f64.to_radians() }).with_tabs(crate::DepthTabs::new(spec, 8.0, 2.0));
+        let ramp = DepthPlan::new(0.0, 8.0, 8.0, DepthEntry::Ramp { max_angle: 10.0_f64.to_radians() })
+            .with_tabs(crate::DepthTabs::new(spec, 8.0, 2.0, 0.0));
         let path = depth_toolpath(&shape, &ramp, &Tolerance::default()).unwrap();
         assert!(xy_travel_at(&path, -6.0) > 15.0, "ramp bridge");
         assert!(xy_travel_at(&path, -8.0) > 100.0, "ramp floor");
 
-        let helix = DepthPlan::new(0.0, 8.0, 8.0, DepthEntry::Helix { radius: 2.0, pitch: 4.0 }).with_tabs(crate::DepthTabs::new(spec, 8.0, 2.0));
+        let helix =
+            DepthPlan::new(0.0, 8.0, 8.0, DepthEntry::Helix { radius: 2.0, pitch: 4.0 }).with_tabs(crate::DepthTabs::new(spec, 8.0, 2.0, 0.0));
         let path = depth_toolpath(&shape, &helix, &Tolerance::default()).unwrap();
         assert!(xy_travel_at(&path, -6.0) > 15.0, "helix bridge");
         assert!(path.moves().iter().any(|mv| matches!(mv, Move::Arc { .. })), "helix arc");
@@ -1484,12 +1500,13 @@ mod tests {
         let tab_top = -(depth - 2.0);
         let floor = -depth;
         let tol = Tolerance::default();
-        let mut tabs = super::layout_tabs(&shape, spec, 0.0).unwrap();
+        // Cutter 0 keeps the tool-centre gap equal to the bridge, so the spans below are the part-edge width.
+        let mut tabs = super::layout_tabs(&shape, spec, 0.0, 0.0, true, false).unwrap();
         let contour = super::move_entry_past_tab(&shape, &mut tabs, &tol).unwrap();
 
         let ramp = DepthPlan::new(0.0, depth, depth, DepthEntry::Ramp { max_angle: angle })
             .entry_start(entry_z)
-            .with_tabs(crate::DepthTabs::new(spec, depth, entry_z));
+            .with_tabs(crate::DepthTabs::new(spec, depth, entry_z, 0.0));
         let path = depth_toolpath(&shape, &ramp, &tol).unwrap();
         assert_bridge_and_angle(&path, &contour, &tabs, tab_top, angle, entry_z, &tol);
         let drop = entry_z - tab_top;
@@ -1501,7 +1518,7 @@ mod tests {
         let pitch = std::f64::consts::TAU * radius * angle.tan();
         let helix = DepthPlan::new(0.0, depth, depth, DepthEntry::Helix { radius, pitch })
             .entry_start(entry_z)
-            .with_tabs(crate::DepthTabs::new(spec, depth, entry_z));
+            .with_tabs(crate::DepthTabs::new(spec, depth, entry_z, 0.0));
         let path = depth_toolpath(&shape, &helix, &tol).unwrap();
         assert_bridge_and_angle(&path, &contour, &tabs, tab_top, angle, entry_z, &tol);
         assert!(path.moves().iter().any(|mv| matches!(mv, Move::Arc { .. })), "helix arc");

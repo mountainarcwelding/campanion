@@ -917,8 +917,13 @@ fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> R
         }
     }
     if let Some(spec) = cut.op.tabs() {
+        let cutter = tool_radius(cut)? * 2.0;
+        let on_contour = match cut.op.kind() {
+            OperationKind::Profile { side } => matches!(side, ProfileSide::On),
+            _ => false,
+        };
         // Tab top follows the operation depth, not a roughing link that stops above the floor.
-        plan = plan.with_tabs(DepthTabs::new(spec, cut.op.depth(), retract_z(cut.job)));
+        plan = plan.with_tabs(DepthTabs::new(spec, cut.op.depth(), retract_z(cut.job), cutter).on_contour(on_contour));
     }
     let path = campanion_path::depth_toolpath(contour, &plan, &cut.tolerance).map_err(|err| op_err(cut.op, err))?;
     clearance_retracts(cut, path.moves())

@@ -12,6 +12,10 @@
 - A ramp or helix entry stays at or below `angle_deg` on every posted descent. The first pass is sized from the retract height, so a ramp that starts above the stock is not the stock step over a length meant for a shorter drop (#91).
 - Pocket rings stay at most one stepover apart, so the band between an outer wall and an island is cut when it is narrower than two stepovers (#90).
 
+### Changed
+
+- Tab `width` is the bridge left on the part, measured along the part edge. On a straight edge the tool-centre gap is that width plus the tool diameter. Profile-document tab gaps are wider by the tool diameter than in 0.8.4.
+
 ## 0.8.4 — 2026-10-28
 
 Safety patch. Do not run tabbed profile-document output, or multi-tool `campanion run` output, from v0.8.3 or earlier; regenerate it with 0.8.4.

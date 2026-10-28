@@ -239,7 +239,9 @@ fn profile_converts_to_ir() {
     let pierce = path.pierce().expect("pierce");
     assert_eq!((pierce.x(), pierce.y(), pierce.z()), (profile.pierce().x(), profile.pierce().y(), profile.pierce().z()));
     assert_eq!(path.tabs().len(), 1);
-    assert_eq!(path.tabs()[0].width(), 4.0);
+    // Side on, 6 mm tool: the tool-centre gap is the 4 mm bridge plus the diameter.
+    let gap = path.tabs()[0].width();
+    assert!((gap - 10.0).abs() < 1e-9, "tool-centre gap {gap}");
     assert_eq!(path.tabs()[0].height(), Some(2.0));
 
     let blocks = path.blocks();

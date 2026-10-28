@@ -1,7 +1,8 @@
 //! Tabs on a `campanion run` profile (#95).
 //!
-//! The plate is 100 by 60 with a 30 by 20 notch. Six 10 mm tabs, 3 mm high, are cut with a 6 mm
-//! tool to Z -12. The bridge is crossed at Z -9 along the compensated contour.
+//! The plate is 100 by 60 with a 30 by 20 notch. Six 10 mm bridges, 3 mm high, are cut with a 6 mm
+//! tool to Z -12. The tool-centre gap is the bridge plus the tool diameter. The bridge is crossed
+//! at Z -9 along the compensated contour.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -287,8 +288,9 @@ fn notched_plate_tabs_post_on_three_dialects() -> Result<(), String> {
         assert_no_low_rapid(&moves).map_err(|err| format!("{post}: {err}"))?;
         assert_no_gouge(&moves, notch(), RADIUS).map_err(|err| format!("{post}: {err}"))?;
         let bridge = xy_at(&moves, -9.0);
-        if !(bridge > 55.0 && bridge < 65.0) {
-            return Err(format!("{post}: six 10 mm bridges should travel about 60 mm at Z -9, got {bridge}"));
+        // Six 10 mm bridges with a 6 mm tool: each straight gap is 16 mm, and a corner can add more.
+        if !(bridge > 90.0 && bridge < 180.0) {
+            return Err(format!("{post}: six 10 mm bridges with a 6 mm tool, travel at Z -9 was {bridge}"));
         }
         let floor = xy_at(&moves, -12.0);
         if floor < 250.0 {
@@ -332,7 +334,7 @@ fn passes_above_the_tab_top_are_not_interrupted() -> Result<(), String> {
     if (top - mid).abs() > 1.0 {
         return Err(format!("passes above the tab differ: {top} vs {mid}"));
     }
-    if !(bridge > 55.0 && bridge < 65.0) {
+    if !(bridge > 90.0 && bridge < 180.0) {
         return Err(format!("deep pass bridge length {bridge}"));
     }
     Ok(())
@@ -380,8 +382,9 @@ fn inch_tabs_scale_width_and_bridge_height() -> Result<(), String> {
     let bridge_z = -(0.5 - 0.125) * 25.4;
     let bridge = xy_at(&moves, bridge_z);
     let width = 0.4 * 25.4;
-    if !(bridge > 6.0 * width - 2.0 && bridge < 6.0 * width + 2.0) {
-        return Err(format!("inch bridge length {bridge}, expected about {}", 6.0 * width));
+    let gap = width + 0.25 * 25.4;
+    if !(bridge > 6.0 * gap - 5.0 && bridge < 6.0 * gap + 40.0) {
+        return Err(format!("inch bridge length {bridge}, expected at least {}", 6.0 * gap));
     }
     Ok(())
 }
@@ -543,7 +546,8 @@ fn on_side_tabs_follow_the_part_boundary() -> Result<(), String> {
     let moves = motions(&posted[0].1)?;
     assert_no_low_rapid(&moves)?;
     let bridge = xy_at(&moves, -9.0);
-    if !(bridge > 30.0 && bridge < 36.0) {
+    // Four 8 mm bridges on the line with a 6 mm tool: each tool-centre gap is 14 mm.
+    if !(bridge > 50.0 && bridge < 62.0) {
         return Err(format!("on-contour bridge length {bridge}"));
     }
     let mut prev: Option<&Motion> = None;
