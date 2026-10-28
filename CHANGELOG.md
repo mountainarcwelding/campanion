@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A lathe STEP section keeps a radial end face when a seam pulls it off Z, so `examples/shaft_fillet.lathe.json` runs with solidcraft-cli. It failed with "the two halves of the section differ".
+
 ## 0.8.4 — 2026-10-28
 
 Safety patch. Do not run tabbed profile-document output, or multi-tool `campanion run` output, from v0.8.3 or earlier; regenerate it with 0.8.4.
