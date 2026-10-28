@@ -27,6 +27,9 @@ Direction (2026-10-21):
    SolidCraft's "everything is a command" rule and makes integration easy.
 6. **Verifiable.** Each milestone lands with analytic tests, property tests and a simple
    verifier (gouge/limit checks), not only golden files.
+7. **Code-generation errors come first.** Any code-generation error (wrong G-code or a wrong
+   toolpath, reported by anyone) is fixed, with a regression test that reproduces the report,
+   before work moves on to new features or the next milestone. A solid base comes before reach.
 
 ## Milestones
 
@@ -350,3 +353,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-24: v0.8.3 is the Haas lathe G99 thread feed mode fix, the tailstock operation (H1,
   M21/M22 only) and the tilting B head rename. Parts catcher, bar feeder and steady rest follow in
   v0.8.4; machine limit profiles and sub-spindle brake/orient in v0.8.5.
+- 2026-10-28: New policy (design principle 7): code-generation errors are fixed before new
+  features. The open G-code reports (#89–#95) come before the rest of v0.8.4, safety first (#95
+  tabs, #94 tool change and spindle speed in run jobs).
