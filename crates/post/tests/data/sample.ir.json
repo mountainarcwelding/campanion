@@ -119,10 +119,6 @@
             "role": "cut"
           },
           {
-            "type": "process_off",
-            "process": "spindle"
-          },
-          {
             "type": "rapid",
             "to": {
               "tip": {
@@ -169,21 +165,6 @@
               }
             },
             "feed": null
-          },
-          {
-            "type": "process_on",
-            "process": "spindle",
-            "params": {
-              "speed": 12000.0,
-              "power": null,
-              "pierce_delay_s": 0.0,
-              "pierce_process_on_during_delay": true,
-              "post_delay_s": 0.0,
-              "post_process_on_during_delay": false,
-              "pierce_height": null,
-              "cut_height": null,
-              "extra": {}
-            }
           },
           {
             "type": "linear",
@@ -285,10 +266,6 @@
             "role": "cut"
           },
           {
-            "type": "process_off",
-            "process": "spindle"
-          },
-          {
             "type": "rapid",
             "to": {
               "tip": {
@@ -337,21 +314,6 @@
             "feed": null
           },
           {
-            "type": "process_on",
-            "process": "spindle",
-            "params": {
-              "speed": 12000.0,
-              "power": null,
-              "pierce_delay_s": 0.0,
-              "pierce_process_on_during_delay": true,
-              "post_delay_s": 0.0,
-              "post_process_on_during_delay": false,
-              "pierce_height": null,
-              "cut_height": null,
-              "extra": {}
-            }
-          },
-          {
             "type": "linear",
             "to": {
               "tip": {
@@ -391,10 +353,6 @@
             "sense": "ccw",
             "feed": 1000.0,
             "role": "cut"
-          },
-          {
-            "type": "process_off",
-            "process": "spindle"
           },
           {
             "type": "rapid",
@@ -459,21 +417,6 @@
               }
             },
             "feed": null
-          },
-          {
-            "type": "process_on",
-            "process": "spindle",
-            "params": {
-              "speed": 12000.0,
-              "power": null,
-              "pierce_delay_s": 0.0,
-              "pierce_process_on_during_delay": true,
-              "post_delay_s": 0.0,
-              "post_process_on_during_delay": false,
-              "pierce_height": null,
-              "cut_height": null,
-              "extra": {}
-            }
           },
           {
             "type": "linear",
@@ -657,10 +600,6 @@
             "role": "cut"
           },
           {
-            "type": "process_off",
-            "process": "spindle"
-          },
-          {
             "type": "rapid",
             "to": {
               "tip": {
@@ -675,6 +614,10 @@
               }
             },
             "feed": null
+          },
+          {
+            "type": "process_off",
+            "process": "spindle"
           }
         ]
       }

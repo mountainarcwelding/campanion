@@ -117,6 +117,34 @@ impl Program {
         &self.toolpaths
     }
 
+    /// Replace each toolpath's blocks and re-validate.
+    ///
+    /// `block_lists` is one list per toolpath, in order. Name, tool, feeds and tabs stay.
+    pub(crate) fn map_toolpaths(self, block_lists: Vec<Vec<ClBlock>>) -> Result<Self> {
+        if block_lists.len() != self.toolpaths.len() {
+            return Err(check::invalid("toolpath block lists do not match the program"));
+        }
+        let toolpaths = self
+            .toolpaths
+            .iter()
+            .zip(block_lists)
+            .map(|(path, blocks)| {
+                ClPath::try_new(
+                    path.name().map(str::to_string),
+                    path.tool_id(),
+                    path.compensation(),
+                    path.feeds(),
+                    path.pierce(),
+                    path.tabs().to_vec(),
+                    blocks,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let program = Self { toolpaths, ..self };
+        program.check()?;
+        Ok(program)
+    }
+
     pub fn channel_programs(&self) -> &[ChannelProgram] {
         &self.channel_programs
     }

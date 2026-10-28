@@ -314,14 +314,6 @@
             "role": "lead_out"
           },
           {
-            "type": "process_off",
-            "process": "spindle"
-          },
-          {
-            "type": "dwell",
-            "seconds": 0.1
-          },
-          {
             "type": "rapid",
             "to": {
               "tip": {
@@ -336,6 +328,14 @@
               }
             },
             "feed": null
+          },
+          {
+            "type": "process_off",
+            "process": "spindle"
+          },
+          {
+            "type": "dwell",
+            "seconds": 0.1
           }
         ]
       }

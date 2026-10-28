@@ -189,6 +189,28 @@ fn profile_heights_are_honoured_and_rejected() {
     }
 }
 
+#[test]
+fn spindle_retracts_above_the_stock_before_it_stops() {
+    let ngc = profile_ngc("campanion-spindle-stop.json", None, r#"{"count": 1, "width": 4.0, "height": 1.0}"#, -12.0).expect("ngc");
+    let before = code_before_process_off(&ngc).expect("m5");
+    let z = motion_z(&before).unwrap_or_else(|| panic!("line before M5 is not a move: {before}\n{ngc}"));
+    assert!(before.split_whitespace().any(|word| word == "G0"), "expected G0 before M5, got {before}\n{ngc}");
+    assert!(z > 0.0, "M5 at Z{z}, expected a retract above the stock\n{ngc}");
+}
+
+#[test]
+fn laser_stops_at_the_cut_before_the_lift() {
+    let path = write_cut("campanion-laser-stop.json", "laser", r#"{"id": 1, "name": "beam", "kerf": 0.2}"#, "on", -12.0).expect("write");
+    let path = path.to_str().expect("path");
+    let ngc = success_stdout(&["ngc", "--job", path]).expect("ngc");
+    let before = code_before_process_off(&ngc).expect("m5");
+    let z = motion_z(&before).unwrap_or_else(|| panic!("line before M5 is not a move: {before}\n{ngc}"));
+    assert!(z <= 0.0, "laser M5 at Z{z}, expected the beam off at the cut\n{ngc}");
+    let after = code_after_process_off(&ngc).expect("lift");
+    let lift = motion_z(&after).unwrap_or_else(|| panic!("line after M5 is not a move: {after}\n{ngc}"));
+    assert!(after.split_whitespace().any(|word| word == "G0") && lift > 0.0, "expected a lift after M5, got {after}\n{ngc}");
+}
+
 fn profile_ngc(name: &str, heights: Option<&str>, tabs: &str, z: f64) -> Result<String, String> {
     let path = write_profile(name, heights, tabs, z)?;
     let path = path.to_str().ok_or_else(|| format!("{name}: path is not utf-8"))?;
@@ -225,6 +247,72 @@ fn write_profile(name: &str, heights: Option<&str>, tabs: &str, z: f64) -> Resul
     )
     .map_err(|err| format!("{name}: {err}"))?;
     Ok(path)
+}
+
+fn write_cut(name: &str, process: &str, tool: &str, side: &str, z: f64) -> Result<PathBuf, String> {
+    let path = temp_path(name);
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{
+  "name": "cut",
+  "process": "{process}",
+  "cut_feed": 1500.0,
+  "tool": {tool},
+  "feeds": {{"plunge": 500.0}},
+  "params": {{"power": 0.8, "speed": 18000.0}},
+  "profile": {{
+    "side": "{side}",
+    "direction": "climb",
+    "compensation": "computed",
+    "z": {z},
+    "closed": true,
+    "points": [[0,0],[40,0],[40,20],[0,20]]
+  }}
+}}"#
+        ),
+    )
+    .map_err(|err| format!("{name}: {err}"))?;
+    Ok(path)
+}
+
+fn code_lines(ngc: &str) -> Vec<&str> {
+    ngc.lines().filter(|line| !strip_code(line).is_empty()).collect()
+}
+
+fn strip_code(line: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for ch in line.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+fn is_process_off(line: &str) -> bool {
+    strip_code(line).split_whitespace().any(|word| word == "M5")
+}
+
+fn code_before_process_off(ngc: &str) -> Result<String, String> {
+    let lines = code_lines(ngc);
+    let index = lines.iter().position(|line| is_process_off(line)).ok_or_else(|| format!("no M5\n{ngc}"))?;
+    lines.get(index.wrapping_sub(1)).map(|line| strip_code(line)).ok_or_else(|| format!("M5 is the first code line\n{ngc}"))
+}
+
+fn code_after_process_off(ngc: &str) -> Result<String, String> {
+    let lines = code_lines(ngc);
+    let index = lines.iter().position(|line| is_process_off(line)).ok_or_else(|| format!("no M5\n{ngc}"))?;
+    let next = lines.get(index + 1).ok_or_else(|| format!("nothing after M5\n{ngc}"))?;
+    Ok(strip_code(next))
+}
+
+fn motion_z(code: &str) -> Option<f64> {
+    code.split_whitespace().find_map(|word| word.strip_prefix('Z').and_then(|text| text.parse().ok()))
 }
 
 fn motions(ngc: &str) -> Vec<(bool, f64, f64, f64)> {

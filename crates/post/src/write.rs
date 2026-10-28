@@ -1516,6 +1516,16 @@ impl<'a> Writer<'a> {
             Event::ProcessOn { process, params } => {
                 let lines = self.process_words(process)?.on.clone();
                 let speed = format_speed(params.speed_value())?;
+                // A spindle that is already running at this speed stays on: another process-on is not a
+                // second start. A different speed writes the on template again (M3 S) and does not stop.
+                // Torch, laser and other processes still emit every on and off so a pierce or a torch cycle
+                // stays per cut.
+                if self.turning.is_none()
+                    && matches!(process, ProcessKind::Spindle)
+                    && self.on.iter().any(|active| active.key == process_key(process) && active.speed == speed)
+                {
+                    return Ok(());
+                }
                 let (power, missing) = format_power(self.post, params.power_value())?;
                 self.note_on(process, &speed, &power);
                 self.arm_thc();

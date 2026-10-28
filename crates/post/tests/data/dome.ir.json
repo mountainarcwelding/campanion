@@ -20870,10 +20870,6 @@
             "role": "retract"
           },
           {
-            "type": "process_off",
-            "process": "spindle"
-          },
-          {
             "type": "rapid",
             "to": {
               "tip": {
@@ -20888,6 +20884,10 @@
               }
             },
             "feed": null
+          },
+          {
+            "type": "process_off",
+            "process": "spindle"
           }
         ]
       }

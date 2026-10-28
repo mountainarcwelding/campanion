@@ -104,7 +104,9 @@ pub enum Issue {
         tolerance: f64,
     },
     /// [`Event::ProcessOn`] has no later [`Event::ProcessOff`] for the same process.
-    /// A spindle process also closes when [`Event::SpindleRun`] stops the toolpath's bound spindle.
+    /// A mill spindle may stay open across toolpaths and is reported only at the end of the program
+    /// (`toolpath` is [`None`]). Any other process must close on the toolpath that opened it.
+    /// A spindle also closes when [`Event::SpindleRun`] stops the bound spindle.
     ProcessNotClosed {
         /// Toolpath index, when the process was left open on a toolpath.
         toolpath: Option<usize>,
@@ -218,10 +220,16 @@ pub fn verify_with(program: &Program, options: &VerifyOptions) -> VerifyReport {
     };
     let heights = resolve_heights(program, options, &mut out);
     // The tip carries across toolpaths in program order. The program's first motion still has no start.
+    // A mill spindle does too: depth passes of one tool share one process-on. Turning still closes
+    // the spindle on the toolpath that opened it.
     let mut cursor = None;
+    let mut carry = SpindleCarry { span: program.turning().is_none(), open: Vec::new() };
     for (index, path) in program.toolpaths().iter().enumerate() {
         let bound = program.turning().and_then(|turning| turning.binding_for(index as u32)).map(|binding| binding.spindle());
-        verify_toolpath(index, path, bound, heights, &mut cursor, &mut out);
+        verify_toolpath(index, path, bound, heights, &mut cursor, &mut out, &mut carry);
+    }
+    if carry.span {
+        close_processes(&carry.open, None, None, &mut out);
     }
     for channel_program in program.channel_programs() {
         verify_channel(program.machine(), channel_program, heights, &mut out);
@@ -308,15 +316,41 @@ fn raise_z(max_z: &mut Option<f64>, z: f64) {
     });
 }
 
-fn verify_toolpath(index: usize, path: &ClPath, bound_spindle: Option<&str>, heights: Heights, cursor: &mut Option<Vec3>, out: &mut VerifyReport) {
-    let mut open: Vec<ProcessKind> = Vec::new();
+/// Mill spindles still running when a toolpath ends. Other processes never go in `open`.
+struct SpindleCarry {
+    span: bool,
+    open: Vec<ProcessKind>,
+}
+
+fn verify_toolpath(
+    index: usize,
+    path: &ClPath,
+    bound_spindle: Option<&str>,
+    heights: Heights,
+    cursor: &mut Option<Vec3>,
+    out: &mut VerifyReport,
+    carry: &mut SpindleCarry,
+) {
+    let mut open = if carry.span { std::mem::take(&mut carry.open) } else { Vec::new() };
     for (block_index, block) in path.blocks().iter().enumerate() {
         match block {
             ClBlock::Motion(motion) => verify_cl_motion(index, block_index, motion, cursor, heights, out),
             ClBlock::Event(event) => verify_event(event, bound_spindle, &mut open, out),
         }
     }
-    close_processes(&open, Some(index), None, out);
+    if carry.span {
+        let mut rest = Vec::new();
+        for process in open {
+            if matches!(process, ProcessKind::Spindle) {
+                carry.open.push(process);
+            } else {
+                rest.push(process);
+            }
+        }
+        close_processes(&rest, Some(index), None, out);
+    } else {
+        close_processes(&open, Some(index), None, out);
+    }
 }
 
 fn verify_channel(machine: Option<&Machine>, program: &ChannelProgram, heights: Heights, out: &mut VerifyReport) {
@@ -338,7 +372,13 @@ fn verify_channel(machine: Option<&Machine>, program: &ChannelProgram, heights: 
 
 fn verify_event(event: &Event, bound_spindle: Option<&str>, open: &mut Vec<ProcessKind>, out: &mut VerifyReport) {
     match event {
-        Event::ProcessOn { process, .. } => open.push(process.clone()),
+        Event::ProcessOn { process, .. } => {
+            // A second spindle-on is a new speed, not another start. One process-off closes it.
+            let already = matches!(process, ProcessKind::Spindle) && open.iter().any(|open_process| open_process == process);
+            if !already {
+                open.push(process.clone());
+            }
+        }
         Event::ProcessOff { process } => close_process(open, process),
         // A transfer part-off turns the spindle on and leaves it running. The later stop of the
         // bound spindle is the close. Stopping the other spindle does not.
@@ -1045,7 +1085,51 @@ mod tests {
             ClBlock::Event(Event::SpindleRun { spindle: "sub".into(), rpm: 0.0, reverse: false }),
         ];
         let open_report = verify(&bound_main(other_spindle));
-        assert!(open_report.issues().iter().any(|issue| matches!(issue, Issue::ProcessNotClosed { process: ProcessKind::Spindle, .. })));
+        assert!(
+            open_report
+                .issues()
+                .iter()
+                .any(|issue| matches!(issue, Issue::ProcessNotClosed { process: ProcessKind::Spindle, toolpath: Some(0), .. }))
+        );
+    }
+
+    #[test]
+    fn mill_spindle_left_on_is_reported_at_program_end() {
+        let blocks = vec![
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ];
+        let report = verify(&program_with_path(blocks));
+        assert!(
+            report
+                .issues()
+                .iter()
+                .any(|issue| matches!(issue, Issue::ProcessNotClosed { process: ProcessKind::Spindle, toolpath: None, channel: None }))
+        );
+    }
+
+    #[test]
+    fn a_spindle_speed_change_does_not_need_a_stop_between_the_ons() {
+        let slow = ProcessParams::new().speed(Some(10_000.0)).expect("speed");
+        let fast = ProcessParams::new().speed(Some(16_000.0)).expect("speed");
+        let blocks = vec![
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: slow }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: fast }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(2.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
+        ];
+        let report = verify(&program_with_path(blocks));
+        assert!(report.issues().iter().all(|issue| !matches!(issue, Issue::ProcessNotClosed { .. })), "{:?}", report.issues());
+    }
+
+    #[test]
+    fn mill_spindle_may_cross_toolpaths_when_a_later_path_stops_it() {
+        let on = ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() });
+        let off = ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle });
+        let cut = ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut });
+        let report = verify(&program_with_paths(vec![vec![on, cut.clone()], vec![cut, off]]));
+        assert!(report.issues().iter().all(|issue| !matches!(issue, Issue::ProcessNotClosed { .. })), "{:?}", report.issues());
     }
 
     #[test]

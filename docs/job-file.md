@@ -158,6 +158,7 @@ jobs already write a tool change when the tool id changes; that path is unchange
 
 `tools[].speed` and `operations[].speed` are rpm. The operation value wins when both are set.
 `run` copies the resolved speed onto each process-on event so a post writes `M3 S{speed}`.
+A spindle stays on through that tool's depth passes and later operations — one process-on after the tool change, the new speed without a stop when rpm changes, and one process-off after the retract above the stock at the next tool change or the end of the program — while laser and plasma still turn on and off at each cut.
 
 A job that omits both still parses. When `run --post` uses a mill post whose spindle-on
 template substitutes `{speed}` (mach3, linuxcnc, haas, and the other mill posts) and a

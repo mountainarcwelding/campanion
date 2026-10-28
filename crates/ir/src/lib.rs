@@ -74,6 +74,7 @@ mod process;
 mod program;
 mod rotary;
 mod schema;
+mod spindle;
 mod turning;
 mod verify;
 mod wrap;
@@ -91,6 +92,7 @@ pub use rotary::{
     unwrap_angle,
 };
 pub use schema::json_schema;
+pub use spindle::hold_spindle;
 pub use turning::{Hand, Head, HeadAxis, Insert, InsertShape, Spindle, SpindleSpeed, TurnBinding, TurnInsert, TurnSection, TurnStock, TurningSetup};
 pub use verify::{Bounds, Issue, RefKind, VerifyOptions, VerifyReport, verify, verify_with};
 pub use wrap::{Cylinder, unwrap_pose, wrap_point, wrap_polyline};
