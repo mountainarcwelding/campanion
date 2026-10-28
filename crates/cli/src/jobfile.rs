@@ -139,10 +139,10 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 const MM_PER_INCH: f64 = 25.4;
 const MAX_MM: f64 = 1.0e6;
-/// Default clearance (safe height), in millimetres.
-const DEFAULT_CLEARANCE_MM: f64 = 5.0;
-/// Default retract height, in millimetres.
-const DEFAULT_RETRACT_MM: f64 = 2.0;
+/// Default clearance (safe height), in millimetres. Shared with [`campanion_path::ProfileOp`].
+pub(crate) const DEFAULT_CLEARANCE_MM: f64 = campanion_path::DEFAULT_CLEARANCE_MM;
+/// Default retract height, in millimetres. Shared with [`campanion_path::ProfileOp`].
+pub(crate) const DEFAULT_RETRACT_MM: f64 = campanion_path::DEFAULT_RETRACT_MM;
 /// Face stepover when the file omits it, as a fraction of the tool diameter.
 const FACE_STEPOVER_OF_DIAMETER: f64 = 0.75;
 /// Roughing stepover when the file omits it, as a fraction of the tool diameter.

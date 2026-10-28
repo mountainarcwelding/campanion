@@ -492,11 +492,12 @@ mod tests {
         };
         assert_eq!(to.x(), profile.pierce().x());
         assert_eq!(to.y(), profile.pierce().y());
-        assert!(matches!(moves[on_at + 3], Move::Linear { kind: CutKind::LeadIn, .. }));
+        assert!(moves.iter().skip(on_at).any(|mv| matches!(mv, Move::Linear { kind: CutKind::LeadIn, .. })), "lead-in follows the start");
 
         let off_at = moves.iter().rposition(|mv| matches!(mv, Move::Event(ProcessEvent::Off))).expect("stop");
         assert!(matches!(moves[off_at - 1], Move::Linear { kind: CutKind::LeadOut, .. }));
-        assert!(matches!(moves.last(), Some(Move::Dwell { seconds }) if *seconds == post_delay));
+        assert!(matches!(moves[off_at + 1], Move::Dwell { seconds } if seconds == post_delay));
+        assert!(matches!(moves.last(), Some(Move::Rapid { to }) if (to.z() - crate::DEFAULT_CLEARANCE_MM).abs() < 1e-12));
 
         let lifts = moves.iter().filter(|mv| matches!(mv, Move::Linear { kind: CutKind::Retract, to } if to.z() == 1.5)).count();
         assert!(lifts >= 3, "at least one retract onto each tab, got {lifts}");

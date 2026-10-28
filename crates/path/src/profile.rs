@@ -29,10 +29,13 @@
 //! contour exactly (lines, arcs and corners). Climbing onto the tab and dropping off it is a
 //! vertical feed. The gap is never a rapid and never a chord that leaves the contour. When
 //! `height` is omitted or 0, the tab is the full depth of the material: the tool feeds up to the
-//! stock top (Z 0, or the cut Z if that is higher), rapids at that height, and feeds back down.
+//! retract height, rapids across at that height, and feeds back down.
 //!
-//! The program rapids to the pierce XY at that same safe height, plunges to `z`, and feeds back
-//! to the safe height before process-off. No rapid that changes XY ends below the stock top.
+//! The program rapids to the pierce XY at the clearance height, rapids down to the retract
+//! height, and feeds (plunge) to `z`. After process-off it rapids back to the clearance height.
+//! Clearance defaults to 5 mm and retract to 2 mm, the same defaults as `campanion run`. The
+//! retract height is above the stock top unless the caller sets a lower plane on purpose. No
+//! rapid that changes XY ends below the retract height.
 
 use campanion_geom::{Contour, Orientation, Point, Tolerance, Vec2};
 
@@ -44,8 +47,14 @@ use crate::{PathError, Result};
 /// How many tabs one profile will place.
 const MAX_TABS: usize = 4_096;
 
-/// Stock top for 2.5D profiles. Z is up. Rapids that change XY stay at or above this height.
+/// Stock top for 2.5D profiles. Z is up. A mill retract height has to sit above this.
 const STOCK_TOP_Z: f64 = 0.0;
+
+/// Default clearance height, millimetres. Same value `campanion run` uses when a job omits it.
+pub const DEFAULT_CLEARANCE_MM: f64 = 5.0;
+
+/// Default retract height, millimetres. Above the stock top. Same value `campanion run` uses.
+pub const DEFAULT_RETRACT_MM: f64 = 2.0;
 
 /// Which side of the contour the tool runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,8 +113,8 @@ pub enum TabLayout {
 /// Tabs (bridges) left uncut along the profile.
 ///
 /// A positive [`Self::height`] raises the tool by that amount and feeds along the compensated
-/// contour at the raised Z. `None` or 0 is a full-depth tab: retract to the stock top, rapid at
-/// that height, plunge back.
+/// contour at the raised Z. `None` or 0 is a full-depth tab: feed up to the retract height, rapid
+/// across at that height, and plunge back.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabSpec {
     layout: TabLayout,
@@ -180,6 +189,11 @@ pub struct ProfileOp {
     start: StartPoint,
     tabs: Option<TabSpec>,
     z: f64,
+    /// Rapid plane, millimetres. Defaults to [`DEFAULT_CLEARANCE_MM`].
+    clearance: f64,
+    /// Height of the rapid down onto the part and of a full-depth tab crossing. Defaults to
+    /// [`DEFAULT_RETRACT_MM`].
+    retract: f64,
     tolerance: Tolerance,
 }
 
@@ -197,8 +211,33 @@ impl ProfileOp {
             start: StartPoint::Automatic,
             tabs: None,
             z: 0.0,
+            clearance: DEFAULT_CLEARANCE_MM,
+            retract: DEFAULT_RETRACT_MM,
             tolerance: Tolerance::default(),
         }
+    }
+
+    /// Clearance and retract heights, millimetres.
+    ///
+    /// The program rapids to the pierce XY at `clearance`, rapids down to `retract` when that is
+    /// lower, and feeds to the cut. A full-depth tab crosses at `retract`. `clearance` must be
+    /// finite and at least `retract`. `retract` must be finite and at least 0. A mill profile
+    /// should keep `retract` above the stock top; the profile document rejects a retract that is
+    /// not. Defaults are [`DEFAULT_CLEARANCE_MM`] and [`DEFAULT_RETRACT_MM`] when this is not called.
+    pub fn heights(mut self, clearance: f64, retract: f64) -> Self {
+        self.clearance = clearance;
+        self.retract = retract;
+        self
+    }
+
+    /// Rapid plane, millimetres, before validation.
+    pub fn clearance(&self) -> f64 {
+        self.clearance
+    }
+
+    /// Retract height, millimetres, before validation.
+    pub fn retract(&self) -> f64 {
+        self.retract
     }
 
     pub fn allowance(mut self, allowance: f64) -> Self {
@@ -262,6 +301,7 @@ impl ProfileOp {
         if contour.segments().len() > campanion_geom::MAX_SEGMENTS {
             return Err(invalid(format!("too many segments: {} > {}", contour.segments().len(), campanion_geom::MAX_SEGMENTS)));
         }
+        let _heights = approach_heights(self.clearance, self.retract)?;
         let z = finite(self.z, "z")?;
         let overcut = non_negative(self.overcut, "overcut")?;
         if overcut > 0.0 && !contour.is_closed() {
@@ -533,10 +573,14 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     let mut moves = Vec::new();
     let pierce_xy = lead_in_point(start, travel, waste_left, op.lead_in)?;
     let pierce = point3(pierce_xy, z)?;
-    let safe_z = safe_height(z);
-    // Rapid at the stock top (or the cut Z if that is higher), then plunge. Matches the
-    // clearance / retract link `campanion run` wraps around a 2.5D section.
-    push(&mut moves, Move::Rapid { to: point3(pierce_xy, safe_z)? })?;
+    let (clearance, retract) = approach_heights(op.clearance, op.retract)?;
+    // Rapid at clearance, rapid down to the retract height (never below the cut), then a plunge
+    // feed to depth. The retract back to clearance follows process-off, so a post delay can sit
+    // between the stop and that rapid.
+    let travel_z = clearance.max(z);
+    let down_z = retract.max(z).min(travel_z);
+    push_rapid(&mut moves, pierce_xy, travel_z)?;
+    push_rapid(&mut moves, pierce_xy, down_z)?;
     push(&mut moves, Move::Event(ProcessEvent::On))?;
     push_vertical(&mut moves, pierce_xy, z, CutKind::Plunge)?;
     emit_lead(op.lead_in, start, travel, waste_left, false, z, CutKind::LeadIn, &mut moves)?;
@@ -547,7 +591,7 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
         if tab.start > cursor + 1e-9 {
             emit_span(path, cursor, tab.start, z, CutKind::Cut, &mut moves)?;
         }
-        emit_gap(path, tab, z, safe_z, &mut moves)?;
+        emit_gap(path, tab, z, retract, &mut moves)?;
         cursor = tab.start + tab.width;
     }
     if length > cursor + 1e-9 {
@@ -562,8 +606,8 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     let exit_tangent = curve::tangent_at_length(path, exit_s)?;
     emit_lead(op.lead_out, exit, exit_tangent, waste_left, true, z, CutKind::LeadOut, &mut moves)?;
     let end_xy = lead_out_point(exit, exit_tangent, waste_left, op.lead_out)?;
-    push_vertical(&mut moves, end_xy, safe_z, CutKind::Retract)?;
     push(&mut moves, Move::Event(ProcessEvent::Off))?;
+    push_rapid(&mut moves, end_xy, travel_z)?;
     Ok((Toolpath::new(moves)?, pierce))
 }
 
@@ -586,7 +630,7 @@ fn push_segment(seg: campanion_geom::Segment, z: f64, kind: CutKind, moves: &mut
     Ok(())
 }
 
-fn emit_gap(path: &Contour, tab: &Tab, z: f64, safe_z: f64, moves: &mut Vec<Move>) -> Result<()> {
+fn emit_gap(path: &Contour, tab: &Tab, z: f64, retract: f64, moves: &mut Vec<Move>) -> Result<()> {
     let from = curve::point_at_length(path, tab.start)?;
     let to = curve::point_at_length(path, tab.start + tab.width)?;
     let end_s = tab.start + tab.width;
@@ -596,19 +640,29 @@ fn emit_gap(path: &Contour, tab: &Tab, z: f64, safe_z: f64, moves: &mut Vec<Move
         emit_span(path, tab.start, end_s, raised, CutKind::Retract, moves)?;
         push_vertical(moves, to, z, CutKind::Plunge)?;
     } else {
-        // Full-depth tab: do not rapid at cutting depth. Retract to the stock top, rapid there,
-        // plunge back.
-        push_vertical(moves, from, safe_z, CutKind::Retract)?;
+        // Full-depth tab: feed up to the retract height (already there when the cut is higher),
+        // rapid across, and plunge back. The rapid stays off the stock top.
+        let cross = retract.max(z);
+        push_vertical(moves, from, cross, CutKind::Retract)?;
         if !same_xy(from, to) {
-            push(moves, Move::Rapid { to: point3(to, safe_z)? })?;
+            push(moves, Move::Rapid { to: point3(to, cross)? })?;
         }
         push_vertical(moves, to, z, CutKind::Plunge)?;
     }
     Ok(())
 }
 
-fn safe_height(z: f64) -> f64 {
-    z.max(STOCK_TOP_Z)
+/// Finite clearance and retract. Retract is at least the stock top; clearance is at least retract.
+fn approach_heights(clearance: f64, retract: f64) -> Result<(f64, f64)> {
+    let clearance = finite(clearance, "clearance")?;
+    let retract = finite(retract, "retract")?;
+    if retract < STOCK_TOP_Z {
+        return Err(invalid("retract must be >= 0"));
+    }
+    if retract > clearance {
+        return Err(invalid("retract is above clearance"));
+    }
+    Ok((clearance, retract))
 }
 
 fn same_xy(a: Point, b: Point) -> bool {
@@ -621,6 +675,14 @@ fn push_vertical(moves: &mut Vec<Move>, xy: Point, z: f64, kind: CutKind) -> Res
         return Ok(());
     }
     push(moves, Move::Linear { to, kind })
+}
+
+fn push_rapid(moves: &mut Vec<Move>, xy: Point, z: f64) -> Result<()> {
+    let to = point3(xy, z)?;
+    if last_point(moves).is_some_and(|prev| prev.almost_eq(to, 1e-9)) {
+        return Ok(());
+    }
+    push(moves, Move::Rapid { to })
 }
 
 fn last_point(moves: &[Move]) -> Option<Point3> {
@@ -994,7 +1056,7 @@ mod tests {
         near(sum, 8.0, 1e-12);
         near(plain.toolpath().cutting_length().unwrap() - with.toolpath().cutting_length().unwrap(), sum, 1e-6);
         let rapids = with.toolpath().moves().iter().filter(|mv| matches!(mv, Move::Rapid { .. })).count();
-        assert_eq!(rapids, 5, "entry rapid plus one rapid per full-depth tab");
+        assert_eq!(rapids, 7, "clearance, retract, one rapid per full-depth tab, and the final retract");
 
         let lifted = inside_climb().tabs(TabSpec::count(4, 2.0).height(1.5)).generate(&shape).unwrap();
         let mut lifts = 0;
@@ -1014,7 +1076,8 @@ mod tests {
         }
         assert_eq!(lifts, 4);
         near(plain.toolpath().cutting_length().unwrap() - lifted.toolpath().cutting_length().unwrap(), 8.0, 1e-6);
-        assert_eq!(lifted.toolpath().moves().iter().filter(|mv| matches!(mv, Move::Rapid { .. })).count(), 1, "lifted tabs are feed, not rapid");
+        let lifted_rapids = lifted.toolpath().moves().iter().filter(|mv| matches!(mv, Move::Rapid { .. })).count();
+        assert_eq!(lifted_rapids, 3, "clearance, retract, and the final retract; a raised tab is feed");
     }
 
     #[test]
@@ -1121,22 +1184,27 @@ mod tests {
     fn process_markers_bracket_the_cut_and_z_is_carried() {
         let profile = inside_climb().z(-2.5).generate(&rect(20.0, 10.0)).unwrap();
         let moves = profile.toolpath().moves();
-        assert!(matches!(moves.first(), Some(Move::Rapid { to }) if (to.z() - STOCK_TOP_Z).abs() < 1e-12));
-        assert!(matches!(moves.get(1), Some(Move::Event(ProcessEvent::On))));
-        assert!(matches!(moves.get(2), Some(Move::Linear { kind: CutKind::Plunge, to }) if (to.z() + 2.5).abs() < 1e-12));
-        assert!(matches!(moves.last(), Some(Move::Event(ProcessEvent::Off))));
+        let Some(Move::Rapid { to: at_clearance }) = moves.first() else {
+            panic!("first motion should be a rapid at clearance, got {:?}", moves.first());
+        };
+        near(at_clearance.z(), DEFAULT_CLEARANCE_MM, 1e-12);
+        let Some(Move::Rapid { to: at_retract }) = moves.get(1) else {
+            panic!("second motion should be a rapid at the retract height, got {:?}", moves.get(1));
+        };
+        near(at_retract.z(), DEFAULT_RETRACT_MM, 1e-12);
+        assert!((at_clearance.x() - at_retract.x()).abs() < 1e-12 && (at_clearance.y() - at_retract.y()).abs() < 1e-12);
+        assert!(matches!(moves.get(2), Some(Move::Event(ProcessEvent::On))));
+        assert!(matches!(moves.get(3), Some(Move::Linear { kind: CutKind::Plunge, to }) if (to.z() + 2.5).abs() < 1e-12));
+        assert!(matches!(moves.last(), Some(Move::Rapid { to }) if (to.z() - DEFAULT_CLEARANCE_MM).abs() < 1e-12));
+        let off = moves.iter().rposition(|mv| matches!(mv, Move::Event(ProcessEvent::Off))).expect("process off");
+        assert_eq!(off + 1, moves.len() - 1, "the clearance rapid follows process-off");
         near(profile.pierce().z(), -2.5, 1e-12);
-        let retract = moves.iter().rev().find(|mv| matches!(mv, Move::Linear { kind: CutKind::Retract, .. }));
-        match retract {
-            Some(Move::Linear { to, .. }) => near(to.z(), STOCK_TOP_Z, 1e-12),
-            other => panic!("expected a retract to the stock top, got {other:?}"),
-        }
         for mv in moves {
             if let Move::Linear { to, kind: CutKind::Cut } | Move::Arc { to, kind: CutKind::Cut, .. } = mv {
                 near(to.z(), -2.5, 1e-12);
             }
         }
-        assert!(!xy_rapid_below_stock(moves));
+        assert!(!xy_rapid_below(moves, DEFAULT_RETRACT_MM));
     }
 
     #[test]
@@ -1170,6 +1238,11 @@ mod tests {
             inside_climb().tabs(TabSpec::spacing(1.0e9, 1.0)),
             inside_climb().tabs(TabSpec::count(4, 1.0).height(-1.0)),
             inside_climb().tabs(TabSpec::count(100, 1.0)),
+            inside_climb().heights(f64::NAN, DEFAULT_RETRACT_MM),
+            inside_climb().heights(f64::INFINITY, DEFAULT_RETRACT_MM),
+            inside_climb().heights(DEFAULT_CLEARANCE_MM, f64::NAN),
+            inside_climb().heights(DEFAULT_CLEARANCE_MM, -0.1),
+            inside_climb().heights(1.0, 2.0),
             ProfileOp::new(Tool::Diameter { diameter: 100.0 }, Compensation::Computed, ProfileSide::Inside, CutDirection::Climb),
             ProfileOp::new(tool2(), Compensation::Computed, ProfileSide::On, CutDirection::Conventional).allowance(0.4),
         ];
@@ -1205,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn notched_profile_tabs_follow_the_contour_and_start_at_the_stock_top() {
+    fn notched_profile_tabs_follow_the_contour_and_start_at_clearance() {
         let part = notched_plate();
         let diameter = 6.0;
         let radius = diameter * 0.5;
@@ -1219,12 +1292,10 @@ mod tests {
             .unwrap();
         let moves = profile.toolpath().moves();
         match moves.first() {
-            Some(Move::Rapid { to }) => {
-                assert!(to.z() >= STOCK_TOP_Z - 1e-12, "first motion Z {}", to.z());
-            }
-            other => panic!("first motion should be a rapid at the stock top, got {other:?}"),
+            Some(Move::Rapid { to }) => near(to.z(), DEFAULT_CLEARANCE_MM, 1e-12),
+            other => panic!("first motion should be a rapid at clearance, got {other:?}"),
         }
-        assert!(!xy_rapid_below_stock(moves), "XY rapid below the stock: {moves:?}");
+        assert!(!xy_rapid_below(moves, DEFAULT_RETRACT_MM), "XY rapid below the retract height: {moves:?}");
 
         let mut tab_feeds = 0;
         let mut returns = 0;
@@ -1258,21 +1329,46 @@ mod tests {
     }
 
     #[test]
-    fn full_depth_tab_rapids_at_the_stock_top() {
-        let profile = inside_climb().z(-8.0).tabs(TabSpec::count(2, 3.0)).generate(&rect(40.0, 20.0)).unwrap();
-        let moves = profile.toolpath().moves();
-        assert!(!xy_rapid_below_stock(moves), "{moves:?}");
-        let tab_rapids: Vec<_> = moves.iter().filter(|mv| matches!(mv, Move::Rapid { to } if (to.z() - STOCK_TOP_Z).abs() < 1e-9)).collect();
-        assert!(tab_rapids.len() >= 2, "entry plus a rapid per full-depth tab, got {tab_rapids:?}");
-        let mut at_depth = 0;
-        for mv in moves {
-            if let Move::Linear { to, kind: CutKind::Plunge } = mv
-                && (to.z() + 8.0).abs() < 1e-9
-            {
-                at_depth += 1;
+    fn full_depth_tab_crosses_at_the_retract_height() {
+        for spec in [TabSpec::count(2, 3.0), TabSpec::count(2, 3.0).height(0.0)] {
+            let profile = inside_climb().z(-8.0).tabs(spec).generate(&rect(40.0, 20.0)).unwrap();
+            let moves = profile.toolpath().moves();
+            assert!(!xy_rapid_below(moves, DEFAULT_RETRACT_MM), "{moves:?}");
+            assert!(full_depth_crossing(moves, DEFAULT_RETRACT_MM, -8.0), "feed up, rapid across, feed down: {moves:?}");
+            let mut at_depth = 0;
+            for mv in moves {
+                if let Move::Linear { to, kind: CutKind::Plunge } = mv
+                    && (to.z() + 8.0).abs() < 1e-9
+                {
+                    at_depth += 1;
+                }
             }
+            assert!(at_depth >= 3, "entry plunge plus a plunge after each tab, got {at_depth}");
         }
-        assert!(at_depth >= 3, "entry plunge plus a plunge after each tab, got {at_depth}");
+    }
+
+    #[test]
+    fn custom_heights_are_the_approach_and_the_tab_plane() {
+        let profile = inside_climb().z(-4.0).heights(9.0, 3.5).tabs(TabSpec::count(2, 3.0)).generate(&rect(20.0, 10.0)).unwrap();
+        let moves = profile.toolpath().moves();
+        match (moves.first(), moves.get(1)) {
+            (Some(Move::Rapid { to: clearance }), Some(Move::Rapid { to: retract })) => {
+                near(clearance.z(), 9.0, 1e-12);
+                near(retract.z(), 3.5, 1e-12);
+                assert!((clearance.x() - retract.x()).abs() < 1e-9 && (clearance.y() - retract.y()).abs() < 1e-9);
+            }
+            other => panic!("expected clearance then retract, got {other:?}"),
+        }
+        assert!(matches!(moves.get(3), Some(Move::Linear { kind: CutKind::Plunge, to }) if (to.z() + 4.0).abs() < 1e-9));
+        assert!(matches!(moves.last(), Some(Move::Rapid { to }) if (to.z() - 9.0).abs() < 1e-9));
+        assert!(full_depth_crossing(moves, 3.5, -4.0), "{moves:?}");
+        assert!(!xy_rapid_below(moves, 3.5));
+
+        let level = inside_climb().z(-4.0).heights(4.0, 4.0).generate(&rect(20.0, 10.0)).unwrap();
+        let level_moves = level.toolpath().moves();
+        assert!(matches!(level_moves.first(), Some(Move::Rapid { to }) if (to.z() - 4.0).abs() < 1e-12));
+        assert!(matches!(level_moves.get(1), Some(Move::Event(ProcessEvent::On))));
+        assert!(matches!(level_moves.get(2), Some(Move::Linear { kind: CutKind::Plunge, to }) if (to.z() + 4.0).abs() < 1e-12));
     }
 
     #[test]
@@ -1298,7 +1394,7 @@ mod tests {
             .generate(&circle)
             .unwrap();
         let moves = profile.toolpath().moves();
-        assert!(!xy_rapid_below_stock(moves), "{moves:?}");
+        assert!(!xy_rapid_below(moves, DEFAULT_RETRACT_MM), "{moves:?}");
         let mut saw_arc_tab = false;
         let mut cursor: Option<Point3> = None;
         for mv in moves {
@@ -1421,16 +1517,51 @@ mod tests {
         }
     }
 
-    fn xy_rapid_below_stock(moves: &[Move]) -> bool {
+    fn xy_rapid_below(moves: &[Move], floor: f64) -> bool {
         let mut cursor: Option<Point3> = None;
         for mv in moves {
             if let Move::Rapid { to } = *mv
                 && let Some(from) = cursor
             {
                 let xy = (from.x() - to.x()).abs() > 1e-9 || (from.y() - to.y()).abs() > 1e-9;
-                if xy && from.z().min(to.z()) < STOCK_TOP_Z - 1e-12 {
+                if xy && from.z().min(to.z()) < floor - 1e-12 {
                     return true;
                 }
+            }
+            if let Some(to) = move_end(*mv) {
+                cursor = Some(to);
+            }
+        }
+        false
+    }
+
+    /// Feed up to `retract`, rapid across at that height, feed back to `depth`.
+    fn full_depth_crossing(moves: &[Move], retract: f64, depth: f64) -> bool {
+        let mut cursor: Option<Point3> = None;
+        let mut saw_up = false;
+        let mut across: Option<Point3> = None;
+        for mv in moves {
+            match *mv {
+                Move::Linear { to, kind: CutKind::Retract } if (to.z() - retract).abs() < 1e-9 => {
+                    let vertical = cursor.is_some_and(|from| (from.x() - to.x()).abs() <= 1e-9 && (from.y() - to.y()).abs() <= 1e-9);
+                    if vertical {
+                        saw_up = true;
+                        across = None;
+                    }
+                }
+                Move::Rapid { to } if saw_up && (to.z() - retract).abs() < 1e-9 => {
+                    let moved = cursor.is_some_and(|from| (from.x() - to.x()).abs() > 1e-9 || (from.y() - to.y()).abs() > 1e-9);
+                    if moved {
+                        across = Some(to);
+                    }
+                }
+                Move::Linear { to, kind: CutKind::Plunge }
+                    if across.is_some_and(|from| (from.x() - to.x()).abs() <= 1e-9 && (from.y() - to.y()).abs() <= 1e-9)
+                        && (to.z() - depth).abs() < 1e-9 =>
+                {
+                    return true;
+                }
+                _ => {}
             }
             if let Some(to) = move_end(*mv) {
                 cursor = Some(to);
@@ -1533,9 +1664,9 @@ mod tests {
 
     fn assert_profile_safe(part: &Contour, profile: &Profile, radius: f64) {
         let moves = profile.toolpath().moves();
-        assert!(!xy_rapid_below_stock(moves), "XY rapid below the stock");
+        assert!(!xy_rapid_below(moves, DEFAULT_RETRACT_MM), "XY rapid below the retract height");
         match moves.first() {
-            Some(Move::Rapid { to }) => assert!(to.z() >= STOCK_TOP_Z - 1e-12, "first motion Z {}", to.z()),
+            Some(Move::Rapid { to }) => assert!((to.z() - DEFAULT_CLEARANCE_MM).abs() < 1e-9, "first motion Z {}", to.z()),
             other => panic!("first motion should be a rapid, got {other:?}"),
         }
         for (x, y, _) in sample_path(moves) {

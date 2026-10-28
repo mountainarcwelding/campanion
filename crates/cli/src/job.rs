@@ -12,6 +12,9 @@
 //! - `feeds` (optional): `lead_in`, `lead_out`, `plunge`, `retract`
 //! - `params` (optional): `speed`, `power`, pierce and post delays and their toggles,
 //!   `pierce_height`, `cut_height`
+//! - `heights` (optional): `clearance` and `retract`, the same object a `campanion-job/1` file
+//!   uses. Omitted fields default to 5 mm and 2 mm. Both must be finite, `retract` must be above
+//!   the stock top, and `clearance` must be at least `retract`.
 //! - `profile`: `side` (`inside`, `outside`, `on`), `direction` (`climb`, `conventional`),
 //!   `compensation` (`computed`, `controller_left`, `controller_right`), optional `z`,
 //!   `allowance`, `overcut`, `lead_in`, `lead_out`, `tabs`, `closed`, and `points` as `[x, y]`
@@ -20,9 +23,10 @@
 //! `{"type":"perpendicular","length":…}` or `{"type":"none"}`. Tabs use `width` and either
 //! `count` or `spacing`, with an optional `height`. A positive height is crossed at `z + height`
 //! as feed along the compensated contour (lines, arcs and corners), never as a rapid. Omitted or
-//! zero height is a full-depth tab: feed up to the stock top (Z 0), rapid at that height, feed
-//! back down. The program rapids to the pierce XY at the stock top (or at `z` if that is higher),
-//! plunges to depth, and retracts to that height at the end. An XY rapid below Z 0 is rejected.
+//! zero height is a full-depth tab: feed up to the retract height, rapid across at that height,
+//! feed back down. The program rapids to the pierce XY at the clearance height, rapids down to
+//! the retract height, feeds to depth, and rapids back to clearance after process-off. An XY
+//! rapid below the retract height is rejected. That height is above the stock top.
 
 use std::path::Path;
 
@@ -32,6 +36,7 @@ use campanion_path::{Compensation, ControllerSide, CutDirection, Lead, ProfileOp
 use serde_json::{Map, Value};
 
 use crate::error::{CliError, MAX_JSON_BYTES};
+use crate::jobfile::{DEFAULT_CLEARANCE_MM, DEFAULT_RETRACT_MM};
 
 /// Absolute coordinate cap, in millimetres. Larger values are rejected so a hostile file cannot
 /// ask the offsetter for an unbounded shape.
@@ -83,6 +88,8 @@ struct Job {
     tool: ParsedTool,
     feeds: Feeds,
     params: ProcessParams,
+    clearance: f64,
+    retract: f64,
     profile: ProfileSpec,
 }
 
@@ -121,7 +128,7 @@ pub fn read_text(path: &Path) -> Result<String, CliError> {
 }
 
 fn realise(job: Job) -> Result<Document, CliError> {
-    let op = profile_op(&job.profile, job.tool.path);
+    let op = profile_op(&job.profile, job.tool.path, job.clearance, job.retract);
     let mut import = Import::new(job.process, job.cut_feed)?;
     if let Some(name) = job.name {
         import = import.name(name)?;
@@ -131,22 +138,26 @@ fn realise(job: Job) -> Result<Document, CliError> {
     let contour = contour_from(job.profile.points, job.profile.closed)?;
     let profile = op.generate(&contour).map_err(|err| CliError::run(err.to_string()))?;
     let doc = Document::from_profile(&profile, &import)?;
-    reject_xy_rapids_below_stock(&doc)?;
+    reject_xy_rapids_below_retract(&doc, job.clearance, job.retract)?;
     Ok(doc)
 }
 
-/// Stock top is Z 0 on this 2.5D document. Reuses the same rapid floor `campanion run` applies.
-fn reject_xy_rapids_below_stock(doc: &Document) -> Result<(), CliError> {
-    let report = verify_with(doc.program(), &VerifyOptions { safe_z: Some(0.0), retract_z: Some(0.0) });
-    let lines = crate::safety::blocking_rapids(&report, 0.0);
+/// XY rapids on this 2.5D document have to stay at or above the retract height.
+///
+/// The retract height is above the stock top, so the floor is strictly above Z 0. A traverse
+/// between the retract and clearance heights is left as a non-blocking finding, the same rule
+/// `campanion run` uses.
+fn reject_xy_rapids_below_retract(doc: &Document, clearance: f64, retract: f64) -> Result<(), CliError> {
+    let report = verify_with(doc.program(), &VerifyOptions { safe_z: Some(clearance), retract_z: Some(retract) });
+    let lines = crate::safety::blocking_rapids(&report, retract);
     match lines.first() {
         Some(line) => Err(CliError::run(line.clone())),
         None => Ok(()),
     }
 }
 
-fn profile_op(spec: &ProfileSpec, tool: PathTool) -> ProfileOp {
-    let mut op = ProfileOp::new(tool, spec.path_compensation, spec.side, spec.direction).z(spec.z);
+fn profile_op(spec: &ProfileSpec, tool: PathTool, clearance: f64, retract: f64) -> ProfileOp {
+    let mut op = ProfileOp::new(tool, spec.path_compensation, spec.side, spec.direction).z(spec.z).heights(clearance, retract);
     if let Some(allowance) = spec.allowance {
         op = op.allowance(allowance);
     }
@@ -162,7 +173,7 @@ fn profile_op(spec: &ProfileSpec, tool: PathTool) -> ProfileOp {
 
 fn parse_job(value: &Value) -> Result<Job, CliError> {
     let map = object(value, "job")?;
-    check_keys(map, &["name", "process", "cut_feed", "tool", "feeds", "params", "profile"], "job")?;
+    check_keys(map, &["name", "process", "cut_feed", "tool", "feeds", "params", "heights", "profile"], "job")?;
     let name = match optional(map, "name") {
         Some(value) => Some(required_name(as_str(value, "name")?, "name")?),
         None => None,
@@ -172,8 +183,35 @@ fn parse_job(value: &Value) -> Result<Job, CliError> {
     let tool = parse_tool(require(map, "tool")?)?;
     let feeds = parse_feeds(optional(map, "feeds"), cut_feed)?;
     let params = parse_params(optional(map, "params"))?;
+    let (clearance, retract) = parse_profile_heights(optional(map, "heights"))?;
     let profile = parse_profile(require(map, "profile")?)?;
-    Ok(Job { name, process, cut_feed, tool, feeds, params, profile })
+    Ok(Job { name, process, cut_feed, tool, feeds, params, clearance, retract, profile })
+}
+
+/// Optional `heights`, the same fields as `campanion-job/1`. Lengths are millimetres.
+///
+/// An omitted field keeps the run default. `retract` has to be above the stock top, and
+/// `clearance` has to be at least `retract`.
+fn parse_profile_heights(value: Option<&Value>) -> Result<(f64, f64), CliError> {
+    let mut clearance = DEFAULT_CLEARANCE_MM;
+    let mut retract = DEFAULT_RETRACT_MM;
+    if let Some(value) = value {
+        let map = object(value, "heights")?;
+        check_keys(map, &["clearance", "retract"], "heights")?;
+        if let Some(value) = optional(map, "clearance") {
+            clearance = as_f64(value, "clearance")?;
+        }
+        if let Some(value) = optional(map, "retract") {
+            retract = as_f64(value, "retract")?;
+        }
+    }
+    if retract <= 0.0 {
+        return Err(CliError::invalid("retract must be above the stock top"));
+    }
+    if retract > clearance {
+        return Err(CliError::invalid("retract is above clearance"));
+    }
+    Ok((clearance, retract))
 }
 
 fn parse_process(value: &Value) -> Result<ProcessKind, CliError> {

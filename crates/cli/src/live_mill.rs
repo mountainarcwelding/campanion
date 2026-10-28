@@ -219,8 +219,12 @@ fn toolpath_moves(spec: &MillSpec, contours: &[Contour]) -> Result<Vec<Move>, Cl
             for depth in depths {
                 let z = -depth;
                 for contour in contours {
+                    // Drawing Z is depth into the part. The lathe clearance is the approach
+                    // plane, so both heights are that clearance and the link stays one plunge
+                    // from clearance to depth.
                     let profile = ProfileOp::new(tool, Compensation::Computed, side, CutDirection::Climb)
                         .z(z)
+                        .heights(spec.clearance, spec.clearance)
                         .tolerance(tolerance)
                         .generate(contour)
                         .map_err(|err| op_err(&spec.name, err))?;
