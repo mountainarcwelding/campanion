@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Run jobs accept `tabs` on a profile operation. Bridges match a profile document: a pass below the tab top feeds along the compensated contour, and a full-depth tab rapids at the retract height (#95).
+
 ### Fixed
 
 - A lathe STEP section keeps a radial end face when a seam pulls it off Z, so `examples/shaft_fillet.lathe.json` runs with solidcraft-cli. It failed with "the two halves of the section differ".

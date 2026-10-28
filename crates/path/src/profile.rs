@@ -328,7 +328,7 @@ impl ProfileOp {
         let _lead_out_span = lead_span(self.lead_out)?;
         let skip = lead_in_span.max(overcut);
         let tabs = match self.tabs {
-            Some(spec) => place_tabs(&path, spec, skip)?,
+            Some(spec) => layout_tabs(&path, spec, skip)?,
             None => Vec::new(),
         };
         let controller_side = match self.compensation {
@@ -506,7 +506,7 @@ fn automatic_start(contour: &Contour, tolerance: &Tolerance) -> Result<Location>
     curve::sharpest_corner(contour)?.ok_or_else(|| invalid("contour has no start point"))
 }
 
-fn place_tabs(contour: &Contour, spec: TabSpec, skip: f64) -> Result<Vec<Tab>> {
+pub(crate) fn layout_tabs(contour: &Contour, spec: TabSpec, skip: f64) -> Result<Vec<Tab>> {
     let width = positive(spec.width, "tab width")?;
     let height = match spec.height {
         None => None,
@@ -586,17 +586,7 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     emit_lead(op.lead_in, start, travel, waste_left, false, z, CutKind::LeadIn, &mut moves)?;
 
     let length = path.length()?;
-    let mut cursor = 0.0;
-    for tab in tabs {
-        if tab.start > cursor + 1e-9 {
-            emit_span(path, cursor, tab.start, z, CutKind::Cut, &mut moves)?;
-        }
-        emit_gap(path, tab, z, retract, &mut moves)?;
-        cursor = tab.start + tab.width;
-    }
-    if length > cursor + 1e-9 {
-        emit_span(path, cursor, length, z, CutKind::Cut, &mut moves)?;
-    }
+    emit_tabbed_span(path, 0.0, length, z, CutKind::Cut, tabs, retract, &mut moves)?;
     if overcut > 0.0 {
         emit_span(path, 0.0, overcut, z, CutKind::Cut, &mut moves)?;
     }
@@ -630,26 +620,190 @@ fn push_segment(seg: campanion_geom::Segment, z: f64, kind: CutKind, moves: &mut
     Ok(())
 }
 
-fn emit_gap(path: &Contour, tab: &Tab, z: f64, retract: f64, moves: &mut Vec<Move>) -> Result<()> {
-    let from = curve::point_at_length(path, tab.start)?;
-    let to = curve::point_at_length(path, tab.start + tab.width)?;
-    let end_s = tab.start + tab.width;
-    if let Some(height) = tab.height.filter(|height| *height > 0.0) {
+/// Cut from `s_from` to `s_to` at `z`, lifting across every tab the span meets.
+///
+/// `s_to` may be less than `s_from`; the span is then walked backward. A positive tab height
+/// follows the contour at `z + height`. Omitted or non-positive height is a full-depth crossing
+/// at `retract`.
+pub(crate) fn emit_tabbed_span(
+    path: &Contour,
+    s_from: f64,
+    s_to: f64,
+    z: f64,
+    kind: CutKind,
+    tabs: &[Tab],
+    retract: f64,
+    moves: &mut Vec<Move>,
+) -> Result<()> {
+    if (s_to - s_from).abs() <= 1e-9 {
+        return Ok(());
+    }
+    if s_to + 1e-9 >= s_from {
+        emit_tabbed_forward(path, s_from, s_to, z, kind, tabs, retract, moves)
+    } else {
+        emit_tabbed_backward(path, s_from, s_to, z, kind, tabs, retract, moves)
+    }
+}
+
+fn emit_tabbed_forward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, tabs: &[Tab], retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+    let mut cursor = s0;
+    for tab in tabs {
+        let start = tab.start();
+        let end = start + tab.width();
+        if end <= cursor + 1e-9 || start >= s1 - 1e-9 {
+            continue;
+        }
+        if start > cursor + 1e-9 {
+            let cut_to = start.min(s1);
+            emit_span(path, cursor, cut_to, z, kind, moves)?;
+            cursor = cut_to;
+        }
+        if cursor >= s1 - 1e-9 {
+            break;
+        }
+        let leave = end.min(s1);
+        if leave > cursor + 1e-9 {
+            emit_crossing(path, cursor, leave, z, tab.height(), retract, moves)?;
+            cursor = leave;
+        }
+    }
+    if s1 > cursor + 1e-9 {
+        emit_span(path, cursor, s1, z, kind, moves)?;
+    }
+    Ok(())
+}
+
+fn emit_tabbed_backward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, tabs: &[Tab], retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+    let mut cursor = s0;
+    for tab in tabs.iter().rev() {
+        let start = tab.start();
+        let end = start + tab.width();
+        if start >= cursor - 1e-9 || end <= s1 + 1e-9 {
+            continue;
+        }
+        if end < cursor - 1e-9 {
+            let cut_to = end.max(s1);
+            emit_span_backward(path, cursor, cut_to, z, kind, moves)?;
+            cursor = cut_to;
+        }
+        if cursor <= s1 + 1e-9 {
+            break;
+        }
+        let leave = start.max(s1);
+        if cursor > leave + 1e-9 {
+            emit_crossing(path, cursor, leave, z, tab.height(), retract, moves)?;
+            cursor = leave;
+        }
+    }
+    if cursor > s1 + 1e-9 {
+        emit_span_backward(path, cursor, s1, z, kind, moves)?;
+    }
+    Ok(())
+}
+
+/// Feed up, follow or rapid from `s_from` to `s_to`, and feed back to `z`.
+pub(crate) fn emit_crossing(path: &Contour, s_from: f64, s_to: f64, z: f64, height: Option<f64>, retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+    if (s_from - s_to).abs() <= 1e-9 {
+        return Ok(());
+    }
+    let from = curve::point_at_length(path, s_from)?;
+    let to = curve::point_at_length(path, s_to)?;
+    if let Some(height) = height.filter(|height| *height > 0.0) {
         let raised = z + height;
         push_vertical(moves, from, raised, CutKind::Retract)?;
-        emit_span(path, tab.start, end_s, raised, CutKind::Retract, moves)?;
+        if s_to >= s_from {
+            emit_span(path, s_from, s_to, raised, CutKind::Retract, moves)?;
+        } else {
+            emit_span_backward(path, s_from, s_to, raised, CutKind::Retract, moves)?;
+        }
         push_vertical(moves, to, z, CutKind::Plunge)?;
     } else {
-        // Full-depth tab: feed up to the retract height (already there when the cut is higher),
-        // rapid across, and plunge back. The rapid stays off the stock top.
+        // Full-depth tab: feed up to the retract height, rapid across, and plunge back.
         let cross = retract.max(z);
         push_vertical(moves, from, cross, CutKind::Retract)?;
         if !same_xy(from, to) {
-            push(moves, Move::Rapid { to: point3(to, cross)? })?;
+            push_rapid(moves, to, cross)?;
         }
         push_vertical(moves, to, z, CutKind::Plunge)?;
     }
     Ok(())
+}
+
+fn emit_span_backward(path: &Contour, s_from: f64, s_to: f64, z: f64, kind: CutKind, moves: &mut Vec<Move>) -> Result<()> {
+    if s_from <= s_to + 1e-9 {
+        return Ok(());
+    }
+    let segs = curve::subdivide(path, s_to, s_from)?;
+    for seg in segs.into_iter().rev() {
+        push_segment(seg.reversed(), z, kind, moves)?;
+    }
+    Ok(())
+}
+
+/// Arc length at which travel in `forward` leaves the tab that contains `s`.
+///
+/// The boundary in the direction of travel counts as inside, so a plunge on that point is moved
+/// past the tab before it descends.
+pub(crate) fn covering_tab_end(tabs: &[Tab], s: f64, forward: bool) -> Option<f64> {
+    for tab in tabs {
+        let start = tab.start();
+        let end = start + tab.width();
+        if forward {
+            if s >= start - 1e-6 && s < end - 1e-9 {
+                return Some(end);
+            }
+        } else if s <= end + 1e-6 && s > start + 1e-9 {
+            return Some(start);
+        }
+    }
+    None
+}
+
+/// Distance along `forward` from `s` to the next tab boundary, or to the end of the contour.
+pub(crate) fn room_to_tab(tabs: &[Tab], s: f64, forward: bool, length: f64) -> f64 {
+    if forward {
+        let mut room = (length - s).max(0.0);
+        for tab in tabs {
+            if tab.start() > s + 1e-9 {
+                room = room.min(tab.start() - s);
+            }
+        }
+        room.max(0.0)
+    } else {
+        let mut room = s.max(0.0);
+        for tab in tabs {
+            let end = tab.start() + tab.width();
+            if end < s - 1e-9 {
+                room = room.min(s - end);
+            }
+        }
+        room.max(0.0)
+    }
+}
+
+/// Rotate a closed contour so its start is not inside a tab. Tab arc lengths move with it.
+///
+/// An open contour is unchanged: the caller starts cutting at [`covering_tab_end`].
+pub(crate) fn move_entry_past_tab(contour: &Contour, tabs: &mut [Tab], tolerance: &Tolerance) -> Result<Contour> {
+    let Some(end) = covering_tab_end(tabs, 0.0, true) else {
+        return Ok(contour.clone());
+    };
+    if end <= 1e-6 || !contour.is_closed() {
+        return Ok(contour.clone());
+    }
+    let length = contour.length()?;
+    if !length.is_finite() || end >= length - 1e-6 {
+        return Ok(contour.clone());
+    }
+    let point = curve::point_at_length(contour, end)?;
+    let location = curve::closest_location(contour, point, tolerance)?;
+    let rotated = curve::rotate_closed(contour, &location, tolerance)?;
+    for tab in tabs.iter_mut() {
+        let start = (tab.start - end).rem_euclid(length);
+        *tab = Tab { start, width: tab.width, height: tab.height };
+    }
+    tabs.sort_by(|a, b| a.start.total_cmp(&b.start));
+    Ok(rotated)
 }
 
 /// Finite clearance and retract. Retract is at least the stock top; clearance is at least retract.

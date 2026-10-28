@@ -116,12 +116,13 @@ use campanion_ir::{
     Feeds, FiveAxisSetup, Kinematics, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, SolutionPolicy, Tool as IrTool,
     ToolPose, Vec3,
 };
-use campanion_path::{DepthEntry, ProfileSide, Tool as PathTool};
+use campanion_path::{DepthEntry, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
 use serde_json::{Map, Number, Value};
 
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::job::{
-    as_bool, as_f64, as_str, as_u32, check_keys, object, optional, parse_feeds, parse_params, parse_side, parse_tool, require, required_name,
+    as_bool, as_f64, as_str, as_u32, check_keys, object, optional, parse_feeds, parse_params, parse_side, parse_tabs, parse_tool, require,
+    required_name,
 };
 
 /// On-disk tag this build reads. Minor tags are not accepted: unknown fields already fail the load.
@@ -504,6 +505,7 @@ impl Finish {
 /// [`Self::speed`] is the operation spindle speed in rpm. `None` means the file omitted
 /// `operations[].speed`; [`Self::resolved_speed`] then uses the tool's speed.
 /// [`Self::plane`] is the tilted work plane. `None` means the file omitted `plane`.
+/// [`Self::tabs`] is set on a profile that leaves bridges. Other kinds store `None`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -552,6 +554,8 @@ pub struct Operation {
     plane: Option<WorkPlane>,
     /// Spindle speed in rpm. `None` when the file omits `operations[].speed`.
     speed: Option<f64>,
+    /// Bridges on a profile. `None` when the file omits `tabs`, and on every other kind.
+    tabs: Option<TabSpec>,
 }
 
 /// Work plane for one indexed 3+2 operation.
@@ -724,6 +728,14 @@ impl Operation {
     /// How the tool enters each depth pass. An omitted `entry` object is [`DepthEntry::Plunge`].
     pub fn entry(&self) -> DepthEntry {
         self.entry
+    }
+
+    /// Bridges left along a profile. `None` when the file omits `tabs`, and on every other kind.
+    ///
+    /// Lengths are millimetres. A positive height is a bridge of that thickness. `None` or 0
+    /// inside the spec is a full-depth tab.
+    pub fn tabs(&self) -> Option<TabSpec> {
+        self.tabs
     }
 
     /// Cut feed, and an optional plunge feed. `plunge` of `None` means "use the cut feed".
@@ -1336,6 +1348,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "direction",
             "plane",
             "speed",
+            "tabs",
         ],
         "operation",
     )
@@ -1345,6 +1358,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let index_deg = parse_index_deg(optional(map, "index_deg"))?;
     let speed = parse_rpm(optional(map, "speed"))?;
     let kind = parse_kind(map)?;
+    if optional(map, "tabs").is_some() && !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(op_invalid(&name, "tabs is only valid on a profile"));
+    }
     let dwell = parse_dwell(optional(map, "dwell"), kind)?;
     let plane = take_plane(&name, map, &kind, index_deg.is_some(), scale)?;
     if matches!(kind, OperationKind::Surface) {
@@ -1408,6 +1424,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let entry = parse_entry(optional(map, "entry"), scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale)?;
+    let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
     Ok(Operation {
         name,
         kind,
@@ -1439,6 +1456,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         rotary_geom: None,
         plane,
         speed,
+        tabs,
     })
 }
 
@@ -1554,6 +1572,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         rotary_geom: None,
         plane: None,
         speed: None,
+        tabs: None,
     })
 }
 
@@ -1676,6 +1695,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         rotary_geom: None,
         plane: None,
         speed: None,
+        tabs: None,
     })
 }
 
@@ -1797,6 +1817,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         rotary_geom: None,
         plane: None,
         speed: None,
+        tabs: None,
     })
 }
 
@@ -1889,6 +1910,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         rotary_geom: None,
         plane: None,
         speed: None,
+        tabs: None,
     })
 }
 
@@ -2007,6 +2029,7 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         rotary_geom: Some(RotaryFinishGeom { u_min, u_max, angle_step_deg, travel }),
         plane: None,
         speed: None,
+        tabs: None,
     })
 }
 
@@ -2349,6 +2372,52 @@ fn parse_finish(value: Option<&Value>, kind: OperationKind, depth: f64, scale: f
         None => true,
     };
     Ok(Some(Finish { step_down, floor }))
+}
+
+/// Same object as a profile document. Lengths scale with `units`. `count` does not.
+///
+/// `height` must be >= 0 and less than `depth`. Zero is a full-depth tab. Width and spacing
+/// use the profile-document checks: width positive, spacing positive and greater than the width.
+fn parse_profile_tabs(value: Option<&Value>, depth: f64, scale: f64) -> Result<Option<TabSpec>, JobFileError> {
+    let Some(spec) = parse_tabs(value).map_err(from_cli)? else {
+        return Ok(None);
+    };
+    let width = scaled_tab_length(spec.width(), scale, "tab width")?;
+    if !(width > 0.0) {
+        return Err(JobFileError::invalid("tab width must be positive"));
+    }
+    cap_under(width, MAX_MM, "tab width")?;
+    let mut built = match spec.layout() {
+        TabLayout::Count(count) => TabSpec::count(count, width),
+        TabLayout::Spacing(spacing) => {
+            let spacing = scaled_tab_length(spacing, scale, "tab spacing")?;
+            if !(spacing > 0.0) {
+                return Err(JobFileError::invalid("tab spacing must be positive"));
+            }
+            cap_under(spacing, MAX_MM, "tab spacing")?;
+            if spacing <= width {
+                return Err(JobFileError::invalid("tab spacing must be greater than the tab width"));
+            }
+            TabSpec::spacing(spacing, width)
+        }
+    };
+    if let Some(height) = spec.tab_height() {
+        let height = scaled_tab_length(height, scale, "tab height")?;
+        if height < 0.0 {
+            return Err(JobFileError::invalid("tab height must be >= 0"));
+        }
+        cap_under(height, MAX_MM, "tab height")?;
+        if height >= depth {
+            return Err(JobFileError::invalid("tab height must be less than depth"));
+        }
+        built = built.height(height);
+    }
+    Ok(Some(built))
+}
+
+fn scaled_tab_length(value: f64, scale: f64, what: &str) -> Result<f64, JobFileError> {
+    let scaled = value * scale;
+    if scaled.is_finite() { Ok(scaled) } else { Err(JobFileError::invalid(format!("{what} must be finite"))) }
 }
 
 /// `entry` is optional. Lengths scale with the file units. Angles stay in degrees until they
@@ -5107,5 +5176,122 @@ mod tests {
         write_beside(&path, "tight.kin.json", tight);
         let err = load(&path).expect_err("plus z");
         assert_eq!(invalid_detail(&err), "operation `inner`: tool axis (0.000000, 0.000000, 1.000000) is outside the rotary limits");
+    }
+
+    #[test]
+    fn profile_tabs_scale_and_match_profile_document_errors() {
+        let tools = r#"[{"id":1,"diameter":6}]"#;
+        let deep = |extra: &str| {
+            format!(
+                r#"{{"name":"outer","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":12,"step_down":12{extra},"feeds":{{"cut":1}}}}"#
+            )
+        };
+        let loaded = load(&write_job("tabs-ok", &envelope("p.dxf", tools, &format!("[{}]", deep(r#","tabs":{"count":6,"width":10,"height":3}"#)))))
+            .expect("tabs");
+        let spec = loaded.operations()[0].tabs().expect("spec");
+        assert!(matches!(spec.layout(), TabLayout::Count(6)));
+        near(spec.width(), 10.0);
+        assert_eq!(spec.tab_height(), Some(3.0));
+
+        let zero = load(&write_job(
+            "tabs-zero",
+            &envelope("p.dxf", tools, &format!("[{}]", profile_op("outer", r#","tabs":{"count":2,"width":4,"height":0}"#))),
+        ))
+        .expect("zero height");
+        assert_eq!(zero.operations()[0].tabs().expect("zero").tab_height(), Some(0.0));
+
+        let full =
+            load(&write_job("tabs-omit", &envelope("p.dxf", tools, &format!("[{}]", profile_op("outer", r#","tabs":{"spacing":12,"width":4}"#)))))
+                .expect("omitted height");
+        let spec = full.operations()[0].tabs().expect("spacing");
+        assert!(matches!(spec.layout(), TabLayout::Spacing(spacing) if (spacing - 12.0).abs() < 1e-9));
+        assert_eq!(spec.tab_height(), None);
+
+        let inch = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"p.dxf","hash":"{EMPTY_HASH}"}},"units":"inch","tools":[{{"id":1,"diameter":0.25}}],"operations":[{{"name":"outer","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":0.5,"step_down":0.5,"tabs":{{"count":6,"width":0.25,"height":0.125}},"feeds":{{"cut":40}}}}]}}"#
+        );
+        let inch = load(&write_job("tabs-inch", &inch)).expect("inch");
+        let spec = inch.operations()[0].tabs().expect("inch spec");
+        near(spec.width(), 0.25 * 25.4);
+        near(spec.tab_height().expect("height"), 0.125 * 25.4);
+        near(inch.operations()[0].depth(), 0.5 * 25.4);
+        assert!(matches!(spec.layout(), TabLayout::Count(6)));
+
+        let cases = [
+            (profile_op("outer", r#","tabs":[]"#), "tabs must be an object"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":1,"depth":1}"#), "unknown tabs field `depth`"),
+            (profile_op("outer", r#","tabs":{"count":1}"#), "missing `width`"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":"wide"}"#), "tab width must be a number"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":0}"#), "tab width must be positive"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":-2}"#), "tab width must be positive"),
+            (profile_op("outer", r#","tabs":{"count":1.5,"width":1}"#), "tab count must be an integer"),
+            (profile_op("outer", r#","tabs":{"count":0,"width":1}"#), "tab count must be positive"),
+            (profile_op("outer", r#","tabs":{"count":5000,"width":1}"#), "tab count is out of range"),
+            (profile_op("outer", r#","tabs":{"count":1,"spacing":5,"width":1}"#), "tabs have both count and spacing"),
+            (profile_op("outer", r#","tabs":{"width":1}"#), "tabs need count or spacing"),
+            (profile_op("outer", r#","tabs":{"spacing":0,"width":1}"#), "tab spacing must be positive"),
+            (profile_op("outer", r#","tabs":{"spacing":-1,"width":1}"#), "tab spacing must be positive"),
+            (profile_op("outer", r#","tabs":{"spacing":"far","width":1}"#), "tab spacing must be a number"),
+            (profile_op("outer", r#","tabs":{"spacing":1,"width":1}"#), "tab spacing must be greater than the tab width"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":1,"height":"tall"}"#), "tab height must be a number"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":1,"height":-0.1}"#), "tab height must be >= 0"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":1,"height":1}"#), "tab height must be less than depth"),
+            (profile_op("outer", r#","tabs":{"count":1,"width":1,"height":2}"#), "tab height must be less than depth"),
+            (
+                r#"{"name":"pocket","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}"#.to_string(),
+                "operation `pocket`: tabs is only valid on a profile",
+            ),
+            (
+                r#"{"name":"holes","type":"drill","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}"#.to_string(),
+                "operation `holes`: tabs is only valid on a profile",
+            ),
+            (
+                r#"{"name":"mark","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}"#.to_string(),
+                "operation `mark`: tabs is only valid on a profile",
+            ),
+            (
+                r#"{"name":"face","type":"face","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}"#.to_string(),
+                "operation `face`: tabs is only valid on a profile",
+            ),
+            (
+                r#"{"name":"edge","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}"#.to_string(),
+                "operation `edge`: tabs is only valid on a profile",
+            ),
+        ];
+        for (index, (op, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("tabs-bad-{index}"), &envelope("p.dxf", tools, &format!("[{op}]")))).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
+
+        let mesh_tools = r#"[{"id":1,"diameter":6,"shape":"ball"}]"#;
+        let mesh_cases = [
+            (
+                r#"[{"name":"cap","type":"surface","tool_id":1,"stepover":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}]"#,
+                "operation `cap`: tabs is only valid on a profile",
+            ),
+            (
+                r#"[{"name":"hog","type":"rough","tool_id":1,"step_down":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}]"#,
+                "operation `hog`: tabs is only valid on a profile",
+            ),
+            (
+                r#"[{"name":"walls","type":"waterline","tool_id":1,"step_down":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}]"#,
+                "operation `walls`: tabs is only valid on a profile",
+            ),
+        ];
+        for (index, (ops, needle)) in mesh_cases.iter().enumerate() {
+            let err = load(&write_job(&format!("tabs-mesh-{index}"), &envelope("part.stl", mesh_tools, ops))).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
+
+        let wrap = r#"{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"diameter":40,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}"#;
+        let err = load(&write_job("tabs-wrap", &rotary_job("mm", tools, &format!("[{wrap}]")))).expect_err("wrap");
+        assert!(invalid_detail(&err).contains("operation `letters`: tabs is only valid on a profile"), "{err}");
+
+        let spin = r#"{"name":"spin","type":"rotary_finish","tool_id":1,"stepover":1,"tabs":{"count":1,"width":1},"feeds":{"cut":1}}"#;
+        let rotary = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"part.stl","hash":"{EMPTY_HASH}"}},"units":"mm","rotary":{{"axis":"a","center":[0,0,0],"direction":"positive"}},"tools":[{{"id":1,"diameter":6,"shape":"ball"}}],"operations":[{spin}]}}"#
+        );
+        let err = load(&write_job("tabs-rotary", &rotary)).expect_err("rotary");
+        assert!(invalid_detail(&err).contains("operation `spin`: tabs is only valid on a profile"), "{err}");
     }
 }
