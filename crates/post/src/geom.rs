@@ -67,11 +67,21 @@ pub(crate) fn same_radius(start: Xyz, end: Xyz, center: Xyz, plane: Plane, extra
     Ok(radius)
 }
 
-/// In-plane sweep of an arc, in `(0, τ]`. A coincident start and end is a full turn.
+/// Chord that still meets the start of a full turn.
+///
+/// The floor is 1e-9 mm. Above that the gap may be `1e-9` radii. A short arc that only meets
+/// its start after rounding to the post's decimals is wider than this and is not a full turn.
+pub(crate) fn full_turn_chord(radius: f64) -> f64 {
+    1e-9_f64.max(radius.abs() * 1e-9)
+}
+
+/// In-plane sweep of an arc, in `(0, τ]`. A closed start and end is a full turn.
 ///
 /// `extra_slack` covers a start point that was already rounded to the post's linear decimals.
+/// Closure uses [`full_turn_chord`]: either direction, so a full turn whose end drifted a
+/// fraction of a radius past the start is not read as a near-zero arc.
 pub(crate) fn arc_sweep(start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: ArcSense, extra_slack: f64) -> Result<f64> {
-    same_radius(start, end, center, plane, extra_slack)?;
+    let radius = same_radius(start, end, center, plane, extra_slack)?;
     let a0 = angle_of(plane, start, center);
     let a1 = angle_of(plane, end, center);
     if !a0.is_finite() || !a1.is_finite() {
@@ -80,7 +90,7 @@ pub(crate) fn arc_sweep(start: Xyz, end: Xyz, center: Xyz, plane: Plane, sense: 
     let chord = in_plane_len(plane, start, end);
     let ccw = matches!(sense, ArcSense::Ccw);
     let delta = forward_delta(a0, a1, ccw);
-    let sweep = if chord <= 1e-9 || delta <= 1e-12 { TAU } else { delta };
+    let sweep = if chord <= full_turn_chord(radius) || delta <= 1e-12 { TAU } else { delta };
     if sweep.is_finite() && sweep > 0.0 { Ok(sweep) } else { Err(invalid("arc sweep must be positive")) }
 }
 
