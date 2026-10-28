@@ -4,10 +4,13 @@
 //! tool radius (or half the kerf) inside that boundary, and the same distance off every island.
 //!
 //! [`PocketStrategy::OffsetRings`] cuts successive inward offsets through [`offset_region`].
-//! The first offset is the tool radius plus the finishing allowance. Each later offset adds one
-//! stepover. Rings are emitted outside-in ([`RingOrder::OutsideIn`]). Two rings are joined by a
-//! straight cut when that segment stays inside the region the tool centre may enter. Otherwise
-//! the tool retracts, rapids, and plunges.
+//! The first offset is the tool radius plus the finishing allowance. Each later offset moves in
+//! by at most one stepover. A band between the outer wall and an island that is narrower than
+//! two stepovers still gets a ring, so those passes stay within one stepover. A solid remainder
+//! whose middle is farther than the tool radius from the last ring gets another pass. Rings are
+//! emitted outside-in ([`RingOrder::OutsideIn`]). Two rings are joined by a straight cut when
+//! that segment stays inside the region the tool centre may enter. Otherwise the tool retracts,
+//! rapids, and plunges.
 //!
 //! [`PocketStrategy::Zigzag`] fills the inset region with parallel lines at `angle` radians from
 //! +X, spaced by the stepover and clipped to that region. Successive lines alternate direction.
@@ -19,7 +22,7 @@
 //! Corner clean-up is not implemented. [`PocketOp::corner_cleanup`] makes [`PocketOp::generate`]
 //! return [`crate::PathError::NotSupported`].
 
-use campanion_geom::{Arc, BoundingBox, Containment, Contour, Point, Region, Segment, Tolerance, Vec2, cmp_float_key, offset_region};
+use campanion_geom::{Arc, BooleanOp, BoundingBox, Containment, Contour, Point, Region, Segment, Tolerance, Vec2, boolean_regions, cmp_float_key, offset_region};
 
 use crate::check::{self, finite, non_negative, positive};
 use crate::tool::Tool;
@@ -28,6 +31,12 @@ use crate::{PathError, Result};
 
 /// Upper bound on offset levels and on zigzag lines. A hostile stepover fails instead of looping.
 const MAX_PASSES: usize = 1024;
+
+/// Offset curves, including a shorter pass that closes a band under two stepovers.
+const MAX_RING_LOOPS: usize = MAX_PASSES * 2;
+
+/// Orphan patches thinner than this are offset noise, not an uncut band.
+const ORPHAN_CLEARANCE_MM: f64 = 1.0e-3;
 
 /// Largest accepted stepover or finishing allowance, in millimetres.
 const MAX_DISTANCE_MM: f64 = 1.0e6;
@@ -162,7 +171,7 @@ impl PocketOp {
         let mut pieces = Vec::new();
         let rings = match self.strategy {
             PocketStrategy::OffsetRings => {
-                let loops = offset_rings(&clip, stepover, &self.tolerance)?;
+                let loops = offset_rings(&clip, stepover, radius, &self.tolerance)?;
                 let count = loops.len();
                 pieces.extend(loops.into_iter().map(CutPiece::Loop));
                 count
@@ -332,23 +341,10 @@ fn link(pen: &mut Pen, to: Point, clearance: &[Region], tolerance: &Tolerance) -
     plunge(pen)
 }
 
-fn offset_rings(start: &[Region], stepover: f64, tolerance: &Tolerance) -> Result<Vec<Contour>> {
-    let mut frontier = start.to_vec();
+fn offset_rings(start: &[Region], stepover: f64, radius: f64, tolerance: &Tolerance) -> Result<Vec<Contour>> {
     let mut loops = Vec::new();
-    for _level in 0..MAX_PASSES {
-        let before = loops.len();
-        append_loops(&frontier, &mut loops, tolerance)?;
-        if loops.len() == before {
-            break;
-        }
-        if loops.len() > MAX_PASSES {
-            return Err(invalid(format!("too many offset rings: limit is {MAX_PASSES}")));
-        }
-        let next = step_inward(&frontier, stepover, tolerance)?;
-        if next.is_empty() {
-            break;
-        }
-        frontier = next;
+    for region in start {
+        cover_region(region, stepover, radius, tolerance, &mut loops)?;
     }
     if loops.is_empty() {
         return Err(invalid("tool does not fit in the pocket"));
@@ -356,16 +352,134 @@ fn offset_rings(start: &[Region], stepover: f64, tolerance: &Tolerance) -> Resul
     Ok(loops)
 }
 
-fn step_inward(frontier: &[Region], stepover: f64, tolerance: &Tolerance) -> Result<Vec<Region>> {
-    let mut next = Vec::new();
-    for region in frontier {
-        for piece in offset_region(region, stepover, tolerance)? {
+/// Emit `region`'s loops, then the next inward rings.
+///
+/// A full stepover inset moves every boundary, so the gap between an outer wall and an island
+/// closes at twice the stepover. When that inset would drop a band that is still wider than one
+/// stepover, or a solid core that the tool radius does not reach from the current ring, the next
+/// ring is a shorter inset. Later rings use a full stepover again where the remaining region allows it.
+fn cover_region(region: &Region, stepover: f64, radius: f64, tolerance: &Tolerance, loops: &mut Vec<Contour>) -> Result<()> {
+    if loops.len() > MAX_RING_LOOPS {
+        return Err(invalid(format!("too many offset rings: limit is {MAX_RING_LOOPS}")));
+    }
+    let before = loops.len();
+    append_loops(std::slice::from_ref(region), loops, tolerance)?;
+    if loops.len() == before {
+        return Ok(());
+    }
+    if loops.len() > MAX_RING_LOOPS {
+        return Err(invalid(format!("too many offset rings: limit is {MAX_RING_LOOPS}")));
+    }
+
+    let limit = ring_limit(region, stepover, radius);
+    let children = inward(region, stepover, tolerance)?;
+    if !children.is_empty() && !facing_gap(region, &children, limit, stepover, tolerance)? {
+        return descend(&children, stepover, radius, tolerance, loops);
+    }
+
+    let step = limit.min(stepover);
+    if step <= linear_eps(tolerance) {
+        return descend(&children, stepover, radius, tolerance, loops);
+    }
+    let mids = inward(region, step, tolerance)?;
+    let mut progressed = Vec::new();
+    for mid in &mids {
+        if smaller(region, mid, tolerance)? {
+            progressed.push(mid);
+        }
+    }
+    if progressed.is_empty() {
+        return descend(&children, stepover, radius, tolerance, loops);
+    }
+    for mid in progressed {
+        cover_region(mid, stepover, radius, tolerance, loops)?;
+    }
+    Ok(())
+}
+
+fn descend(children: &[Region], stepover: f64, radius: f64, tolerance: &Tolerance, loops: &mut Vec<Contour>) -> Result<()> {
+    for child in children {
+        cover_region(child, stepover, radius, tolerance, loops)?;
+    }
+    Ok(())
+}
+
+/// How far a point may sit from the rings already emitted for this region.
+///
+/// A solid loop's opposite sides are the same ring. Only the middle has to stay within a tool
+/// radius of that ring. An outer loop and an island loop are both cut, and the material between
+/// them is twice the clearance, so that clearance must also stay within half a stepover.
+fn ring_limit(region: &Region, stepover: f64, radius: f64) -> f64 {
+    if region.holes().is_empty() { radius } else { (stepover * 0.5).min(radius) }
+}
+
+/// `true` when a full stepover inset leaves a patch that `ring_limit` says still needs a ring.
+///
+/// The patch is the part of the `limit` inset that a grow of the full-step children does not
+/// cover. Corner skins thinner than [`ORPHAN_CLEARANCE_MM`] are offset noise.
+fn facing_gap(region: &Region, children: &[Region], limit: f64, stepover: f64, tolerance: &Tolerance) -> Result<bool> {
+    let eps = linear_eps(tolerance);
+    if children.is_empty() || limit + eps >= stepover {
+        return Ok(false);
+    }
+    let deep = inward(region, limit, tolerance)?;
+    if deep.is_empty() {
+        return Ok(false);
+    }
+    let reach = stepover - limit;
+    let mut shadows = Vec::new();
+    for child in children {
+        for piece in offset_region(child, -reach, tolerance)? {
             if region_alive(&piece, tolerance)? {
-                next.push(piece);
+                shadows.push(piece);
             }
         }
     }
+    if shadows.is_empty() {
+        return Ok(true);
+    }
+    let pending = subtract_all(&deep, &shadows, tolerance)?;
+    for piece in &pending {
+        if !inward(piece, ORPHAN_CLEARANCE_MM, tolerance)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn subtract_all(sources: &[Region], cuts: &[Region], tolerance: &Tolerance) -> Result<Vec<Region>> {
+    let mut pending = sources.to_vec();
+    for cut in cuts {
+        if pending.is_empty() {
+            break;
+        }
+        let mut next = Vec::new();
+        for piece in &pending {
+            next.extend(boolean_regions(BooleanOp::Difference, piece, cut, tolerance)?);
+        }
+        pending = next;
+    }
+    Ok(pending)
+}
+
+fn inward(region: &Region, distance: f64, tolerance: &Tolerance) -> Result<Vec<Region>> {
+    if !(distance > 0.0) {
+        return Ok(Vec::new());
+    }
+    let mut next = Vec::new();
+    for piece in offset_region(region, distance, tolerance)? {
+        if region_alive(&piece, tolerance)? {
+            next.push(piece);
+        }
+    }
     Ok(next)
+}
+
+fn smaller(before: &Region, after: &Region, tolerance: &Tolerance) -> Result<bool> {
+    let earlier = before.area()?.abs();
+    let later = after.area()?.abs();
+    let eps = linear_eps(tolerance).max(1e-6);
+    Ok(later + eps < earlier)
 }
 
 fn append_loops(regions: &[Region], out: &mut Vec<Contour>, tolerance: &Tolerance) -> Result<()> {
@@ -714,6 +828,7 @@ mod tests {
     use super::*;
     use crate::Point3;
     use campanion_geom::{Line, Polyline, Vertex};
+    use proptest::prelude::*;
     use std::f64::consts::{PI, TAU};
 
     fn near(a: f64, b: f64, tol: f64) {
@@ -1089,5 +1204,334 @@ mod tests {
         assert_eq!(err.to_string(), "not supported yet: corner clean-up");
         let err = PocketOp::new(tool, PocketStrategy::OffsetRings, 1.0e-6).generate(&pocket).unwrap_err();
         assert!(err.to_string().contains("too many"), "{err}");
+    }
+
+    fn annulus(outer_r: f64, island_r: f64) -> Region {
+        let tol = Tolerance::default();
+        Region::try_new(circle(0.0, 0.0, outer_r), vec![circle(0.0, 0.0, island_r)], &tol).unwrap()
+    }
+
+    fn centred_ring_radii(path: &Toolpath) -> Vec<f64> {
+        let mut radii = Vec::new();
+        for mv in path.moves() {
+            if let Move::Arc { to, centre, kind: CutKind::Cut, .. } = *mv {
+                let radius = (to.x() - centre.x()).hypot(to.y() - centre.y());
+                if radius.is_finite() {
+                    radii.push(radius);
+                }
+            }
+        }
+        radii.sort_by(f64::total_cmp);
+        let mut unique = Vec::new();
+        for radius in radii {
+            if unique.last().is_none_or(|prev: &f64| (radius - *prev).abs() > 1e-3) {
+                unique.push(radius);
+            }
+        }
+        unique
+    }
+
+    fn assert_close_radii(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len(), "radii {actual:?} expected {expected:?}");
+        for (got, want) in actual.iter().zip(expected) {
+            near(*got, *want, 1e-3);
+        }
+    }
+
+    fn max_radius_gap(radii: &[f64]) -> f64 {
+        radii.windows(2).fold(0.0, |best, pair| {
+            let (Some(&left), Some(&right)) = (pair.first(), pair.get(1)) else {
+                return best;
+            };
+            best.max(right - left)
+        })
+    }
+
+    /// Every radius in `[inner, outer]` is within `tool_r` of a tool-centre ring.
+    fn assert_annulus_covered(radii: &[f64], inner: f64, outer: f64, tool_r: f64) {
+        for step in 0..=400 {
+            let radius = inner + (outer - inner) * f64::from(step) / 400.0;
+            let best = radii.iter().fold(f64::INFINITY, |best, ring| best.min((radius - *ring).abs()));
+            assert!(best <= tool_r + 1e-6, "r {radius} is {best} from {radii:?}, tool radius {tool_r}");
+        }
+    }
+
+    fn assert_samples_in_band(path: &Toolpath, inner_wall: f64, outer_wall: f64, tool_r: f64) {
+        for point in samples_of(path) {
+            let radius = point.x().hypot(point.y());
+            assert!(radius + 1e-3 >= inner_wall + tool_r, "sample r {radius} gouges the island");
+            assert!(radius <= outer_wall - tool_r + 1e-3, "sample r {radius} gouges the wall");
+        }
+    }
+
+    #[test]
+    fn annulus_under_two_stepovers_keeps_the_middle_band() {
+        // Outer 30, island 15, tool radius 3, stepover 5. Tool centres span r 18..=27 (9 mm).
+        // A full stepover inset closes that band from both sides and used to drop every ring
+        // between them, leaving r 21..=24 uncut.
+        let tool_r = 3.0;
+        let stepover = 5.0;
+        let cut = PocketOp::new(tool_diameter(tool_r * 2.0), PocketStrategy::OffsetRings, stepover).generate(&annulus(30.0, 15.0)).unwrap();
+        let radii = centred_ring_radii(cut.toolpath());
+        assert_close_radii(&radii, &[18.0, 20.5, 24.5, 27.0]);
+        assert!(max_radius_gap(&radii) <= stepover + 1e-6, "gap {} radii {radii:?}", max_radius_gap(&radii));
+        assert_annulus_covered(&radii, 15.0, 30.0, tool_r);
+        assert_samples_in_band(cut.toolpath(), 15.0, 30.0, tool_r);
+    }
+
+    #[test]
+    fn five_millimetre_band_stays_within_a_three_millimetre_stepover() {
+        // Outer 30, island 19, tool radius 3, stepover 3. Tool centres span r 22..=27 (5 mm).
+        // The two wall passes alone are 5 mm apart, so each would engage 5 of the 6 mm diameter.
+        let tool_r = 3.0;
+        let stepover = 3.0;
+        let cut = PocketOp::new(tool_diameter(tool_r * 2.0), PocketStrategy::OffsetRings, stepover).generate(&annulus(30.0, 19.0)).unwrap();
+        let radii = centred_ring_radii(cut.toolpath());
+        assert_close_radii(&radii, &[22.0, 23.5, 25.5, 27.0]);
+        assert!(max_radius_gap(&radii) <= stepover + 1e-6, "gap {} radii {radii:?}", max_radius_gap(&radii));
+        assert_annulus_covered(&radii, 19.0, 30.0, tool_r);
+        assert_samples_in_band(cut.toolpath(), 19.0, 30.0, tool_r);
+    }
+
+    #[test]
+    fn wide_annulus_keeps_a_full_stepover_until_the_last_band() {
+        // Clip radii 47 and 13, band 34 mm, stepover 5. Full steps land on a 4 mm remainder,
+        // which is already within one stepover, so no shorter pass is inserted.
+        let cut = PocketOp::new(tool_diameter(6.0), PocketStrategy::OffsetRings, 5.0).generate(&annulus(50.0, 10.0)).unwrap();
+        let radii = centred_ring_radii(cut.toolpath());
+        assert_close_radii(&radii, &[13.0, 18.0, 23.0, 28.0, 32.0, 37.0, 42.0, 47.0]);
+        assert!(max_radius_gap(&radii) <= 5.0 + 1e-6, "{radii:?}");
+    }
+
+    #[test]
+    fn off_centre_island_gap_under_two_stepovers_is_filled() {
+        // 80 mm square, island radius 8 centred at (21, 40). Tool radius 3, stepover 5.
+        // On the left the tool-centre gap is 7 mm: wider than one stepover and narrower than two,
+        // while the rest of the pocket still accepts a full step. The midpoint of that gap must
+        // land within half a stepover of a cutting pass.
+        let tol = Tolerance::default();
+        let outer = rect(80.0, 80.0);
+        let island = circle(21.0, 40.0, 8.0);
+        let pocket = Region::try_new(outer, vec![island], &tol).unwrap();
+        let stepover = 5.0;
+        let cut = PocketOp::new(tool_diameter(6.0), PocketStrategy::OffsetRings, stepover).generate(&pocket).unwrap();
+        let segs = cut_segments(cut.toolpath()).unwrap();
+        let mid = Point::new(6.5, 40.0).unwrap();
+        let best = segs.iter().fold(f64::INFINITY, |best, seg| best.min(seg.distance_to_point(mid)));
+        assert!(best <= stepover * 0.5 + 1e-3, "gap midpoint is {best} from the toolpath");
+        for point in samples_of(cut.toolpath()) {
+            let wall = dist_to_contour(point, pocket.outer());
+            let island_clear = dist_to_contour(point, &pocket.holes()[0]);
+            assert!(wall.min(island_clear) + 1e-3 >= 3.0, "({:.3}, {:.3}) gouges", point.x(), point.y());
+        }
+    }
+
+    #[test]
+    fn solid_core_farther_than_the_tool_radius_is_cut() {
+        // Clip radius 8.5, stepover 5, tool radius 3. Rings at 8.5 and 3.5 leave the centre
+        // 3.5 mm from the inner ring, past the tool radius, so a shorter core pass is required.
+        let cut = PocketOp::new(tool_diameter(6.0), PocketStrategy::OffsetRings, 5.0)
+            .generate(&Region::from_contour(circle(0.0, 0.0, 11.5), &Tolerance::default()).unwrap())
+            .unwrap();
+        let radii = centred_ring_radii(cut.toolpath());
+        assert_close_radii(&radii, &[0.5, 3.5, 8.5]);
+        assert!(max_radius_gap(&radii) <= 5.0 + 1e-6, "{radii:?}");
+        assert_annulus_covered(&radii, 0.0, 11.5, 3.0);
+    }
+
+    fn l_shape(width: f64, height: f64, arm: f64, tol: &Tolerance) -> Contour {
+        let p = |x, y| Point::new(x, y).unwrap();
+        let edge = |a, b| Segment::Line(Line::new(a, b).unwrap());
+        Contour::try_new(
+            vec![
+                edge(p(0.0, 0.0), p(width, 0.0)),
+                edge(p(width, 0.0), p(width, arm)),
+                edge(p(width, arm), p(arm, arm)),
+                edge(p(arm, arm), p(arm, height)),
+                edge(p(arm, height), p(0.0, height)),
+                edge(p(0.0, height), p(0.0, 0.0)),
+            ],
+            true,
+            tol,
+        )
+        .unwrap()
+    }
+
+    fn dist_to_contour(point: Point, contour: &Contour) -> f64 {
+        contour.segments().iter().map(|seg| seg.distance_to_point(point)).fold(f64::INFINITY, f64::min)
+    }
+
+    fn in_material(point: Point, outer: &Contour, holes: &[Contour], tol: &Tolerance) -> Result<bool> {
+        if !matches!(outer.containment(point, tol)?, Containment::Inside | Containment::Boundary) {
+            return Ok(false);
+        }
+        for hole in holes {
+            if matches!(hole.containment(point, tol)?, Containment::Inside) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// A round tool can reach `point` without crossing a wall when the point lies in the
+    /// tool-radius inset, or within a tool radius of that inset's boundary.
+    fn tool_can_reach(point: Point, clearance: &[Region], radius: f64, tol: &Tolerance) -> Result<bool> {
+        let mut nearest = f64::INFINITY;
+        for region in clearance {
+            if in_region(point, region, tol)? {
+                return Ok(true);
+            }
+            nearest = nearest.min(dist_to_contour(point, region.outer()));
+            for hole in region.holes() {
+                nearest = nearest.min(dist_to_contour(point, hole));
+            }
+        }
+        Ok(nearest <= radius + 1e-3)
+    }
+
+    fn grid_count(span: f64, step: f64) -> usize {
+        let count = (span / step).ceil();
+        if count.is_finite() && count > 0.0 { count as usize + 1 } else { 1 }
+    }
+
+    fn arc_segment(from: Point, to: Point, centre: Point, ccw: bool) -> Result<Segment> {
+        let radius = from.distance(centre);
+        let a0 = (from.y() - centre.y()).atan2(from.x() - centre.x());
+        let a1 = (to.y() - centre.y()).atan2(to.x() - centre.x());
+        let mut sweep = if ccw { (a1 - a0).rem_euclid(TAU) } else { (a0 - a1).rem_euclid(TAU) };
+        if from.almost_eq(to, 1e-8) || sweep < 1e-8 {
+            sweep = TAU;
+        }
+        let start = if ccw { a0 } else { a0 - sweep };
+        Ok(Segment::Arc(Arc::new(centre, radius, start, sweep)?))
+    }
+
+    fn cut_segments(path: &Toolpath) -> Result<Vec<Segment>> {
+        let mut segs = Vec::new();
+        let mut cursor: Option<Point> = None;
+        for mv in path.moves() {
+            match *mv {
+                Move::Linear { to, kind: CutKind::Cut } => {
+                    let end = Point::new(to.x(), to.y())?;
+                    if let Some(from) = cursor
+                        && from.distance(end) > 1e-9
+                    {
+                        segs.push(Segment::Line(Line::new(from, end)?));
+                    }
+                    cursor = Some(end);
+                }
+                Move::Arc { to, centre, ccw, kind: CutKind::Cut } => {
+                    let end = Point::new(to.x(), to.y())?;
+                    if let Some(from) = cursor {
+                        segs.push(arc_segment(from, end, Point::new(centre.x(), centre.y())?, ccw)?);
+                    }
+                    cursor = Some(end);
+                }
+                Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => {
+                    cursor = Some(Point::new(to.x(), to.y())?);
+                }
+                Move::Event(_) | Move::Dwell { .. } => {}
+            }
+        }
+        Ok(segs)
+    }
+
+    fn assert_pocket_covers(outer: &Contour, holes: &[Contour], diameter: f64, stepover: f64) -> Result<()> {
+        let tol = Tolerance::default();
+        let radius = diameter * 0.5;
+        let region =
+            if holes.is_empty() { Region::from_contour(outer.clone(), &tol)? } else { Region::try_new(outer.clone(), holes.to_vec(), &tol)? };
+        let clearance = offset_region(&region, radius, &tol)?;
+        let cut = PocketOp::new(Tool::Diameter { diameter }, PocketStrategy::OffsetRings, stepover).tolerance(tol).generate(&region)?;
+        let segs = cut_segments(cut.toolpath())?;
+        let samples = samples_of(cut.toolpath());
+        if segs.is_empty() || samples.is_empty() {
+            return Err(invalid("pocket produced no toolpath"));
+        }
+        for point in &samples {
+            let mut clear = dist_to_contour(*point, outer);
+            for hole in holes {
+                clear = clear.min(dist_to_contour(*point, hole));
+            }
+            if clear + 1e-3 < radius {
+                return Err(invalid(format!("sample ({:.4}, {:.4}) is {clear:.4} from a wall, tool radius {radius}", point.x(), point.y())));
+            }
+        }
+        let bounds = outer.bounding_box()?;
+        let step = (stepover * 0.5).min(radius * 0.5).clamp(0.35, 1.25);
+        let nx = grid_count(bounds.width(), step);
+        let ny = grid_count(bounds.height(), step);
+        let min = bounds.min();
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let point = Point::new(min.x() + ix as f64 * step, min.y() + iy as f64 * step)?;
+                if !in_material(point, outer, holes, &tol)? || !tool_can_reach(point, &clearance, radius, &tol)? {
+                    continue;
+                }
+                let best = segs.iter().fold(f64::INFINITY, |best, seg| best.min(seg.distance_to_point(point)));
+                if best > radius + 1e-3 {
+                    return Err(invalid(format!(
+                        "({:.3}, {:.3}) is {best:.3} from the toolpath, tool radius {radius}, stepover {stepover}",
+                        point.x(),
+                        point.y()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn random_pockets_are_covered_without_gouging(
+            width in 16.0..64.0,
+            height in 16.0..64.0,
+            kind in 0u8..3,
+            diameter in 1.0..12.0,
+            fraction in 0.1..0.95,
+            island in proptest::bool::ANY,
+            shift_x in -0.7..0.7,
+            shift_y in -0.7..0.7,
+        ) {
+            let stepover = diameter * fraction;
+            let tol = Tolerance::default();
+            let outer = match kind {
+                0 => rect(width, height),
+                1 => circle(0.0, 0.0, width * 0.5),
+                _ => l_shape(width, height, width.min(height) * 0.45, &tol),
+            };
+            let mut holes = Vec::new();
+            if island {
+                let hole = match kind {
+                    0 => {
+                        let radius = width.min(height) * 0.15;
+                        let cx = width * 0.5 + shift_x * (width * 0.5 - radius - 1.0);
+                        let cy = height * 0.5 + shift_y * (height * 0.5 - radius - 1.0);
+                        circle(cx, cy, radius)
+                    }
+                    1 => {
+                        let outer_r = width * 0.5;
+                        let radius = outer_r * 0.28;
+                        let room = outer_r - radius - 1.0;
+                        circle(shift_x * room, shift_y * room, radius)
+                    }
+                    _ => {
+                        let arm = width.min(height) * 0.45;
+                        let radius = arm * 0.16;
+                        circle(arm * 0.5 + shift_x * arm * 0.12, arm * 0.5 + shift_y * arm * 0.12, radius)
+                    }
+                };
+                holes.push(hole);
+            }
+            match assert_pocket_covers(&outer, &holes, diameter, stepover) {
+                Ok(()) => {}
+                Err(err) if err.to_string().contains("fit") || err.to_string().contains("no toolpath") || err.to_string().contains("too many") => {
+                    prop_assume!(false);
+                }
+                Err(err) => prop_assert!(false, "{err}"),
+            }
+        }
     }
 }

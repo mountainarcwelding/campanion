@@ -6,6 +6,7 @@
 
 - A lathe STEP section keeps a radial end face when a seam pulls it off Z, so `examples/shaft_fillet.lathe.json` runs with solidcraft-cli. It failed with "the two halves of the section differ".
 - A ramp or helix entry stays at or below `angle_deg` on every posted descent. The first pass is sized from the retract height, so a ramp that starts above the stock is not the stock step over a length meant for a shorter drop (fixes #91).
+- Pocket rings stay at most one stepover apart, so the band between an outer wall and an island is cut when it is narrower than two stepovers (fixes #90).
 
 ## 0.8.4 — 2026-10-28
 
