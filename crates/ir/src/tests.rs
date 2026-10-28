@@ -262,7 +262,8 @@ fn profile_converts_to_ir() {
     assert_eq!(params.speed_value(), Some(12_000.0));
     assert!(params.pierce_height_z().is_none());
     assert!(matches!(blocks.get(on_at - 1), Some(ClBlock::Event(Event::Dwell { seconds })) if *seconds == 0.3));
-    assert!(matches!(blocks.get(on_at + 1), Some(ClBlock::Motion(ClMotion::Arc { role: MoveRole::LeadIn, .. }))));
+    assert!(matches!(blocks.get(on_at + 1), Some(ClBlock::Motion(ClMotion::Linear { role: MoveRole::Plunge, .. }))));
+    assert!(matches!(blocks.get(on_at + 2), Some(ClBlock::Motion(ClMotion::Arc { role: MoveRole::LeadIn, .. }))));
     assert!(blocks.iter().any(|block| matches!(block, ClBlock::Motion(ClMotion::Linear { role: MoveRole::Plunge, feed, .. }) if *feed == 300.0)));
 
     let off_at = blocks.iter().position(|block| matches!(block, ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }))).expect("off");

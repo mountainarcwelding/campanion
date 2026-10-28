@@ -9,7 +9,9 @@
 //! A rapid that changes X or Y while Z is below the safe height is an error, listed by
 //! [`VerifyReport::rapid_safe_errors`]. A rapid that ends below the retract height is a warning,
 //! listed by [`VerifyReport::rapid_retract_warnings`]. [`VerifyOptions`] supplies those heights.
-//! When safe height is unset, it is the highest Z any rapid reaches. When retract height is
+//! When safe height is unset, it is the highest Z any rapid reaches. On a 2.5D mill program (no
+//! turning, rotary table, or five-axis setup) that value is at least the stock top Z 0, so an XY
+//! rapid through the stock cannot hide as "every rapid was already low". When retract height is
 //! unset, the warning is skipped.
 
 use crate::MAX_AXES;
@@ -23,6 +25,8 @@ use crate::program::Program;
 const TAU: f64 = std::f64::consts::TAU;
 /// Chord at or below this, in millimetres, is treated as a full-turn arc.
 const FULL_TURN_CHORD_MM: f64 = 1.0e-12;
+/// Stock top for 2.5D mill programs. Z is up.
+const STOCK_TOP_Z: f64 = 0.0;
 
 /// Heights used by the rapid checks. Millimetres. Z is up.
 ///
@@ -193,7 +197,8 @@ impl VerifyReport {
 
 /// Walk `program` with [`VerifyOptions::default`].
 ///
-/// Safe height is the highest Z any rapid reaches. The retract warning is off.
+/// Safe height is the highest Z any rapid reaches, and at least the stock top Z 0 on a 2.5D mill
+/// program. The retract warning is off.
 ///
 /// Structural checks in [`Program::try_new`](crate::Program::try_new) already reject some of
 /// these problems. This still reports them, because a deserialized program can bypass those
@@ -243,7 +248,15 @@ fn resolve_heights(program: &Program, options: &VerifyOptions, out: &mut VerifyR
         }
         None => None,
     };
-    Heights { safe_z, retract_z }
+    Heights { safe_z: floor_mill_safe_z(program, safe_z), retract_z }
+}
+
+/// 2.5D mill stock is Z 0. Floor the safe height so an XY rapid below the stock is always an error.
+fn floor_mill_safe_z(program: &Program, safe_z: Option<f64>) -> Option<f64> {
+    if program.turning().is_some() || program.rotary().is_some() || program.five_axis().is_some() {
+        return safe_z;
+    }
+    Some(safe_z.unwrap_or(STOCK_TOP_Z).max(STOCK_TOP_Z))
 }
 
 /// Highest finite Z on any rapid, including the Z the rapid starts from.
@@ -1228,5 +1241,16 @@ mod tests {
     fn inferred_safe_z_flags_a_sideways_rapid_at_the_start_of_the_next_toolpath() {
         let report = verify(&ended_at_retract_then(vec![rapid(50.0, 40.0, 2.0)]));
         assert_eq!(report.rapid_safe_errors(), &[(Some(1), None, 0, 2.0, 5.0)]);
+    }
+
+    #[test]
+    fn xy_rapid_below_the_stock_top_is_an_error_on_a_mill_program() {
+        let through_stock = vec![rapid(0.0, 0.0, -12.0), rapid(10.0, 0.0, -12.0)];
+        let report = verify(&program_with_path(through_stock));
+        assert_eq!(report.rapid_safe_errors(), &[(Some(0), None, 1, -12.0, 0.0)]);
+
+        let at_stock = vec![rapid(0.0, 0.0, 0.0), rapid(10.0, 0.0, 0.0)];
+        let report = verify(&program_with_path(at_stock));
+        assert!(report.rapid_safe_errors().is_empty(), "{:?}", report.rapid_safe_errors());
     }
 }

@@ -5,11 +5,19 @@ It does not contain geometry and it does not contain a toolpath. A later step im
 and builds paths from the operations recorded here.
 
 This is not the profile document read by `campanion ir --job` and `campanion ngc --job`. That
-document has no `format` tag. `campanion-job/1` rejects it.
+document has no `format` tag. `campanion-job/1` rejects it. See [Profile document](#profile-document).
 
 Lathe work uses a different file, `campanion-lathe/1`, loaded by `campanion lathe`. See [Lathe jobs](#lathe-jobs).
 
 The loader is `crates/cli/src/jobfile.rs`. `campanion run` loads it.
+
+## Profile document
+
+The file read by `campanion ir --job` and `campanion ngc --job` is a single 2D profile, not a `campanion-job/1` job. Stock top is Z 0. Optional top-level `heights` is the same object a job file uses: `{"clearance": …, "retract": …}`. An omitted field keeps the job default, 5 mm clearance and 2 mm retract. Both values must be finite, `retract` must be above the stock top, and `clearance` must be at least `retract`.
+
+The program rapids to the pierce XY at the clearance height, rapids down to the retract height, and feeds down to depth. After the process turns off it rapids back to the clearance height.
+
+`profile.tabs` takes `width` and either `count` or `spacing`, with an optional `height`. A positive height is a bridge of that thickness: the tool feeds up, follows the compensated contour at `z + height` (lines, arcs and corners), and feeds back down. That crossing is never a rapid and never a chord that leaves the contour. When `height` is omitted or 0, the tab is the full depth of the material: feed up to the retract height, rapid across at that height, feed back down. An XY rapid below the retract height is an error. That height is above the stock top, so the rapid is strictly above Z 0.
 
 ## Top level
 

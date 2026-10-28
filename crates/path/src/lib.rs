@@ -29,7 +29,9 @@ pub use engrave::{Engrave, EngraveOp};
 pub use face::{Face, FaceOp};
 pub use order::{Feature, OrderedCuts, link_features, order_and_link};
 pub use pocket::{Pocket, PocketOp, PocketStrategy, RingOrder};
-pub use profile::{CutDirection, Lead, Profile, ProfileOp, ProfileSide, StartPoint, Tab, TabLayout, TabSpec};
+pub use profile::{
+    CutDirection, DEFAULT_CLEARANCE_MM, DEFAULT_RETRACT_MM, Lead, Profile, ProfileOp, ProfileSide, StartPoint, Tab, TabLayout, TabSpec,
+};
 pub use timing::{ProcessTiming, apply_timing};
 pub use tool::{Compensation, ControllerSide, Tool};
 pub use toolpath::{CutKind, Move, Point3, ProcessEvent, Toolpath};

@@ -114,6 +114,168 @@ fn job_file_matches_builtin_sample() {
 }
 
 #[test]
+fn profile_tabs_do_not_rapid_through_stock() {
+    let ngc = profile_ngc("campanion-tabs-profile.json", None, r#"{"count": 6, "width": 10.0, "height": 3.0}"#, -12.0).expect("ngc");
+    let moves = motions(&ngc);
+    assert_approach(&moves, 5.0, 2.0, &ngc);
+    let mut saw_tab_feed = false;
+    let mut prev: Option<(f64, f64)> = None;
+    for (rapid, x, y, z) in &moves {
+        if !rapid
+            && (z + 9.0).abs() < 1e-4
+            && let Some((px, py)) = prev
+            && ((px - x).abs() > 1e-6 || (py - y).abs() > 1e-6)
+        {
+            saw_tab_feed = true;
+        }
+        prev = Some((*x, *y));
+    }
+    assert!(saw_tab_feed, "tab crossings should be feed at Z -9\n{ngc}");
+    let returns = moves.iter().filter(|(rapid, _, _, z)| !rapid && (z + 12.0).abs() < 1e-4).count();
+    assert!(returns >= 6, "should re-reach Z -12 after each tab, got {returns}\n{ngc}");
+}
+
+#[test]
+fn full_depth_tab_crosses_at_the_retract_height() {
+    for (name, tabs) in
+        [("campanion-tabs-full.json", r#"{"count": 2, "width": 8.0}"#), ("campanion-tabs-zero.json", r#"{"count": 2, "width": 8.0, "height": 0}"#)]
+    {
+        let ngc = profile_ngc(name, None, tabs, -6.0).expect("ngc");
+        let moves = motions(&ngc);
+        assert_approach(&moves, 5.0, 2.0, &ngc);
+        assert!(full_depth_cross(&moves, 2.0, -6.0), "expected G1 up to Z2, G0 across at Z2, G1 down\n{ngc}");
+    }
+}
+
+#[test]
+fn profile_heights_are_honoured_and_rejected() {
+    let custom = profile_ngc("campanion-heights-custom.json", Some(r#"{"clearance": 8.0, "retract": 3.0}"#), r#"{"count": 2, "width": 8.0}"#, -6.0)
+        .expect("ngc");
+    let moves = motions(&custom);
+    assert_approach(&moves, 8.0, 3.0, &custom);
+    assert!(full_depth_cross(&moves, 3.0, -6.0), "custom retract should be the tab plane\n{custom}");
+
+    let equal =
+        profile_ngc("campanion-heights-equal.json", Some(r#"{"clearance": 4, "retract": 4}"#), r#"{"count": 1, "width": 4.0, "height": 1.0}"#, -5.0)
+            .expect("ngc");
+    let equal_moves = motions(&equal);
+    let (rapid, _, _, z) = equal_moves[0];
+    assert!(rapid && (z - 4.0).abs() < 1e-4, "equal heights start at Z4, got {equal_moves:?}\n{equal}");
+    assert!(!equal_moves[1].0, "the next motion is the plunge, got {:?}\n{equal}", equal_moves[1]);
+    assert!(equal_moves.iter().all(|(is_rapid, _, _, z)| !is_rapid || *z + 1e-6 >= 4.0), "{equal}");
+
+    let retract_only =
+        profile_ngc("campanion-heights-retract.json", Some(r#"{"retract": 3.5}"#), r#"{"count": 1, "width": 4.0, "height": 1.0}"#, -5.0)
+            .expect("ngc");
+    assert_approach(&motions(&retract_only), 5.0, 3.5, &retract_only);
+
+    for (name, heights, needle) in [
+        ("campanion-heights-zero.json", r#"{"clearance": 5, "retract": 0}"#, "retract must be above the stock top"),
+        ("campanion-heights-negative.json", r#"{"clearance": 5, "retract": -1}"#, "retract must be above the stock top"),
+        ("campanion-heights-above.json", r#"{"clearance": 2, "retract": 4}"#, "retract is above clearance"),
+        ("campanion-heights-text.json", r#"{"clearance": "high", "retract": 2}"#, "clearance must be a number"),
+        ("campanion-heights-huge.json", r#"{"clearance": 1e309, "retract": 2}"#, "number out of range"),
+        ("campanion-heights-inf.json", r#"{"clearance": 5, "retract": 1e309}"#, "number out of range"),
+    ] {
+        let path = write_profile(name, Some(heights), r#"{"count": 1, "width": 4.0}"#, -2.0).expect("write");
+        let output = campanion(["ngc", "--job", path.to_str().expect("path")]).expect("run");
+        let stderr = text(&output.stderr).expect("utf-8");
+        assert_eq!(output.status.code(), Some(1), "{name} {stderr}");
+        assert!(stderr.contains(needle), "{name} missing `{needle}` in {stderr}");
+    }
+}
+
+fn profile_ngc(name: &str, heights: Option<&str>, tabs: &str, z: f64) -> Result<String, String> {
+    let path = write_profile(name, heights, tabs, z)?;
+    let path = path.to_str().ok_or_else(|| format!("{name}: path is not utf-8"))?;
+    success_stdout(&["ngc", "--job", path]).map_err(|err| format!("{name}: {err}"))
+}
+
+fn write_profile(name: &str, heights: Option<&str>, tabs: &str, z: f64) -> Result<PathBuf, String> {
+    let path = temp_path(name);
+    let heights = match heights {
+        Some(heights) => format!("\n  \"heights\": {heights},"),
+        None => String::new(),
+    };
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{
+  "name": "tabs",
+  "process": "spindle",
+  "cut_feed": 1500.0,{heights}
+  "tool": {{"id": 1, "name": "6 mm end mill", "diameter": 6.0}},
+  "feeds": {{"plunge": 500.0}},
+  "params": {{"speed": 18000.0}},
+  "profile": {{
+    "side": "outside",
+    "direction": "climb",
+    "compensation": "computed",
+    "z": {z},
+    "tabs": {tabs},
+    "closed": true,
+    "points": [[0,0],[35,0],[35,20],[65,20],[65,0],[100,0],[100,60],[0,60]]
+  }}
+}}"#
+        ),
+    )
+    .map_err(|err| format!("{name}: {err}"))?;
+    Ok(path)
+}
+
+fn motions(ngc: &str) -> Vec<(bool, f64, f64, f64)> {
+    ngc.lines().filter_map(parse_xyz).collect()
+}
+
+fn assert_approach(moves: &[(bool, f64, f64, f64)], clearance: f64, retract: f64, ngc: &str) {
+    assert!(moves.len() >= 3, "expected approach moves\n{ngc}");
+    let (rapid, x, y, z) = moves[0];
+    assert!(rapid, "first motion should be a rapid\n{ngc}");
+    assert!((z - clearance).abs() < 1e-4, "first motion Z {z} expected {clearance}\n{ngc}");
+    let (rapid, x2, y2, z2) = moves[1];
+    assert!(rapid, "second motion should be a rapid\n{ngc}");
+    assert!((x2 - x).abs() < 1e-4 && (y2 - y).abs() < 1e-4, "second rapid should keep the pierce XY\n{ngc}");
+    assert!((z2 - retract).abs() < 1e-4, "second motion Z {z2} expected {retract}\n{ngc}");
+    assert!(!moves[2].0, "third motion should be a feed\n{ngc}");
+    assert!(moves.iter().all(|(is_rapid, _, _, z)| !is_rapid || *z + 1e-6 >= retract), "G0 below retract {retract}\n{ngc}");
+}
+
+/// G1 up to the retract height, G0 across at that height, G1 back to depth.
+fn full_depth_cross(moves: &[(bool, f64, f64, f64)], retract: f64, depth: f64) -> bool {
+    moves.windows(3).any(|window| {
+        let (up_rapid, ux, uy, uz) = window[0];
+        let (across_rapid, ax, ay, az) = window[1];
+        let (down_rapid, dx, dy, dz) = window[2];
+        !up_rapid
+            && (uz - retract).abs() < 1e-4
+            && across_rapid
+            && (az - retract).abs() < 1e-4
+            && ((ux - ax).abs() > 1e-4 || (uy - ay).abs() > 1e-4)
+            && !down_rapid
+            && (dx - ax).abs() < 1e-4
+            && (dy - ay).abs() < 1e-4
+            && (dz - depth).abs() < 1e-4
+    })
+}
+
+fn parse_xyz(line: &str) -> Option<(bool, f64, f64, f64)> {
+    let rapid = if line.starts_with("G0 ") {
+        true
+    } else if line.starts_with("G1 ") || line.contains("G2 ") || line.contains("G3 ") {
+        false
+    } else {
+        return None;
+    };
+    let word = |key: &str| {
+        line.split_whitespace().find_map(|word| {
+            let rest = word.strip_prefix(key)?;
+            rest.parse::<f64>().ok()
+        })
+    };
+    Some((rapid, word("X")?, word("Y")?, word("Z")?))
+}
+
+#[test]
 fn bad_job_reports_invalid_input() {
     let path = temp_path("campanion-bad-job.json");
     std::fs::write(&path, "{}").expect("write job");

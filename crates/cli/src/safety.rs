@@ -12,6 +12,8 @@ use crate::error::CliError;
 
 const PLANE_EPS: f64 = 1e-6;
 const XY_EPS: f64 = 1e-9;
+/// Stock top for 2.5D mill programs. Z is up.
+const STOCK_TOP_Z: f64 = 0.0;
 
 /// Inclusive XY region the tool can be over the part, grown by the cutter radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,17 +129,22 @@ pub(crate) fn check_radial(op_name: &str, paths: &[ClPath], axis_point: Vec3, ax
 ///
 /// Retract warnings (the rapid ends below `retract`) come first. Safe-height XY rapids follow,
 /// and only when their lowest Z is below `retract`. A traverse that stays between the retract
-/// and clearance heights is left out. Toolpath and block numbers are 1-based.
+/// and clearance heights is left out. The floor is also the stock top (Z 0), so a rapid through
+/// the stock is an error even when `retract` is below the stock. Toolpath and block numbers are
+/// 1-based.
 pub(crate) fn blocking_rapids(report: &VerifyReport, retract: f64) -> Vec<String> {
+    let plane = retract.max(STOCK_TOP_Z);
     let mut lines = Vec::new();
     for (toolpath, _channel, block, z, _limit) in report.rapid_retract_warnings() {
-        let (toolpath, block) = place(*toolpath, *block);
-        lines.push(format!("toolpath {toolpath} block {block}: rapid ends at Z {z:.3} below the safe plane {retract:.3}"));
+        if *z < plane - PLANE_EPS {
+            let (toolpath, block) = place(*toolpath, *block);
+            lines.push(format!("toolpath {toolpath} block {block}: rapid ends at Z {z:.3} below the safe plane {plane:.3}"));
+        }
     }
     for (toolpath, _channel, block, z, _limit) in report.rapid_safe_errors() {
-        if *z < retract - PLANE_EPS {
+        if *z < plane - PLANE_EPS {
             let (toolpath, block) = place(*toolpath, *block);
-            lines.push(format!("toolpath {toolpath} block {block}: rapid traverse at Z {z:.3} below the safe plane {retract:.3}"));
+            lines.push(format!("toolpath {toolpath} block {block}: rapid traverse at Z {z:.3} below the safe plane {plane:.3}"));
         }
     }
     lines

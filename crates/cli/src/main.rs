@@ -92,7 +92,8 @@ schema  Print the JSON Schema for campanion-ir/1.
 
 --job FILE
         Read a JSON job instead of the built-in sample. The job is one profile: process,
-        cut_feed, tool, optional feeds and params, and profile points in millimetres.
+        cut_feed, tool, optional feeds, params and heights, and profile points in millimetres.
+        heights.clearance and heights.retract default to 5 mm and 2 mm.
         Processes: spindle, torch, laser, extruder, knife.
         Sides: inside, outside, on. Directions: climb, conventional.
         Compensation: computed, controller_left, controller_right.
