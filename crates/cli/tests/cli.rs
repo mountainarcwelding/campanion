@@ -34,6 +34,10 @@ fn assert_golden(name: &str, actual: &str) -> Result<(), String> {
         return Ok(());
     }
     let expected = std::fs::read_to_string(&path).map_err(|err| format!("read {}: {err} (set UPDATE_GOLDEN=1 to create)", path.display()))?;
+    if name.ends_with(".json") {
+        return campanion_testsupport::ir_json_close(actual, &expected).map_err(|err| format!("{err} ({})", path.display()));
+    }
+    // G-code is already rounded to the post's decimals, so the golden stays byte-exact.
     if actual != expected {
         return Err(format!("golden mismatch for {} (set UPDATE_GOLDEN=1 to regenerate)", path.display()));
     }

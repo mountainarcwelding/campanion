@@ -219,6 +219,7 @@ dependencies = [
  "campanion-mesh",
  "campanion-path",
  "campanion-post",
+ "campanion-testsupport",
  "campanion-turn",
  "proptest",
  "serde_json",
@@ -251,6 +252,7 @@ version = "0.8.4"
 dependencies = [
  "campanion-geom",
  "campanion-path",
+ "campanion-testsupport",
  "proptest",
  "schemars",
  "serde",
@@ -284,10 +286,18 @@ dependencies = [
  "campanion-import",
  "campanion-ir",
  "campanion-path",
+ "campanion-testsupport",
  "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "campanion-testsupport"
+version = "0.8.4"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -298,6 +308,7 @@ dependencies = [
  "campanion-import",
  "campanion-ir",
  "campanion-mesh",
+ "campanion-testsupport",
  "proptest",
  "thiserror 2.0.21",
 ]

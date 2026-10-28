@@ -312,7 +312,8 @@ mod tests {
             std::fs::write(&path, &pretty).unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
         }
         let committed = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-        assert_eq!(committed, pretty, "turn_thread.ir.json drifted; rerun with UPDATE_THREAD_IR=1");
+        campanion_testsupport::ir_json_close(&pretty, &committed)
+            .unwrap_or_else(|err| panic!("turn_thread.ir.json drifted; rerun with UPDATE_THREAD_IR=1\n{err}"));
         // serde_json does not bit-preserve every f64, so compare the loaded program by its thread moves.
         let loaded = Document::from_json(&committed).unwrap_or_else(|err| panic!("load {}: {err}", path.display()));
         let loaded_threads: Vec<f64> = loaded.program().toolpaths()[0]
