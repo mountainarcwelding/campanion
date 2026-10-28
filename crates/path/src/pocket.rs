@@ -25,7 +25,9 @@
 //! Corner clean-up is not implemented. [`PocketOp::corner_cleanup`] makes [`PocketOp::generate`]
 //! return [`crate::PathError::NotSupported`].
 
-use campanion_geom::{Arc, BooleanOp, BoundingBox, Containment, Contour, Point, Region, Segment, Tolerance, Vec2, boolean_regions, cmp_float_key, offset_region};
+use campanion_geom::{
+    Arc, BooleanOp, BoundingBox, Containment, Contour, Point, Region, Segment, Tolerance, Vec2, boolean_regions, cmp_float_key, offset_region,
+};
 
 use crate::check::{self, finite, non_negative, positive};
 use crate::tool::Tool;
