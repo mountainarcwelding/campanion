@@ -356,3 +356,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-28: New policy (design principle 7): code-generation errors are fixed before new
   features. The open G-code reports (#89–#95) come before the rest of v0.8.4, safety first (#95
   tabs, #94 tool change and spindle speed in run jobs).
+- 2026-10-28: v0.8.4 is a safety patch: profile tabs (#95), tool changes and spindle speed in run
+  jobs (#94), full circles off the millimetre grid (#92), and the parts catcher. Bar feeder and
+  steady rest move to v0.8.5; machine limit profiles and sub-spindle brake/orient to v0.8.6.
