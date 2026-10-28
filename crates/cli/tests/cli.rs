@@ -114,6 +114,82 @@ fn job_file_matches_builtin_sample() {
 }
 
 #[test]
+fn profile_tabs_do_not_rapid_through_stock() {
+    let path = temp_path("campanion-tabs-profile.json");
+    std::fs::write(
+        &path,
+        r#"{
+  "name": "tabs",
+  "process": "spindle",
+  "cut_feed": 1500.0,
+  "tool": {"id": 1, "name": "6 mm end mill", "diameter": 6.0},
+  "feeds": {"plunge": 500.0},
+  "params": {"speed": 18000.0},
+  "profile": {
+    "side": "outside",
+    "direction": "climb",
+    "compensation": "computed",
+    "z": -12.0,
+    "tabs": {"count": 6, "width": 10.0, "height": 3.0},
+    "closed": true,
+    "points": [[0,0],[35,0],[35,20],[65,20],[65,0],[100,0],[100,60],[0,60]]
+  }
+}"#,
+    )
+    .expect("write job");
+    let ngc = success_stdout(&["ngc", "--job", path.to_str().expect("path")]).expect("ngc --job");
+    let mut first_motion = None;
+    let mut prev: Option<(f64, f64, f64)> = None;
+    let mut saw_tab_feed = false;
+    let mut returns = 0;
+    for line in ngc.lines() {
+        let Some((rapid, x, y, z)) = parse_xyz(line) else {
+            continue;
+        };
+        if first_motion.is_none() {
+            first_motion = Some((rapid, z));
+        }
+        if rapid {
+            if let Some((px, py, pz)) = prev {
+                let xy = (px - x).abs() > 1e-6 || (py - y).abs() > 1e-6;
+                assert!(!(xy && pz.min(z) < 0.0), "XY rapid below the stock: {line}");
+            }
+        } else if (z + 9.0).abs() < 1e-4
+            && let Some((px, py, _)) = prev
+            && ((px - x).abs() > 1e-6 || (py - y).abs() > 1e-6)
+        {
+            saw_tab_feed = true;
+        }
+        if !rapid && (z + 12.0).abs() < 1e-4 {
+            returns += 1;
+        }
+        prev = Some((x, y, z));
+    }
+    let (first_rapid, first_z) = first_motion.expect("motion");
+    assert!(first_rapid, "first motion should be a rapid, got {ngc}");
+    assert!(first_z >= 0.0, "first motion Z {first_z} is below the stock top");
+    assert!(saw_tab_feed, "tab crossings should be feed at Z -9\n{ngc}");
+    assert!(returns >= 6, "should re-reach Z -12 after each tab, got {returns}\n{ngc}");
+}
+
+fn parse_xyz(line: &str) -> Option<(bool, f64, f64, f64)> {
+    let rapid = if line.starts_with("G0 ") {
+        true
+    } else if line.starts_with("G1 ") || line.contains("G2 ") || line.contains("G3 ") {
+        false
+    } else {
+        return None;
+    };
+    let word = |key: &str| {
+        line.split_whitespace().find_map(|word| {
+            let rest = word.strip_prefix(key)?;
+            rest.parse::<f64>().ok()
+        })
+    };
+    Some((rapid, word("X")?, word("Y")?, word("Z")?))
+}
+
+#[test]
 fn bad_job_reports_invalid_input() {
     let path = temp_path("campanion-bad-job.json");
     std::fs::write(&path, "{}").expect("write job");

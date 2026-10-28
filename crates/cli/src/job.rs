@@ -18,12 +18,16 @@
 //!
 //! A lead is `{"type":"line","length":…}`, `{"type":"arc","radius":…}`,
 //! `{"type":"perpendicular","length":…}` or `{"type":"none"}`. Tabs use `width` and either
-//! `count` or `spacing`, with an optional `height`.
+//! `count` or `spacing`, with an optional `height`. A positive height is crossed at `z + height`
+//! as feed along the compensated contour (lines, arcs and corners), never as a rapid. Omitted or
+//! zero height is a full-depth tab: feed up to the stock top (Z 0), rapid at that height, feed
+//! back down. The program rapids to the pierce XY at the stock top (or at `z` if that is higher),
+//! plunges to depth, and retracts to that height at the end. An XY rapid below Z 0 is rejected.
 
 use std::path::Path;
 
 use campanion_geom::{Contour, Line, Point, Segment, Tolerance};
-use campanion_ir::{CompensationMode, Document, Feeds, Import, ProcessKind, ProcessParams, Tool};
+use campanion_ir::{CompensationMode, Document, Feeds, Import, ProcessKind, ProcessParams, Tool, VerifyOptions, verify_with};
 use campanion_path::{Compensation, ControllerSide, CutDirection, Lead, ProfileOp, ProfileSide, TabSpec, Tool as PathTool};
 use serde_json::{Map, Value};
 
@@ -126,7 +130,19 @@ fn realise(job: Job) -> Result<Document, CliError> {
     import = import.compensation(job.profile.ir_compensation);
     let contour = contour_from(job.profile.points, job.profile.closed)?;
     let profile = op.generate(&contour).map_err(|err| CliError::run(err.to_string()))?;
-    Ok(Document::from_profile(&profile, &import)?)
+    let doc = Document::from_profile(&profile, &import)?;
+    reject_xy_rapids_below_stock(&doc)?;
+    Ok(doc)
+}
+
+/// Stock top is Z 0 on this 2.5D document. Reuses the same rapid floor `campanion run` applies.
+fn reject_xy_rapids_below_stock(doc: &Document) -> Result<(), CliError> {
+    let report = verify_with(doc.program(), &VerifyOptions { safe_z: Some(0.0), retract_z: Some(0.0) });
+    let lines = crate::safety::blocking_rapids(&report, 0.0);
+    match lines.first() {
+        Some(line) => Err(CliError::run(line.clone())),
+        None => Ok(()),
+    }
 }
 
 fn profile_op(spec: &ProfileSpec, tool: PathTool) -> ProfileOp {

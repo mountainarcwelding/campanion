@@ -5,11 +5,17 @@ It does not contain geometry and it does not contain a toolpath. A later step im
 and builds paths from the operations recorded here.
 
 This is not the profile document read by `campanion ir --job` and `campanion ngc --job`. That
-document has no `format` tag. `campanion-job/1` rejects it.
+document has no `format` tag. `campanion-job/1` rejects it. See [Profile document](#profile-document).
 
 Lathe work uses a different file, `campanion-lathe/1`, loaded by `campanion lathe`. See [Lathe jobs](#lathe-jobs).
 
 The loader is `crates/cli/src/jobfile.rs`. `campanion run` loads it.
+
+## Profile document
+
+The file read by `campanion ir --job` and `campanion ngc --job` is a single 2D profile, not a `campanion-job/1` job. Stock top is Z 0. The program rapids to the pierce XY at the stock top (or at the cut `z` if that is higher), plunges to depth, and retracts to that height at the end.
+
+`profile.tabs` takes `width` and either `count` or `spacing`, with an optional `height`. A positive height is a bridge of that thickness: the tool feeds up, follows the compensated contour at `z + height` (lines, arcs and corners), and feeds back down. That crossing is never a rapid and never a chord that leaves the contour. When `height` is omitted or 0, the tab is the full depth of the material: feed up to the stock top, rapid at that height, feed back down. An XY rapid below Z 0 is an error.
 
 ## Top level
 

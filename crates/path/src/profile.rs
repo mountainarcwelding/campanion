@@ -24,6 +24,15 @@
 //! centre is on the waste side, one radius out. Overcut, on a closed profile, keeps cutting
 //! along the contour past the start. Tabs are gaps measured by arc length. They are not placed
 //! on the lead-in span or on the overcut, both measured from the start along the path.
+//!
+//! A tab with a positive `height` is crossed at `z + height` as feed, following the compensated
+//! contour exactly (lines, arcs and corners). Climbing onto the tab and dropping off it is a
+//! vertical feed. The gap is never a rapid and never a chord that leaves the contour. When
+//! `height` is omitted or 0, the tab is the full depth of the material: the tool feeds up to the
+//! stock top (Z 0, or the cut Z if that is higher), rapids at that height, and feeds back down.
+//!
+//! The program rapids to the pierce XY at that same safe height, plunges to `z`, and feeds back
+//! to the safe height before process-off. No rapid that changes XY ends below the stock top.
 
 use campanion_geom::{Contour, Orientation, Point, Tolerance, Vec2};
 
@@ -34,6 +43,9 @@ use crate::{PathError, Result};
 
 /// How many tabs one profile will place.
 const MAX_TABS: usize = 4_096;
+
+/// Stock top for 2.5D profiles. Z is up. Rapids that change XY stay at or above this height.
+const STOCK_TOP_Z: f64 = 0.0;
 
 /// Which side of the contour the tool runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,11 +102,15 @@ pub enum TabLayout {
 }
 
 /// Tabs (bridges) left uncut along the profile.
+///
+/// A positive [`Self::height`] raises the tool by that amount and feeds along the compensated
+/// contour at the raised Z. `None` or 0 is a full-depth tab: retract to the stock top, rapid at
+/// that height, plunge back.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabSpec {
     layout: TabLayout,
     width: f64,
-    /// Retained for a later depth pass. `None` skips the gap in XY only.
+    /// Lift while crossing the gap, millimetres. `None` or 0 is a full-depth tab.
     height: Option<f64>,
 }
 
@@ -107,7 +123,8 @@ impl TabSpec {
         Self { layout: TabLayout::Spacing(spacing), width, height: None }
     }
 
-    /// Vertical lift while crossing the gap. Applied when it is positive; stored either way for later.
+    /// Lift while crossing the gap, millimetres. Positive values feed along the contour at `z + height`.
+    /// Zero is stored and treated as a full-depth tab.
     pub fn height(mut self, height: f64) -> Self {
         self.height = Some(height);
         self
@@ -516,8 +533,12 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     let mut moves = Vec::new();
     let pierce_xy = lead_in_point(start, travel, waste_left, op.lead_in)?;
     let pierce = point3(pierce_xy, z)?;
-    push(&mut moves, Move::Rapid { to: pierce })?;
+    let safe_z = safe_height(z);
+    // Rapid at the stock top (or the cut Z if that is higher), then plunge. Matches the
+    // clearance / retract link `campanion run` wraps around a 2.5D section.
+    push(&mut moves, Move::Rapid { to: point3(pierce_xy, safe_z)? })?;
     push(&mut moves, Move::Event(ProcessEvent::On))?;
+    push_vertical(&mut moves, pierce_xy, z, CutKind::Plunge)?;
     emit_lead(op.lead_in, start, travel, waste_left, false, z, CutKind::LeadIn, &mut moves)?;
 
     let length = path.length()?;
@@ -526,7 +547,7 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
         if tab.start > cursor + 1e-9 {
             emit_span(path, cursor, tab.start, z, CutKind::Cut, &mut moves)?;
         }
-        emit_gap(path, tab, z, &mut moves)?;
+        emit_gap(path, tab, z, safe_z, &mut moves)?;
         cursor = tab.start + tab.width;
     }
     if length > cursor + 1e-9 {
@@ -540,6 +561,8 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     let exit = curve::point_at_length(path, exit_s)?;
     let exit_tangent = curve::tangent_at_length(path, exit_s)?;
     emit_lead(op.lead_out, exit, exit_tangent, waste_left, true, z, CutKind::LeadOut, &mut moves)?;
+    let end_xy = lead_out_point(exit, exit_tangent, waste_left, op.lead_out)?;
+    push_vertical(&mut moves, end_xy, safe_z, CutKind::Retract)?;
     push(&mut moves, Move::Event(ProcessEvent::Off))?;
     Ok((Toolpath::new(moves)?, pierce))
 }
@@ -563,17 +586,48 @@ fn push_segment(seg: campanion_geom::Segment, z: f64, kind: CutKind, moves: &mut
     Ok(())
 }
 
-fn emit_gap(path: &Contour, tab: &Tab, z: f64, moves: &mut Vec<Move>) -> Result<()> {
+fn emit_gap(path: &Contour, tab: &Tab, z: f64, safe_z: f64, moves: &mut Vec<Move>) -> Result<()> {
     let from = curve::point_at_length(path, tab.start)?;
     let to = curve::point_at_length(path, tab.start + tab.width)?;
+    let end_s = tab.start + tab.width;
     if let Some(height) = tab.height.filter(|height| *height > 0.0) {
-        push(moves, Move::Linear { to: point3(from, z + height)?, kind: CutKind::Retract })?;
-        push(moves, Move::Rapid { to: point3(to, z + height)? })?;
-        push(moves, Move::Linear { to: point3(to, z)?, kind: CutKind::Plunge })?;
+        let raised = z + height;
+        push_vertical(moves, from, raised, CutKind::Retract)?;
+        emit_span(path, tab.start, end_s, raised, CutKind::Retract, moves)?;
+        push_vertical(moves, to, z, CutKind::Plunge)?;
     } else {
-        push(moves, Move::Rapid { to: point3(to, z)? })?;
+        // Full-depth tab: do not rapid at cutting depth. Retract to the stock top, rapid there,
+        // plunge back.
+        push_vertical(moves, from, safe_z, CutKind::Retract)?;
+        if !same_xy(from, to) {
+            push(moves, Move::Rapid { to: point3(to, safe_z)? })?;
+        }
+        push_vertical(moves, to, z, CutKind::Plunge)?;
     }
     Ok(())
+}
+
+fn safe_height(z: f64) -> f64 {
+    z.max(STOCK_TOP_Z)
+}
+
+fn same_xy(a: Point, b: Point) -> bool {
+    (a.x() - b.x()).abs() <= 1e-9 && (a.y() - b.y()).abs() <= 1e-9
+}
+
+fn push_vertical(moves: &mut Vec<Move>, xy: Point, z: f64, kind: CutKind) -> Result<()> {
+    let to = point3(xy, z)?;
+    if last_point(moves).is_some_and(|prev| prev.almost_eq(to, 1e-9)) {
+        return Ok(());
+    }
+    push(moves, Move::Linear { to, kind })
+}
+
+fn last_point(moves: &[Move]) -> Option<Point3> {
+    moves.iter().rev().find_map(|mv| match *mv {
+        Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => Some(to),
+        Move::Event(_) | Move::Dwell { .. } => None,
+    })
 }
 
 fn emit_lead(
@@ -940,18 +994,27 @@ mod tests {
         near(sum, 8.0, 1e-12);
         near(plain.toolpath().cutting_length().unwrap() - with.toolpath().cutting_length().unwrap(), sum, 1e-6);
         let rapids = with.toolpath().moves().iter().filter(|mv| matches!(mv, Move::Rapid { .. })).count();
-        assert_eq!(rapids, 5, "entry rapid plus one rapid per tab");
+        assert_eq!(rapids, 5, "entry rapid plus one rapid per full-depth tab");
 
         let lifted = inside_climb().tabs(TabSpec::count(4, 2.0).height(1.5)).generate(&shape).unwrap();
-        let mut retracts = 0;
+        let mut lifts = 0;
+        let mut cursor: Option<Point3> = None;
         for mv in lifted.toolpath().moves() {
-            if let Move::Linear { to, kind: CutKind::Retract } = mv {
-                retracts += 1;
+            if let Move::Linear { to, kind: CutKind::Retract } = mv
+                && let Some(from) = cursor
+                && (from.x() - to.x()).abs() <= 1e-12
+                && (from.y() - to.y()).abs() <= 1e-12
+            {
+                lifts += 1;
                 near(to.z(), 1.5, 1e-12);
             }
+            if let Some(to) = move_end(*mv) {
+                cursor = Some(to);
+            }
         }
-        assert_eq!(retracts, 4);
+        assert_eq!(lifts, 4);
         near(plain.toolpath().cutting_length().unwrap() - lifted.toolpath().cutting_length().unwrap(), 8.0, 1e-6);
+        assert_eq!(lifted.toolpath().moves().iter().filter(|mv| matches!(mv, Move::Rapid { .. })).count(), 1, "lifted tabs are feed, not rapid");
     }
 
     #[test]
@@ -1058,19 +1121,22 @@ mod tests {
     fn process_markers_bracket_the_cut_and_z_is_carried() {
         let profile = inside_climb().z(-2.5).generate(&rect(20.0, 10.0)).unwrap();
         let moves = profile.toolpath().moves();
-        assert!(matches!(moves.first(), Some(Move::Rapid { .. })));
+        assert!(matches!(moves.first(), Some(Move::Rapid { to }) if (to.z() - STOCK_TOP_Z).abs() < 1e-12));
         assert!(matches!(moves.get(1), Some(Move::Event(ProcessEvent::On))));
+        assert!(matches!(moves.get(2), Some(Move::Linear { kind: CutKind::Plunge, to }) if (to.z() + 2.5).abs() < 1e-12));
         assert!(matches!(moves.last(), Some(Move::Event(ProcessEvent::Off))));
         near(profile.pierce().z(), -2.5, 1e-12);
+        let retract = moves.iter().rev().find(|mv| matches!(mv, Move::Linear { kind: CutKind::Retract, .. }));
+        match retract {
+            Some(Move::Linear { to, .. }) => near(to.z(), STOCK_TOP_Z, 1e-12),
+            other => panic!("expected a retract to the stock top, got {other:?}"),
+        }
         for mv in moves {
-            let z = match mv {
-                Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => Some(to.z()),
-                Move::Event(_) | Move::Dwell { .. } => None,
-            };
-            if let Some(z) = z {
-                near(z, -2.5, 1e-12);
+            if let Move::Linear { to, kind: CutKind::Cut } | Move::Arc { to, kind: CutKind::Cut, .. } = mv {
+                near(to.z(), -2.5, 1e-12);
             }
         }
+        assert!(!xy_rapid_below_stock(moves));
     }
 
     #[test]
@@ -1136,6 +1202,127 @@ mod tests {
         let long = Contour::try_new(segments, false, &Tolerance::default()).unwrap();
         let err = outside_conventional().generate(&long).unwrap_err();
         assert!(err.to_string().contains("too many segments"), "{err}");
+    }
+
+    #[test]
+    fn notched_profile_tabs_follow_the_contour_and_start_at_the_stock_top() {
+        let part = notched_plate();
+        let diameter = 6.0;
+        let radius = diameter * 0.5;
+        let z = -12.0;
+        let height = 3.0;
+        let raised = z + height;
+        let profile = ProfileOp::new(Tool::Diameter { diameter }, Compensation::Computed, ProfileSide::Outside, CutDirection::Climb)
+            .z(z)
+            .tabs(TabSpec::count(6, 10.0).height(height))
+            .generate(&part)
+            .unwrap();
+        let moves = profile.toolpath().moves();
+        match moves.first() {
+            Some(Move::Rapid { to }) => {
+                assert!(to.z() >= STOCK_TOP_Z - 1e-12, "first motion Z {}", to.z());
+            }
+            other => panic!("first motion should be a rapid at the stock top, got {other:?}"),
+        }
+        assert!(!xy_rapid_below_stock(moves), "XY rapid below the stock: {moves:?}");
+
+        let mut tab_feeds = 0;
+        let mut returns = 0;
+        let mut cursor: Option<Point3> = None;
+        for mv in moves {
+            match *mv {
+                Move::Linear { to, kind: CutKind::Retract } | Move::Arc { to, kind: CutKind::Retract, .. } if (to.z() - raised).abs() < 1e-9 => {
+                    let moved_xy = cursor.is_some_and(|from| (from.x() - to.x()).abs() > 1e-9 || (from.y() - to.y()).abs() > 1e-9);
+                    if moved_xy || matches!(mv, Move::Arc { .. }) {
+                        tab_feeds += 1;
+                    }
+                }
+                Move::Linear { to, kind: CutKind::Plunge } if (to.z() - z).abs() < 1e-9 => returns += 1,
+                _ => {}
+            }
+            if let Some(to) = move_end(*mv) {
+                cursor = Some(to);
+            }
+        }
+        assert!(tab_feeds >= 6, "tab crossings as feed, got {tab_feeds}");
+        assert!(returns >= 6, "plunge back to cut depth after each tab, got {returns}");
+
+        for (x, y, _z) in sample_path(moves) {
+            let at = Point::new(x, y).unwrap();
+            let distance = outline_distance(&part, at);
+            assert!(distance + 1e-6 >= radius, "gouge at ({x}, {y}): distance {distance} < radius {radius}");
+        }
+        let corner = Point::new(65.0, 0.0).unwrap();
+        let min_corner = sample_path(moves).into_iter().map(|(x, y, _)| Point::new(x, y).unwrap().distance(corner)).fold(f64::INFINITY, f64::min);
+        assert!(min_corner + 1e-6 >= radius, "notch corner gouge: closest approach {min_corner}");
+    }
+
+    #[test]
+    fn full_depth_tab_rapids_at_the_stock_top() {
+        let profile = inside_climb().z(-8.0).tabs(TabSpec::count(2, 3.0)).generate(&rect(40.0, 20.0)).unwrap();
+        let moves = profile.toolpath().moves();
+        assert!(!xy_rapid_below_stock(moves), "{moves:?}");
+        let tab_rapids: Vec<_> = moves.iter().filter(|mv| matches!(mv, Move::Rapid { to } if (to.z() - STOCK_TOP_Z).abs() < 1e-9)).collect();
+        assert!(tab_rapids.len() >= 2, "entry plus a rapid per full-depth tab, got {tab_rapids:?}");
+        let mut at_depth = 0;
+        for mv in moves {
+            if let Move::Linear { to, kind: CutKind::Plunge } = mv
+                && (to.z() + 8.0).abs() < 1e-9
+            {
+                at_depth += 1;
+            }
+        }
+        assert!(at_depth >= 3, "entry plunge plus a plunge after each tab, got {at_depth}");
+    }
+
+    #[test]
+    fn tab_across_an_arc_stays_on_the_arc() {
+        let r = 20.0;
+        let east = Point::new(r, 0.0).unwrap();
+        let west = Point::new(-r, 0.0).unwrap();
+        let circle = Contour::try_new(
+            vec![
+                Segment::Arc(campanion_geom::Arc::from_bulge(east, west, 1.0).unwrap()),
+                Segment::Arc(campanion_geom::Arc::from_bulge(west, east, 1.0).unwrap()),
+            ],
+            true,
+            &Tolerance::default(),
+        )
+        .unwrap();
+        let z = -6.0;
+        let height = 2.0;
+        let raised = z + height;
+        let profile = ProfileOp::new(Tool::Diameter { diameter: 4.0 }, Compensation::Computed, ProfileSide::On, CutDirection::Conventional)
+            .z(z)
+            .tabs(TabSpec::count(3, 8.0).height(height))
+            .generate(&circle)
+            .unwrap();
+        let moves = profile.toolpath().moves();
+        assert!(!xy_rapid_below_stock(moves), "{moves:?}");
+        let mut saw_arc_tab = false;
+        let mut cursor: Option<Point3> = None;
+        for mv in moves {
+            if let Move::Arc { to, centre, kind: CutKind::Retract, .. } = *mv
+                && (to.z() - raised).abs() < 1e-9
+            {
+                saw_arc_tab = true;
+                if let Some(from) = cursor {
+                    let r0 = (from.x() - centre.x()).hypot(from.y() - centre.y());
+                    let r1 = (to.x() - centre.x()).hypot(to.y() - centre.y());
+                    near(r0, r, 1e-6);
+                    near(r1, r, 1e-6);
+                }
+            }
+            if let Some(to) = move_end(*mv) {
+                cursor = Some(to);
+            }
+        }
+        assert!(saw_arc_tab, "tab across an arc must emit an arc feed, got {moves:?}");
+        for (x, y, path_z) in sample_path(moves) {
+            if (path_z - raised).abs() < 1e-6 || (path_z - z).abs() < 1e-6 {
+                near(x.hypot(y), r, 1e-4);
+            }
+        }
     }
 
     #[test]
@@ -1225,5 +1412,169 @@ mod tests {
 
     fn last_feed(profile: &Profile) -> &Move {
         profile.toolpath().moves().iter().rev().find(|mv| matches!(mv, Move::Linear { .. } | Move::Arc { .. })).expect("feed")
+    }
+
+    fn move_end(mv: Move) -> Option<Point3> {
+        match mv {
+            Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => Some(to),
+            Move::Event(_) | Move::Dwell { .. } => None,
+        }
+    }
+
+    fn xy_rapid_below_stock(moves: &[Move]) -> bool {
+        let mut cursor: Option<Point3> = None;
+        for mv in moves {
+            if let Move::Rapid { to } = *mv
+                && let Some(from) = cursor
+            {
+                let xy = (from.x() - to.x()).abs() > 1e-9 || (from.y() - to.y()).abs() > 1e-9;
+                if xy && from.z().min(to.z()) < STOCK_TOP_Z - 1e-12 {
+                    return true;
+                }
+            }
+            if let Some(to) = move_end(*mv) {
+                cursor = Some(to);
+            }
+        }
+        false
+    }
+
+    fn notched_plate() -> Contour {
+        let p = |x, y| Point::new(x, y).unwrap();
+        let edge = |a, b| Segment::Line(Line::new(a, b).unwrap());
+        Contour::try_new(
+            vec![
+                edge(p(0.0, 0.0), p(35.0, 0.0)),
+                edge(p(35.0, 0.0), p(35.0, 20.0)),
+                edge(p(35.0, 20.0), p(65.0, 20.0)),
+                edge(p(65.0, 20.0), p(65.0, 0.0)),
+                edge(p(65.0, 0.0), p(100.0, 0.0)),
+                edge(p(100.0, 0.0), p(100.0, 60.0)),
+                edge(p(100.0, 60.0), p(0.0, 60.0)),
+                edge(p(0.0, 60.0), p(0.0, 0.0)),
+            ],
+            true,
+            &Tolerance::default(),
+        )
+        .unwrap()
+    }
+
+    fn outline_distance(contour: &Contour, point: Point) -> f64 {
+        contour.segments().iter().map(|seg| seg.distance_to_point(point)).fold(f64::INFINITY, f64::min)
+    }
+
+    fn sample_path(moves: &[Move]) -> Vec<(f64, f64, f64)> {
+        let mut out = Vec::new();
+        let mut cursor: Option<Point3> = None;
+        for mv in moves {
+            match *mv {
+                Move::Linear { to, .. } => {
+                    if let Some(from) = cursor {
+                        sample_line(&mut out, from, to);
+                    }
+                    cursor = Some(to);
+                }
+                Move::Arc { to, centre, ccw, .. } => {
+                    if let Some(from) = cursor {
+                        sample_arc(&mut out, from, to, centre, ccw);
+                    }
+                    cursor = Some(to);
+                }
+                Move::Rapid { to } => cursor = Some(to),
+                Move::Event(_) | Move::Dwell { .. } => {}
+            }
+        }
+        out
+    }
+
+    fn sample_line(out: &mut Vec<(f64, f64, f64)>, from: Point3, to: Point3) {
+        let len = from.distance(to);
+        let n = ((len / 0.5).ceil() as usize).clamp(1, 80);
+        for i in 0..=n {
+            let t = i as f64 / n as f64;
+            out.push((from.x() + (to.x() - from.x()) * t, from.y() + (to.y() - from.y()) * t, from.z() + (to.z() - from.z()) * t));
+        }
+    }
+
+    fn sample_arc(out: &mut Vec<(f64, f64, f64)>, from: Point3, to: Point3, centre: Point3, ccw: bool) {
+        let a0 = (from.y() - centre.y()).atan2(from.x() - centre.x());
+        let a1 = (to.y() - centre.y()).atan2(to.x() - centre.x());
+        let mut sweep = if ccw { (a1 - a0).rem_euclid(std::f64::consts::TAU) } else { (a0 - a1).rem_euclid(std::f64::consts::TAU) };
+        if from.almost_eq(to, 1e-8) || sweep < 1e-8 {
+            sweep = std::f64::consts::TAU;
+        }
+        let n = ((sweep / (PI / 12.0)).ceil() as usize).clamp(8, 96);
+        let r = (from.x() - centre.x()).hypot(from.y() - centre.y());
+        for i in 0..=n {
+            let t = i as f64 / n as f64;
+            let angle = if ccw { a0 + sweep * t } else { a0 - sweep * t };
+            let z = from.z() + (to.z() - from.z()) * t;
+            out.push((centre.x() + r * angle.cos(), centre.y() + r * angle.sin(), z));
+        }
+    }
+
+    fn l_shape(w: f64, h: f64, notch: f64) -> Contour {
+        let p = |x, y| Point::new(x, y).unwrap();
+        let edge = |a, b| Segment::Line(Line::new(a, b).unwrap());
+        Contour::try_new(
+            vec![
+                edge(p(0.0, 0.0), p(w, 0.0)),
+                edge(p(w, 0.0), p(w, h)),
+                edge(p(w, h), p(notch, h)),
+                edge(p(notch, h), p(notch, notch)),
+                edge(p(notch, notch), p(0.0, notch)),
+                edge(p(0.0, notch), p(0.0, 0.0)),
+            ],
+            true,
+            &Tolerance::default(),
+        )
+        .unwrap()
+    }
+
+    fn assert_profile_safe(part: &Contour, profile: &Profile, radius: f64) {
+        let moves = profile.toolpath().moves();
+        assert!(!xy_rapid_below_stock(moves), "XY rapid below the stock");
+        match moves.first() {
+            Some(Move::Rapid { to }) => assert!(to.z() >= STOCK_TOP_Z - 1e-12, "first motion Z {}", to.z()),
+            other => panic!("first motion should be a rapid, got {other:?}"),
+        }
+        for (x, y, _) in sample_path(moves) {
+            let distance = outline_distance(part, Point::new(x, y).unwrap());
+            assert!(distance + 1e-6 >= radius, "gouge at ({x}, {y}): distance {distance} < radius {radius}");
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+        #[test]
+        fn random_rectangles_and_l_shapes_do_not_gouge_or_rapid_through_stock(
+            w in 40.0f64..120.0,
+            h in 30.0f64..80.0,
+            diameter in 4.0f64..8.0,
+            z in -20.0f64..-2.0,
+            count in 1usize..5,
+            width in 2.0f64..6.0,
+            height in 0.0f64..4.0,
+            l_notch in proptest::bool::ANY,
+            climb in proptest::bool::ANY,
+        ) {
+            proptest::prop_assume!(count as f64 * width < 0.35 * 2.0 * (w + h));
+            let part = if l_notch {
+                let notch = (w.min(h) * 0.4).clamp(8.0, 24.0);
+                l_shape(w, h, notch)
+            } else {
+                rect(w, h)
+            };
+            let direction = if climb { CutDirection::Climb } else { CutDirection::Conventional };
+            let mut spec = TabSpec::count(count, width);
+            if height > 0.0 {
+                spec = spec.height(height.min((-z) * 0.5).max(0.2));
+            }
+            let op = ProfileOp::new(Tool::Diameter { diameter }, Compensation::Computed, ProfileSide::Outside, direction).z(z).tabs(spec);
+            let Ok(profile) = op.generate(&part) else {
+                return Ok(());
+            };
+            assert_profile_safe(&part, &profile, diameter * 0.5);
+        }
     }
 }
