@@ -68,6 +68,23 @@ fn equal_halves_match_the_upper_half() {
     assert_eq!(from_both, from_upper);
 }
 
+/// XZ section of `examples/shaft_fillet.step` as solidcraft-cli 0.25.1 writes it.
+/// The negative fillet ends about 1.2e-5 mm off the front face.
+#[test]
+fn shaft_fillet_section_keeps_journal_body_and_fillet() {
+    let profile = TurnProfile::from_section_dxf(include_str!("../../cli/tests/fixtures/shaft_fillet_section.dxf"), 1e-6).expect("shaft fillet");
+    let (zmin, zmax) = profile.z_range();
+    assert_close(zmin, -60.0, 1e-6, "zmin");
+    assert_close(zmax, 0.0, 1e-6, "zmax");
+    assert_close(profile.radius_at(-20.0).expect("journal") * 2.0, 30.0, 1e-4, "journal diameter");
+    assert_close(profile.radius_at(-50.0).expect("body") * 2.0, 40.0, 1e-4, "body diameter");
+    let fillet = 12.0 + (9.0 - 4.0_f64).sqrt();
+    assert_close(profile.radius_at(-1.0).expect("fillet"), fillet, 1e-4, "fillet radius at Z -1");
+    assert!(profile.segments().iter().any(|segment| matches!(segment, Segment::Arc(_))), "expected the R3 fillet");
+    assert_close(profile.start().y(), 0.0, 1e-6, "front on the axis");
+    assert_close(profile.end().y(), 20.0, 1e-4, "back face dropped");
+}
+
 #[test]
 fn halves_that_differ_are_rejected() {
     let body = format!(
@@ -79,6 +96,32 @@ fn halves_that_differ_are_rejected() {
     );
     let err = TurnProfile::from_section_dxf(&dxf_mm(&body), 1e-6).expect_err("differ");
     assert!(err.to_string().contains("differ"), "{err}");
+}
+
+#[test]
+fn a_tilted_face_does_not_hide_a_different_radius() {
+    let body = format!(
+        "{}{}{}{}",
+        line_entity(10.0, 0.0, -12.0, -1e-5),
+        line_entity(10.0, 0.0, 10.0, -20.0),
+        line_entity(-12.0, -1e-5, -12.0, -20.0),
+        line_entity(10.0, -20.0, -12.0, -20.0),
+    );
+    let err = TurnProfile::from_section_dxf(&dxf_mm(&body), 1e-6).expect_err("differ");
+    assert!(err.to_string().contains("not turned about Z"), "{err}");
+}
+
+#[test]
+fn a_section_missing_the_cylinders_is_not_a_half_profile() {
+    let body = format!(
+        "{}{}{}{}",
+        line_entity(-20.0, -60.0, 20.0, -60.0),
+        line_entity(-20.0, -36.0, -15.0, -36.0),
+        line_entity(-12.0, 0.0, 12.0, 0.0),
+        line_entity(15.0, -36.0, 20.0, -36.0),
+    );
+    let err = TurnProfile::from_section_dxf(&dxf_mm(&body), 1e-6).expect_err("open edges");
+    assert!(err.to_string().contains("half-profile"), "{err}");
 }
 
 #[test]

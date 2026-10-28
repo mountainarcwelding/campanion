@@ -17,6 +17,10 @@ Safety patch. Do not run tabbed profile-document output, or multi-tool `campanio
 - `campanion run` writes a tool-change event at the start of the first toolpath and whenever the tool id changes, so mill posts emit `T{tool} M6` (fixes #94). Consecutive toolpaths that share a tool get one change. A spindle operation with no speed fails `run --post` when that post's spindle-on template uses `{speed}`.
 - Full circles post on every mill post at any coordinates: a closed arc whose end lies within 1e-9 of a radius of its start is one full turn in the toolpath, the writer, and read-back (fixes #92). `examples/step.job.json` now posts on every mill post.
 
+### Fixed
+
+- A lathe STEP section keeps a radial end face when a seam pulls it off Z, so `examples/shaft_fillet.lathe.json` runs with solidcraft-cli.
+
 ## 0.8.3 — 2026-10-24
 
 ### Added

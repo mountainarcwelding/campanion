@@ -40,7 +40,10 @@ impl TurnProfile {
     ///    front (larger Z) first. The end radii are set to 0 and the chain is built with
     ///    [`TurnProfile::try_new`] at `JOIN.max(tol)`. A flat back face (a line at the
     ///    smallest Z down to the axis) is dropped first, so the profile stops at the chuck-end
-    ///    diameter like a drawn profile.
+    ///    diameter like a drawn profile. A line whose Z changes by at most `JOIN` and whose
+    ///    radius changes by more than `JOIN` is a radial face: both ends take the Z of the end
+    ///    nearer the axis. A seam that pulls the outer end of that face off the plane stays one
+    ///    face, so the two halves are not reported as different radii there.
     /// 6. When both halves are usable, compare [`TurnProfile::radius_at`] at 65 evenly spaced Z
     ///    values on the overlapping Z range, skipping a Z where either returns `None`. If the
     ///    largest difference is at most `max(10 * tol, 1e-3)`, return the upper half. A larger
@@ -223,7 +226,42 @@ fn chain_half(pieces: &[Segment], join: f64, tol: f64) -> Option<TurnProfile> {
     let ordered = order_chain(pieces, join)?;
     let mut snapped = snap_chain(&ordered, join)?;
     drop_back_face(&mut snapped, join);
+    straighten_radial_faces(&mut snapped, join)?;
     TurnProfile::try_new(snapped, join.max(tol)).ok()
+}
+
+/// Put a radial face back on one Z.
+///
+/// Joining a seam can drag the outer end of a front or shoulder face off its plane by less than
+/// `join`. [`TurnProfile::radius_at`] then samples the axis end of that sloped line and reports
+/// radius 0, while the other half's square face reports the outside radius. Both ends take the Z
+/// of the end nearer the axis. A line that is already vertical, or that does not change radius by
+/// more than `join`, is left alone.
+fn straighten_radial_faces(segments: &mut [Segment], join: f64) -> Option<()> {
+    if join <= 0.0 {
+        return Some(());
+    }
+    for segment in segments.iter_mut() {
+        let Segment::Line(line) = *segment else {
+            continue;
+        };
+        let z0 = line.start().x();
+        let z1 = line.end().x();
+        let dz = (z0 - z1).abs();
+        if dz <= 1e-15 || dz > join {
+            continue;
+        }
+        let r0 = line.start().y();
+        let r1 = line.end().y();
+        if (r0 - r1).abs() <= join {
+            continue;
+        }
+        let face_z = if r0.abs() <= r1.abs() { z0 } else { z1 };
+        let start = Point::new(face_z, r0).ok()?;
+        let end = Point::new(face_z, r1).ok()?;
+        *segment = Segment::Line(Line::new(start, end).ok()?);
+    }
+    Some(())
 }
 
 /// Remove the flat back face at the chuck end (a vertical line down to the axis).

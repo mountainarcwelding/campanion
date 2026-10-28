@@ -295,3 +295,160 @@ fn missing_cli_uses_the_existing_message() -> Result<(), String> {
     }
     Ok(())
 }
+
+fn shaft_fillet_dxf() -> Result<PathBuf, String> {
+    workspace_root()?.join("crates/cli/tests/fixtures/shaft_fillet_section.dxf").canonicalize().map_err(|err| err.to_string())
+}
+
+fn example_job() -> Result<PathBuf, String> {
+    workspace_root()?.join("examples/shaft_fillet.lathe.json").canonicalize().map_err(|err| err.to_string())
+}
+
+/// `CAMPANION_SOLIDCRAFT_CLI` when that file exists, otherwise `solidcraft-cli` on `PATH`.
+fn solidcraft_cli() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os("CAMPANION_SOLIDCRAFT_CLI") {
+        let path = PathBuf::from(value);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join("solidcraft-cli");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+struct Posted {
+    status: Option<i32>,
+    stderr: String,
+    nc: String,
+    ir: String,
+}
+
+fn post_job(name: &str, job: &Path, post: &str, dxf: Option<&Path>) -> Result<Posted, String> {
+    let scratch = Scratch::new(name)?;
+    let out = scratch.0.join("out.nc");
+    let ir = scratch.0.join("out.ir.json");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_campanion"));
+    command.args(["lathe", &path_arg(job)?, "-o", &path_arg(&out)?, "--ir", &path_arg(&ir)?, "--post", post]).current_dir(&scratch.0);
+    if let Some(dxf) = dxf {
+        let log = scratch.0.join("calls.log");
+        let cli = scratch.0.join("solidcraft-cli");
+        write_executable(&cli, fake_cli())?;
+        let probe = write_probe(&scratch.0, r#"[{"bodies":["shaft2"],"exporter":"SolidCraft","exporter_up":"z","warnings":[]}]"#)?;
+        command
+            .env("CAMPANION_SOLIDCRAFT_CLI", path_arg(&cli)?)
+            .env("CAMPANION_FAKE_LOG", path_arg(&log)?)
+            .env("CAMPANION_FAKE_PROBE", path_arg(&probe)?)
+            .env("CAMPANION_FAKE_DXF", path_arg(dxf)?);
+    }
+    let output = command.output().map_err(|err| err.to_string())?;
+    let nc = std::fs::read_to_string(&out).unwrap_or_default();
+    let ir_text = std::fs::read_to_string(&ir).unwrap_or_default();
+    Ok(Posted { status: output.status.code(), stderr: output_text(&output.stderr)?, nc, ir: ir_text })
+}
+
+fn program_finished(nc: &str, post: &str) -> bool {
+    let end = if post == "linuxcnc_lathe" { "M2" } else { "M30" };
+    let Some(line) = nc.lines().rev().map(str::trim).find(|line| !line.is_empty() && *line != "%") else {
+        return false;
+    };
+    line.split_whitespace().any(|word| word == end)
+}
+
+fn section_radius(points: &[[f64; 2]], z: f64) -> Result<f64, String> {
+    let mut best: Option<f64> = None;
+    for window in points.windows(2) {
+        let (Some(start), Some(end)) = (window.first(), window.get(1)) else {
+            continue;
+        };
+        let (z0, r0) = (start[0], start[1]);
+        let (z1, r1) = (end[0], end[1]);
+        let low = z0.min(z1) - 1e-9;
+        let high = z0.max(z1) + 1e-9;
+        if z < low || z > high {
+            continue;
+        }
+        let dz = z1 - z0;
+        let radius = if dz.abs() <= 1e-9 {
+            r0.max(r1)
+        } else {
+            let t = ((z - z0) / dz).clamp(0.0, 1.0);
+            r0 + t * (r1 - r0)
+        };
+        best = Some(best.map_or(radius, |current| current.max(radius)));
+    }
+    best.ok_or_else(|| format!("no section radius at Z {z}"))
+}
+
+/// Diameters on the straight journals, and one point on the R3 fillet.
+///
+/// The stored section is chorded at the job chord height (0.01 mm). A radius taken along Z can
+/// sit slightly farther from the arc than that sagitta, so the fillet check allows 0.02 mm.
+fn assert_shaft_profile(ir: &str) -> Result<(), String> {
+    let doc = campanion_ir::Document::from_json(ir).map_err(|err| err.to_string())?;
+    let points = doc.program().turning().and_then(|turning| turning.section()).ok_or("turning section missing")?.points();
+    let journal = section_radius(points, -20.0)?;
+    let body = section_radius(points, -50.0)?;
+    let fillet = section_radius(points, -1.0)?;
+    if (journal * 2.0 - 30.0).abs() > 1e-3 {
+        return Err(format!("Ø30 journal at Z -20 measured diameter {}", journal * 2.0));
+    }
+    if (body * 2.0 - 40.0).abs() > 1e-3 {
+        return Err(format!("Ø40 body at Z -50 measured diameter {}", body * 2.0));
+    }
+    let expected = 12.0 + (9.0 - 4.0_f64).sqrt();
+    if (fillet - expected).abs() > 0.02 {
+        return Err(format!("R3 fillet at Z -1 is radius {fillet}, expected {expected} within 0.02 mm"));
+    }
+    Ok(())
+}
+
+#[test]
+fn shaft_fillet_fixture_posts_on_three_lathes() -> Result<(), String> {
+    let job = example_job()?;
+    let dxf = shaft_fillet_dxf()?;
+    for post in ["haas_lathe", "linuxcnc_lathe", "fanuc_lathe"] {
+        let posted = post_job(&format!("fillet-{post}"), &job, post, Some(&dxf))?;
+        if posted.status != Some(0) {
+            return Err(format!("{post} exit {:?} stderr {}", posted.status, posted.stderr));
+        }
+        if !program_finished(&posted.nc, post) {
+            return Err(format!("{post} did not finish the program:\n{}", posted.nc));
+        }
+        assert_shaft_profile(&posted.ir).map_err(|err| format!("{post}: {err}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn shaft_fillet_runs_when_solidcraft_cli_present() -> Result<(), String> {
+    if solidcraft_cli().is_none() {
+        eprintln!("skipping: solidcraft-cli not found");
+        return Ok(());
+    }
+    let job = example_job()?;
+    for post in ["haas_lathe", "linuxcnc_lathe", "fanuc_lathe"] {
+        let posted = post_job(&format!("real-{post}"), &job, post, None)?;
+        if posted.status == Some(0) {
+            if !program_finished(&posted.nc, post) {
+                return Err(format!("{post} did not finish the program:\n{}", posted.nc));
+            }
+            assert_shaft_profile(&posted.ir).map_err(|err| format!("{post}: {err}"))?;
+            continue;
+        }
+        // A kernel that cannot build this solid returns a section with no wall between the
+        // end faces. That is not a turned half-profile, and it must stay an error.
+        let clear = "the section does not give one half-profile from the axis back to the axis";
+        if posted.stderr.contains(clear) && !posted.stderr.contains("differ by") {
+            eprintln!("skipping posts: solidcraft-cli section is not a half-profile");
+            return Ok(());
+        }
+        return Err(format!("{post} exit {:?} stderr {}", posted.status, posted.stderr));
+    }
+    Ok(())
+}
