@@ -120,7 +120,7 @@ pub(crate) fn contours_to_regions(contours: &[Contour], tolerance: &Tolerance) -
         let Some(inner) = closed.get(i) else {
             continue;
         };
-        let mut best: Option<(usize, f64)> = None;
+        let mut best: Option<(usize, f64, (f64, f64))> = None;
         for j in 0..n {
             if i == j {
                 continue;
@@ -132,15 +132,17 @@ pub(crate) fn contours_to_regions(contours: &[Contour], tolerance: &Tolerance) -
                 continue;
             }
             let area = outer.signed_area()?.abs();
+            let bounds = outer.bounding_box()?;
+            let xy = (bounds.min().x(), bounds.min().y());
             let take = match best {
                 None => true,
-                Some((_, best_area)) => area < best_area,
+                Some((best_index, best_area, best_xy)) => crate::min_beats(area, xy, j, best_area, best_xy, best_index),
             };
             if take {
-                best = Some((j, area));
+                best = Some((j, area, xy));
             }
         }
-        if let Some((j, _)) = best
+        if let Some((j, _, _)) = best
             && let Some(slot) = parent.get_mut(i)
         {
             *slot = Some(j);
@@ -665,7 +667,13 @@ fn sort_regions(mut regions: Vec<Region>, _tolerance: &Tolerance) -> Result<Vec<
         let bounds = region.outer().bounding_box()?;
         keyed.push((area, bounds.min().x(), bounds.min().y(), index));
     }
-    keyed.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2)).then(a.3.cmp(&b.3)));
+    keyed.sort_by(|a, b| {
+        crate::cmp_float_key(b.0, a.0)
+            .then(crate::cmp_float_key(a.1, b.1))
+            .then(crate::cmp_float_key(a.2, b.2))
+            .then(crate::cmp_xy_rounded((a.1, a.2), (b.1, b.2)))
+            .then(a.3.cmp(&b.3))
+    });
     let original = regions.clone();
     for (slot, key) in regions.iter_mut().zip(keyed.iter()) {
         if let Some(region) = original.get(key.3) {
@@ -819,5 +827,47 @@ mod tests {
     fn try_new_rejects_a_hole_outside_the_outer() {
         let err = Region::try_new(rect(0.0, 0.0, 2.0, 2.0), vec![rect(5.0, 5.0, 1.0, 1.0)], &Tolerance::default()).unwrap_err();
         assert!(err.to_string().contains("outside"), "{err}");
+    }
+
+    fn min_corner(region: &Region) -> (f64, f64) {
+        let bounds = region.outer().bounding_box().unwrap();
+        (bounds.min().x(), bounds.min().y())
+    }
+
+    #[test]
+    fn near_equal_region_areas_order_by_rounded_corner_not_ulp_area() {
+        let tol = Tolerance::default();
+        // Widening a 10 mm square by 1e-9 mm changes its area by 1e-8, inside 1e-9 * 100.
+        let east = region_of(rect(10.0, 0.0, 10.0, 10.0));
+        let west = region_of(rect(-10.0, 0.0, 10.0 + 1e-9, 10.0));
+        let xs = |regions: Vec<Region>| sort_regions(regions, &tol).unwrap().into_iter().map(|region| min_corner(&region).0).collect::<Vec<_>>();
+        assert_eq!(xs(vec![east.clone(), west.clone()]), vec![-10.0, 10.0]);
+        assert_eq!(xs(vec![west.clone(), east.clone()]), vec![-10.0, 10.0]);
+
+        for ulps in [-8_i32, -1, 1, 8] {
+            let mut width = 10.0_f64;
+            for _ in 0..ulps.unsigned_abs() {
+                width = if ulps > 0 { width.next_up() } else { width.next_down() };
+            }
+            let nudged = region_of(rect(-10.0, 0.0, width, 10.0));
+            assert_eq!(xs(vec![east.clone(), nudged.clone()]), vec![-10.0, 10.0], "ulps {ulps}");
+            assert_eq!(xs(vec![nudged, east.clone()]), vec![-10.0, 10.0], "ulps {ulps}");
+        }
+
+        // A tenth of a millimetre is a real area gap, so the larger region stays first.
+        let bigger = region_of(rect(10.0, 0.0, 10.1, 10.0));
+        let clear = xs(vec![west.clone(), bigger]);
+        assert!((clear[0] - 10.0).abs() < 1e-9, "{clear:?}");
+        assert!((clear[1] + 10.0).abs() < 1e-9, "{clear:?}");
+
+        // Mirror pockets: the slightly larger area still loses to the lower corner.
+        let low_x = region_of(rect(-20.0, -8.0, 10.0, 10.0));
+        let low_y = region_of(rect(-8.0, -20.0, 10.0 + 1e-9, 10.0));
+        let corners = |regions: Vec<Region>| sort_regions(regions, &tol).unwrap().into_iter().map(|region| min_corner(&region)).collect::<Vec<_>>();
+        for pair in [vec![low_x.clone(), low_y.clone()], vec![low_y, low_x]] {
+            let ordered = corners(pair);
+            assert!((ordered[0].0 + 20.0).abs() < 1e-9 && (ordered[0].1 + 8.0).abs() < 1e-9, "{ordered:?}");
+            assert!((ordered[1].0 + 8.0).abs() < 1e-9 && (ordered[1].1 + 20.0).abs() < 1e-9, "{ordered:?}");
+        }
     }
 }

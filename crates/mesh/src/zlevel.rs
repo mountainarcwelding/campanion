@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use campanion_geom::{Containment, Contour, Line, Orientation, Point, Region, Segment, Tolerance, offset_region};
+use campanion_geom::{Containment, Contour, Line, Orientation, Point, Region, Segment, Tolerance, min_beats, offset_region};
 
 use crate::{DropCutter, Result, invalid};
 
@@ -507,7 +507,7 @@ fn nest_parents(loops: &[Contour], tol: &Tolerance) -> Result<Vec<Option<usize>>
     let mut parent = vec![None; n];
     for i in 0..n {
         let inner = loops.get(i).ok_or_else(|| invalid("z-level loop is missing"))?;
-        let mut best: Option<usize> = None;
+        let mut best: Option<(usize, f64, (f64, f64))> = None;
         for j in 0..n {
             if i == j {
                 continue;
@@ -516,16 +516,19 @@ fn nest_parents(loops: &[Contour], tol: &Tolerance) -> Result<Vec<Option<usize>>
             if !contains_loop(outer, inner, tol)? {
                 continue;
             }
-            let tighter = match best {
+            let area = loop_area(outer);
+            let bounds = outer.bounding_box().map_err(from_geom)?;
+            let xy = (bounds.min().x(), bounds.min().y());
+            let take = match best {
                 None => true,
-                Some(b) => loop_area(outer) < loop_area(loops.get(b).ok_or_else(|| invalid("z-level loop is missing"))?),
+                Some((best_index, best_area, best_xy)) => min_beats(area, xy, j, best_area, best_xy, best_index),
             };
-            if tighter {
-                best = Some(j);
+            if take {
+                best = Some((j, area, xy));
             }
         }
         let slot = parent.get_mut(i).ok_or_else(|| invalid("z-level loop is missing"))?;
-        *slot = best;
+        *slot = best.map(|(index, _, _)| index);
     }
     Ok(parent)
 }
@@ -606,9 +609,9 @@ fn append_stepovers(region: &Region, stepover: f64, tol: &Tolerance, out: &mut V
 }
 
 fn push_boundaries(region: &Region, out: &mut Vec<Contour>) {
-    out.push(region.outer().clone());
+    out.push(region.outer().with_stable_start());
     for hole in region.holes() {
-        out.push(hole.clone());
+        out.push(hole.with_stable_start());
     }
 }
 

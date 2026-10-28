@@ -199,11 +199,16 @@ fn best_match(items: &[Segment], used: &[bool], at: Point, prefer: Option<Vec2>,
 }
 
 fn better(a: &Match, b: &Match) -> bool {
-    if (a.gap - b.gap).abs() > 1e-15 && (a.gap - b.gap).abs() > (a.gap.max(b.gap) * 1e-9) {
-        return a.gap < b.gap;
+    use std::cmp::Ordering;
+    match crate::cmp_float_key(a.gap, b.gap) {
+        Ordering::Less => return true,
+        Ordering::Greater => return false,
+        Ordering::Equal => {}
     }
-    if (a.dot - b.dot).abs() > 1e-12 {
-        return a.dot > b.dot;
+    match crate::cmp_float_key(b.dot, a.dot) {
+        Ordering::Less => return true,
+        Ordering::Greater => return false,
+        Ordering::Equal => {}
     }
     if a.index != b.index {
         return a.index < b.index;
@@ -389,7 +394,13 @@ fn sort_contours(contours: &mut [Contour]) -> Result<()> {
         keyed.push((rank, x, y, area, len, index));
     }
     keyed.sort_by(|a, b| {
-        a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2)).then(a.3.total_cmp(&b.3)).then(a.4.total_cmp(&b.4)).then(a.5.cmp(&b.5))
+        a.0.cmp(&b.0)
+            .then(crate::cmp_float_key(a.1, b.1))
+            .then(crate::cmp_float_key(a.2, b.2))
+            .then(crate::cmp_float_key(a.3, b.3))
+            .then(crate::cmp_float_key(a.4, b.4))
+            .then(crate::cmp_xy_rounded((a.1, a.2), (b.1, b.2)))
+            .then(a.5.cmp(&b.5))
     });
     let original = contours.to_vec();
     for (slot, key) in contours.iter_mut().zip(keyed.iter()) {
