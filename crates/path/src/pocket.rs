@@ -7,10 +7,13 @@
 //! The first offset is the tool radius plus the finishing allowance. Each later offset moves in
 //! by at most one stepover. A band between the outer wall and an island that is narrower than
 //! two stepovers still gets a ring, so those passes stay within one stepover. A solid remainder
-//! whose middle is farther than the tool radius from the last ring gets another pass. Rings are
-//! emitted outside-in ([`RingOrder::OutsideIn`]). Two rings are joined by a straight cut when
-//! that segment stays inside the region the tool centre may enter. Otherwise the tool retracts,
-//! rapids, and plunges.
+//! thinner than two tool radii, whose middle is farther than the tool radius from the last ring,
+//! gets one more pass. A wider remainder that is still thinner than a stepover stays on the
+//! current ring: stepping by the tool radius would be one ring per radius and overflows the
+//! stack on a large off-grid disk. The ring count is capped by the region span divided by half
+//! a stepover. Rings are emitted outside-in ([`RingOrder::OutsideIn`]).
+//! Two rings are joined by a straight cut when that segment stays inside the region the tool
+//! centre may enter. Otherwise the tool retracts, rapids, and plunges.
 //!
 //! [`PocketStrategy::Zigzag`] fills the inset region with parallel lines at `angle` radians from
 //! +X, spaced by the stepover and clipped to that region. Successive lines alternate direction.
@@ -34,6 +37,9 @@ const MAX_PASSES: usize = 1024;
 
 /// Offset curves, including a shorter pass that closes a band under two stepovers.
 const MAX_RING_LOOPS: usize = MAX_PASSES * 2;
+
+/// Extra levels above `span / min_inset` for the boundary ring and one core pass.
+const RING_CAP_SLACK: usize = 2;
 
 /// Orphan patches thinner than this are offset noise, not an uncut band.
 const ORPHAN_CLEARANCE_MM: f64 = 1.0e-3;
@@ -352,56 +358,109 @@ fn offset_rings(start: &[Region], stepover: f64, radius: f64, tolerance: &Tolera
     Ok(loops)
 }
 
-/// Emit `region`'s loops, then the next inward rings.
+/// Emit `region`'s loops, then each inward ring, on an explicit stack.
 ///
 /// A full stepover inset moves every boundary, so the gap between an outer wall and an island
 /// closes at twice the stepover. When that inset would drop a band that is still wider than one
 /// stepover, or a solid core that the tool radius does not reach from the current ring, the next
 /// ring is a shorter inset. Later rings use a full stepover again where the remaining region allows it.
+///
+/// The walk is iterative. A remainder thinner than one stepover used to recurse by the coverage
+/// limit (the tool radius on a solid disk). An off-grid disk whose stepover is larger than its
+/// radius then built one frame per tool radius and overflowed the stack.
 fn cover_region(region: &Region, stepover: f64, radius: f64, tolerance: &Tolerance, loops: &mut Vec<Contour>) -> Result<()> {
-    if loops.len() > MAX_RING_LOOPS {
-        return Err(invalid(format!("too many offset rings: limit is {MAX_RING_LOOPS}")));
-    }
-    let before = loops.len();
-    append_loops(std::slice::from_ref(region), loops, tolerance)?;
-    if loops.len() == before {
-        return Ok(());
-    }
-    if loops.len() > MAX_RING_LOOPS {
-        return Err(invalid(format!("too many offset rings: limit is {MAX_RING_LOOPS}")));
-    }
-
-    let limit = ring_limit(region, stepover, radius);
-    let children = inward(region, stepover, tolerance)?;
-    if !children.is_empty() && !facing_gap(region, &children, limit, stepover, tolerance)? {
-        return descend(&children, stepover, radius, tolerance, loops);
-    }
-
-    let step = limit.min(stepover);
-    if step <= linear_eps(tolerance) {
-        return descend(&children, stepover, radius, tolerance, loops);
-    }
-    let mids = inward(region, step, tolerance)?;
-    let mut progressed = Vec::new();
-    for mid in &mids {
-        if smaller(region, mid, tolerance)? {
-            progressed.push(mid);
+    let cap = ring_cap(region, stepover, tolerance)?;
+    let started = loops.len();
+    let mut pending = vec![region.clone()];
+    while let Some(region) = pending.pop() {
+        let before = loops.len();
+        append_loops(std::slice::from_ref(&region), loops, tolerance)?;
+        if loops.len() == before {
+            continue;
         }
-    }
-    if progressed.is_empty() {
-        return descend(&children, stepover, radius, tolerance, loops);
-    }
-    for mid in progressed {
-        cover_region(mid, stepover, radius, tolerance, loops)?;
+        if loops.len() - started > cap || loops.len() > MAX_RING_LOOPS {
+            let limit = cap.min(MAX_RING_LOOPS);
+            return Err(invalid(format!("too many offset rings: limit is {limit}")));
+        }
+        let mut next = next_insets(&region, stepover, radius, tolerance)?;
+        // Push in reverse so the first child is next, matching the old outside-in recursion.
+        next.reverse();
+        pending.extend(next);
     }
     Ok(())
 }
 
-fn descend(children: &[Region], stepover: f64, radius: f64, tolerance: &Tolerance, loops: &mut Vec<Contour>) -> Result<()> {
-    for child in children {
-        cover_region(child, stepover, radius, tolerance, loops)?;
+/// Most loops `region` can emit.
+///
+/// Each pass moves in by at least half a stepover. `span / that inset` is the longest
+/// outside-in chain; a core pass and the boundary ring sit in [`RING_CAP_SLACK`]. A walk
+/// that keeps shaving a sliver off an off-grid ring hits this and returns an error.
+fn ring_cap(region: &Region, stepover: f64, tolerance: &Tolerance) -> Result<usize> {
+    let span = outer_span(region)?;
+    let min_inset = (stepover * 0.5).max(linear_eps(tolerance));
+    let levels = (span / min_inset).ceil();
+    if !levels.is_finite() || levels < 0.0 || levels > MAX_RING_LOOPS as f64 {
+        return Err(invalid(format!("too many offset rings: limit is {MAX_RING_LOOPS}")));
     }
-    Ok(())
+    let per = region.holes().len().saturating_add(1);
+    let cap = (levels as usize).saturating_add(RING_CAP_SLACK).saturating_mul(per);
+    Ok(cap.max(per).min(MAX_RING_LOOPS))
+}
+
+/// Regions for the next inward ring, or empty when this ring is the last.
+fn next_insets(region: &Region, stepover: f64, radius: f64, tolerance: &Tolerance) -> Result<Vec<Region>> {
+    let limit = ring_limit(region, stepover, radius);
+    let children = inward(region, stepover, tolerance)?;
+    if !children.is_empty() && !facing_gap(region, &children, limit, stepover, tolerance)? {
+        return Ok(children);
+    }
+    let step = if children.is_empty() {
+        let Some(step) = core_inset(region, limit, stepover, tolerance)? else {
+            return Ok(Vec::new());
+        };
+        step
+    } else {
+        let step = limit.min(stepover);
+        if step <= linear_eps(tolerance) {
+            return Ok(children);
+        }
+        step
+    };
+    let mids = progressed_insets(region, step, tolerance)?;
+    if mids.is_empty() { Ok(children) } else { Ok(mids) }
+}
+
+/// Inset for a remainder that a full stepover erases.
+///
+/// At most two coverage limits thick: one pass of `limit`, unless the middle is already
+/// inside the tool (an off-grid offset can leave a sliver just past `limit`). Wider than
+/// that, the current ring is already within one stepover of the whole remainder. Another
+/// ring every `limit` is the walk that overflowed the stack, and those rings sit too close
+/// for a post to tell apart.
+fn core_inset(region: &Region, limit: f64, stepover: f64, tolerance: &Tolerance) -> Result<Option<f64>> {
+    let eps = linear_eps(tolerance);
+    let limit = limit.min(stepover);
+    if !(limit > eps) {
+        return Ok(None);
+    }
+    let twice = limit * 2.0;
+    if twice < stepover && !inward(region, twice, tolerance)?.is_empty() {
+        return Ok(None);
+    }
+    if inward(region, limit + ORPHAN_CLEARANCE_MM, tolerance)?.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(limit))
+}
+
+fn progressed_insets(region: &Region, step: f64, tolerance: &Tolerance) -> Result<Vec<Region>> {
+    let mut kept = Vec::new();
+    for mid in inward(region, step, tolerance)? {
+        if smaller(region, &mid, tolerance)? {
+            kept.push(mid);
+        }
+    }
+    Ok(kept)
 }
 
 /// How far a point may sit from the rings already emitted for this region.
@@ -1337,6 +1396,27 @@ mod tests {
         assert_close_radii(&radii, &[0.5, 3.5, 8.5]);
         assert!(max_radius_gap(&radii) <= 5.0 + 1e-6, "{radii:?}");
         assert_annulus_covered(&radii, 0.0, 11.5, 3.0);
+    }
+
+    #[test]
+    fn off_grid_disk_with_coarse_stepover_does_not_walk_by_tool_radius() {
+        // Shrunk from the full-circle post: centre 0.058430123 mm off the grid, radius 0.05 mm,
+        // stepover = radius + 1, tool diameter 0.02 mm. A larger disk with the same pattern
+        // recursed once per tool radius until the thread overflowed its stack.
+        let centre = 0.058430123;
+        let tool_r = 0.01;
+        for radius in [0.05, 40.0] {
+            let region = Region::from_contour(circle(centre, centre, radius + tool_r), &Tolerance::default()).unwrap();
+            let stepover = radius + 1.0;
+            let cut =
+                PocketOp::new(tool_diameter(tool_r * 2.0), PocketStrategy::OffsetRings, stepover).z(-1.0).retract_z(1.0).generate(&region).unwrap();
+            let span = outer_span(&region).unwrap();
+            let min_inset = stepover * 0.5;
+            let cap = (span / min_inset).ceil() as usize + 2;
+            assert_eq!(cut.ring_count(), 1, "radius {radius} rings {} cap {cap}", cut.ring_count());
+            let radii = centred_ring_radii(cut.toolpath());
+            assert!(max_radius_gap(&radii) <= stepover + 1e-3, "radius {radius} gap {} radii {radii:?}", max_radius_gap(&radii));
+        }
     }
 
     fn l_shape(width: f64, height: f64, arm: f64, tol: &Tolerance) -> Contour {
