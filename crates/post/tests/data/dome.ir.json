@@ -27,12 +27,16 @@
         "tabs": [],
         "blocks": [
           {
+            "type": "tool_change",
+            "tool_id": 1
+          },
+          {
             "type": "rapid",
             "to": {
               "tip": {
                 "x": -20.0,
                 "y": -20.0,
-                "z": 5.0
+                "z": 10.0
               },
               "axis": {
                 "x": 0.0,
@@ -46,7 +50,7 @@
             "type": "process_on",
             "process": "spindle",
             "params": {
-              "speed": null,
+              "speed": 12000.0,
               "power": null,
               "pierce_delay_s": 0.0,
               "pierce_process_on_during_delay": true,
@@ -20875,7 +20879,7 @@
               "tip": {
                 "x": 20.0,
                 "y": 20.0,
-                "z": 5.0
+                "z": 10.0
               },
               "axis": {
                 "x": 0.0,

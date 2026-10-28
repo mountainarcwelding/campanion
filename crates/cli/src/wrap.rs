@@ -6,9 +6,7 @@
 //! back. Feeds stay the tool's surface feeds. The path is already in the part frame.
 
 use campanion_geom::{Arc, Contour, Point, Segment};
-use campanion_ir::{
-    ClBlock, ClMotion, ClPath, CompensationMode, Cylinder, Event, MoveRole, Pose, ProcessKind, ProcessParams, RotarySetup, wrap_polyline,
-};
+use campanion_ir::{ClBlock, ClMotion, ClPath, CompensationMode, Cylinder, Event, MoveRole, Pose, ProcessKind, RotarySetup, wrap_polyline};
 use campanion_path::{Tool as PathTool, pass_depths};
 
 use crate::error::CliError;
@@ -50,7 +48,7 @@ pub(crate) fn cut(
         PathTool::Diameter { .. } => ProcessKind::Spindle,
         PathTool::Kerf { .. } => ProcessKind::Torch,
     };
-    let params = ProcessParams::new();
+    let params = op.params_with_speed(tool).map_err(|err| op_err(op, err))?;
     let feeds = op.feeds();
     let plunge_feed = feeds.resolve(MoveRole::Plunge);
     let cut_feed = feeds.cut();

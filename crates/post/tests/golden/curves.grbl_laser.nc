@@ -4,6 +4,7 @@ G90
 G17
 M4 S0
 (toolpath outer)
+(tool 1)
 G0 X50.3618 Y68.4519
 (power missing, using S1000)
 M4 S1000

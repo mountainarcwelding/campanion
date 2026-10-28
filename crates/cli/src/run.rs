@@ -14,6 +14,11 @@
 //! the plunge or ramp. Those link rapids stay at or above the retract height. After linking, the
 //! operation's process timing is applied: process on and the pierce dwell at the pierce height
 //! before the plunge, and process off and the post delay before the rapid retract to clearance.
+//! The first toolpath, and each later toolpath whose tool id differs from the previous one, starts
+//! with a tool-change event. Consecutive toolpaths that share a tool do not get another change.
+//! Spindle speed comes from `operations[].speed`, or from `tools[].speed` when the operation omits
+//! it, and is stored on process-on. A spindle operation with no speed fails `run --post` when that
+//! post's spindle-on template uses `{speed}`.
 //! A pocket uses `stepover` when the job sets it, and otherwise the tool radius. A face clears
 //! the union of the selected contours' bounding boxes, grown by `margin` on every side. Its
 //! stepover is the job value or three quarters of the tool diameter, and its rapids stay at the
@@ -256,6 +261,9 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
 }
 
 fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::GougeNote], post: Option<&PostDef>) -> Result<ExitCode, CliError> {
+    if let Some(post) = post {
+        require_spindle_speeds(job, post)?;
+    }
     let options = campanion_ir::VerifyOptions { safe_z: Some(job.clearance()), retract_z: Some(job.retract()) };
     let report = campanion_ir::verify_with(doc.program(), &options);
     // Rotary and 3+2 programs are checked in the planning frame, before indexing. A 3-axis
@@ -537,6 +545,7 @@ fn finish_paths(job: &JobFile, paths: Vec<ClPath>, rotary: Option<RotarySetup>) 
     if paths.len() > MAX_TOOLPATHS {
         return Err(CliError::invalid(format!("too many toolpaths: {} > {MAX_TOOLPATHS}", paths.len())));
     }
+    let paths = insert_tool_changes(paths)?;
     let mut program = Program::try_new(program_name(job), tools, None, paths, Vec::new(), Vec::new(), rotary)?;
     if let Some(setup) = job.five_axis() {
         program = program.with_five_axis(setup.clone())?;
@@ -606,7 +615,51 @@ fn step_contour_labels(drawing: &Drawing, tolerance: &Tolerance) -> Result<Vec<S
 }
 
 fn import_for(op: &Operation, tool: &JobTool) -> Result<Import, CliError> {
-    import_with_params(op, tool, op.params().clone())
+    let params = op.params_with_speed(tool).map_err(|err| op_err(op, err))?;
+    import_with_params(op, tool, params)
+}
+
+/// A spindle-on template that substitutes `{speed}` needs a rpm on every diameter-tool operation.
+fn require_spindle_speeds(job: &JobFile, post: &PostDef) -> Result<(), CliError> {
+    if !post.spindle_on_needs_speed() {
+        return Ok(());
+    }
+    for op in job.operations() {
+        let Some(tool) = job.tool(op.tool_id()) else {
+            continue;
+        };
+        if !matches!(tool.path_tool(), PathTool::Diameter { .. }) {
+            continue;
+        }
+        if op.resolved_speed(tool).is_none() {
+            return Err(op_err(op, "no spindle speed; set tools[].speed or operations[].speed"));
+        }
+    }
+    Ok(())
+}
+
+/// `Event::ToolChange` on the first toolpath and on each later path whose tool id differs.
+fn insert_tool_changes(paths: Vec<ClPath>) -> Result<Vec<ClPath>, CliError> {
+    let mut previous: Option<u32> = None;
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let next = match path.tool_id() {
+            Some(tool_id) if previous != Some(tool_id) => {
+                previous = Some(tool_id);
+                prepend_tool_change(&path, tool_id)?
+            }
+            _ => path,
+        };
+        out.push(next);
+    }
+    Ok(out)
+}
+
+fn prepend_tool_change(path: &ClPath, tool_id: u32) -> Result<ClPath, CliError> {
+    let mut blocks = Vec::with_capacity(path.blocks().len().saturating_add(1));
+    blocks.push(ClBlock::Event(Event::ToolChange { tool_id }));
+    blocks.extend(path.blocks().iter().cloned());
+    index::rebuild(path, blocks)
 }
 
 fn import_with_params(op: &Operation, tool: &JobTool, params: ProcessParams) -> Result<Import, CliError> {
@@ -925,7 +978,8 @@ fn link_operation(paths: &mut Vec<ClPath>, cut: &Cut<'_>, features: &[Feature]) 
     // parameters back on each process-on.
     let timed = apply_op_timing(cut, ordered.toolpath())?;
     let motion = import_with_params(cut.op, cut.tool, ProcessParams::new())?;
-    let doc = restore_process_params(Document::from_toolpath(&timed, &motion)?, cut.op.params())?;
+    let params = cut.op.params_with_speed(cut.tool).map_err(|err| op_err(cut.op, err))?;
+    let doc = restore_process_params(Document::from_toolpath(&timed, &motion)?, &params)?;
     push_doc(paths, doc)
 }
 
