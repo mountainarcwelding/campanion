@@ -538,16 +538,20 @@ fn consume_curve(
         };
         let point = project(part_point, drop_z);
         let mut block_arc: Option<Xyz> = None;
+        // Equal *posted* endpoints are a full turn. The program start can sit a fraction of a
+        // quantum off that point: one direction is then a few microradians and the other is τ.
+        let mut posted_full_turn = false;
         match mv {
             ReadMove::Rapid { .. } => return Err(invalid(format!("motion {index}: arc was posted as a rapid"))),
             ReadMove::Arc { sense: got, center: got_center, radius, .. } => {
                 if !rotary_curve {
                     let read_start = (*cursor >= 2).then(|| moves.get(*cursor - 2)).flatten().map(|m| project(end_of(m), drop_z));
-                    if let Some(rs) = read_start
-                        && geom::in_plane_len(plane, rs, point) <= 1e-9
-                        && sweep < std::f64::consts::TAU - 0.2
-                    {
-                        return Err(invalid(format!("motion {index}: arc block has equal endpoints and cuts a full circle")));
+                    if let Some(rs) = read_start {
+                        let posted_chord = geom::in_plane_len(plane, rs, point);
+                        if posted_chord <= 1e-9 && sweep < std::f64::consts::TAU - 0.2 {
+                            return Err(invalid(format!("motion {index}: arc block has equal endpoints and cuts a full circle")));
+                        }
+                        posted_full_turn = posted_chord <= 1e-9;
                     }
                 }
                 let got_sense = if rotary_curve {
@@ -582,6 +586,9 @@ fn consume_curve(
         }
         check_curve_feed(mv, prev_part, part_point, prev_angle, angle, &check, tol, index)?;
         acc += match block_arc {
+            // The controller already cut a full turn. Measuring the angle from the unrounded
+            // program start to the rounded end picks the short way on one winding.
+            Some(_) if posted_full_turn => std::f64::consts::TAU,
             // A chord within tol cannot tell a short step from the long way round; the block's own
             // centre and sense can. Longer chords keep the program-centre angle.
             Some(read_center) if geom::in_plane_len(plane, prev, point) <= tol.max(1e-9) => controller_sweep(prev, point, read_center, plane, sense),

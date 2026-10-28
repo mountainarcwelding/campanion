@@ -23,8 +23,6 @@ use crate::process::{Event, ProcessKind};
 use crate::program::Program;
 
 const TAU: f64 = std::f64::consts::TAU;
-/// Chord at or below this, in millimetres, is treated as a full-turn arc.
-const FULL_TURN_CHORD_MM: f64 = 1.0e-12;
 /// Stock top for 2.5D mill programs. Z is up.
 const STOCK_TOP_Z: f64 = 0.0;
 
@@ -732,8 +730,10 @@ fn planar_sweep(su: f64, sv: f64, eu: f64, ev: f64, cu: f64, cv: f64, ccw: bool)
         return None;
     }
     let chord = (eu - su).hypot(ev - sv);
+    // Same closure as `campanion_geom::Arc::full_turn_chord`: 1e-9 mm, or 1e-9 radii.
+    let closure = 1e-9_f64.max(r0 * 1e-9);
     let ccw_delta = (a1 - a0).rem_euclid(TAU);
-    let sweep = if chord <= FULL_TURN_CHORD_MM {
+    let sweep = if chord <= closure {
         TAU
     } else if ccw {
         if ccw_delta <= MIN_COMPONENT { TAU } else { ccw_delta }

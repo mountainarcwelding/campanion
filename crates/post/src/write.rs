@@ -872,7 +872,11 @@ impl<'a> Writer<'a> {
         if geom::dist3(predicted, end) > 1e-3_f64.max(radius * 1e-5) {
             return Err(invalid("arc end does not match the centre and sweep"));
         }
-        let max_sweep = self.post.arcs.max_sweep_deg.to_radians();
+        let mut max_sweep = self.post.arcs.max_sweep_deg.to_radians();
+        // An R word cannot describe a full circle. Split that turn into semicircles.
+        if self.post.arc_mode() == ArcMode::R {
+            max_sweep = max_sweep.min(std::f64::consts::PI);
+        }
         let pieces = geom::piece_count(sweep, max_sweep)?;
         for index in 0..pieces {
             let last = index + 1 == pieces;
@@ -920,8 +924,18 @@ impl<'a> Writer<'a> {
         feed: f64,
         angle: Option<f64>,
     ) -> Result<()> {
-        let rounded = self.round_xyz(end)?;
-        if geom::in_plane_len(plane, start, rounded) <= 1e-12 && sweep < std::f64::consts::TAU - 1e-9 {
+        // A full turn must post with equal in-plane endpoints. Rounding the analytic end on
+        // its own can step across a decimal boundary and leave a one-quantum arc.
+        let full_turn = sweep >= std::f64::consts::TAU - 1e-8;
+        let posted_end = if full_turn {
+            let (su, sv, _) = geom::plane_uv(plane, start);
+            let (_, _, axial) = geom::plane_uv(plane, end);
+            geom::compose(plane, su, sv, axial)
+        } else {
+            end
+        };
+        let rounded = self.round_xyz(posted_end)?;
+        if !full_turn && geom::in_plane_len(plane, start, rounded) <= 1e-12 && sweep < std::f64::consts::TAU - 1e-9 {
             let radius = geom::in_plane_len(plane, start, center);
             let sagitta = radius * (1.0 - (sweep * 0.5).cos());
             if angle.is_none()
@@ -940,6 +954,8 @@ impl<'a> Writer<'a> {
             }
             return Err(invalid("arc end rounds onto its start"));
         }
+        let programmed_end = end;
+        let end = posted_end;
         // Rounded `R` can bow a minor arc past the program sweep. A chord within two quanta of
         // the diameter is read back as exactly 180°. Write that piece as lines instead.
         if self.post.arc_mode() == ArcMode::R && angle.is_none() && sweep <= std::f64::consts::PI {
@@ -1007,7 +1023,7 @@ impl<'a> Writer<'a> {
         }
         self.linear = None;
         self.pos = Some(rounded);
-        self.exact = Some(end);
+        self.exact = Some(programmed_end);
         self.force_axes = false;
         self.emit_words(&words)
     }

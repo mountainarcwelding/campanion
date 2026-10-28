@@ -280,7 +280,10 @@ dependencies = [
 name = "campanion-post"
 version = "0.8.3"
 dependencies = [
+ "campanion-geom",
+ "campanion-import",
  "campanion-ir",
+ "campanion-path",
  "proptest",
  "serde",
  "serde_json",

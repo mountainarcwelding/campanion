@@ -179,8 +179,10 @@ fn arc_length(start: Point3, end: Point3, centre: Point3, ccw: bool) -> Result<f
         return Err(PathError::InvalidInput("arc angle is not finite".into()));
     }
     let chord = hypot2(end.x() - start.x(), end.y() - start.y());
+    // Same closure as `campanion_geom::Arc::full_turn_chord`: 1e-9 mm, or 1e-9 radii.
+    let closure = 1e-9_f64.max(r0 * 1e-9);
     let ccw_delta = (a1 - a0).rem_euclid(TAU);
-    let sweep = if chord <= 1e-12 {
+    let sweep = if chord <= closure {
         TAU
     } else if ccw {
         if ccw_delta <= 1e-15 { TAU } else { ccw_delta }

@@ -32,7 +32,6 @@ const MAX_REPORTS: usize = 32;
 const MAX_SEGMENTS: usize = 50_000_000;
 
 const TAU: f64 = std::f64::consts::TAU;
-const FULL_TURN_CHORD_MM: f64 = 1.0e-12;
 
 /// `min(0.25, tolerance * 10)` millimetres. `tolerance` is the job chord tolerance.
 pub(crate) fn sample_step_for(tolerance: f64) -> Result<f64, CliError> {
@@ -560,8 +559,11 @@ fn xy_sweep(sx: f64, sy: f64, ex: f64, ey: f64, cx: f64, cy: f64, ccw: bool) -> 
         return Err(CliError::run("gouge check: arc angle is not finite"));
     }
     let chord = (ex - sx).hypot(ey - sy);
+    let radius = (sx - cx).hypot(sy - cy);
+    // Same closure as `campanion_geom::Arc::full_turn_chord`: 1e-9 mm, or 1e-9 radii.
+    let closure = 1e-9_f64.max(radius * 1e-9);
     let ccw_delta = (a1 - a0).rem_euclid(TAU);
-    let sweep = if chord <= FULL_TURN_CHORD_MM {
+    let sweep = if chord <= closure {
         TAU
     } else if ccw {
         if ccw_delta <= 1e-15 { TAU } else { ccw_delta }

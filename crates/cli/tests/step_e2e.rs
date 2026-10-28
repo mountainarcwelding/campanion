@@ -106,6 +106,16 @@ fn step_job_runs_when_solidcraft_cli_present() -> Result<(), String> {
     if !has_g2_or_g3(&ngc) {
         return Err("examples/step.job.json: ngc has no G2 or G3 move".into());
     }
+    for post in ["haas", "mach3", "linuxcnc", "grbl", "fanuc"] {
+        let posted = temp_path(&format!("campanion-step-e2e-{post}.nc"));
+        let posted_arg = path_arg(&posted)?;
+        let output = campanion(&root, &["run", "examples/step.job.json", "-o", &posted_arg, "--post", post])?;
+        let stderr = output_text(&output.stderr)?;
+        let stdout = output_text(&output.stdout)?;
+        if output.status.code() != Some(0) {
+            return Err(format!("examples/step.job.json --post {post}: exit {:?} stdout {stdout} stderr {stderr}", output.status.code()));
+        }
+    }
     Ok(())
 }
 

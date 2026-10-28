@@ -17,4 +17,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+campanion-geom.workspace = true
+campanion-import.workspace = true
+campanion-path.workspace = true
 proptest = { version = "1.12", default-features = false, features = ["std"] }

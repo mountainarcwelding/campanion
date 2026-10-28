@@ -232,8 +232,11 @@ fn xy_sweep(start: Point3, end: Point3, centre: Point3, ccw: bool) -> Result<f64
     if !chord.is_finite() {
         return Err(check::invalid("arc chord is not finite"));
     }
+    let radius = (start.x() - centre.x()).hypot(start.y() - centre.y());
+    // Same closure as `campanion_geom::Arc::full_turn_chord`: 1e-9 mm, or 1e-9 radii.
+    let closure = 1e-9_f64.max(radius * 1e-9);
     let ccw_delta = (a1 - a0).rem_euclid(TAU);
-    let sweep = if chord <= 1e-12 {
+    let sweep = if chord <= closure {
         TAU
     } else if ccw {
         if ccw_delta <= 1e-15 { TAU } else { ccw_delta }

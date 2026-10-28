@@ -113,8 +113,31 @@ impl Arc {
         self.point_at(0.0)
     }
 
+    /// End point.
+    ///
+    /// A full turn ends on its start. `point_at(1)` of a sweep of τ is short by about one ulp
+    /// of the angle (`sin(τ)` is not zero), which is enough to make one post treat the move as
+    /// a full circle and another as a near-zero arc. The same snap applies when the sweep is
+    /// already the long way and the analytic end lies within [`full_turn_chord`] of the start.
     pub fn end_point(self) -> Point {
-        self.point_at(1.0)
+        if self.is_full_turn() { self.start_point() } else { self.point_at(1.0) }
+    }
+
+    /// Gap, in millimetres, that still meets the start of a full turn.
+    ///
+    /// The floor is 1e-9 mm. Above that the gap may be `1e-9` radii. A short arc that only
+    /// meets its start after rounding to a post's decimals is wider than this.
+    pub fn full_turn_chord(radius: f64) -> f64 {
+        1e-9_f64.max(radius.abs() * 1e-9)
+    }
+
+    /// One full turn: the sweep is within 1e-8 rad of τ, or it is already the long way and the
+    /// analytic end lies within [`Self::full_turn_chord`] of the start.
+    pub fn is_full_turn(self) -> bool {
+        if self.sweep.abs() >= TAU - 1e-8 {
+            return true;
+        }
+        self.sweep.abs() > PI && self.start_point().distance(self.point_at(1.0)) <= Self::full_turn_chord(self.radius)
     }
 
     pub fn length(self) -> f64 {
@@ -321,5 +344,16 @@ mod tests {
         let arc = Arc::new(Point::new(0.0, 0.0).unwrap(), 5.0, 0.0, PI).unwrap();
         assert!((arc.bulge().unwrap() - 1.0).abs() < 1e-12);
         assert!(Arc::new(Point::new(0.0, 0.0).unwrap(), 5.0, 0.0, TAU).unwrap().bulge().is_err());
+    }
+
+    #[test]
+    fn full_turn_ends_on_its_start() {
+        let centre = Point::new(40.0, 40.05843).unwrap();
+        let ccw = Arc::new(centre, 27.0, 0.3, TAU).unwrap();
+        assert!(ccw.end_point().almost_eq(ccw.start_point(), 0.0));
+        let cw = Arc::new(centre, 2.0, 1.1, -TAU).unwrap();
+        assert!(cw.end_point().almost_eq(cw.start_point(), 0.0));
+        let quarter = Arc::new(centre, 27.0, 0.0, PI * 0.5).unwrap();
+        assert!(quarter.end_point().distance(quarter.start_point()) > 1.0);
     }
 }
