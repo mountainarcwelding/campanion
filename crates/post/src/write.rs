@@ -81,7 +81,11 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     writer.templates("footer", &post.footer, &header_vars)?;
     writer.finish_mill_turn()?;
     writer.deselect_sub_at_end()?;
-    writer.lathe_home()?;
+    if writer.pending_bar_feed.is_some() {
+        writer.write_bar_feed()?;
+    } else {
+        writer.lathe_home()?;
+    }
     writer.finish_five_axis()?;
     writer.templates("program_end", &post.program_end, &header_vars)?;
     Ok(writer.out)
@@ -230,6 +234,9 @@ struct Writer<'a> {
     split_next: bool,
     /// True after the first motion of a five-axis program has been indexed.
     five_started: bool,
+    /// Bar-feed lengths to write after the home lines. `None` until a bar-feed event. Last event wins.
+    /// Not cleared between channels: the feed is a program-end command.
+    pending_bar_feed: Option<(Option<f64>, Option<f64>)>,
 }
 
 impl<'a> Writer<'a> {
@@ -288,6 +295,7 @@ impl<'a> Writer<'a> {
             frame_active: false,
             split_next: false,
             five_started: false,
+            pending_bar_feed: None,
         }
     }
 
@@ -1607,7 +1615,42 @@ impl<'a> Writer<'a> {
             Event::HeadIndex { b_deg, .. } => self.head_index(*b_deg),
             Event::Tailstock { engage } => self.tailstock(*engage),
             Event::PartsCatcher { extend } => self.parts_catcher(*extend),
+            Event::BarFeed { part_length, min_clamp } => self.note_bar_feed(*part_length, *min_clamp),
         }
+    }
+
+    /// Remember a bar feed. The line is written with the program-end home, so it stays the last
+    /// block before `program_end`. A comment is not written on that line: text that looks like
+    /// `XXXX.YYYY` makes a Haas control look for a subprogram and alarm 314.
+    fn note_bar_feed(&mut self, part_length: Option<f64>, min_clamp: Option<f64>) -> Result<()> {
+        if self.post.lathe.as_ref().and_then(|lathe| lathe.bar_feed.as_ref()).is_none() {
+            return Err(unsupported(format!("post `{}` has no bar feeder", self.post.id())));
+        }
+        self.pending_bar_feed = Some((part_length, min_clamp));
+        Ok(())
+    }
+
+    /// Home lines, then one bar-feed line. Length words use the same format as X and Z.
+    fn write_bar_feed(&mut self) -> Result<()> {
+        let (part_length, min_clamp) =
+            self.pending_bar_feed.take().ok_or_else(|| unsupported(format!("post `{}` has no bar feeder", self.post.id())))?;
+        self.lathe_home()?;
+        let bar = self
+            .post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.bar_feed.clone())
+            .ok_or_else(|| unsupported(format!("post `{}` has no bar feeder", self.post.id())))?;
+        let mut words = vec![bar.code];
+        if let Some(length) = part_length {
+            let text = self.format_axis(length, self.post.decimals.linear)?;
+            words.push(format!("{}{text}", bar.part_length_word));
+        }
+        if let Some(clamp) = min_clamp {
+            let text = self.format_axis(clamp, self.post.decimals.linear)?;
+            words.push(format!("{}{text}", bar.min_clamp_word));
+        }
+        self.emit_words(&words)
     }
 
     /// Advance or retract. A post with no `tailstock` block, including a mill post, cannot write the event.

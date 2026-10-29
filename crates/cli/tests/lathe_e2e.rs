@@ -832,6 +832,76 @@ fn catcher_posts_haas_m36_before_the_plunge_and_linuxcnc_rejects_it() -> Result<
     Ok(())
 }
 
+#[test]
+fn barfeed_posts_haas_g105_after_home_and_linuxcnc_rejects_it() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/barfeed.lathe.json"))?;
+    let out = temp_path("campanion-lathe-barfeed.nc");
+    let _ = std::fs::remove_file(&out);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("barfeed.haas_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["G53 G0 X0", "G53 G0 Z0", "G105", "M30"])?;
+    let g105 = posted.lines().find(|line| line.contains("G105")).ok_or("G105 missing")?;
+    let body = g105.split_once(' ').map(|(_, rest)| rest).unwrap_or(g105);
+    if body != "G105" {
+        return Err(format!("G105 line is `{g105}`"));
+    }
+    if posted.lines().any(|line| line.contains("G105") && line.contains('(')) {
+        return Err(format!("a G105 line contains '(': {posted}"));
+    }
+
+    let linux = temp_path("campanion-lathe-barfeed-linuxcnc.nc");
+    let _ = std::fs::remove_file(&linux);
+    let output = campanion(&["lathe", &job, "-o", &path_arg(&linux)?, "--post", "linuxcnc_lathe"])?;
+    let stderr = text(&output.stderr)?;
+    let code = output.status.code();
+    if code == Some(101) || stderr.to_ascii_lowercase().contains("panicked") {
+        return Err(format!("lathe panicked ({code:?}): {stderr}"));
+    }
+    if code != Some(1) {
+        return Err(format!("exit {code:?}, expected 1\n{stderr}"));
+    }
+    let needle = "post `linuxcnc_lathe` has no bar feeder";
+    if !stderr.contains(needle) {
+        return Err(format!("stderr missing {needle}: {stderr}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn barfeed_part_length_posts_as_j_word() -> Result<(), String> {
+    // haas_lathe keeps a decimal point and drops trailing zeros, so 30 mm is `30.` and the block is `G105 J30.`.
+    let root = workspace_root()?;
+    let source = std::fs::read_to_string(root.join("examples/barfeed.lathe.json")).map_err(|err| err.to_string())?;
+    let body = source.replace(r#"{ "name": "feed", "type": "bar_feed" }"#, r#"{ "name": "feed", "type": "bar_feed", "part_length": 30 }"#);
+    let job_path = root.join(format!("examples/barfeed-j-{}.lathe.json", std::process::id()));
+    std::fs::write(&job_path, body).map_err(|err| err.to_string())?;
+    let _guard = RemoveFile(job_path.clone());
+    let out = temp_path("campanion-lathe-barfeed-j.nc");
+    let _ = std::fs::remove_file(&out);
+    run_ok(&["lathe", &path_arg(&job_path)?, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    let g105 = posted.lines().find(|line| line.contains("G105")).ok_or("G105 missing")?;
+    let body = g105.split_once(' ').map(|(_, rest)| rest).unwrap_or(g105);
+    if body != "G105 J30." {
+        return Err(format!("G105 line is `{g105}`"));
+    }
+    if posted.lines().any(|line| line.contains("G105") && line.contains('(')) {
+        return Err(format!("a G105 line contains '(': {posted}"));
+    }
+    assert_in_order(&posted, &["G53 G0 Z0", "G105 J30.", "M30"])?;
+    Ok(())
+}
+
+struct RemoveFile(PathBuf);
+
+impl Drop for RemoveFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 const PROFILE_DXF: &str = "\
 0
 SECTION

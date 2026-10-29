@@ -377,6 +377,9 @@ pub(crate) struct LatheOutput {
     /// Parts catcher extend and retract lines. Absent: parts-catcher events are rejected.
     #[serde(default)]
     pub(crate) parts_catcher: Option<PartsCatcherOutput>,
+    /// Bar-feed command written after the home lines. Absent: bar-feed events are rejected.
+    #[serde(default)]
+    pub(crate) bar_feed: Option<BarFeedOutput>,
     /// Two or more channel sections. Absent: a binding whose channel is not 0 is rejected.
     #[serde(default)]
     pub(crate) channels: Option<ChannelsOutput>,
@@ -454,6 +457,21 @@ pub(crate) struct PartsCatcherOutput {
     pub(crate) extend: Vec<String>,
     /// Written for [`campanion_ir::Event::PartsCatcher`] with `extend` false.
     pub(crate) retract: Vec<String>,
+}
+
+/// One bar-feed line, written after [`LatheOutput::home`].
+///
+/// `code` is a bare word. The two address words are single uppercase letters. Lengths use the
+/// same format as other length words of the program. The line carries no comment.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BarFeedOutput {
+    /// Command, for example `G105`.
+    pub(crate) code: String,
+    /// Word for the part length plus cutoff and facing allowance.
+    pub(crate) part_length_word: String,
+    /// Word for the minimum clamping length.
+    pub(crate) min_clamp_word: String,
 }
 
 /// Chuck, sync, secondary-spindle run and housing-move lines for a part transfer.
@@ -860,6 +878,11 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         check_templates("lathe.parts_catcher.extend", &parts_catcher.extend, LATHE_BARE)?;
         check_templates("lathe.parts_catcher.retract", &parts_catcher.retract, LATHE_BARE)?;
     }
+    if let Some(bar_feed) = &lathe.bar_feed {
+        check_bare_code("lathe.bar_feed.code", &bar_feed.code)?;
+        check_one_uppercase_letter("lathe.bar_feed.part_length_word", &bar_feed.part_length_word)?;
+        check_one_uppercase_letter("lathe.bar_feed.min_clamp_word", &bar_feed.min_clamp_word)?;
+    }
     if let Some(channels) = &lathe.channels {
         if channels.count < 2 {
             return Err(field("lathe.channels.count", "channels.count must be at least 2"));
@@ -885,6 +908,27 @@ fn require_lines(field_name: &str, lines: &[String]) -> Result<()> {
         return Err(field(field_name, "needs at least one line"));
     }
     Ok(())
+}
+
+/// A non-empty word with no whitespace, comment parenthesis or semicolon, and no unknown placeholder.
+fn check_bare_code(field_name: &str, text: &str) -> Result<()> {
+    if text.is_empty() {
+        return Err(field(field_name, "must not be empty"));
+    }
+    if text.chars().any(|ch| ch.is_whitespace() || ch == '(' || ch == ';') {
+        return Err(field(field_name, "must be a bare word"));
+    }
+    let lines = [text.to_string()];
+    check_templates(field_name, &lines, LATHE_BARE)
+}
+
+/// One ASCII uppercase letter. Empty, lowercase and multi-character values share one message.
+fn check_one_uppercase_letter(field_name: &str, text: &str) -> Result<()> {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(ch) if chars.next().is_none() && ch.is_ascii_uppercase() => Ok(()),
+        _ => Err(field(field_name, "must be one uppercase letter")),
+    }
 }
 
 fn check_plane_word(field_name: &str, word: &str) -> Result<()> {

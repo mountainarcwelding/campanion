@@ -1818,6 +1818,79 @@ fn parts_catcher_writes_m36_m37_and_other_posts_reject_it() {
     assert!(err.to_string().contains("lathe.parts_catcher.extend") && err.to_string().contains("unknown placeholder {z}"), "{err}");
 }
 
+/// Body after the sequence number. Haas lines are `N10 G105`.
+fn line_body(line: &str) -> &str {
+    line.split_once(' ').map(|(_, body)| body).unwrap_or(line)
+}
+
+#[test]
+fn bar_feed_writes_g105_with_no_comment_and_other_posts_reject_it() {
+    // haas_lathe keeps a decimal point and drops trailing zeros, so 30 mm is `30.` and 12 mm is `12.`.
+    let blocks = vec![linear(20.0, -10.0, 80.0), event_block(Event::BarFeed { part_length: Some(30.0), min_clamp: Some(12.0) })];
+    let program = lathe_program(blocks, turning(None, false));
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let g105: Vec<_> = text.lines().filter(|line| line.contains("G105")).collect();
+    assert_eq!(g105.len(), 1, "{text}");
+    assert!(!g105[0].contains('('), "{g105:?}");
+    assert_eq!(line_body(g105[0]), "G105 J30. K12.");
+    let home_x = index_of(&text, "G53 G0 X0");
+    let home_z = index_of(&text, "G53 G0 Z0");
+    let feed = index_of(&text, "G105");
+    let end = index_of(&text, "M30");
+    assert!(home_x < home_z && home_z < feed && feed < end, "{text}");
+    assert!(!text[feed + 4..].contains("G53"), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let bare = lathe_program(vec![event_block(Event::BarFeed { part_length: None, min_clamp: None })], turning(None, false));
+    let bare_text = post_program(&bare, &post, &options()).expect("bare");
+    let bare_lines: Vec<_> = bare_text.lines().filter(|line| line.contains("G105")).collect();
+    assert_eq!(bare_lines.len(), 1, "{bare_text}");
+    assert_eq!(line_body(bare_lines[0]), "G105");
+    assert!(!bare_lines[0].contains('('), "{bare_lines:?}");
+
+    let linux = post_program(
+        &lathe_program(vec![event_block(Event::BarFeed { part_length: None, min_clamp: None })], turning(None, false)),
+        &linux_lathe(),
+        &options(),
+    )
+    .expect_err("linuxcnc");
+    assert!(linux.to_string().contains("post `linuxcnc_lathe` has no bar feeder"), "{linux}");
+
+    let mill = Program::try_new(
+        Some("mill".into()),
+        Vec::new(),
+        None,
+        vec![path(None, None, vec![event_block(Event::BarFeed { part_length: Some(30.0), min_clamp: None })])],
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .expect("program");
+    let err = post_program(&mill, &builtin("haas").expect("haas"), &options()).expect_err("mill");
+    assert!(err.to_string().contains("post `haas` has no bar feeder"), "{err}");
+
+    let mut raw = haas_json();
+    raw["lathe"]["bar_feed"]["code"] = serde_json::json!("");
+    let err = load_post(&raw.to_string()).expect_err("empty code");
+    assert!(err.to_string().contains("lathe.bar_feed.code") && err.to_string().contains("must not be empty"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["bar_feed"]["code"] = serde_json::json!("G105 (feed)");
+    let err = load_post(&raw.to_string()).expect_err("comment");
+    assert!(err.to_string().contains("lathe.bar_feed.code") && err.to_string().contains("must be a bare word"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["bar_feed"]["part_length_word"] = serde_json::json!("j");
+    let err = load_post(&raw.to_string()).expect_err("lowercase");
+    assert!(err.to_string().contains("lathe.bar_feed.part_length_word") && err.to_string().contains("must be one uppercase letter"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["bar_feed"]["min_clamp_word"] = serde_json::json!("KK");
+    let err = load_post(&raw.to_string()).expect_err("two letters");
+    assert!(err.to_string().contains("lathe.bar_feed.min_clamp_word") && err.to_string().contains("must be one uppercase letter"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["bar_feed"]["push"] = serde_json::json!(true);
+    assert!(load_post(&raw.to_string()).is_err());
+}
+
 #[test]
 fn haas_lathe_rejects_a_b_head_index() {
     let program = lathe_program(vec![ClBlock::Event(Event::HeadIndex { head: "turret1".into(), b_deg: 30.0 })], turning(None, false));

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Lathe `bar_feed` operation at program end; `haas_lathe` homes and writes G105 alone on its line, with optional J/K overrides.
+
 ## 0.8.5 — 2026-10-29
 
 Second safety patch. Check tabbed jobs: tab `width` is now the bridge left on the part.

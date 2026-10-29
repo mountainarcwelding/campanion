@@ -401,6 +401,7 @@ impl Writer {
                 let verb = if *extend { "extend" } else { "retract" };
                 self.line(&format!("(parts catcher {verb})"));
             }
+            Event::BarFeed { .. } => self.line("(bar feed)"),
         }
         Ok(())
     }

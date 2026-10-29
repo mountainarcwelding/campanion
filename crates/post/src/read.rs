@@ -12,7 +12,7 @@
 //! cylinder mode X still follows diameter mode and Y is the unrolled distance.
 //! `I` `J` `K` are centre offsets from the stored start. `arc_flip` swaps G2 and G3 back to the
 //! IR sense on ZX arcs only. `G53` is a machine move and is not returned. `G28` is a reference
-//! return and is not returned. `U` and `W` are accepted only on that block. `G50` (spindle cap)
+//! return and is not returned. The bar-feed G code from `lathe.bar_feed` is not a move. `U` and `W` are accepted only on that block. `G50` (spindle cap)
 //! and `G98` (Fanuc and Haas feed per minute) are not moves. The thread feed word, such as G99,
 //! is not a move. A cylinder `on` line such as
 //! `G107 Y0 C0 R20.` is not a move and does not change the modal C word.
@@ -296,6 +296,7 @@ impl<'a> Parser<'a> {
                 21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
                 code if self.is_sub_spindle_g(code) => {}
                 code if self.is_transfer_g(code) => {}
+                code if self.is_bar_feed_g(code) => {}
                 code if thread_code == Some(code) => {
                     threading = true;
                     motions += 1;
@@ -315,6 +316,11 @@ impl<'a> Parser<'a> {
         // G53 is a non-modal machine-coordinate move. G28 is a reference return (Fanuc writes
         // U0 W0). Neither block is a part-frame point.
         if self.post.is_lathe() && (g_codes.contains(&28) || g_codes.contains(&53)) {
+            return Ok(None);
+        }
+        // G105 (or the post's bar-feed code) is a feeder command. J and K on that line are
+        // length overrides, not arc centres, and the block is not a part-frame point.
+        if g_codes.iter().any(|code| self.is_bar_feed_g(*code)) {
             return Ok(None);
         }
         if self.has_b_head()
@@ -662,6 +668,13 @@ impl<'a> Parser<'a> {
 
     fn is_transfer_letter(&self, letter: char) -> bool {
         transfer_axis_letter(self.post) == Some(letter)
+    }
+
+    fn is_bar_feed_g(&self, code: u16) -> bool {
+        let Some(bar) = self.post.lathe.as_ref().and_then(|lathe| lathe.bar_feed.as_ref()) else {
+            return false;
+        };
+        g_code_number(&bar.code) == Some(code)
     }
 
     fn is_transfer_g(&self, code: u16) -> bool {
