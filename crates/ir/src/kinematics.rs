@@ -25,7 +25,9 @@
 //! [`Kinematics::inverse`] solves rotary angles for the tool axis, then the gauge position that
 //! puts the tip on the requested point. [`Kinematics::choose`] picks one of those solutions.
 //! [`solve_path`] does that along a pose list, unwinding each rotary so a continuous move does
-//! not jump by 360°.
+//! not jump by 360°. Inside the singular cone it holds the primary rotary and lets the
+//! secondary rotary take the tilt. [`subdivide_path`] then inserts joint-space samples so the
+//! chord and the tool axis stay inside tolerance.
 
 use serde::{Deserialize, Serialize};
 
@@ -759,6 +761,24 @@ fn norm(v: Vec3) -> f64 {
 /// Tool length [`solve_path`] passes to forward and inverse. The gauge point is the tip.
 const PATH_TOOL_LENGTH: f64 = 0.0;
 
+/// Default singular cone, in degrees. A toolpath omits the field when it uses this value.
+pub const DEFAULT_SINGULAR_CONE_DEG: f64 = 1.0;
+
+/// Largest accepted singular cone, in degrees. The value must be greater than 0.
+pub const MAX_SINGULAR_CONE_DEG: f64 = 10.0;
+
+/// Inserted poses [`subdivide_path`] will add on one toolpath. One more is an error.
+const MAX_INSERTED_POSES: usize = 10_000;
+
+/// `singular_cone_deg` must be finite and in `(0, 10]`.
+pub(crate) fn check_singular_cone(degrees: f64) -> Result<()> {
+    if degrees.is_finite() && degrees > 0.0 && degrees <= MAX_SINGULAR_CONE_DEG {
+        Ok(())
+    } else {
+        Err(check::invalid("singular_cone_deg must be in (0, 10]"))
+    }
+}
+
 /// Two unwound solutions are different branches when a rotary differs by more than this.
 ///
 /// A configuration flip moves one rotary by about 180°. A duplicate of the same solution does not.
@@ -770,23 +790,44 @@ struct Ranked {
     distance: f64,
 }
 
+/// One rotary whose axis is the singular direction, and the unit direction of that axis.
+///
+/// The direction has the same sense as the spindle. The opposite sense is the other pole.
+#[derive(Clone, Copy)]
+struct SingularFrame {
+    /// Rotary held at its previous angle inside the cone. `angles[primary]`.
+    primary: usize,
+    /// Unit singular direction. The cone is the same around `-direction`.
+    direction: Vec3,
+}
+
 /// Joint solution for every pose, continuous with `start` or with angles `[0, 0]`.
 ///
-/// Each pose takes the solution closest to the previous joints. The distance is the Euclidean
-/// length of the rotary-angle change after each angle is unwound by whole turns onto the previous
-/// angle, so a continuous rotary does not jump by 360°. That closest solution is the branch
-/// already in use. When it lies outside a travel limit and only another branch is inside the
-/// limits, the path would have to flip: `pose {index} flips the rotary branch`. When every
-/// solution is outside the limits, the error is `pose {index} leaves axis {letter}` for the
-/// first rotary of that closest solution that is outside. No orientation solution is
+/// `singular_cone_deg` is the toolpath setting of the same name: finite, in `(0, 10]`, default
+/// [`DEFAULT_SINGULAR_CONE_DEG`]. When one rotary lies on the spindle axis, that rotary is the
+/// primary and its axis is the singular direction. While the requested tool axis lies inside
+/// that cone of either pole, the primary stays at its previous angle and the secondary rotary
+/// takes the tilt. The tip matches the request. The achieved tool axis stays within
+/// `singular_cone_deg` of the requested axis. Outside the cone the solution is exact.
+///
+/// Each exact pose takes the solution closest to the previous joints. The distance is the
+/// Euclidean length of the rotary-angle change after each angle is unwound by whole turns onto
+/// the previous angle, so a continuous rotary does not jump by 360°. That closest solution is
+/// the branch already in use. When it lies outside a travel limit and only another branch is
+/// inside the limits, the path would have to flip: `pose {index} flips the rotary branch`. When
+/// every solution is outside the limits, the error is `pose {index} leaves axis {letter}` for
+/// the first rotary of that closest solution that is outside. The same limit error is used when
+/// the cone solution leaves a travel limit. No orientation solution is
 /// `pose {index} is unreachable`.
 ///
 /// `start` is the joint position before the first pose. Returned angles stay on the unwound
-/// branch, so an unlimited rotary may leave `(-180, 180]`. [`Kinematics::forward`] of each
-/// result at tool length 0 is the pose.
-pub fn solve_path(setup: &FiveAxisSetup, poses: &[ToolPose], start: Option<Joints>) -> Result<Vec<Joints>> {
+/// branch, so an unlimited rotary may leave `(-180, 180]`. A single rotary has no primary, so
+/// the cone does not change its solution.
+pub fn solve_path(setup: &FiveAxisSetup, poses: &[ToolPose], start: Option<Joints>, singular_cone_deg: f64) -> Result<Vec<Joints>> {
+    check_singular_cone(singular_cone_deg)?;
     let kin = &setup.kinematics;
     kin.check()?;
+    let frame = singular_frame(kin);
     let mut previous = match start {
         Some(joints) => {
             joints.xyz.check("joint position")?;
@@ -796,34 +837,362 @@ pub fn solve_path(setup: &FiveAxisSetup, poses: &[ToolPose], start: Option<Joint
         }
         None => [0.0, 0.0],
     };
-    let count = kin.rotaries.len();
     let mut out = Vec::with_capacity(poses.len());
     for (index, pose) in poses.iter().enumerate() {
-        let sols = kin.unbounded_solutions(pose, PATH_TOOL_LENGTH, previous).map_err(|err| path_pose_error(index, err))?;
-        let mut ranked = Vec::with_capacity(sols.len());
-        for sol in sols {
-            let angles = unwind_angles(sol.angles, previous, count);
-            let distance = rotary_distance(angles, previous, count);
-            ranked.push(Ranked { joints: Joints { xyz: sol.xyz, angles }, distance });
-        }
-        ranked.sort_by(|left, right| left.distance.total_cmp(&right.distance).then_with(|| angle_order(left.joints.angles, right.joints.angles)));
-        let Some(closest) = ranked.first().copied() else {
-            return Err(check::invalid(format!("pose {index} is unreachable")));
-        };
-        let chosen = match same_branch_inside(kin, &ranked, closest.joints.angles) {
-            Some(joints) => joints,
-            None if ranked.iter().any(|item| axis_outside(kin, item.joints.angles).is_none()) => {
-                return Err(check::invalid(format!("pose {index} flips the rotary branch")));
+        let chosen = match frame {
+            Some(frame) if in_singular_cone(pose.axis, frame.direction, singular_cone_deg) => {
+                cone_solution(kin, index, pose, frame, previous, singular_cone_deg)?
             }
-            None => {
-                let letter = axis_outside(kin, closest.joints.angles).unwrap_or('?');
-                return Err(check::invalid(format!("pose {index} leaves axis {letter}")));
-            }
+            _ => exact_pose(kin, index, pose, previous)?,
         };
         previous = chosen.angles;
         out.push(chosen);
     }
     Ok(out)
+}
+
+/// Insert joint-space samples so each segment stays inside the chord and axis tolerances.
+///
+/// `poses` and `joints` are one toolpath, in order, and the same length. `toolpath` is that
+/// toolpath's name and is quoted in the cap error. Between each pair of neighbours the joints
+/// are interpolated linearly, including each rotary angle as stored (no extra 360° fold). The
+/// inserted pose is the forward pose of those joints at tool length 0.
+///
+/// A segment is fine when the tip at the joint midpoint lies within `chord_tol_mm` of the
+/// straight midpoint of the two poses, and the tool axis lies within `axis_tol_deg` of the
+/// slerp of the two axes. Both tolerances must be finite and positive. A segment whose joints
+/// do not change is kept as it is, so a path of constant joints inserts nothing.
+///
+/// More than [`MAX_INSERTED_POSES`] inserted poses is
+/// `toolpath `{toolpath}` inserts more than 10000 poses`.
+pub fn subdivide_path(
+    setup: &FiveAxisSetup,
+    toolpath: &str,
+    poses: &[ToolPose],
+    joints: &[Joints],
+    chord_tol_mm: f64,
+    axis_tol_deg: f64,
+) -> Result<(Vec<ToolPose>, Vec<Joints>)> {
+    if !chord_tol_mm.is_finite() || chord_tol_mm <= 0.0 {
+        return Err(check::invalid("chord_tol_mm must be positive"));
+    }
+    if !axis_tol_deg.is_finite() || axis_tol_deg <= 0.0 {
+        return Err(check::invalid("axis_tol_deg must be positive"));
+    }
+    if poses.len() != joints.len() {
+        return Err(check::invalid(format!("toolpath `{toolpath}` poses and joints differ in length")));
+    }
+    let kin = &setup.kinematics;
+    kin.check()?;
+    let Some((&first_pose, rest_poses)) = poses.split_first() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let Some((&first_joints, rest_joints)) = joints.split_first() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let mut out_poses = Vec::with_capacity(poses.len());
+    let mut out_joints = Vec::with_capacity(joints.len());
+    out_poses.push(first_pose);
+    out_joints.push(first_joints);
+    let mut job = Subdiv { kin, toolpath, chord_tol_mm, axis_tol_deg, inserted: 0 };
+    let mut prev_pose = first_pose;
+    let mut prev_joints = first_joints;
+    for (&pose, &end_joints) in rest_poses.iter().zip(rest_joints) {
+        job.fill(prev_pose, prev_joints, pose, end_joints, &mut out_poses, &mut out_joints)?;
+        prev_pose = pose;
+        prev_joints = end_joints;
+    }
+    Ok((out_poses, out_joints))
+}
+
+struct Subdiv<'a> {
+    kin: &'a Kinematics,
+    toolpath: &'a str,
+    chord_tol_mm: f64,
+    axis_tol_deg: f64,
+    inserted: usize,
+}
+
+impl Subdiv<'_> {
+    fn fill(
+        &mut self,
+        start_pose: ToolPose,
+        start_joints: Joints,
+        end_pose: ToolPose,
+        end_joints: Joints,
+        out_poses: &mut Vec<ToolPose>,
+        out_joints: &mut Vec<Joints>,
+    ) -> Result<()> {
+        // Right half is pushed first so the left half is refined next. The stack is heap data:
+        // a segment that needs thousands of samples must not recurse that deep.
+        let mut stack = vec![(start_pose, start_joints, end_pose, end_joints)];
+        while let Some((left_pose, left_joints, right_pose, right_joints)) = stack.pop() {
+            if self.segment_within(left_pose, left_joints, right_pose, right_joints)? {
+                out_poses.push(right_pose);
+                out_joints.push(right_joints);
+                continue;
+            }
+            let mid_joints = lerp_joints(left_joints, right_joints, 0.5);
+            if joints_unchanged(mid_joints, left_joints) || joints_unchanged(mid_joints, right_joints) {
+                out_poses.push(right_pose);
+                out_joints.push(right_joints);
+                continue;
+            }
+            self.inserted = self.inserted.saturating_add(1);
+            if self.inserted > MAX_INSERTED_POSES {
+                return Err(check::invalid(format!("toolpath `{}` inserts more than 10000 poses", self.toolpath)));
+            }
+            let mid_pose = self.kin.forward(&mid_joints, PATH_TOOL_LENGTH)?;
+            stack.push((mid_pose, mid_joints, right_pose, right_joints));
+            stack.push((left_pose, left_joints, mid_pose, mid_joints));
+        }
+        Ok(())
+    }
+
+    fn segment_within(&self, left_pose: ToolPose, left_joints: Joints, right_pose: ToolPose, right_joints: Joints) -> Result<bool> {
+        if joints_unchanged(left_joints, right_joints) {
+            return Ok(true);
+        }
+        let mid = self.kin.forward(&lerp_joints(left_joints, right_joints, 0.5), PATH_TOOL_LENGTH)?;
+        let tip_gap = gap_vec(mid.tip, lerp_vec(left_pose.tip, right_pose.tip, 0.5));
+        let axis_gap = angle_between_deg(mid.axis, slerp_axis(left_pose.axis, right_pose.axis, 0.5));
+        Ok(tip_gap <= self.chord_tol_mm && axis_gap <= self.axis_tol_deg)
+    }
+}
+
+fn exact_pose(kin: &Kinematics, index: usize, pose: &ToolPose, previous: [f64; 2]) -> Result<Joints> {
+    let count = kin.rotaries.len();
+    let sols = kin.unbounded_solutions(pose, PATH_TOOL_LENGTH, previous).map_err(|err| path_pose_error(index, err))?;
+    let mut ranked = Vec::with_capacity(sols.len());
+    for sol in sols {
+        let angles = unwind_angles(sol.angles, previous, count);
+        let distance = rotary_distance(angles, previous, count);
+        ranked.push(Ranked { joints: Joints { xyz: sol.xyz, angles }, distance });
+    }
+    ranked.sort_by(|left, right| left.distance.total_cmp(&right.distance).then_with(|| angle_order(left.joints.angles, right.joints.angles)));
+    let Some(closest) = ranked.first().copied() else {
+        return Err(check::invalid(format!("pose {index} is unreachable")));
+    };
+    match same_branch_inside(kin, &ranked, closest.joints.angles) {
+        Some(joints) => Ok(joints),
+        None if ranked.iter().any(|item| axis_outside(kin, item.joints.angles).is_none()) => {
+            Err(check::invalid(format!("pose {index} flips the rotary branch")))
+        }
+        None => {
+            let letter = axis_outside(kin, closest.joints.angles).unwrap_or('?');
+            Err(check::invalid(format!("pose {index} leaves axis {letter}")))
+        }
+    }
+}
+
+/// Hold the primary and fit the secondary. The achieved axis stays within the cone.
+fn cone_solution(kin: &Kinematics, index: usize, pose: &ToolPose, frame: SingularFrame, previous: [f64; 2], cone_deg: f64) -> Result<Joints> {
+    let Some(target) = unit_direction(pose.axis) else {
+        return Err(check::invalid(format!("pose {index} is unreachable")));
+    };
+    let mut solved = locked_joints(kin, pose, target, frame, previous).map_err(|err| path_pose_error(index, err))?;
+    let achieved = kin.forward(&solved, PATH_TOOL_LENGTH).map_err(|err| path_pose_error(index, err))?;
+    if angle_between_deg(achieved.axis, target) > cone_deg + 1e-6 {
+        // The nearest pole is an exact singular pose: the primary is free, so it stays put,
+        // and the axis error is the distance to that pole, which is at most the cone.
+        let pole = nearest_pole(target, frame.direction);
+        let pole_pose = ToolPose { tip: pose.tip, axis: pole };
+        solved = locked_joints(kin, &pole_pose, pole, frame, previous).map_err(|err| path_pose_error(index, err))?;
+    }
+    if let Some(letter) = axis_outside(kin, solved.angles) {
+        return Err(check::invalid(format!("pose {index} leaves axis {letter}")));
+    }
+    Ok(solved)
+}
+
+/// Primary rotary when one joint lies on the spindle and the other can tilt off it.
+///
+/// Parallel rotaries, and a single rotary, have no separate tilt to absorb the cone.
+fn singular_frame(kin: &Kinematics) -> Option<SingularFrame> {
+    if kin.rotaries.len() != 2 {
+        return None;
+    }
+    let spindle = unit_direction(kin.spindle_axis)?;
+    let mut best_index = 0usize;
+    let mut best_align = -1.0;
+    let mut axes = [Vec3::ZERO; 2];
+    for (index, joint) in kin.rotaries.iter().enumerate() {
+        let axis = unit_direction(joint.axis)?;
+        axes[index] = axis;
+        let align = dot(axis, spindle).abs();
+        if align > best_align {
+            best_align = align;
+            best_index = index;
+        }
+    }
+    if best_align < 1.0 - 1e-6 {
+        return None;
+    }
+    let other = 1 - best_index;
+    if dot(axes[other], spindle).abs() > 1e-3 {
+        return None;
+    }
+    let direction = if dot(axes[best_index], spindle) >= 0.0 { axes[best_index] } else { scale(axes[best_index], -1.0) };
+    Some(SingularFrame { primary: best_index, direction })
+}
+
+fn in_singular_cone(axis: Vec3, direction: Vec3, cone_deg: f64) -> bool {
+    let Some(axis) = unit_direction(axis) else {
+        return false;
+    };
+    pole_clearance_deg(axis, direction) <= cone_deg
+}
+
+/// Angle from `axis` to the nearer pole of `direction`, in degrees.
+fn pole_clearance_deg(axis: Vec3, direction: Vec3) -> f64 {
+    let cosine = dot(axis, direction).clamp(-1.0, 1.0);
+    cosine.acos().min((-cosine).acos()).to_degrees()
+}
+
+fn nearest_pole(target: Vec3, direction: Vec3) -> Vec3 {
+    if dot(target, direction) >= 0.0 { direction } else { scale(direction, -1.0) }
+}
+
+/// Joints with the primary locked, and the secondary chosen so the tool axis is as close as
+/// the locked meridian allows. `target` is a unit vector.
+fn locked_joints(kin: &Kinematics, pose: &ToolPose, target: Vec3, frame: SingularFrame, previous: [f64; 2]) -> Result<Joints> {
+    let spindle = unit_direction(kin.spindle_axis).ok_or_else(|| check::invalid(format!("kinematics `{}`: spindle axis is zero", kin.name)))?;
+    let (tables, heads) = kin.carrier_axes()?;
+    let Some(map) = axis_map(&tables, &heads) else {
+        return Err(tool_axis_error(target, "not reachable"));
+    };
+    if norm(cross(map.wa, map.wb)) < EPS {
+        return Err(tool_axis_error(target, "not reachable"));
+    }
+    let (x_eq, y_eq) = if frame.primary == map.x_index {
+        let x_eq = map.x_sign * angle_at(previous, frame.primary);
+        let y_eq = match fit_second(map.wa, map.wb, spindle, target, x_eq) {
+            Some(angle) => angle,
+            None => map.y_sign * angle_at(previous, map.y_index),
+        };
+        (x_eq, y_eq)
+    } else if frame.primary == map.y_index {
+        let y_eq = map.y_sign * angle_at(previous, frame.primary);
+        let x_eq = match fit_first(map.wa, map.wb, spindle, target, y_eq) {
+            Some(angle) => angle,
+            None => map.x_sign * angle_at(previous, map.x_index),
+        };
+        (x_eq, y_eq)
+    } else {
+        return Err(tool_axis_error(target, "not reachable"));
+    };
+    let mut angles = [0.0; 2];
+    put_angle(&mut angles, map.x_index, map.x_sign * x_eq);
+    put_angle(&mut angles, map.y_index, map.y_sign * y_eq);
+    // The primary equation was built from the previous angle. Write it back so a ±1 sign
+    // round-trip cannot leave a one-ulp difference, then unwind the secondary onto that branch.
+    put_angle(&mut angles, frame.primary, angle_at(previous, frame.primary));
+    let angles = unwind_angles(angles, previous, kin.rotaries.len());
+    let at_origin = Joints { xyz: Vec3::ZERO, angles };
+    let pose0 = kin.forward(&at_origin, PATH_TOOL_LENGTH)?;
+    let table = kin.chain(&at_origin, Carrier::Table)?;
+    let xyz = map_direction(&table, sub(pose.tip, pose0.tip));
+    xyz.check("joint position")?;
+    Ok(Joints { xyz, angles })
+}
+
+/// Equation angle `y` with `x` locked: `R(wa, x) R(wb, y) spindle` closest to `target`.
+fn fit_second(wa: Vec3, wb: Vec3, spindle: Vec3, target: Vec3, x_eq: f64) -> Option<f64> {
+    let q = rotate_vector(wa, target, -x_eq);
+    let c = closest_on_circle(wb, spindle, q)?;
+    match sp1(wb, spindle, c)? {
+        SolvedAngle::Fixed(angle) => Some(angle),
+        SolvedAngle::Free => None,
+    }
+}
+
+/// Equation angle `x` with `y` locked.
+fn fit_first(wa: Vec3, wb: Vec3, spindle: Vec3, target: Vec3, y_eq: f64) -> Option<f64> {
+    let swung = rotate_vector(wb, spindle, y_eq);
+    let c = closest_on_circle(wa, swung, target)?;
+    match sp1(wa, swung, c)? {
+        SolvedAngle::Fixed(angle) => Some(angle),
+        SolvedAngle::Free => None,
+    }
+}
+
+/// Closest point to `query` on the orbit of `point` about a unit `axis`.
+///
+/// `None` when the orbit is a point, or when `query` lies on `axis` so every angle ties.
+fn closest_on_circle(axis: Vec3, point: Vec3, query: Vec3) -> Option<Vec3> {
+    let along = dot(axis, point);
+    let perp = sub(point, scale(axis, along));
+    let perp_len = norm(perp);
+    if perp_len < EPS {
+        return None;
+    }
+    let q_perp = sub(query, scale(axis, dot(axis, query)));
+    let q_len = norm(q_perp);
+    if q_len < EPS {
+        return None;
+    }
+    Some(add(scale(axis, along), scale(q_perp, perp_len / q_len)))
+}
+
+fn joints_unchanged(left: Joints, right: Joints) -> bool {
+    gap_vec(left.xyz, right.xyz) <= 1e-12 && (left.angles[0] - right.angles[0]).abs() <= 1e-12 && (left.angles[1] - right.angles[1]).abs() <= 1e-12
+}
+
+fn lerp_joints(left: Joints, right: Joints, t: f64) -> Joints {
+    Joints {
+        xyz: lerp_vec(left.xyz, right.xyz, t),
+        angles: [left.angles[0] + (right.angles[0] - left.angles[0]) * t, left.angles[1] + (right.angles[1] - left.angles[1]) * t],
+    }
+}
+
+fn lerp_vec(left: Vec3, right: Vec3, t: f64) -> Vec3 {
+    Vec3::from_xyz(left.x() + (right.x() - left.x()) * t, left.y() + (right.y() - left.y()) * t, left.z() + (right.z() - left.z()) * t)
+}
+
+/// Unit slerp. Anti-parallel axes take the great circle toward +X, or toward +Y when the start
+/// axis is already along X. `t` outside `[0, 1]` is not used.
+pub(crate) fn slerp_axis(start: Vec3, end: Vec3, t: f64) -> Vec3 {
+    let Some(start) = unit_direction(start) else {
+        return end;
+    };
+    let Some(end) = unit_direction(end) else {
+        return start;
+    };
+    let cosine = dot(start, end).clamp(-1.0, 1.0);
+    let theta = cosine.acos();
+    let sin_theta = theta.sin();
+    if sin_theta <= 1e-12 {
+        if cosine > 0.0 {
+            return start;
+        }
+        let helper = if start.x().abs() > 0.9 { Vec3::Y } else { Vec3::X };
+        let Some(side) = unit_direction(cross(start, helper)) else {
+            return start;
+        };
+        let angle = t * std::f64::consts::PI;
+        let (sin_t, cos_t) = angle.sin_cos();
+        return unit_direction(add(scale(start, cos_t), scale(side, sin_t))).unwrap_or(start);
+    }
+    let w0 = ((1.0 - t) * theta).sin() / sin_theta;
+    let w1 = (t * theta).sin() / sin_theta;
+    unit_direction(add(scale(start, w0), scale(end, w1))).unwrap_or(start)
+}
+
+fn gap_vec(left: Vec3, right: Vec3) -> f64 {
+    let delta = sub(left, right);
+    norm(delta)
+}
+
+fn angle_between_deg(left: Vec3, right: Vec3) -> f64 {
+    let Some(left) = unit_direction(left) else {
+        return 180.0;
+    };
+    let Some(right) = unit_direction(right) else {
+        return 180.0;
+    };
+    let sine = norm(cross(left, right));
+    let cosine = dot(left, right).clamp(-1.0, 1.0);
+    sine.atan2(cosine).to_degrees().abs()
 }
 
 /// Closest solution that stays on `closest`'s branch and inside the travel limits.

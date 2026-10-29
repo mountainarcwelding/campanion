@@ -346,7 +346,9 @@ fn old_ir_files_load_and_reserialize_byte_identically() {
         assert!(!json.contains("\"five_axis\""), "{rel} gained a five_axis field");
         assert!(!json.contains("\"continuous\""), "{rel} gained a continuous field");
         assert!(!json.contains("\"max_axis_step_deg\""), "{rel} gained max_axis_step_deg");
+        assert!(!json.contains("\"singular_cone_deg\""), "{rel} gained singular_cone_deg");
         assert!(doc.program().toolpaths().iter().all(|path| !path.continuous()), "{rel}");
+        assert!(doc.program().toolpaths().iter().all(|path| path.singular_cone_deg() == 1.0), "{rel}");
         assert_eq!(doc.program().max_axis_step_deg(), 5.0, "{rel}");
         campanion_testsupport::ir_json_close(&json, &original).unwrap_or_else(|err| panic!("{rel}: {err}"));
         assert_eq!(Document::from_json(&json).expect("reload").to_json().expect("again"), json, "{rel}");
@@ -359,10 +361,11 @@ fn continuous_flag_defaults_are_omitted_and_out_of_range_steps_are_rejected() {
     let json = empty.to_json().expect("json");
     assert!(!json.contains("continuous"), "{json}");
     assert!(!json.contains("max_axis_step_deg"), "{json}");
+    assert!(!json.contains("singular_cone_deg"), "{json}");
     assert_eq!(Document::from_json(&json).expect("load").program().max_axis_step_deg(), 5.0);
 
     let pose = Pose::new(Vec3::ZERO, Vec3::Z).expect("pose");
-    let path = rapid_path(pose).with_continuous(true);
+    let path = rapid_path(pose).with_continuous(true).with_singular_cone_deg(2.5).expect("cone");
     let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None)
         .expect("program")
         .with_max_axis_step_deg(12.5)
@@ -371,21 +374,26 @@ fn continuous_flag_defaults_are_omitted_and_out_of_range_steps_are_rejected() {
     let json = doc.to_json().expect("json");
     assert!(json.contains("\"continuous\":true"), "{json}");
     assert!(json.contains("\"max_axis_step_deg\":12.5"), "{json}");
+    assert!(json.contains("\"singular_cone_deg\":2.5"), "{json}");
     let loaded = Document::from_json(&json).expect("reload");
     assert!(loaded.program().toolpaths()[0].continuous());
+    assert!((loaded.program().toolpaths()[0].singular_cone_deg() - 2.5).abs() < 1e-12);
     assert!((loaded.program().max_axis_step_deg() - 12.5).abs() < 1e-12);
 
     // An older file omits both keys. They load as the defaults and stay omitted on the way back out.
     let mut value = serde_json::to_value(&loaded).expect("value");
     value["program"].as_object_mut().expect("program").remove("max_axis_step_deg");
     value["program"]["toolpaths"][0].as_object_mut().expect("path").remove("continuous");
+    value["program"]["toolpaths"][0].as_object_mut().expect("path").remove("singular_cone_deg");
     let text = serde_json::to_string(&value).expect("text");
     let restored = Document::from_json(&text).expect("old shape");
     assert!(!restored.program().toolpaths()[0].continuous());
+    assert_eq!(restored.program().toolpaths()[0].singular_cone_deg(), 1.0);
     assert_eq!(restored.program().max_axis_step_deg(), 5.0);
     let again = restored.to_json().expect("again");
     assert!(!again.contains("continuous"), "{again}");
     assert!(!again.contains("max_axis_step_deg"), "{again}");
+    assert!(!again.contains("singular_cone_deg"), "{again}");
 
     for bad in [0.0, -4.0, f64::NAN, 90.0 + 1e-6] {
         let err = Program::default().with_max_axis_step_deg(bad).expect_err("range");
@@ -397,6 +405,20 @@ fn continuous_flag_defaults_are_omitted_and_out_of_range_steps_are_rejected() {
     zero["program"]["max_axis_step_deg"] = serde_json::json!(0.0);
     let err = Document::from_json(&serde_json::to_string(&zero).expect("json")).expect_err("zero");
     assert!(err.to_string().contains("max_axis_step_deg must be in (0, 90]"), "{err}");
+
+    for bad in [0.0, -0.5, 10.0 + 1e-6, f64::NAN] {
+        let err = rapid_path(Pose::new(Vec3::ZERO, Vec3::Z).expect("pose")).with_singular_cone_deg(bad).expect_err("cone");
+        assert_eq!(err.to_string(), "invalid input: singular_cone_deg must be in (0, 10]");
+    }
+    rapid_path(Pose::new(Vec3::ZERO, Vec3::Z).expect("pose")).with_singular_cone_deg(10.0).expect("upper end");
+    let pose = Pose::new(Vec3::ZERO, Vec3::Z).expect("pose");
+    let program =
+        Program::try_new(None, Vec::new(), None, vec![rapid_path(pose).with_singular_cone_deg(2.5).expect("cone")], Vec::new(), Vec::new(), None)
+            .expect("program");
+    let mut wide = serde_json::to_value(Document::new(program).expect("doc")).expect("value");
+    wide["program"]["toolpaths"][0]["singular_cone_deg"] = serde_json::json!(0.0);
+    let err = Document::from_json(&serde_json::to_string(&wide).expect("json")).expect_err("zero cone");
+    assert!(err.to_string().contains("singular_cone_deg must be in (0, 10]"), "{err}");
 }
 
 #[test]

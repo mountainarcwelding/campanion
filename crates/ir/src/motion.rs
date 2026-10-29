@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::check::{self, positive};
 use crate::geom::{ArcSense, Plane, Pose, Vec3};
+use crate::kinematics::{self, DEFAULT_SINGULAR_CONE_DEG};
 use crate::process::Event;
 
 /// Why a feed move exists. Rapids have no role.
@@ -301,10 +302,25 @@ pub struct ClPath {
     /// Omitted on disk when false, so a file written before this flag still loads.
     #[serde(default, skip_serializing_if = "is_false")]
     continuous: bool,
+    /// Half-angle of the singular cone, in degrees.
+    ///
+    /// The value is in `(0, 10]`. The default is 1. Omitted on disk when it is the default,
+    /// so a file written before this setting still loads. [`crate::solve_path`] holds the
+    /// primary rotary while the tool axis lies inside this cone of the singular direction.
+    #[serde(default = "default_singular_cone_deg", skip_serializing_if = "is_default_singular_cone")]
+    singular_cone_deg: f64,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn default_singular_cone_deg() -> f64 {
+    DEFAULT_SINGULAR_CONE_DEG
+}
+
+fn is_default_singular_cone(value: &f64) -> bool {
+    *value == DEFAULT_SINGULAR_CONE_DEG
 }
 
 impl ClPath {
@@ -317,7 +333,7 @@ impl ClPath {
         tabs: Vec<ProfileTab>,
         blocks: Vec<ClBlock>,
     ) -> Result<Self> {
-        let path = Self { name, tool_id, compensation, feeds, pierce, tabs, blocks, continuous: false };
+        let path = Self { name, tool_id, compensation, feeds, pierce, tabs, blocks, continuous: false, singular_cone_deg: DEFAULT_SINGULAR_CONE_DEG };
         path.check()?;
         Ok(path)
     }
@@ -333,6 +349,20 @@ impl ClPath {
     pub fn with_continuous(mut self, continuous: bool) -> Self {
         self.continuous = continuous;
         self
+    }
+
+    /// Singular cone, in degrees. The default is [`DEFAULT_SINGULAR_CONE_DEG`].
+    pub fn singular_cone_deg(&self) -> f64 {
+        self.singular_cone_deg
+    }
+
+    /// Replace [`Self::singular_cone_deg`] and re-validate.
+    ///
+    /// `degrees` must be finite and in `(0, 10]`.
+    pub fn with_singular_cone_deg(mut self, degrees: f64) -> Result<Self> {
+        self.singular_cone_deg = degrees;
+        self.check()?;
+        Ok(self)
     }
 
     pub fn name(&self) -> Option<&str> {
@@ -365,6 +395,7 @@ impl ClPath {
 
     pub(crate) fn check(&self) -> Result<()> {
         check::optional_name(&self.name, "toolpath name")?;
+        kinematics::check_singular_cone(self.singular_cone_deg)?;
         if self.blocks.len() > check::MAX_BLOCKS {
             return Err(check::invalid(format!("too many blocks: {} > {}", self.blocks.len(), check::MAX_BLOCKS)));
         }

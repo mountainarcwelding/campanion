@@ -164,7 +164,7 @@ impl Program {
 
     /// Replace each toolpath's blocks and re-validate.
     ///
-    /// `block_lists` is one list per toolpath, in order. Name, tool, feeds, tabs and the continuous flag stay.
+    /// `block_lists` is one list per toolpath, in order. Name, tool, feeds, tabs, the continuous flag and the singular cone stay.
     pub(crate) fn map_toolpaths(self, block_lists: Vec<Vec<ClBlock>>) -> Result<Self> {
         if block_lists.len() != self.toolpaths.len() {
             return Err(check::invalid("toolpath block lists do not match the program"));
@@ -183,7 +183,7 @@ impl Program {
                     path.tabs().to_vec(),
                     blocks,
                 )
-                .map(|rebuilt| rebuilt.with_continuous(path.continuous()))
+                .and_then(|rebuilt| rebuilt.with_continuous(path.continuous()).with_singular_cone_deg(path.singular_cone_deg()))
             })
             .collect::<Result<Vec<_>>>()?;
         let program = Self { toolpaths, ..self };

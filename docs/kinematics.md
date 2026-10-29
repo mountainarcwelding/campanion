@@ -45,15 +45,33 @@ That happens when the tilt is 0° or 180°. The spindle stays on a rotary axis, 
 
 `Nearest(prev)` passes `prev` as the hint, so a free joint keeps its angle from `prev`. `FirstPositive` and `FirstNegative` hint `[0, 0]`, so a free joint is 0 unless selection picks another returned solution.
 
+## Singular cone
+
+`singular_cone_deg` is a toolpath setting. The default is 1. The value is in `(0, 10]`. It is omitted from JSON when it is the default.
+
+When one rotary lies on the spindle axis, that rotary is the primary and its axis is the singular direction. On the examples the primary is `C`. The singular tilt is `A` or `B` at 0°, and the same cone sits around the opposite pole at 180°. A single rotary has no separate primary, so the cone does not change its solution. Parallel rotaries are left to the hint rule above.
+
+While the requested tool axis lies inside that cone of either pole, `solve_path` keeps the primary at its previous angle. The secondary rotary takes the tilt that brings the tool axis as close as that locked primary allows. The tip matches the request. The achieved tool axis stays within `singular_cone_deg` of the requested axis. Outside the cone the solution is exact.
+
+A step that enters or leaves the cone changes the primary by at most `90° + 2 × singular_cone_deg`. Inside the cone the primary does not move. The two exact branches just outside the cone are a half-turn apart on the primary; the nearer one, with the held tilt still inside the cone, stays inside that bound.
+
 ## Path solutions
 
-`solve_path` takes a `FiveAxisSetup`, a list of tool poses and an optional starting joint position. It returns one joint position per pose. The tool length is 0, so the gauge point is the tip. The setup's `SolutionPolicy` is not used: each pose takes the solution closest to the previous joints.
+`solve_path` takes a `FiveAxisSetup`, a list of tool poses, an optional starting joint position and `singular_cone_deg`. It returns one joint position per pose. The tool length is 0, so the gauge point is the tip. The setup's `SolutionPolicy` is not used: each pose takes the solution closest to the previous joints. `singular_cone_deg` is the toolpath setting of the same name.
 
 The distance is the Euclidean length of the rotary-angle changes after each angle is unwound by whole turns onto the previous angle. An unlimited rotary may leave `(-180, 180]`. A joint does not jump by 360°.
 
 The closest solution is the branch already in use. A solution that differs by more than 90° on a rotary is another branch. When the closest solution is outside a travel limit and another branch is inside, the error is `pose {index} flips the rotary branch`. When every solution is outside the limits, the error is `pose {index} leaves axis {letter}` for the first rotary of that closest solution that is outside. No orientation solution, and a zero tool axis, are `pose {index} is unreachable`.
 
 `start` seeds the previous angles. Without it the previous angles are `[0, 0]`.
+
+## Subdivision
+
+`subdivide_path` takes the setup, the toolpath name, the poses, the joint solution, a chord tolerance in millimetres and an axis tolerance in degrees. Both tolerances are finite and positive. Poses and joints are the same length.
+
+It inserts samples between neighbouring poses. Each inserted sample is linear in every joint, angles included, and the inserted pose is the forward pose of those joints. It repeats until, on every segment, the tip at the joint midpoint lies within the chord tolerance of the straight midpoint of the two poses, and the tool axis lies within the axis tolerance of the slerp of the two axes. A segment whose joints do not change is kept as it is, so a path of constant joints inserts nothing.
+
+More than 10000 inserted poses is an error: `toolpath `{name}` inserts more than 10000 poses`.
 
 ## JSON
 

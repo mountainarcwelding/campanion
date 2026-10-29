@@ -70,7 +70,11 @@
 //! (default 5°, allowed range `(0, 90]`). The default step is also omitted from JSON.
 //! [`solve_path`] turns a list of tool poses into joint positions: it keeps the rotary branch,
 //! unwinds angles so a joint does not jump by 360°, and reports the first pose that leaves a
-//! travel limit or that no rotary solution can reach.
+//! travel limit or that no rotary solution can reach. A toolpath may set
+//! [`ClPath::singular_cone_deg`] (default 1°, allowed range `(0, 10]`, omitted from JSON at
+//! the default). Inside that cone of the singular direction, `solve_path` holds the primary
+//! rotary and lets the secondary rotary take the tilt. [`subdivide_path`] inserts joint-space
+//! samples so each segment stays within a chord tolerance and a tool-axis tolerance.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -92,7 +96,9 @@ mod wrap;
 
 pub use convert::Import;
 pub use geom::{ArcSense, Plane, Pose, Vec3};
-pub use kinematics::{Carrier, Choice, FiveAxisSetup, Joints, Kinematics, RotaryJoint, SolutionPolicy, ToolPose, solve_path};
+pub use kinematics::{
+    Carrier, Choice, DEFAULT_SINGULAR_CONE_DEG, FiveAxisSetup, Joints, Kinematics, RotaryJoint, SolutionPolicy, ToolPose, solve_path, subdivide_path,
+};
 pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
 pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};

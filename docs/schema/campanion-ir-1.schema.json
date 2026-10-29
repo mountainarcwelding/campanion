@@ -662,6 +662,11 @@
           "default": null,
           "description": "Where the process turns on, when the source operation recorded it."
         },
+        "singular_cone_deg": {
+          "description": "Half-angle of the singular cone, in degrees.\n\nThe value is in `(0, 10]`. The default is 1. Omitted on disk when it is the default,\nso a file written before this setting still loads. [`crate::solve_path`] holds the\nprimary rotary while the tool axis lies inside this cone of the singular direction.",
+          "format": "double",
+          "type": "number"
+        },
         "tabs": {
           "items": {
             "$ref": "#/$defs/ProfileTab"
