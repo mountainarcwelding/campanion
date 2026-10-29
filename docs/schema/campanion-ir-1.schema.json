@@ -636,6 +636,10 @@
         "compensation": {
           "$ref": "#/$defs/CompensationMode"
         },
+        "continuous": {
+          "description": "Continuous five-axis motion. False keeps the toolpath on one indexed tool axis.\n\nOmitted on disk when false, so a file written before this flag still loads.",
+          "type": "boolean"
+        },
         "feeds": {
           "$ref": "#/$defs/Feeds"
         },
@@ -1922,6 +1926,11 @@
             }
           ],
           "default": null
+        },
+        "max_axis_step_deg": {
+          "description": "Largest tool-axis change, in degrees, on one feed of a continuous toolpath.\n\nThe value is in `(0, 90]`. The default is 5. Omitted on disk when it is the default,\nso a file written before this setting still loads.",
+          "format": "double",
+          "type": "number"
         },
         "name": {
           "default": null,

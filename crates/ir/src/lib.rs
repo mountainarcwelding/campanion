@@ -61,6 +61,16 @@
 //! for a pose, and [`Kinematics::choose`] picks one. [`SolutionPolicy::choice`] builds the
 //! [`Choice`] that `choose` takes. A pose on a five-axis program keeps its part-frame tool axis
 //! and has no rotary angle.
+//!
+//! # Continuous five-axis
+//!
+//! A [`ClPath`] may set [`ClPath::continuous`]. The default is false, and the flag is omitted
+//! from JSON when it is false, so older files load unchanged. On a continuous toolpath the
+//! verifier rejects a feed whose tool axis changes by more than [`Program::max_axis_step_deg`]
+//! (default 5°, allowed range `(0, 90]`). The default step is also omitted from JSON.
+//! [`solve_path`] turns a list of tool poses into joint positions: it keeps the rotary branch,
+//! unwinds angles so a joint does not jump by 360°, and reports the first pose that leaves a
+//! travel limit or that no rotary solution can reach.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -82,7 +92,7 @@ mod wrap;
 
 pub use convert::Import;
 pub use geom::{ArcSense, Plane, Pose, Vec3};
-pub use kinematics::{Carrier, Choice, FiveAxisSetup, Joints, Kinematics, RotaryJoint, SolutionPolicy, ToolPose};
+pub use kinematics::{Carrier, Choice, FiveAxisSetup, Joints, Kinematics, RotaryJoint, SolutionPolicy, ToolPose, solve_path};
 pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
 pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};
@@ -194,6 +204,8 @@ fn valid_minor(minor: &str) -> bool {
     minor.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
 
+#[cfg(test)]
+mod kinematics_path_tests;
 #[cfg(test)]
 mod kinematics_tests;
 

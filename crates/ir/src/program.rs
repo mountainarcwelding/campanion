@@ -62,8 +62,19 @@ impl SyncPoint {
     }
 }
 
+/// Largest tool-axis change, in degrees, allowed on one feed of a continuous toolpath.
+pub(crate) const DEFAULT_MAX_AXIS_STEP_DEG: f64 = 5.0;
+
+fn default_max_axis_step_deg() -> f64 {
+    DEFAULT_MAX_AXIS_STEP_DEG
+}
+
+fn is_default_max_axis_step(value: &f64) -> bool {
+    *value == DEFAULT_MAX_AXIS_STEP_DEG
+}
+
 /// Tools, machine, toolpaths and channel programs.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Program {
     #[serde(default)]
@@ -81,6 +92,29 @@ pub struct Program {
     /// Five-axis kinematics. Absent on a 3-axis or rotary-table program.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     five_axis: Option<FiveAxisSetup>,
+    /// Largest tool-axis change, in degrees, on one feed of a continuous toolpath.
+    ///
+    /// The value is in `(0, 90]`. The default is 5. Omitted on disk when it is the default,
+    /// so a file written before this setting still loads.
+    #[serde(default = "default_max_axis_step_deg", skip_serializing_if = "is_default_max_axis_step")]
+    max_axis_step_deg: f64,
+}
+
+impl Default for Program {
+    fn default() -> Self {
+        Self {
+            name: None,
+            tools: Vec::new(),
+            machine: None,
+            toolpaths: Vec::new(),
+            channel_programs: Vec::new(),
+            syncs: Vec::new(),
+            rotary: None,
+            turning: None,
+            five_axis: None,
+            max_axis_step_deg: DEFAULT_MAX_AXIS_STEP_DEG,
+        }
+    }
 }
 
 impl Program {
@@ -93,7 +127,18 @@ impl Program {
         syncs: Vec<SyncPoint>,
         rotary: Option<RotarySetup>,
     ) -> Result<Self> {
-        let program = Self { name, tools, machine, toolpaths, channel_programs, syncs, rotary, turning: None, five_axis: None };
+        let program = Self {
+            name,
+            tools,
+            machine,
+            toolpaths,
+            channel_programs,
+            syncs,
+            rotary,
+            turning: None,
+            five_axis: None,
+            max_axis_step_deg: DEFAULT_MAX_AXIS_STEP_DEG,
+        };
         // A thread move, and a pose angle that a later [`Self::with_turning`] reads as C, are legal
         // on this intermediate. [`Self::with_turning`] and [`Document::new`] reject a thread, or an
         // angle, when the finished program still has neither a turning setup nor a rotary setup.
@@ -119,7 +164,7 @@ impl Program {
 
     /// Replace each toolpath's blocks and re-validate.
     ///
-    /// `block_lists` is one list per toolpath, in order. Name, tool, feeds and tabs stay.
+    /// `block_lists` is one list per toolpath, in order. Name, tool, feeds, tabs and the continuous flag stay.
     pub(crate) fn map_toolpaths(self, block_lists: Vec<Vec<ClBlock>>) -> Result<Self> {
         if block_lists.len() != self.toolpaths.len() {
             return Err(check::invalid("toolpath block lists do not match the program"));
@@ -138,6 +183,7 @@ impl Program {
                     path.tabs().to_vec(),
                     blocks,
                 )
+                .map(|rebuilt| rebuilt.with_continuous(path.continuous()))
             })
             .collect::<Result<Vec<_>>>()?;
         let program = Self { toolpaths, ..self };
@@ -170,6 +216,22 @@ impl Program {
         self.five_axis.as_ref()
     }
 
+    /// Largest tool-axis step, in degrees, accepted on one feed of a continuous toolpath.
+    ///
+    /// The default is 5. The verifier uses this limit.
+    pub fn max_axis_step_deg(&self) -> f64 {
+        self.max_axis_step_deg
+    }
+
+    /// Replace [`Self::max_axis_step_deg`] and re-validate.
+    ///
+    /// `degrees` must be finite and in `(0, 90]`.
+    pub fn with_max_axis_step_deg(self, degrees: f64) -> Result<Self> {
+        let program = Self { max_axis_step_deg: degrees, ..self };
+        program.check()?;
+        Ok(program)
+    }
+
     /// Store five-axis kinematics and re-validate.
     ///
     /// A program that already has a rotary setup is rejected: the two setups name different machines.
@@ -199,6 +261,7 @@ impl Program {
     }
 
     fn check_structure(&self) -> Result<()> {
+        check_max_axis_step(self.max_axis_step_deg)?;
         optional_name(&self.name, "program name")?;
         check_tools(&self.tools)?;
         if let Some(machine) = &self.machine {
@@ -562,6 +625,10 @@ fn vec_within(left: Vec3, right: Vec3, tol: f64) -> bool {
     let dy = left.y() - right.y();
     let dz = left.z() - right.z();
     (dx * dx + dy * dy + dz * dz).sqrt() <= tol
+}
+
+fn check_max_axis_step(degrees: f64) -> Result<()> {
+    if degrees.is_finite() && degrees > 0.0 && degrees <= 90.0 { Ok(()) } else { Err(check::invalid("max_axis_step_deg must be in (0, 90]")) }
 }
 
 /// A finished program that stores an angle needs a rotary setup or a turning setup.

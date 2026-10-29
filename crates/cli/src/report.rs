@@ -114,6 +114,9 @@ fn format_issue(issue: &Issue) -> String {
         }
         Issue::UnknownRef(RefKind::Axis(id)) => format!("unknown_ref axis {id}"),
         Issue::UnknownRef(RefKind::Channel(id)) => format!("unknown_ref channel {id}"),
+        Issue::AxisStep { toolpath, move_index, angle_deg } => {
+            format!("tool_axis_step toolpath {toolpath} move {move_index} angle_deg {}", num(*angle_deg))
+        }
     }
 }
 
@@ -133,5 +136,36 @@ mod tests {
         assert!(text.contains("status errors\n"), "{text}");
         assert!(text.contains("issues 1\n"), "{text}");
         assert!(text.contains("gouge operation dome x 1.000000 y 2.000000 z 3.500000 depth 0.500000\n"), "{text}");
+    }
+
+    #[test]
+    fn axis_step_names_the_toolpath_the_move_and_the_angle() {
+        use campanion_ir::{ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, MoveRole, Pose, Vec3};
+
+        let pose_at = |deg: f64| {
+            let radians = deg.to_radians();
+            Pose::new(Vec3::new(1.0, 2.0, 3.0).expect("tip"), Vec3::new(radians.sin(), 0.0, radians.cos()).expect("axis")).expect("pose")
+        };
+        let feed = |deg: f64| ClBlock::Motion(ClMotion::Linear { to: pose_at(deg), feed: 100.0, role: MoveRole::Cut });
+        let rapid = |deg: f64| ClBlock::Motion(ClMotion::Rapid { to: pose_at(deg), feed: None });
+        let make = |blocks: Vec<ClBlock>| {
+            ClPath::try_new(
+                None,
+                None,
+                CompensationMode::Off,
+                Feeds::try_new(100.0, None, None, None, None).expect("feeds"),
+                None,
+                Vec::new(),
+                blocks,
+            )
+            .expect("path")
+        };
+        let indexed = make(vec![rapid(0.0), feed(40.0)]);
+        let continuous = make(vec![ClBlock::Event(Event::Comment { text: "note".into() }), rapid(0.0), feed(5.0 + 1e-4)]).with_continuous(true);
+        let program = Program::try_new(None, Vec::new(), None, vec![indexed, continuous], Vec::new(), Vec::new(), None).expect("program");
+        let report = verify(&program);
+        let text = format_report(&report);
+        assert!(text.contains("tool_axis_step toolpath 1 move 1 angle_deg "), "{text}");
+        assert!(!text.contains("tool_axis_step toolpath 0"), "{text}");
     }
 }

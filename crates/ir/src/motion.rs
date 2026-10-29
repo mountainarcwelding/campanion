@@ -296,6 +296,15 @@ pub struct ClPath {
     pierce: Option<Vec3>,
     tabs: Vec<ProfileTab>,
     blocks: Vec<ClBlock>,
+    /// Continuous five-axis motion. False keeps the toolpath on one indexed tool axis.
+    ///
+    /// Omitted on disk when false, so a file written before this flag still loads.
+    #[serde(default, skip_serializing_if = "is_false")]
+    continuous: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ClPath {
@@ -308,9 +317,22 @@ impl ClPath {
         tabs: Vec<ProfileTab>,
         blocks: Vec<ClBlock>,
     ) -> Result<Self> {
-        let path = Self { name, tool_id, compensation, feeds, pierce, tabs, blocks };
+        let path = Self { name, tool_id, compensation, feeds, pierce, tabs, blocks, continuous: false };
         path.check()?;
         Ok(path)
+    }
+
+    /// Whether this toolpath moves with a changing tool axis.
+    ///
+    /// False is the indexed 3+2 rule: one tool axis for the whole toolpath.
+    pub fn continuous(&self) -> bool {
+        self.continuous
+    }
+
+    /// Set [`Self::continuous`]. The blocks are unchanged.
+    pub fn with_continuous(mut self, continuous: bool) -> Self {
+        self.continuous = continuous;
+        self
     }
 
     pub fn name(&self) -> Option<&str> {

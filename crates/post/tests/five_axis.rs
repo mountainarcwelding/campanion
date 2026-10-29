@@ -166,6 +166,28 @@ fn machine_mode_matches_inverse_and_splits_xy_then_z() {
 }
 
 #[test]
+fn continuous_toolpath_is_rejected_before_indexed_output() {
+    let axis_z = Vec3::Z;
+    let constant = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(Vec3::new(1.0, 2.0, 3.0).expect("a"), axis_z), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(4.0, 2.0, 3.0).expect("b"), axis_z), feed: 80.0, role: MoveRole::Cut }),
+    ];
+    let cases = [(constant, None), (b90_blocks(), Some(setup(B_TABLE)))];
+    for (blocks, five) in cases {
+        let path = path(blocks).with_continuous(true);
+        let program = Program::try_new(Some("plate".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
+        let program = match five {
+            Some(five) => program.with_five_axis(five).expect("five"),
+            None => program,
+        };
+        for id in ["haas", "haas_umc", "linuxcnc"] {
+            let err = post_program(&program, &builtin(id).expect(id), &options(0.05)).expect_err(id);
+            assert_eq!(err.to_string(), format!("not supported: post `{id}` has no continuous five-axis output"));
+        }
+    }
+}
+
+#[test]
 fn toolpath_rejects_an_axis_change_inside_a_move() {
     let axis_z = Vec3::Z;
     let axis_y = Vec3::new(0.0, -1.0, 0.0).expect("axis");

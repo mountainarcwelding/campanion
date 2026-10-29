@@ -24,6 +24,8 @@
 //!
 //! [`Kinematics::inverse`] solves rotary angles for the tool axis, then the gauge position that
 //! puts the tip on the requested point. [`Kinematics::choose`] picks one of those solutions.
+//! [`solve_path`] does that along a pose list, unwinding each rotary so a continuous move does
+//! not jump by 360°.
 
 use serde::{Deserialize, Serialize};
 
@@ -378,6 +380,44 @@ impl Kinematics {
         }
         Ok((tables, heads))
     }
+
+    /// Orientation solutions before travel limits and 360° folding.
+    ///
+    /// A free joint keeps `hint`. Callers that follow a path unwind the principal angles.
+    fn unbounded_solutions(&self, pose: &ToolPose, tool_length: f64, hint: [f64; 2]) -> Result<Vec<Joints>> {
+        if !tool_length.is_finite() || tool_length < 0.0 {
+            return Err(check::invalid("tool length must be finite and non-negative"));
+        }
+        let Some(target) = unit_direction(pose.axis) else {
+            return Err(check::invalid("tool axis is zero"));
+        };
+        self.check()?;
+        pose.tip.check("tool tip")?;
+        let spindle = unit_direction(self.spindle_axis).ok_or_else(|| check::invalid(format!("kinematics `{}`: spindle axis is zero", self.name)))?;
+        let raw = self.orientation_angles(spindle, target, hint)?;
+        if raw.is_empty() {
+            return Err(tool_axis_error(target, "not reachable"));
+        }
+        let mut solutions = Vec::with_capacity(raw.len());
+        for angles in raw {
+            if solutions.iter().any(|sol: &Joints| same_angles(sol.angles, angles)) {
+                continue;
+            }
+            let at_origin = Joints { xyz: Vec3::ZERO, angles };
+            let pose0 = self.forward(&at_origin, tool_length)?;
+            if norm(sub(pose0.axis, target)) > 1e-9 {
+                continue;
+            }
+            let table = self.chain(&at_origin, Carrier::Table)?;
+            let xyz = map_direction(&table, sub(pose.tip, pose0.tip));
+            xyz.check("joint position")?;
+            solutions.push(Joints { xyz, angles });
+        }
+        if solutions.is_empty() {
+            return Err(tool_axis_error(target, "not reachable"));
+        }
+        Ok(solutions)
+    }
 }
 
 /// One joint after its axis has been normalised. `angle_deg` is the commanded angle.
@@ -714,6 +754,148 @@ fn nearest(sols: &[Joints], preferred: [f64; 2]) -> Option<Joints> {
 
 fn norm(v: Vec3) -> f64 {
     dot(v, v).sqrt()
+}
+
+/// Tool length [`solve_path`] passes to forward and inverse. The gauge point is the tip.
+const PATH_TOOL_LENGTH: f64 = 0.0;
+
+/// Two unwound solutions are different branches when a rotary differs by more than this.
+///
+/// A configuration flip moves one rotary by about 180°. A duplicate of the same solution does not.
+const BRANCH_SPLIT_DEG: f64 = 90.0;
+
+#[derive(Clone, Copy)]
+struct Ranked {
+    joints: Joints,
+    distance: f64,
+}
+
+/// Joint solution for every pose, continuous with `start` or with angles `[0, 0]`.
+///
+/// Each pose takes the solution closest to the previous joints. The distance is the Euclidean
+/// length of the rotary-angle change after each angle is unwound by whole turns onto the previous
+/// angle, so a continuous rotary does not jump by 360°. That closest solution is the branch
+/// already in use. When it lies outside a travel limit and only another branch is inside the
+/// limits, the path would have to flip: `pose {index} flips the rotary branch`. When every
+/// solution is outside the limits, the error is `pose {index} leaves axis {letter}` for the
+/// first rotary of that closest solution that is outside. No orientation solution is
+/// `pose {index} is unreachable`.
+///
+/// `start` is the joint position before the first pose. Returned angles stay on the unwound
+/// branch, so an unlimited rotary may leave `(-180, 180]`. [`Kinematics::forward`] of each
+/// result at tool length 0 is the pose.
+pub fn solve_path(setup: &FiveAxisSetup, poses: &[ToolPose], start: Option<Joints>) -> Result<Vec<Joints>> {
+    let kin = &setup.kinematics;
+    kin.check()?;
+    let mut previous = match start {
+        Some(joints) => {
+            joints.xyz.check("joint position")?;
+            finite(joints.angles[0], "joint angle")?;
+            finite(joints.angles[1], "joint angle")?;
+            joints.angles
+        }
+        None => [0.0, 0.0],
+    };
+    let count = kin.rotaries.len();
+    let mut out = Vec::with_capacity(poses.len());
+    for (index, pose) in poses.iter().enumerate() {
+        let sols = kin.unbounded_solutions(pose, PATH_TOOL_LENGTH, previous).map_err(|err| path_pose_error(index, err))?;
+        let mut ranked = Vec::with_capacity(sols.len());
+        for sol in sols {
+            let angles = unwind_angles(sol.angles, previous, count);
+            let distance = rotary_distance(angles, previous, count);
+            ranked.push(Ranked { joints: Joints { xyz: sol.xyz, angles }, distance });
+        }
+        ranked.sort_by(|left, right| left.distance.total_cmp(&right.distance).then_with(|| angle_order(left.joints.angles, right.joints.angles)));
+        let Some(closest) = ranked.first().copied() else {
+            return Err(check::invalid(format!("pose {index} is unreachable")));
+        };
+        let chosen = match same_branch_inside(kin, &ranked, closest.joints.angles) {
+            Some(joints) => joints,
+            None if ranked.iter().any(|item| axis_outside(kin, item.joints.angles).is_none()) => {
+                return Err(check::invalid(format!("pose {index} flips the rotary branch")));
+            }
+            None => {
+                let letter = axis_outside(kin, closest.joints.angles).unwrap_or('?');
+                return Err(check::invalid(format!("pose {index} leaves axis {letter}")));
+            }
+        };
+        previous = chosen.angles;
+        out.push(chosen);
+    }
+    Ok(out)
+}
+
+/// Closest solution that stays on `closest`'s branch and inside the travel limits.
+fn same_branch_inside(kin: &Kinematics, ranked: &[Ranked], closest: [f64; 2]) -> Option<Joints> {
+    let count = kin.rotaries.len();
+    ranked.iter().find_map(|item| {
+        if axis_outside(kin, item.joints.angles).is_some() || different_branch(item.joints.angles, closest, count) { None } else { Some(item.joints) }
+    })
+}
+
+fn path_pose_error(index: usize, err: crate::IrError) -> crate::IrError {
+    let text = err.to_string();
+    if text.contains("not reachable") || text.contains("tool axis is zero") {
+        check::invalid(format!("pose {index} is unreachable"))
+    } else if let crate::IrError::InvalidInput(message) = err {
+        check::invalid(format!("pose {index}: {message}"))
+    } else {
+        err
+    }
+}
+
+fn unwind_angles(angles: [f64; 2], previous: [f64; 2], count: usize) -> [f64; 2] {
+    let mut out = angles;
+    for index in 0..count.min(2) {
+        let unwound = unwind_angle(angle_at(angles, index), angle_at(previous, index));
+        if index == 0 {
+            out[0] = unwound;
+        } else {
+            out[1] = unwound;
+        }
+    }
+    out
+}
+
+fn unwind_angle(angle: f64, previous: f64) -> f64 {
+    if !angle.is_finite() || !previous.is_finite() {
+        return angle;
+    }
+    let turns = ((previous - angle) / 360.0).round();
+    if turns == 0.0 { angle } else { angle + 360.0 * turns }
+}
+
+fn rotary_distance(angles: [f64; 2], previous: [f64; 2], count: usize) -> f64 {
+    let mut sum = 0.0;
+    for index in 0..count.min(2) {
+        let delta = angle_at(angles, index) - angle_at(previous, index);
+        sum += delta * delta;
+    }
+    sum.sqrt()
+}
+
+fn angle_order(left: [f64; 2], right: [f64; 2]) -> std::cmp::Ordering {
+    left[0].abs().total_cmp(&right[0].abs()).then(left[0].total_cmp(&right[0])).then(left[1].total_cmp(&right[1]))
+}
+
+fn different_branch(left: [f64; 2], right: [f64; 2], count: usize) -> bool {
+    (0..count.min(2)).any(|index| (angle_at(left, index) - angle_at(right, index)).abs() > BRANCH_SPLIT_DEG)
+}
+
+/// First rotary whose unwound angle is outside its travel limits.
+fn axis_outside(kin: &Kinematics, angles: [f64; 2]) -> Option<char> {
+    for (index, joint) in kin.rotaries.iter().enumerate() {
+        let angle = angle_at(angles, index);
+        let inside = match joint.limits {
+            Some(limits) => limits.contains(angle),
+            None => angle.is_finite(),
+        };
+        if !inside {
+            return Some(joint.letter);
+        }
+    }
+    None
 }
 
 fn comp_for_error(value: f64) -> f64 {
