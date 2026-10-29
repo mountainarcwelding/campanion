@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.8.6 — 2026-10-29
+
 ### Added
 
 - Lathe `steady_rest` operation (clamp/unclamp) with a band check; `haas_lathe` writes M146/M147.

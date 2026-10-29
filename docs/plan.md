@@ -363,3 +363,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   tabs (#95), the spindle held through a tool's passes and stopped above the stock (#93), pocket
   entry and linking (#89), pocket ring spacing and coverage (#90), and ramp angle (#91). Bar feeder
   and steady rest move to v0.8.6; machine limit profiles and sub-spindle brake/orient to v0.8.7.
+- 2026-10-29: v0.8.6 is the Haas lathe bar feeder (G105 at program end) and steady rest
+  (M146/M147 with a jaw band check). Machine limit profiles and sub-spindle brake/orient follow in
+  v0.8.7.
