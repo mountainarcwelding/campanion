@@ -681,13 +681,13 @@ Drawing X is Z and drawing Y is the radius for `.dxf` and `.svg`. Z = 0 is the f
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `model` | yes | `haas_st15y`, `haas_st20y` or `haas_ds30y`. Anything else, including a missing model, is `machine.model must be haas_st15y, haas_st20y or haas_ds30y`. |
-| `live_tool_upgrade` | no | Boolean, default false. `true` raises the live-tool cap from 4000 rpm to 6000 rpm on the ST-15Y and ST-20Y. On the DS-30Y, `true` is `machine.live_tool_upgrade: haas_ds30y has no 6000 rpm live tool option`. |
+| `live_tool_upgrade` | no | Boolean, default false. Accepted for older jobs and has no effect: the live-tool cap is 6000 rpm on every model. |
 | `sub_spindle` | no | Boolean, default false. On `haas_ds30y` the sub-spindle is standard equipment, so the default is true. |
 | `tailstock` | no | Boolean, default false. `true` on `haas_ds30y` is rejected. |
 
 On the ST-15Y and the ST-20Y the sub-spindle option and the tailstock option cannot both be selected: `haas_st20y: the sub-spindle option is not compatible with the tailstock option (Haas ST-20Y spec page)`, and the same sentence with `haas_st15y` and `Haas ST-15Y spec page`.
 
-These profiles are the standard configuration; optional equipment may change the machine's specifications (Haas). The 6000 rpm live-tool figure for the ST-15Y and ST-20Y is the ST Y-axis flyer, <https://www.haascnc.com/content/dam/haascnc/assets/seriesflyers/21.07_st_yaxis_4_pager_39-20004b.pdf>.
+These profiles are the standard configuration; optional equipment may change the machine's specifications (Haas). The live-tool cap is 6000 rpm on all three models; for the ST-15Y and ST-20Y that is the figure in the ST Y-axis flyer, <https://www.haascnc.com/content/dam/haascnc/assets/seriesflyers/21.07_st_yaxis_4_pager_39-20004b.pdf>.
 
 | | [ST-15Y](https://www.haascnc.com/machines/lathes/st/models/y-axis/st-15y.html) | [ST-20Y](https://www.haascnc.com/machines/lathes/st/models/y-axis/st-20y.html) | [DS-30Y](https://www.haascnc.com/machines/lathes/dual-spindle/models/ds-30y.html) |
 | --- | --- | --- | --- |
@@ -697,7 +697,7 @@ These profiles are the standard configuration; optional equipment may change the
 | Main spindle | 4000 rpm | 4000 rpm | 4500 rpm |
 | Main C axis | 60 rpm (not checked) | 60 rpm (not checked) | 60 rpm (not checked) |
 | Sub-spindle | optional, 6000 rpm, sync 4800 rpm | optional, 6000 rpm, sync 4800 rpm | standard, 4000 rpm, sync 4000 rpm |
-| Live tool | 4000 rpm, or 6000 rpm with `live_tool_upgrade` | 4000 rpm, or 6000 rpm with `live_tool_upgrade` | 4000 rpm, no upgrade |
+| Live tool | 6000 rpm | 6000 rpm | 6000 rpm |
 | Tailstock | optional, not with the sub-spindle | optional, not with the sub-spindle | none (the B axis is the secondary spindle) |
 
 The main C-axis speed is recorded on the profile and is not checked.
