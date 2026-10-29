@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The Haas ST-15Y, ST-20Y and DS-30Y profiles cap live-tool rpm at 6000 instead of 4000. `machine.live_tool_upgrade` is still accepted and no longer changes anything, including on the DS-30Y.
+
 ## 0.8.7 — 2026-10-29
 
 ### Added

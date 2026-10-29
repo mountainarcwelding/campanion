@@ -40,8 +40,6 @@ pub(crate) struct MachineProfile {
     /// True when the sub-spindle is standard equipment, so `machine.sub_spindle` defaults to true.
     pub sub_standard: bool,
     pub live_rpm: f64,
-    /// Present when the model lists a 6000 rpm live-tool upgrade.
-    pub live_upgrade_rpm: Option<f64>,
     /// True when a tailstock is an available option.
     pub tailstock_option: bool,
 }
@@ -63,8 +61,7 @@ pub(crate) const HAAS_ST15Y: MachineProfile = MachineProfile {
     c_axis_rpm: 60.0,
     sub: Some(SubLimits { rpm: 6_000.0, sync_rpm: 4_800.0 }),
     sub_standard: false,
-    live_rpm: 4_000.0,
-    live_upgrade_rpm: Some(6_000.0),
+    live_rpm: 6_000.0,
     tailstock_option: true,
 };
 
@@ -85,8 +82,7 @@ pub(crate) const HAAS_ST20Y: MachineProfile = MachineProfile {
     c_axis_rpm: 60.0,
     sub: Some(SubLimits { rpm: 6_000.0, sync_rpm: 4_800.0 }),
     sub_standard: false,
-    live_rpm: 4_000.0,
-    live_upgrade_rpm: Some(6_000.0),
+    live_rpm: 6_000.0,
     tailstock_option: true,
 };
 
@@ -104,8 +100,7 @@ pub(crate) const HAAS_DS30Y: MachineProfile = MachineProfile {
     c_axis_rpm: 60.0,
     sub: Some(SubLimits { rpm: 4_000.0, sync_rpm: 4_000.0 }),
     sub_standard: true,
-    live_rpm: 4_000.0,
-    live_upgrade_rpm: None,
+    live_rpm: 6_000.0,
     tailstock_option: false,
 };
 
@@ -121,9 +116,9 @@ pub(crate) struct MachineConfig {
 }
 
 impl MachineConfig {
-    /// Live-tool rpm cap. The upgrade replaces the standard cap when the model lists one.
+    /// Live-tool rpm cap. `live_tool_upgrade` is accepted for older jobs and has no effect.
     pub(crate) fn live_limit(self) -> f64 {
-        if self.live_tool_upgrade { self.profile.live_upgrade_rpm.unwrap_or(self.profile.live_rpm) } else { self.profile.live_rpm }
+        self.profile.live_rpm
     }
 }
 
@@ -193,9 +188,6 @@ pub(crate) fn parse_machine(value: &Value) -> Result<MachineConfig, CliError> {
     check_keys(map, &["model", "live_tool_upgrade", "sub_spindle", "tailstock"], "machine")?;
     let profile = profile_for(map)?;
     let live_tool_upgrade = flag(map, "live_tool_upgrade")?;
-    if live_tool_upgrade && profile.live_upgrade_rpm.is_none() {
-        return Err(CliError::invalid(format!("machine.live_tool_upgrade: {} has no 6000 rpm live tool option", profile.id)));
-    }
     let sub_spindle = match optional(map, "sub_spindle") {
         Some(value) => as_bool(value, "sub_spindle")?,
         None => profile.sub_standard,
@@ -373,27 +365,19 @@ mod tests {
     }
 
     #[test]
-    fn live_tool_passes_at_the_limit_and_the_upgrade_raises_it() {
-        let plain = fitted(&HAAS_ST15Y, false, false, false);
-        ok(check_programmed(&plain, &limits(4_000.0, None, &[], None, &[(2, 4_000.0)], &[("holes", 4_000.0)])), "4000");
-        let over = 4_000.001;
-        let tool = err(&plain, &limits(4_000.0, None, &[], None, &[(2, over)], &[]));
-        assert!(tool.contains(&format!("machine haas_st15y: tool 2: live tool max_rpm {over} exceeds 4000")), "{tool}");
-        let op = err(&plain, &limits(4_000.0, None, &[], None, &[], &[("holes", over)]));
-        assert!(op.contains(&format!("machine haas_st15y: operation holes: live tool rpm {over} exceeds 4000")), "{op}");
-
-        let upgraded = fitted(&HAAS_ST20Y, true, false, false);
-        assert_eq!(upgraded.live_limit(), 6_000.0);
-        ok(check_programmed(&upgraded, &limits(4_000.0, None, &[], None, &[(3, 6_000.0)], &[("holes", 6_000.0)])), "6000");
-        let over = 6_000.001;
-        let message = err(&upgraded, &limits(4_000.0, None, &[], None, &[], &[("holes", over)]));
-        assert!(message.contains(&format!("machine haas_st20y: operation holes: live tool rpm {over} exceeds 6000")), "{message}");
-
-        let ds = fitted(&HAAS_DS30Y, false, true, false);
-        ok(check_programmed(&ds, &limits(4_500.0, None, &[], None, &[], &[("holes", 4_000.0)])), "ds live");
-        let over = 4_000.001;
-        let message = err(&ds, &limits(4_500.0, None, &[], None, &[(7, over)], &[]));
-        assert!(message.contains(&format!("machine haas_ds30y: tool 7: live tool max_rpm {over} exceeds 4000")), "{message}");
+    fn live_tool_cap_is_6000_on_every_model_and_the_upgrade_flag_changes_nothing() {
+        for (profile, main) in [(&HAAS_ST15Y, 4_000.0), (&HAAS_ST20Y, 4_000.0), (&HAAS_DS30Y, 4_500.0)] {
+            for upgrade in [false, true] {
+                let config = fitted(profile, upgrade, profile.sub_standard, false);
+                assert_eq!(config.live_limit(), 6_000.0);
+                ok(check_programmed(&config, &limits(main, None, &[], None, &[(2, 6_000.0)], &[("holes", 6_000.0)])), "6000");
+                let over = 6_000.001;
+                let tool = err(&config, &limits(main, None, &[], None, &[(2, over)], &[]));
+                assert!(tool.contains(&format!("machine {}: tool 2: live tool max_rpm {over} exceeds 6000", profile.id)), "{tool}");
+                let op = err(&config, &limits(main, None, &[], None, &[], &[("holes", over)]));
+                assert!(op.contains(&format!("machine {}: operation holes: live tool rpm {over} exceeds 6000", profile.id)), "{op}");
+            }
+        }
     }
 
     #[test]
@@ -455,8 +439,8 @@ mod tests {
         let extra = bad(parse_machine(&serde_json::json!({"model": "haas_st15y", "serial": 1})), "field");
         assert!(extra.contains("unknown machine field `serial`"), "{extra}");
 
-        let upgrade = bad(parse_machine(&serde_json::json!({"model": "haas_ds30y", "live_tool_upgrade": true})), "upgrade");
-        assert!(upgrade.contains("machine.live_tool_upgrade: haas_ds30y has no 6000 rpm live tool option"), "{upgrade}");
+        let upgrade = parse_machine(&serde_json::json!({"model": "haas_ds30y", "live_tool_upgrade": true})).unwrap_or_else(|_| panic!("upgrade flag is accepted"));
+        assert_eq!(upgrade.live_limit(), 6_000.0);
 
         let tail = bad(parse_machine(&serde_json::json!({"model": "haas_ds30y", "tailstock": true})), "tail");
         assert!(tail.contains("machine haas_ds30y: haas_ds30y has no tailstock (the B axis is the secondary spindle)"), "{tail}");

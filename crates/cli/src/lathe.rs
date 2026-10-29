@@ -4462,34 +4462,29 @@ mod tests {
 
     #[test]
     fn live_upgrade_and_missing_options_use_the_profile() {
-        let live_tool = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6, "max_rpm": 4000 }"#;
-        let holes = r#"{ "name": "holes", "type": "live_drill", "tool_id": 2, "face": "front", "z_start": 0, "positions": [{ "c": 0, "r": 10 }], "depth": 5, "rpm": 4000, "feed": 80 }"#;
+        let live_tool = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6, "max_rpm": 6000 }"#;
+        let holes = r#"{ "name": "holes", "type": "live_drill", "tool_id": 2, "face": "front", "z_start": 0, "positions": [{ "c": 0, "r": 10 }], "depth": 5, "rpm": 6000, "feed": 80 }"#;
         let at = machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, "", live_tool, holes)
             .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
-        unwrap_ok(super::parse_job(&at), "live at 4000");
+        unwrap_ok(super::parse_job(&at), "live at 6000");
 
-        let fast_tool = live_tool.replace("4000", "4000.001");
+        let fast_tool = live_tool.replace("6000", "6000.001");
         let tool_over = machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, "", &fast_tool, holes)
             .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
         let message = parse_err(&tool_over);
-        assert!(message.contains("machine haas_st15y: tool 2: live tool max_rpm 4000.001 exceeds 4000"), "{message}");
+        assert!(message.contains("machine haas_st15y: tool 2: live tool max_rpm 6000.001 exceeds 6000"), "{message}");
 
         // The tool cap is checked first, so this operation uses a live tool with no max_rpm.
         let uncapped = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6 }"#;
-        let fast_op = holes.replace("\"rpm\": 4000", "\"rpm\": 4000.001");
+        let fast_op = holes.replace("\"rpm\": 6000", "\"rpm\": 6000.001");
         let op_over = machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, "", uncapped, &fast_op)
             .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
         let message = parse_err(&op_over);
-        assert!(message.contains("machine haas_st15y: operation holes: live tool rpm 4000.001 exceeds 4000"), "{message}");
+        assert!(message.contains("machine haas_st15y: operation holes: live tool rpm 6000.001 exceeds 6000"), "{message}");
 
-        let upgraded = holes.replace("\"rpm\": 4000", "\"rpm\": 6000");
-        let tool = live_tool.replace("4000", "6000");
-        let raised = machine_shell(3_000.0, r#""machine": { "model": "haas_st20y", "live_tool_upgrade": true },"#, "", &tool, &upgraded)
+        let flagged = machine_shell(3_000.0, r#""machine": { "model": "haas_ds30y", "live_tool_upgrade": true },"#, "", live_tool, holes)
             .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
-        unwrap_ok(super::parse_job(&raised), "6000 with the upgrade");
-
-        let ds = parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_ds30y", "live_tool_upgrade": true },"#, "", TURN_TOOL, FACE_OP));
-        assert!(ds.contains("machine.live_tool_upgrade: haas_ds30y has no 6000 rpm live tool option"), "{ds}");
+        unwrap_ok(super::parse_job(&flagged), "upgrade flag accepted, no effect");
     }
 
     #[test]
