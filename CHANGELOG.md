@@ -2,15 +2,17 @@
 
 ## [Unreleased]
 
+## 0.8.7 — 2026-10-29
+
 ### Added
 
+- Lathe `machine` block with cited limit profiles for the Haas ST-15Y, ST-20Y and DS-30Y (travel extents, Y travel, spindle, sync and live-tool rpm).
 - Lathe `orient` and `sub_brake` operations. `haas_lathe` writes `M19 R` / `M119 R` for spindle orient (two decimal places) and `M114`/`M115` for the secondary spindle brake. M119 is not written while G14 is active (Haas NGC lathe operator's manual, 2025, §8.1.10, §8.1.37, §8.1.38, §7.1.8).
 
 ## 0.8.6 — 2026-10-29
 
 ### Added
 
-- Lathe `machine` block with cited limit profiles for the Haas ST-15Y, ST-20Y and DS-30Y (travel extents, Y travel, spindle, sync and live-tool rpm).
 - Lathe `steady_rest` operation (clamp/unclamp) with a band check; `haas_lathe` writes M146/M147.
 - Lathe `bar_feed` operation at program end; `haas_lathe` homes and writes G105 alone on its line, with optional J/K overrides.
 
