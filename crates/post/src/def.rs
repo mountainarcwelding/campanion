@@ -374,6 +374,9 @@ pub(crate) struct LatheOutput {
     /// Tailstock advance and retract lines. Absent: tailstock events are rejected.
     #[serde(default)]
     pub(crate) tailstock: Option<TailstockOutput>,
+    /// Steady-rest clamp and unclamp lines. Absent: steady-rest events are rejected.
+    #[serde(default)]
+    pub(crate) steady_rest: Option<SteadyRestOutput>,
     /// Parts catcher extend and retract lines. Absent: parts-catcher events are rejected.
     #[serde(default)]
     pub(crate) parts_catcher: Option<PartsCatcherOutput>,
@@ -445,6 +448,18 @@ pub(crate) struct TailstockOutput {
     pub(crate) advance: Vec<String>,
     /// Written for [`campanion_ir::Event::Tailstock`] with `engage` false.
     pub(crate) retract: Vec<String>,
+}
+
+/// Clamp and unclamp lines for a lathe steady rest.
+///
+/// Both lists are bare. Tow-along P positions are not placeholders; the rest is positioned in setup.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SteadyRestOutput {
+    /// Written for [`campanion_ir::Event::SteadyRest`] with `clamp` true.
+    pub(crate) clamp: Vec<String>,
+    /// Written for [`campanion_ir::Event::SteadyRest`] with `clamp` false.
+    pub(crate) unclamp: Vec<String>,
 }
 
 /// Extend and retract lines for a lathe parts catcher.
@@ -867,6 +882,16 @@ fn check_lathe(post: &PostDef) -> Result<()> {
         }
         check_templates("lathe.tailstock.advance", &tailstock.advance, LATHE_BARE)?;
         check_templates("lathe.tailstock.retract", &tailstock.retract, LATHE_BARE)?;
+    }
+    if let Some(steady_rest) = &lathe.steady_rest {
+        if steady_rest.clamp.is_empty() {
+            return Err(field("lathe.steady_rest.clamp", "must not be empty"));
+        }
+        if steady_rest.unclamp.is_empty() {
+            return Err(field("lathe.steady_rest.unclamp", "must not be empty"));
+        }
+        check_templates("lathe.steady_rest.clamp", &steady_rest.clamp, LATHE_BARE)?;
+        check_templates("lathe.steady_rest.unclamp", &steady_rest.unclamp, LATHE_BARE)?;
     }
     if let Some(parts_catcher) = &lathe.parts_catcher {
         if parts_catcher.extend.is_empty() {

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Lathe `steady_rest` operation (clamp/unclamp) with a band check; `haas_lathe` writes M146/M147.
 - Lathe `bar_feed` operation at program end; `haas_lathe` homes and writes G105 alone on its line, with optional J/K overrides.
 
 ## 0.8.5 — 2026-10-29

@@ -184,6 +184,8 @@ struct Writer<'a> {
     live_on: bool,
     /// True after a tailstock advance, until retract. Not cleared between channels: the quill stays advanced.
     tailstock_engaged: bool,
+    /// True after a steady-rest clamp, until unclamp. Not cleared between channels: the jaws stay closed.
+    steady_rest_clamped: bool,
     /// True once the live-tool feed mode has been considered for this program.
     live_feed_written: bool,
     /// Formatted Y word last written. `None` means centreline 0 has not been written.
@@ -266,6 +268,7 @@ impl<'a> Writer<'a> {
             polar_count: 0,
             live_on: false,
             tailstock_engaged: false,
+            steady_rest_clamped: false,
             live_feed_written: false,
             y_modal: None,
             mill_plane: None,
@@ -1498,6 +1501,9 @@ impl<'a> Writer<'a> {
         if self.tailstock_engaged && matches!(event, Event::SpindleMove { .. } | Event::SpindleSync { .. } | Event::ChuckClamp { .. }) {
             return Err(invalid("retract the tailstock before a part transfer"));
         }
+        if self.steady_rest_clamped && matches!(event, Event::SpindleMove { .. } | Event::SpindleSync { .. } | Event::ChuckClamp { .. }) {
+            return Err(invalid("unclamp the steady rest before a part transfer"));
+        }
         if self.turning.is_none()
             && matches!(
                 event,
@@ -1614,6 +1620,7 @@ impl<'a> Writer<'a> {
             }
             Event::HeadIndex { b_deg, .. } => self.head_index(*b_deg),
             Event::Tailstock { engage } => self.tailstock(*engage),
+            Event::SteadyRest { clamp } => self.steady_rest(*clamp),
             Event::PartsCatcher { extend } => self.parts_catcher(*extend),
             Event::BarFeed { part_length, min_clamp } => self.note_bar_feed(*part_length, *min_clamp),
         }
@@ -1665,6 +1672,21 @@ impl<'a> Writer<'a> {
         let field_name = if engage { "lathe.tailstock.advance" } else { "lathe.tailstock.retract" };
         self.templates(field_name, &lines, &[("date-free!", "")])?;
         self.tailstock_engaged = engage;
+        Ok(())
+    }
+
+    /// Clamp or unclamp. A post with no `steady_rest` block, including a mill post, cannot write the event.
+    fn steady_rest(&mut self, clamp: bool) -> Result<()> {
+        let lines = self
+            .post
+            .lathe
+            .as_ref()
+            .and_then(|lathe| lathe.steady_rest.as_ref())
+            .map(|steady_rest| if clamp { steady_rest.clamp.clone() } else { steady_rest.unclamp.clone() })
+            .ok_or_else(|| unsupported(format!("post `{}` has no steady rest", self.post.id())))?;
+        let field_name = if clamp { "lathe.steady_rest.clamp" } else { "lathe.steady_rest.unclamp" };
+        self.templates(field_name, &lines, &[("date-free!", "")])?;
+        self.steady_rest_clamped = clamp;
         Ok(())
     }
 

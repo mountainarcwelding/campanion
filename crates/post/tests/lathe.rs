@@ -1767,6 +1767,63 @@ fn tailstock_writes_m21_m22_and_blocks_a_transfer_while_advanced() {
 }
 
 #[test]
+fn steady_rest_writes_m146_m147_and_blocks_a_transfer_while_clamped() {
+    let blocks = vec![event_block(Event::SteadyRest { clamp: true }), linear(20.0, -10.0, 80.0), event_block(Event::SteadyRest { clamp: false })];
+    let program = lathe_program(blocks, turning(None, false));
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let m146 = index_of(&text, "M146");
+    let m147 = index_of(&text, "M147");
+    assert!(m146 < m147, "{text}");
+    for line in text.lines() {
+        if line.contains("M146") || line.contains("M147") {
+            assert!(!line.contains('P'), "{line}");
+        }
+    }
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    for event in [
+        Event::ChuckClamp { spindle: "sub".into(), clamp: false },
+        Event::SpindleSync { engage: true, phase_deg: None },
+        Event::SpindleMove { spindle: "sub".into(), z: 1.0, machine: false, feed: None },
+    ] {
+        let blocked = lathe_program(vec![event_block(Event::SteadyRest { clamp: true }), event_block(event)], turning(None, false));
+        let err = post_program(&blocked, &post, &options()).expect_err("transfer while clamped");
+        assert!(err.to_string().contains("unclamp the steady rest before a part transfer"), "{err}");
+    }
+
+    let linux = post_program(&lathe_program(vec![event_block(Event::SteadyRest { clamp: true })], turning(None, false)), &linux_lathe(), &options())
+        .expect_err("linuxcnc");
+    assert!(linux.to_string().contains("post `linuxcnc_lathe` has no steady rest"), "{linux}");
+
+    let mill = Program::try_new(
+        Some("mill".into()),
+        Vec::new(),
+        None,
+        vec![path(None, None, vec![event_block(Event::SteadyRest { clamp: false })])],
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .expect("program");
+    let err = post_program(&mill, &builtin("haas").expect("haas"), &options()).expect_err("mill");
+    assert!(err.to_string().contains("post `haas` has no steady rest"), "{err}");
+
+    let mut raw = haas_json();
+    raw["lathe"]["steady_rest"]["clamp"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty clamp");
+    assert!(err.to_string().contains("lathe.steady_rest.clamp") && err.to_string().contains("must not be empty"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["steady_rest"]["unclamp"] = serde_json::json!([]);
+    let err = load_post(&raw.to_string()).expect_err("empty unclamp");
+    assert!(err.to_string().contains("lathe.steady_rest.unclamp") && err.to_string().contains("must not be empty"), "{err}");
+    raw = haas_json();
+    raw["lathe"]["steady_rest"]["clamp"] = serde_json::json!(["M146 {z}"]);
+    let err = load_post(&raw.to_string()).expect_err("placeholder");
+    assert!(err.to_string().contains("lathe.steady_rest.clamp") && err.to_string().contains("unknown placeholder {z}"), "{err}");
+}
+
+#[test]
 fn parts_catcher_writes_m36_m37_and_other_posts_reject_it() {
     let blocks =
         vec![event_block(Event::PartsCatcher { extend: true }), linear(20.0, -10.0, 80.0), event_block(Event::PartsCatcher { extend: false })];

@@ -333,6 +333,8 @@ pub enum CoolantMode {
 /// [`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is
 /// `(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold
 /// force and travel are machine settings; the event carries no position.
+/// [`Event::SteadyRest`] clamps or unclamps the steady rest. The rest is positioned in setup;
+/// the event carries no position.
 /// [`Event::PartsCatcher`] moves the parts catcher into position to catch a part, or out of the
 /// work envelope. [`Event::BarFeed`] commands a bar feeder. Optional lengths are one-line
 /// overrides in millimetres: part length plus cutoff and facing allowance, and minimum clamping
@@ -488,6 +490,12 @@ pub enum Event {
         /// `true` advances the tailstock. `false` retracts it.
         engage: bool,
     },
+    /// Clamp (`clamp: true`) or unclamp (`false`) the lathe steady rest. The rest is
+    /// positioned in setup; the event carries no position.
+    SteadyRest {
+        /// `true` clamps the steady rest. `false` unclamps it.
+        clamp: bool,
+    },
     /// Move the parts catcher into position to catch a part (`extend: true`) or out of the
     /// work envelope (`false`).
     PartsCatcher {
@@ -540,7 +548,7 @@ impl Event {
                     return Err(check::invalid("live tool rpm is above 100000"));
                 }
             }
-            Self::LiveToolOff | Self::FaceInterpolation { .. } | Self::Tailstock { .. } | Self::PartsCatcher { .. } => {}
+            Self::LiveToolOff | Self::FaceInterpolation { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::PartsCatcher { .. } => {}
             Self::BarFeed { part_length, min_clamp } => {
                 if let Some(length) = part_length {
                     positive(*length, "bar feed part length")?;

@@ -397,6 +397,10 @@ impl Writer {
                 let verb = if *engage { "advance" } else { "retract" };
                 self.line(&format!("(tailstock {verb})"));
             }
+            Event::SteadyRest { clamp } => {
+                let verb = if *clamp { "clamp" } else { "unclamp" };
+                self.line(&format!("(steady rest {verb})"));
+            }
             Event::PartsCatcher { extend } => {
                 let verb = if *extend { "extend" } else { "retract" };
                 self.line(&format!("(parts catcher {verb})"));

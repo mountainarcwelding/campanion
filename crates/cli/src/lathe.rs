@@ -19,7 +19,9 @@
 //! main-spindle toolpath on channel 0 that hands the part to the sub, optionally parting it off
 //! without a spindle stop. An `eject` stops the sub and unclamps it. A `tailstock` operation
 //! advances or retracts the tailstock: one event on channel 0, main spindle, no tool. While it
-//! is advanced, motion tips stay outside the quill cylinder. A `bar_feed` operation is the last
+//! is advanced, motion tips stay outside the quill cylinder. A `steady_rest` operation clamps or
+//! unclamps the steady rest the same way. While it is clamped, motion stays outside its Z band.
+//! A `bar_feed` operation is the last
 //! one: one event on channel 0, main spindle, no tool, written after the home lines. A `part`
 //! operation with `catch`
 //! extends the parts catcher after the approach rapid and retracts it after the final retract,
@@ -94,7 +96,7 @@ const DEFAULT_FLANK_DEG: f64 = 29.5;
 const DEFAULT_FIRST_DEPTH_CAP: f64 = 0.35;
 /// Thread cycles emit rapids and synchronised moves. The path still needs a positive cut feed.
 const THREAD_RECORD_FEED: f64 = 100.0;
-/// Eject, tailstock, bar feed and a transfer with no cut still need a positive recorded feed. Nothing posts it.
+/// Eject, tailstock, steady rest, bar feed and a transfer with no cut still need a positive recorded feed. Nothing posts it.
 const EVENT_ONLY_FEED: f64 = 1.0;
 /// Flank length, millimetres, used when a face, rough or finish path is checked for gouges.
 const TURN_EDGE_MM: f64 = 4.0;
@@ -117,6 +119,8 @@ struct LatheJob {
     sub: Option<SubBlock>,
     /// Centre or quill at the finished face. Absent when the job has no tailstock block.
     tailstock: Option<TailstockBlock>,
+    /// Jaw centre on the part. Absent when the job has no steady_rest block.
+    steady_rest: Option<SteadyRestBlock>,
     /// Diameter and length the parts catcher will take. Absent when the job has no parts_catcher block.
     parts_catcher: Option<PartsCatcherBlock>,
     head: LatheHead,
@@ -402,6 +406,12 @@ enum Operation {
         /// `true` advances. `false` retracts.
         engage: bool,
     },
+    /// Clamp or unclamp the steady rest. No tool, channel 0, main spindle.
+    SteadyRest {
+        name: String,
+        /// `true` clamps. `false` unclamps.
+        clamp: bool,
+    },
     /// Bar feed at program end. No tool, channel 0, main spindle.
     BarFeed {
         name: String,
@@ -417,6 +427,16 @@ struct TailstockBlock {
     /// Diameter of the centre or quill where it meets the finished face. Positive.
     diameter: f64,
     /// Extra gap around that cylinder, in job units. Default 1.
+    clearance: f64,
+}
+
+/// Jaw centre and the axial band the turret must stay clear of.
+struct SteadyRestBlock {
+    /// Jaw centre in the part frame. Z 0 is the finished face. Finite and negative.
+    z: f64,
+    /// Jaw width along Z. Positive.
+    width: f64,
+    /// Extra gap on each side of the jaws, in job units. Default 1.
     clearance: f64,
 }
 
@@ -458,6 +478,7 @@ impl Operation {
             | Self::Transfer { name, .. }
             | Self::Eject { name }
             | Self::Tailstock { name, .. }
+            | Self::SteadyRest { name, .. }
             | Self::BarFeed { name, .. } => name,
         }
     }
@@ -476,7 +497,7 @@ impl Operation {
             | Self::LiveSlot { spindle, .. }
             | Self::LiveFlat { spindle, .. }
             | Self::LiveMill { spindle, .. } => *spindle,
-            Self::Transfer { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => WorkSpindle::Main,
+            Self::Transfer { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => WorkSpindle::Main,
             Self::Eject { .. } => WorkSpindle::Sub,
         }
     }
@@ -496,14 +517,14 @@ impl Operation {
             | Self::LiveFlat { tool_id, .. }
             | Self::LiveMill { tool_id, .. } => *tool_id,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id).unwrap_or(0),
-            Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => 0,
+            Self::Eject { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => 0,
         }
     }
 
-    /// Tool the job file must name. Eject, tailstock and a transfer with no part-off name none.
+    /// Tool the job file must name. Eject, tailstock, steady rest and a transfer with no part-off name none.
     fn checked_tool(&self) -> Option<u32> {
         match self {
-            Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => None,
+            Self::Eject { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id),
             _ => Some(self.tool_id()),
         }
@@ -512,7 +533,12 @@ impl Operation {
     /// 0 or 1. A wait is written on both channels and reports 0 here.
     fn channel(&self) -> u8 {
         match self {
-            Self::Wait { .. } | Self::Transfer { .. } | Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => 0,
+            Self::Wait { .. }
+            | Self::Transfer { .. }
+            | Self::Eject { .. }
+            | Self::Tailstock { .. }
+            | Self::SteadyRest { .. }
+            | Self::BarFeed { .. } => 0,
             Self::Face { channel, .. }
             | Self::Rough { channel, .. }
             | Self::Finish { channel, .. }
@@ -545,7 +571,7 @@ impl Operation {
             | Self::LiveMill { feed, .. } => *feed,
             Self::Thread { .. } => THREAD_RECORD_FEED,
             Self::Transfer { feed, part_off, .. } => part_off.as_ref().map(|part| part.feed).unwrap_or(*feed),
-            Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => EVENT_ONLY_FEED,
+            Self::Eject { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => EVENT_ONLY_FEED,
             Self::Wait { .. } => 1.0,
         }
     }
@@ -566,6 +592,7 @@ impl Operation {
             | Self::LiveMill { .. }
             | Self::Eject { .. }
             | Self::Tailstock { .. }
+            | Self::SteadyRest { .. }
             | Self::BarFeed { .. }
             | Self::Wait { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.speed),
@@ -586,6 +613,10 @@ impl Operation {
 
     fn is_tailstock(&self) -> bool {
         matches!(self, Self::Tailstock { .. })
+    }
+
+    fn is_steady_rest(&self) -> bool {
+        matches!(self, Self::SteadyRest { .. })
     }
 
     fn is_bar_feed(&self) -> bool {
@@ -758,6 +789,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
             "spindle",
             "sub",
             "tailstock",
+            "steady_rest",
             "parts_catcher",
             "head",
             "tools",
@@ -782,12 +814,19 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         Some(value) => Some(parse_tailstock_block(value)?),
         None => None,
     };
+    let steady_rest = match optional(map, "steady_rest") {
+        Some(value) => Some(parse_steady_rest_block(value)?),
+        None => None,
+    };
     let parts_catcher = match optional(map, "parts_catcher") {
         Some(value) => Some(parse_parts_catcher_block(value)?),
         None => None,
     };
     if sub.is_some() && tailstock.is_some() {
         return Err(CliError::invalid("\"tailstock\" is not allowed with a \"sub\" block (the B axis is the secondary spindle)"));
+    }
+    if sub.is_some() && steady_rest.is_some() {
+        return Err(CliError::invalid("\"steady_rest\" is not allowed with a \"sub\" block"));
     }
     let head = parse_head(optional(map, "head"))?;
     let tools = parse_tools(require(map, "tools")?)?;
@@ -797,6 +836,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
     check_bar_feed(&operations, sub.is_some())?;
     check_tailstock_ops(&operations, tailstock.is_some(), parts_catcher.is_some())?;
+    check_steady_rest_ops(&operations, steady_rest.is_some())?;
     for operation in &operations {
         check_b_deg(operation, &head)?;
         if operation.is_wait() {
@@ -812,7 +852,23 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         check_flat(operation, tool, &head, clearance)?;
         check_mill_head(operation, &head)?;
     }
-    Ok(LatheJob { source, stock, front_allowance, max_rpm, c_axis, sub, tailstock, parts_catcher, head, tools, operations, linear, chord, clearance })
+    Ok(LatheJob {
+        source,
+        stock,
+        front_allowance,
+        max_rpm,
+        c_axis,
+        sub,
+        tailstock,
+        steady_rest,
+        parts_catcher,
+        head,
+        tools,
+        operations,
+        linear,
+        chord,
+        clearance,
+    })
 }
 
 fn parse_tailstock_block(value: &Value) -> Result<TailstockBlock, CliError> {
@@ -824,6 +880,21 @@ fn parse_tailstock_block(value: &Value) -> Result<TailstockBlock, CliError> {
         None => 1.0,
     };
     Ok(TailstockBlock { diameter, clearance })
+}
+
+fn parse_steady_rest_block(value: &Value) -> Result<SteadyRestBlock, CliError> {
+    let map = object(value, "steady_rest")?;
+    check_keys(map, &["z", "width", "clearance"], "steady_rest")?;
+    let z = as_f64(require(map, "z")?, "z")?;
+    if !(z < 0.0) {
+        return Err(CliError::invalid("z must be < 0"));
+    }
+    let width = positive(require(map, "width")?, "width")?;
+    let clearance = match optional(map, "clearance") {
+        Some(value) => non_negative(value, "clearance")?,
+        None => 1.0,
+    };
+    Ok(SteadyRestBlock { z, width, clearance })
 }
 
 fn parse_parts_catcher_block(value: &Value) -> Result<PartsCatcherBlock, CliError> {
@@ -863,6 +934,37 @@ fn check_tailstock_ops(operations: &[Operation], has_block: bool, has_catcher: b
         }
         if advanced && (operation.is_transfer() || operation.spindle() == WorkSpindle::Sub || operation.is_bar_feed()) {
             return Err(CliError::invalid(format!("operation {}: retract the tailstock first", operation.name())));
+        }
+    }
+    Ok(())
+}
+
+/// Clamp and unclamp must alternate. A transfer, a sub-spindle operation or a part while the
+/// steady rest is clamped is rejected. Ending the program still clamped is allowed.
+fn check_steady_rest_ops(operations: &[Operation], has_block: bool) -> Result<(), CliError> {
+    let mut clamped = false;
+    for operation in operations {
+        if let Operation::SteadyRest { name, clamp } = operation {
+            if !has_block {
+                return Err(CliError::invalid(format!("operation {name}: steady_rest needs a \"steady_rest\" block")));
+            }
+            if *clamp && clamped {
+                return Err(CliError::invalid(format!("operation {name}: steady rest is already clamped")));
+            }
+            if !*clamp && !clamped {
+                return Err(CliError::invalid(format!("operation {name}: steady rest is not clamped")));
+            }
+            clamped = *clamp;
+            continue;
+        }
+        if !clamped {
+            continue;
+        }
+        if matches!(operation, Operation::Part { .. }) {
+            return Err(CliError::invalid(format!("operation {}: unclamp the steady rest before parting off", operation.name())));
+        }
+        if operation.is_transfer() || operation.spindle() == WorkSpindle::Sub {
+            return Err(CliError::invalid(format!("operation {}: unclamp the steady rest first", operation.name())));
         }
     }
     Ok(())
@@ -1311,6 +1413,9 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
     if op_type == "tailstock" {
         return parse_tailstock(map, names);
     }
+    if op_type == "steady_rest" {
+        return parse_steady_rest(map, names);
+    }
     if op_type == "bar_feed" {
         return parse_bar_feed(map, names);
     }
@@ -1655,6 +1760,21 @@ fn parse_tailstock(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Re
         _ => return Err(CliError::invalid(format!("operation {name}: tailstock action must be advance or retract"))),
     };
     Ok(Operation::Tailstock { name, engage })
+}
+
+fn parse_steady_rest(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
+    check_keys(map, &["name", "type", "action"], "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    let action = as_str(require(map, "action")?, "action")?;
+    let clamp = match action {
+        "clamp" => true,
+        "unclamp" => false,
+        _ => return Err(CliError::invalid(format!("operation {name}: steady_rest action must be clamp or unclamp"))),
+    };
+    Ok(Operation::SteadyRest { name, clamp })
 }
 
 fn parse_bar_feed(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
@@ -2189,6 +2309,7 @@ fn build_document(
     let mut b_now = [0.0, 0.0];
     let mut sync_id = 0u32;
     let mut tailstock_advanced = false;
+    let mut steady_rest_clamped = false;
     let mut zone_start: Option<Vec3> = None;
     for operation in &job.operations {
         if operation.is_wait() {
@@ -2230,6 +2351,10 @@ fn build_document(
             let (path, engage) = tailstock_toolpath(operation)?;
             tailstock_advanced = engage;
             path
+        } else if operation.is_steady_rest() {
+            let (path, clamp) = steady_rest_toolpath(operation)?;
+            steady_rest_clamped = clamp;
+            path
         } else if operation.is_bar_feed() {
             bar_feed_toolpath(operation)?
         } else {
@@ -2251,6 +2376,12 @@ fn build_document(
             && let Some(tailstock) = &job.tailstock
         {
             check_tailstock_zone(operation.name(), &toolpath, tailstock, zone_start)?;
+        }
+        if steady_rest_clamped
+            && !operation.is_steady_rest()
+            && let Some(steady_rest) = &job.steady_rest
+        {
+            check_steady_rest_zone(operation.name(), &toolpath, steady_rest, zone_start)?;
         }
         if channel == 0
             && operation.spindle() == WorkSpindle::Main
@@ -2280,7 +2411,7 @@ fn build_document(
 }
 
 /// Face is always outside. Rough and finish use the operation side. Thread, groove, part, drill,
-/// transfer, eject, tailstock, bar feed and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
+/// transfer, eject, tailstock, steady rest, bar feed and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
 fn gouge_side(operation: &Operation) -> Option<Side> {
     match operation {
         Operation::Face { .. } => Some(Side::Outside),
@@ -2296,6 +2427,7 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
         | Operation::Transfer { .. }
         | Operation::Eject { .. }
         | Operation::Tailstock { .. }
+        | Operation::SteadyRest { .. }
         | Operation::BarFeed { .. }
         | Operation::Wait { .. } => None,
     }
@@ -2419,7 +2551,9 @@ fn mount_insert(job: &LatheJob, tool_id: u32, insert: &Insert) -> Result<Insert,
 fn mount_angle(operation: &Operation, tool_id: u32) -> Option<f64> {
     let uses = match operation {
         Operation::Transfer { part_off, .. } => part_off.as_ref().is_some_and(|part| part.tool_id == tool_id),
-        Operation::Wait { .. } | Operation::Eject { .. } | Operation::Tailstock { .. } | Operation::BarFeed { .. } => false,
+        Operation::Wait { .. } | Operation::Eject { .. } | Operation::Tailstock { .. } | Operation::SteadyRest { .. } | Operation::BarFeed { .. } => {
+            false
+        }
         _ => operation.checked_tool() == Some(tool_id),
     };
     if uses { Some(operation.b_deg().unwrap_or(0.0)) } else { None }
@@ -2550,6 +2684,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
         || operation.is_transfer()
         || operation.is_eject()
         || operation.is_tailstock()
+        || operation.is_steady_rest()
         || operation.is_bar_feed()
     {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
@@ -2705,6 +2840,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
         | Operation::Transfer { .. }
         | Operation::Eject { .. }
         | Operation::Tailstock { .. }
+        | Operation::SteadyRest { .. }
         | Operation::BarFeed { .. }
         | Operation::Wait { .. } => Err(CliError::run(format!("internal: operation {} has no turning path", operation.name()))),
     }
@@ -2842,6 +2978,16 @@ fn tailstock_toolpath(operation: &Operation) -> Result<(ClPath, bool), CliError>
     Ok((path, *engage))
 }
 
+fn steady_rest_toolpath(operation: &Operation) -> Result<(ClPath, bool), CliError> {
+    let Operation::SteadyRest { name, clamp } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not a steady rest move", operation.name())));
+    };
+    let blocks = vec![ClBlock::Event(Event::SteadyRest { clamp: *clamp })];
+    let feeds = Feeds::try_new(EVENT_ONLY_FEED, None, None, None, None)?;
+    let path = ClPath::try_new(Some(name.clone()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks)?;
+    Ok((path, *clamp))
+}
+
 /// A tip in the quill cylinder is rejected. X of an ordinary turning pose is a radius. Face
 /// interpolation and a Y move are Cartesian, so the radius is the distance from the spindle axis.
 /// Cylinder interpolation keeps the radius in X and the unrolled distance in Y.
@@ -2883,6 +3029,81 @@ fn check_tailstock_zone(name: &str, path: &ClPath, tailstock: &TailstockBlock, s
         }
     }
     Ok(())
+}
+
+/// Rejects any move of `path` whose Z range overlaps the steady-rest band
+/// `[z - width / 2 - clearance, z + width / 2 + clearance]`. Each move is the straight segment
+/// from the previous tip (`start` for the first move, the last tip of the previous main-channel
+/// operation), so a rapid that starts on one side of the band and ends on the other still fails.
+/// Arcs are checked by their chord. The reported point is the segment end inside the band, or
+/// the end nearest the band when neither end is inside. X in the message is the diameter.
+fn check_steady_rest_zone(name: &str, path: &ClPath, rest: &SteadyRestBlock, start: Option<Vec3>) -> Result<(), CliError> {
+    let (z_lo, z_hi) = steady_rest_band(rest);
+    let mut face = false;
+    let mut cylinder = false;
+    let mut prev = start;
+    for block in path.blocks() {
+        match block {
+            ClBlock::Event(Event::FaceInterpolation { on }) => {
+                face = *on;
+                if *on {
+                    cylinder = false;
+                }
+            }
+            ClBlock::Event(Event::CylinderInterpolation { radius }) => {
+                cylinder = radius.is_some();
+                if cylinder {
+                    face = false;
+                }
+            }
+            ClBlock::Motion(motion) => {
+                let tip = motion_tip(motion);
+                let from = prev.unwrap_or(tip);
+                prev = Some(tip);
+                if segment_crosses_band(from.z(), tip.z(), z_lo, z_hi) {
+                    let at = band_report_tip(from, tip, z_lo, z_hi);
+                    let diameter = reported_radius(at, face, cylinder) * 2.0;
+                    let z = at.z();
+                    return Err(CliError::invalid(format!("operation {name}: move at X{diameter:.3} Z{z:.3} crosses the steady rest band")));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn steady_rest_band(rest: &SteadyRestBlock) -> (f64, f64) {
+    let half = rest.width * 0.5;
+    (rest.z - half - rest.clearance, rest.z + half + rest.clearance)
+}
+
+fn segment_crosses_band(z0: f64, z1: f64, z_lo: f64, z_hi: f64) -> bool {
+    let seg_lo = z0.min(z1);
+    let seg_hi = z0.max(z1);
+    seg_lo <= z_hi && seg_hi >= z_lo
+}
+
+/// The segment end inside the band, or the end nearest the band. A tie reports `to`.
+fn band_report_tip(from: Vec3, to: Vec3, z_lo: f64, z_hi: f64) -> Vec3 {
+    let inside = |z: f64| z >= z_lo && z <= z_hi;
+    let from_in = inside(from.z());
+    let to_in = inside(to.z());
+    if to_in != from_in {
+        return if to_in { to } else { from };
+    }
+    if from_in {
+        return to;
+    }
+    let distance = |z: f64| if z < z_lo { z_lo - z } else { z - z_hi };
+    if distance(from.z()) < distance(to.z()) { from } else { to }
+}
+
+/// Radius is X in turning and cylinder mode, and the distance from the spindle axis when the tip
+/// is off the XZ plane or face interpolation is on.
+fn reported_radius(tip: Vec3, face: bool, cylinder: bool) -> f64 {
+    let planar = cylinder || (!face && tip.y().abs() <= 1.0e-9);
+    if planar { tip.x() } else { tip.x().hypot(tip.y()) }
 }
 
 /// The point of the segment `from`→`to` with the smallest radius among those with `z > z_min`,
@@ -3558,6 +3779,101 @@ mod tests {
         let job = unwrap_ok(super::parse_job(&finish), "finish job");
         // Profile radius 10 equals D/2 + clearance. The finish stays on that radius.
         unwrap_ok(super::build_document(Path::new("job.lathe.json"), &job, &cylinder(10.0, 20.0), None), "exact radius finish passes");
+    }
+
+    #[test]
+    fn steady_rest_block_rejects_a_sub_spindle_a_missing_block_and_a_bad_action() {
+        let clamp = r#"{ "name": "in", "type": "steady_rest", "action": "clamp" }"#;
+        let both = tailstock_job(r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } }, "steady_rest": { "z": -20, "width": 8 },"#, clamp);
+        let err = parse_err(&both);
+        assert!(err.contains("\"steady_rest\" is not allowed with a \"sub\" block"), "{err}");
+
+        let missing = parse_err(&tailstock_job("", clamp));
+        assert!(missing.contains("operation in: steady_rest needs a \"steady_rest\" block"), "{missing}");
+
+        let bad =
+            parse_err(&tailstock_job(r#""steady_rest": { "z": -20, "width": 8 },"#, r#"{ "name": "in", "type": "steady_rest", "action": "park" }"#));
+        assert!(bad.contains("operation in: steady_rest action must be clamp or unclamp"), "{bad}");
+
+        let unknown = parse_err(&tailstock_job(r#""steady_rest": { "z": -20, "width": 8, "p": 1 },"#, clamp));
+        assert!(unknown.contains("unknown steady_rest field `p`"), "{unknown}");
+
+        let forward = parse_err(&tailstock_job(r#""steady_rest": { "z": 0, "width": 8 },"#, clamp));
+        assert!(forward.contains("z must be < 0"), "{forward}");
+
+        let job = unwrap_ok(super::parse_job(&tailstock_job(r#""steady_rest": { "z": -20, "width": 8 },"#, clamp)), "default clearance");
+        let rest = job.steady_rest.expect("block");
+        assert!((rest.z + 20.0).abs() < 1e-12);
+        assert!((rest.width - 8.0).abs() < 1e-12);
+        assert!((rest.clearance - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn steady_rest_clamp_and_unclamp_must_alternate_and_a_transfer_or_part_waits() {
+        let block = r#""steady_rest": { "z": -20, "width": 8, "clearance": 1 },"#;
+        let twice = parse_err(&tailstock_job(
+            block,
+            r#"{ "name": "in", "type": "steady_rest", "action": "clamp" }, { "name": "again", "type": "steady_rest", "action": "clamp" }"#,
+        ));
+        assert!(twice.contains("operation again: steady rest is already clamped"), "{twice}");
+
+        let early = parse_err(&tailstock_job(block, r#"{ "name": "out", "type": "steady_rest", "action": "unclamp" }"#));
+        assert!(early.contains("operation out: steady rest is not clamped"), "{early}");
+
+        unwrap_ok(super::parse_job(&tailstock_job(block, r#"{ "name": "in", "type": "steady_rest", "action": "clamp" }"#)), "end clamped");
+
+        let parted = parse_err(&tailstock_job(
+            block,
+            r#"{ "name": "in", "type": "steady_rest", "action": "clamp" }, { "name": "cutoff", "type": "part", "tool_id": 1, "z": -20, "clearance": 1, "feed": 60, "speed": { "rpm": 400 } }"#,
+        ));
+        assert!(parted.contains("operation cutoff: unclamp the steady rest before parting off"), "{parted}");
+
+        let ops = [
+            super::Operation::SteadyRest { name: "in".into(), clamp: true },
+            super::Operation::Transfer {
+                name: "handoff".into(),
+                rpm: 0.0,
+                phase: None,
+                approach_z: 4.0,
+                grip_z: -1.0,
+                park_z: -50.0,
+                feed: 200.0,
+                dwell: 0.5,
+                part_off: None,
+            },
+        ];
+        let err = super::check_steady_rest_ops(&ops, true).expect_err("transfer");
+        assert!(err.to_string().contains("operation handoff: unclamp the steady rest first"), "{err}");
+
+        let eject = [super::Operation::SteadyRest { name: "in".into(), clamp: true }, super::Operation::Eject { name: "drop".into() }];
+        let err = super::check_steady_rest_ops(&eject, true).expect_err("eject");
+        assert!(err.to_string().contains("operation drop: unclamp the steady rest first"), "{err}");
+    }
+
+    #[test]
+    fn steady_rest_band_includes_the_edge_and_a_segment_that_only_crosses_it() {
+        let rest = super::SteadyRestBlock { z: -40.0, width: 10.0, clearance: 1.0 };
+        let (z_lo, z_hi) = super::steady_rest_band(&rest);
+        assert!((z_lo + 46.0).abs() < 1e-12 && (z_hi + 34.0).abs() < 1e-12, "{z_lo} {z_hi}");
+
+        let on_edge = vec![rapid_at(10.0, 0.0, z_lo - 10.0), rapid_at(12.0, 0.0, z_lo)];
+        let err = super::check_steady_rest_zone("cut", &path_of(on_edge), &rest, None).expect_err("edge");
+        let expected = format!("operation cut: move at X{:.3} Z{:.3} crosses the steady rest band", 24.0, z_lo);
+        assert!(err.to_string().contains(&expected), "{err}");
+
+        let clear = vec![rapid_at(10.0, 0.0, z_lo - 10.0), rapid_at(12.0, 0.0, z_lo - 0.001)];
+        unwrap_ok(super::check_steady_rest_zone("cut", &path_of(clear), &rest, None), "just outside the band passes");
+
+        let cross = vec![rapid_at(4.0, 0.0, z_lo - 5.0), rapid_at(9.0, 0.0, z_hi + 1.0)];
+        let err = super::check_steady_rest_zone("cross", &path_of(cross), &rest, None).expect_err("crossing");
+        let expected = format!("operation cross: move at X{:.3} Z{:.3} crosses the steady rest band", 18.0, z_hi + 1.0);
+        assert!(err.to_string().contains(&expected), "{err}");
+
+        let start = Vec3::new(5.0, 0.0, rest.z).expect("start");
+        let away = vec![rapid_at(20.0, 0.0, z_lo - 10.0)];
+        let err = super::check_steady_rest_zone("next", &path_of(away), &rest, Some(start)).expect_err("carried start");
+        let expected = format!("operation next: move at X{:.3} Z{:.3} crosses the steady rest band", 10.0, rest.z);
+        assert!(err.to_string().contains(&expected), "{err}");
     }
 
     /// Stock Ø40, part `z` -10, insert width 3, so the caught length is 13.
