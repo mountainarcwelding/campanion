@@ -44,7 +44,8 @@
 //! second spindle fit in these types: spindles and heads are lists, and the extra axes and flags
 //! are optional fields. In a turning program [`Pose::rotary`] is the C angle in degrees (finite,
 //! absolute value at most 99999). [`Event::CAxis`] engages that spindle as a positioning axis,
-//! [`Event::SpindleBrake`] clamps it, and [`Event::LiveToolOn`] starts the driven tool.
+//! [`Event::SpindleBrake`] clamps it, [`Event::SpindleOrient`] turns it to an angle, and
+//! [`Event::LiveToolOn`] starts the driven tool.
 //! [`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]
 //! transfer a part: chuck, synchronise, run either spindle, and move a spindle housing. A live-tool
 //! event does not require a turning setup. Bar and tube stock runs from the finished front face at

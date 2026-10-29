@@ -348,6 +348,9 @@ impl Writer {
                 let verb = if *clamp { "clamp" } else { "release" };
                 self.line(&format!("(spindle brake {verb} {})", strip_parens(spindle)));
             }
+            Event::SpindleOrient { spindle, angle_deg } => {
+                self.line(&format!("(spindle orient {} {angle_deg})", strip_parens(spindle)));
+            }
             Event::LiveToolOn { rpm, direction } => {
                 let verb = match direction {
                     LiveDirection::Forward => "forward",

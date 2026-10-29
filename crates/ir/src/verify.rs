@@ -407,6 +407,7 @@ fn verify_event(event: &Event, bound_spindle: Option<&str>, open: &mut Vec<Proce
         | Event::Sync { .. }
         | Event::CAxis { .. }
         | Event::SpindleBrake { .. }
+        | Event::SpindleOrient { .. }
         | Event::LiveToolOn { .. }
         | Event::LiveToolOff
         | Event::FaceInterpolation { .. }

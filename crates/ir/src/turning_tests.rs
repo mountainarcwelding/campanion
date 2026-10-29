@@ -915,6 +915,48 @@ fn mill_turn_events_round_trip_and_reject_bad_spindles_and_rpm() {
     program_with(Vec::new(), vec![path_with(None, vec![neg_block])], m10(None), None).expect("min c");
 }
 
+fn two_spindle_setup() -> TurningSetup {
+    let binding = TurnBinding::try_new(0, "main", "turret1", 0).expect("binding");
+    setup_with(vec![spindle_named("main"), spindle_named("sub")], vec![head_named("turret1", 4, false)], Vec::new(), vec![binding]).expect("setup")
+}
+
+#[test]
+fn spindle_orient_round_trips_and_rejects_a_bad_angle() {
+    let events = [
+        Event::SpindleOrient { spindle: "main".into(), angle_deg: 0.0 },
+        Event::SpindleOrient { spindle: "sub".into(), angle_deg: 90.5 },
+        Event::SpindleOrient { spindle: "sub".into(), angle_deg: 359.99 },
+    ];
+    for event in events {
+        let json = serde_json::to_string(&event).expect("json");
+        let back: Event = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, event, "{json}");
+        assert!(try_event(event).is_ok(), "{json}");
+    }
+    let json = serde_json::to_string(&Event::SpindleOrient { spindle: "sub".into(), angle_deg: 90.5 }).expect("json");
+    assert!(json.contains("\"type\":\"spindle_orient\""), "{json}");
+    assert!(json.contains("\"angle_deg\":90.5"), "{json}");
+    assert!(serde_json::from_str::<Event>(r#"{"type":"spindle_orient","spindle":"main","angle_deg":1.0,"nope":1}"#).is_err());
+
+    assert_err(try_event(Event::SpindleOrient { spindle: String::new(), angle_deg: 0.0 }), "empty");
+    assert_err(try_event(Event::SpindleOrient { spindle: "main".into(), angle_deg: f64::NAN }), "orient angle must be finite");
+    assert_err(try_event(Event::SpindleOrient { spindle: "main".into(), angle_deg: f64::INFINITY }), "orient angle must be finite");
+    assert_err(try_event(Event::SpindleOrient { spindle: "main".into(), angle_deg: -0.1 }), "orient angle must be in 0..360");
+    assert_err(try_event(Event::SpindleOrient { spindle: "sub".into(), angle_deg: 360.0 }), "orient angle must be in 0..360");
+
+    let orient = path_with(None, vec![ClBlock::Event(Event::SpindleOrient { spindle: "main".into(), angle_deg: 90.0 })]);
+    let brake = path_with(None, vec![ClBlock::Event(Event::SpindleBrake { spindle: "sub".into(), clamp: true })]);
+    let program = program_with(Vec::new(), vec![orient, brake], two_spindle_setup(), None).expect("sub brake and orient");
+    round_trip(&Document::new(program).expect("document"));
+
+    let unknown = path_with(None, vec![ClBlock::Event(Event::SpindleOrient { spindle: "other".into(), angle_deg: 0.0 })]);
+    assert_err(program_with(Vec::new(), vec![unknown], plain_setup(), None), "unknown spindle other");
+    let missing_sub = path_with(None, vec![ClBlock::Event(Event::SpindleBrake { spindle: "sub".into(), clamp: false })]);
+    assert_err(program_with(Vec::new(), vec![missing_sub], plain_setup(), None), "unknown spindle sub");
+    let main_orient = path_with(None, vec![ClBlock::Event(Event::SpindleOrient { spindle: "main".into(), angle_deg: 0.0 })]);
+    program_with(Vec::new(), vec![main_orient], plain_setup(), None).expect("main orient needs no C axis");
+}
+
 #[test]
 fn transfer_events_round_trip_and_reject_bad_values() {
     let events = [

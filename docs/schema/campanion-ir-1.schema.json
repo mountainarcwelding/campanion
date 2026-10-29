@@ -743,7 +743,7 @@
       ]
     },
     "Event": {
-      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.\n[`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]\nhand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.\n[`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is\n`(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold\nforce and travel are machine settings; the event carries no position.\n[`Event::SteadyRest`] clamps or unclamps the steady rest. The rest is positioned in setup;\nthe event carries no position.\n[`Event::PartsCatcher`] moves the parts catcher into position to catch a part, or out of the\nwork envelope. [`Event::BarFeed`] commands a bar feeder. Optional lengths are one-line\noverrides in millimetres: part length plus cutoff and facing allowance, and minimum clamping\nlength.",
+      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.\n[`Event::SpindleOrient`] turns a spindle to an angle in `0..360` degrees. A secondary-spindle\norient is written while that spindle is not selected.\n[`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]\nhand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.\n[`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is\n`(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold\nforce and travel are machine settings; the event carries no position.\n[`Event::SteadyRest`] clamps or unclamps the steady rest. The rest is positioned in setup;\nthe event carries no position.\n[`Event::PartsCatcher`] moves the parts catcher into position to catch a part, or out of the\nwork envelope. [`Event::BarFeed`] commands a bar feeder. Optional lengths are one-line\noverrides in millimetres: part length plus cutoff and facing allowance, and minimum clamping\nlength.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -976,7 +976,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Clamp (`true`) or release (`false`) the named spindle's brake while the C axis holds position.",
+          "description": "Clamp (`true`) or release (`false`) the named spindle's brake while the C axis holds position.\n\nSpindle `sub` is the secondary caliper brake and does not need a C axis. Any other spindle\nmust have one.",
           "properties": {
             "clamp": {
               "description": "`true` clamps the brake. `false` releases it.",
@@ -995,6 +995,31 @@
             "type",
             "spindle",
             "clamp"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Orient the named spindle. `angle_deg` is finite and in `0..360`.\n\nThe post writes a secondary-spindle orient while that spindle is not selected.",
+          "properties": {
+            "angle_deg": {
+              "description": "Angle in degrees, from 0 inclusive to 360 exclusive.",
+              "format": "double",
+              "type": "number"
+            },
+            "spindle": {
+              "description": "Spindle name.",
+              "type": "string"
+            },
+            "type": {
+              "const": "spindle_orient",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "spindle",
+            "angle_deg"
           ],
           "type": "object"
         },

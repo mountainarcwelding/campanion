@@ -328,6 +328,8 @@ pub enum CoolantMode {
 /// or an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.
 /// `Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value
 /// at most 99999. A live-tool event does not require a turning setup.
+/// [`Event::SpindleOrient`] turns a spindle to an angle in `0..360` degrees. A secondary-spindle
+/// orient is written while that spindle is not selected.
 /// [`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]
 /// hand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.
 /// [`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is
@@ -403,11 +405,23 @@ pub enum Event {
         engage: bool,
     },
     /// Clamp (`true`) or release (`false`) the named spindle's brake while the C axis holds position.
+    ///
+    /// Spindle `sub` is the secondary caliper brake and does not need a C axis. Any other spindle
+    /// must have one.
     SpindleBrake {
         /// Spindle name.
         spindle: String,
         /// `true` clamps the brake. `false` releases it.
         clamp: bool,
+    },
+    /// Orient the named spindle. `angle_deg` is finite and in `0..360`.
+    ///
+    /// The post writes a secondary-spindle orient while that spindle is not selected.
+    SpindleOrient {
+        /// Spindle name.
+        spindle: String,
+        /// Angle in degrees, from 0 inclusive to 360 exclusive.
+        angle_deg: f64,
     },
     /// Start the live (driven) tool. `rpm` > 0, finite, at most 100000.
     LiveToolOn {
@@ -541,6 +555,13 @@ impl Event {
             }
             Self::CAxis { spindle, .. } | Self::SpindleBrake { spindle, .. } => {
                 required_name(spindle, "spindle name")?;
+            }
+            Self::SpindleOrient { spindle, angle_deg } => {
+                required_name(spindle, "spindle name")?;
+                let angle = finite(*angle_deg, "orient angle")?;
+                if !(0.0..360.0).contains(&angle) {
+                    return Err(check::invalid("orient angle must be in 0..360"));
+                }
             }
             Self::LiveToolOn { rpm, .. } => {
                 let rpm = positive(*rpm, "live tool rpm")?;
