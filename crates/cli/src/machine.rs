@@ -110,7 +110,6 @@ const MODEL_LIST: &str = "machine.model must be haas_st15y, haas_st20y or haas_d
 #[derive(Clone, Copy)]
 pub(crate) struct MachineConfig {
     pub profile: &'static MachineProfile,
-    pub live_tool_upgrade: bool,
     pub sub_spindle: bool,
     pub tailstock: bool,
 }
@@ -187,7 +186,8 @@ pub(crate) fn parse_machine(value: &Value) -> Result<MachineConfig, CliError> {
     let map = object(value, "machine")?;
     check_keys(map, &["model", "live_tool_upgrade", "sub_spindle", "tailstock"], "machine")?;
     let profile = profile_for(map)?;
-    let live_tool_upgrade = flag(map, "live_tool_upgrade")?;
+    // Accepted for older jobs; the cap is the same either way.
+    flag(map, "live_tool_upgrade")?;
     let sub_spindle = match optional(map, "sub_spindle") {
         Some(value) => as_bool(value, "sub_spindle")?,
         None => profile.sub_standard,
@@ -199,7 +199,7 @@ pub(crate) fn parse_machine(value: &Value) -> Result<MachineConfig, CliError> {
     if sub_spindle && tailstock {
         return Err(incompatible_options(profile));
     }
-    Ok(MachineConfig { profile, live_tool_upgrade, sub_spindle, tailstock })
+    Ok(MachineConfig { profile, sub_spindle, tailstock })
 }
 
 pub(crate) fn no_tailstock(profile: &MachineProfile) -> CliError {
@@ -280,7 +280,8 @@ mod tests {
     use super::{AxisExtent, HAAS_DS30Y, HAAS_ST15Y, HAAS_ST20Y, MachineConfig, MachineProfile, ProgrammedLimits, check_programmed, parse_machine};
 
     fn fitted(profile: &'static MachineProfile, upgrade: bool, sub: bool, tailstock: bool) -> MachineConfig {
-        MachineConfig { profile, live_tool_upgrade: upgrade, sub_spindle: sub, tailstock }
+        let _ = upgrade;
+        MachineConfig { profile, sub_spindle: sub, tailstock }
     }
 
     fn limits<'a>(
@@ -423,13 +424,12 @@ mod tests {
     #[test]
     fn options_default_and_reject_unknown_models_the_upgrade_and_a_ds_tailstock() {
         let st = ok(parse_machine(&serde_json::json!({"model": "haas_st15y"})), "st");
-        assert!(!st.live_tool_upgrade && !st.sub_spindle && !st.tailstock);
+        assert!(!st.sub_spindle && !st.tailstock);
 
         let ds = ok(parse_machine(&serde_json::json!({"model": "haas_ds30y"})), "ds");
-        assert!(ds.sub_spindle && !ds.tailstock && !ds.live_tool_upgrade, "sub-spindle is standard");
+        assert!(ds.sub_spindle && !ds.tailstock, "sub-spindle is standard");
 
         let upgraded = ok(parse_machine(&serde_json::json!({"model": "haas_st20y", "live_tool_upgrade": true})), "upgrade");
-        assert!(upgraded.live_tool_upgrade);
         assert_eq!(upgraded.live_limit(), 6_000.0);
 
         let missing = bad(parse_machine(&serde_json::json!({})), "model");
