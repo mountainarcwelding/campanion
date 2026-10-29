@@ -18,9 +18,12 @@
 //! bridge lifts across the bridge instead of descending through it. A pocket area pass enters
 //! from the retract height at every depth, and feeds from one ring to the next at the level
 //! when the link stays inside the pocket. A ramp longer than that ring, or a helix that leaves
-//! the pocket, is an error. Those link rapids stay at or above the retract height. After linking, the
-//! operation's process timing is applied: process on and the pierce dwell at the pierce height
-//! before the plunge, and process off and the post delay before the rapid retract to clearance.
+//! the pocket, is an error. Those link rapids stay at or above the retract height. After linking,
+//! process timing is applied. A spindle stays on for the whole tool: one process-on after the
+//! tool change, a new process-on only when the speed changes, and one process-off after the
+//! retract above the stock, at the next tool change or the end of the program. Torch and other
+//! per-cut processes still turn off before that retract, with the pierce dwell at the pierce
+//! height and the post delay beside the process-off.
 //! The first toolpath, and each later toolpath whose tool id differs from the previous one, starts
 //! with a tool-change event. Consecutive toolpaths that share a tool do not get another change.
 //! Spindle speed comes from `operations[].speed`, or from `tools[].speed` when the operation omits
@@ -60,12 +63,14 @@
 //! (or from that plane when a ramp or helix would otherwise rapid below it), cuts the ring, and
 //! feeds back to the retract height. An omitted entry is a plunge. A helix that leaves the
 //! ring or the stock allowance ramps instead, and the operation warns once. The process turns on
-//! once before the first cut and off after the last retract, then the tool rapids to clearance.
+//! once before the first cut. A spindle's process-off follows the clearance rapid; a torch turns
+//! off after the last retract and then the tool rapids to clearance.
 //! Each `waterline` operation finishes steep walls. Levels use the same depth plan as roughing.
 //! For each polyline the tool rapids at clearance to the first point, rapids down to the safe
 //! plane (the retract height, or the stock top when that is higher), plunges to that point's Z
 //! plus axial stock, cuts along the polyline, and feeds back to the retract height. The process
-//! turns on once and off after the last retract.
+//! turns on once. A spindle's process-off follows the clearance rapid; a torch still turns off
+//! after the last retract.
 //! After the document is built, each cutting move is checked against the mesh with that
 //! operation's cutter. The sample step is `min(0.25, chord * 10)` millimetres and the allowance
 //! is the job chord tolerance. A gouge is a verify error. Roughing, surfacing, waterline and
@@ -107,7 +112,9 @@ use std::process::ExitCode;
 
 use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
-use campanion_ir::{ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, RotarySetup, Vec3};
+use campanion_ir::{
+    ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, RotarySetup, Vec3, hold_spindle,
+};
 use campanion_mesh::Mesh;
 use campanion_path::{
     ChamferOp, CutKind, DepthEntry, DepthPlan, DepthTabs, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent,
@@ -557,6 +564,7 @@ fn finish_paths(job: &JobFile, paths: Vec<ClPath>, rotary: Option<RotarySetup>) 
     if let Some(setup) = job.five_axis() {
         program = program.with_five_axis(setup.clone())?;
     }
+    let program = hold_spindle(program)?;
     Ok(Document::new(program)?)
 }
 
@@ -947,8 +955,9 @@ fn moves_through_process_off(path: &Toolpath) -> Vec<Move> {
 }
 
 /// The first rapid sits at clearance so the linker does not feed down from there; the next rapid
-/// drops to the job retract height. The return to clearance is a rapid inserted after process-off,
-/// so a post delay can sit between that stop and the retract.
+/// drops to the job retract height. The return to clearance is a rapid inserted after process-off.
+/// A spindle's process-off moves to after that rapid later. A torch or laser keeps the stop, and
+/// its post delay, here.
 fn clearance_retracts(cut: &Cut<'_>, source: &[Move]) -> Result<Toolpath, CliError> {
     let retract = cut.job.retract();
     let clearance = cut.job.clearance();

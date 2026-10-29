@@ -4,6 +4,14 @@ RS274/NGC posts. A post definition is JSON (`posts/linuxcnc.json` and the other 
 
 `decimal_point`, when true, keeps a decimal point on every dimensional word (`X` `Y` `Z`, `I` `J` `K`, `R`, rotary `A`/`B`, and lathe `X`/`Z`): a whole number is `52.` and zero is `0.`. Fanuc and Haas controls read a word written without a decimal point as least-input increments, so `X52` is 0.052 mm and `A90` is 0.09 degrees. Feed (`F`), spindle (`S`), dwell (`P`), line numbers, and tool and program numbers are left alone. LinuxCNC, Mach3, Grbl, and plasma omit the flag and read plain decimals.
 
+## Process cycle
+
+`process_cycle` is `hold` or `per_cut`. Omit it for `hold`.
+
+`hold` is the mill default. A spindle process-on that repeats the speed already running writes nothing, so one `M3` stays in effect across rapids and later operations. The matching `M5` is the process-off after the retract above the stock.
+
+`per_cut` writes every process-on. When any process is still on and the next motion is a rapid (`G0`), the writer emits `thc.off` and that process's off lines before the rapid, then the on lines again before the next feed. Speed and power come from the process-on that is still in effect. A pierce dwell is written only when the IR already has a dwell at that cut. Plasma and `grbl_laser` set `per_cut`, so a torch or beam stays off through G0 travel even when the IR process is `spindle`.
+
 ## Rotary axes
 
 `rotary` is optional.

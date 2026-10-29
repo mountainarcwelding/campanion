@@ -12,6 +12,15 @@
 //! `drop` omits Z words. `thc.on` is written on the first feed move after process on and a dwell,
 //! and `thc.off` is written before process off.
 //!
+//! `process_cycle` is `hold` or `per_cut`. The default is `hold`. A hold post does not write a
+//! second spindle-on when that spindle is already running at the same speed, so the spindle stays
+//! on through later rapids. A per_cut post writes every process-on. When a process is on and the
+//! next motion is a rapid, it writes that process's off lines and `thc.off` before the rapid, then
+//! the on lines again before the next feed. Those on lines reuse the speed and power already in
+//! effect. A pierce dwell is written only when the IR has a dwell at that cut; the post does not
+//! invent one. Plasma and the Grbl laser post set `per_cut`, so a torch or beam mapped from any
+//! process, including `spindle`, is off during G0 travel.
+//!
 //! `rotary` is optional. Without it, a program that carries a rotary angle is rejected. `axes`
 //! lists `a`, `b`, or both. The A/B word uses the dimensional formatter with `decimals`
 //! (degrees). `decimal_point` keeps a point on that word and on `X` `Y` `Z` `I` `J` `K` `R`
@@ -100,6 +109,9 @@ pub struct PostDef {
     /// `keep` writes Z. `drop` omits the Z word on every motion block.
     #[serde(default = "default_z_mode")]
     pub(crate) z_mode: String,
+    /// `hold` keeps a running spindle on across rapids. `per_cut` cycles every process off before a rapid.
+    #[serde(default = "default_process_cycle")]
+    pub(crate) process_cycle: String,
     pub(crate) process: BTreeMap<String, ProcessWords>,
     /// Torch-height control. `on` follows the pierce dwell. `off` precedes process off.
     #[serde(default)]
@@ -616,6 +628,10 @@ fn default_z_mode() -> String {
     "keep".to_string()
 }
 
+fn default_process_cycle() -> String {
+    "hold".to_string()
+}
+
 impl PostDef {
     pub(crate) fn checked(mut self) -> Result<Self> {
         check_token("id", &self.id, 64)?;
@@ -638,6 +654,9 @@ impl PostDef {
         check_power_scale(self.power_scale)?;
         if !matches!(self.z_mode.as_str(), "keep" | "drop") {
             return Err(field("z_mode", "must be keep or drop"));
+        }
+        if !matches!(self.process_cycle.as_str(), "hold" | "per_cut") {
+            return Err(field("process_cycle", "must be hold or per_cut"));
         }
         check_process(&self.process)?;
         if let Some(thc) = &self.thc {
@@ -735,6 +754,11 @@ impl PostDef {
 
     pub(crate) fn drop_z(&self) -> bool {
         self.z_mode == "drop"
+    }
+
+    /// True when every running process turns off before a rapid and on again before the next feed.
+    pub(crate) fn cycles_per_cut(&self) -> bool {
+        self.process_cycle == "per_cut"
     }
 }
 

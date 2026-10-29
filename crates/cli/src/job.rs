@@ -25,13 +25,14 @@
 //! as feed along the compensated contour (lines, arcs and corners), never as a rapid. Omitted or
 //! zero height is a full-depth tab: feed up to the retract height, rapid across at that height,
 //! feed back down. The program rapids to the pierce XY at the clearance height, rapids down to
-//! the retract height, feeds to depth, and rapids back to clearance after process-off. An XY
+//! the retract height, feeds to depth, and rapids back to clearance before process-off for a
+//! spindle. A torch, laser or other per-cut process still turns off before that rapid. An XY
 //! rapid below the retract height is rejected. That height is above the stock top.
 
 use std::path::Path;
 
 use campanion_geom::{Contour, Line, Point, Segment, Tolerance};
-use campanion_ir::{CompensationMode, Document, Feeds, Import, ProcessKind, ProcessParams, Tool, VerifyOptions, verify_with};
+use campanion_ir::{CompensationMode, Document, Feeds, Import, ProcessKind, ProcessParams, Tool, VerifyOptions, hold_spindle, verify_with};
 use campanion_path::{Compensation, ControllerSide, CutDirection, Lead, ProfileOp, ProfileSide, TabSpec, Tool as PathTool};
 use serde_json::{Map, Value};
 
@@ -138,6 +139,7 @@ fn realise(job: Job) -> Result<Document, CliError> {
     let contour = contour_from(job.profile.points, job.profile.closed)?;
     let profile = op.generate(&contour).map_err(|err| CliError::run(err.to_string()))?;
     let doc = Document::from_profile(&profile, &import)?;
+    let doc = Document::new(hold_spindle(doc.program().clone())?)?;
     reject_xy_rapids_below_retract(&doc, job.clearance, job.retract)?;
     Ok(doc)
 }

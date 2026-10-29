@@ -84,8 +84,8 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 | `mach3` | Mach3 | A, degrees per minute | Millimetre dialect for Mach3. Incremental IJK arcs and helices, dwell P in seconds, no line numbers. A axis with degrees-per-minute feed when the angle changes. |
 | `fanuc` | Fanuc | A, inverse time | Millimetre Fanuc mill dialect. Program O0001, sequence numbers, R arcs, helices as lines, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |
 | `haas` | Haas | A, inverse time | Millimetre Haas mill dialect. Program O00001, sequence numbers, IJK arcs and helices, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |
-| `plasma` | LinuxCNC plasma | - | Millimetre plasma. Torch on M3 S1 / off M5, pierce dwell from the path, optional THC codes, helices as lines. No rotary axis. |
-| `grbl_laser` | Grbl laser | - | Grbl laser mode. Dynamic power M4 S{power} (0..1 scaled to S0..S1000), Z words and Z-only rapids omitted. No rotary axis. |
+| `plasma` | LinuxCNC plasma | - | Millimetre plasma. Torch on M3 S1 / off M5, pierce dwell from the path, optional THC codes, helices as lines. `process_cycle` `per_cut` keeps every process, including spindle, off during G0. No rotary axis. |
+| `grbl_laser` | Grbl laser | - | Grbl laser mode. Dynamic power M4 S{power} (0..1 scaled to S0..S1000), Z words and Z-only rapids omitted. `process_cycle` `per_cut` keeps the beam off during G0. No rotary axis. |
 | `linuxcnc_lathe` | LinuxCNC lathe | - | Millimetre LinuxCNC lathe. Diameter mode (G7), ZX plane (G18), constant surface speed (G96) and direct rpm (G97). No rotary axis. |
 | `fanuc_lathe` | Fanuc lathe | - | Millimetre Fanuc lathe. Diameter mode by default, ZX plane (G18), feed per minute (G98), G50 spindle cap then G96. Home is G28 U0 W0. No rotary axis. |
 | `haas_lathe` | Haas lathe | - | Millimetre Haas lathe. Program O00001, safety block G21 G18 G40 G80, feed per minute (G98), G53 home. Sub-spindle select is G55 then G14. No rotary axis. |

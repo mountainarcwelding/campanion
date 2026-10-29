@@ -174,13 +174,11 @@ struct Scan<'a> {
     sections: usize,
     section_open: bool,
     section_cut: bool,
-    /// Line number of an `M5` that has not yet been followed by a rapid to clearance.
-    m5_line: Option<usize>,
 }
 
 impl<'a> Scan<'a> {
     fn new(job: &'a str, lines: &'a [&'a str], delays: bool) -> Self {
-        Self { job, lines, delays, x: None, y: None, z: None, feed: None, sections: 0, section_open: false, section_cut: false, m5_line: None }
+        Self { job, lines, delays, x: None, y: None, z: None, feed: None, sections: 0, section_open: false, section_cut: false }
     }
 
     fn walk(&mut self) -> Result<(), String> {
@@ -250,17 +248,6 @@ impl<'a> Scan<'a> {
         if xy_changed && !near(z, CLEARANCE_Z) {
             return Err(format!("{job}:{line_no}: G0 changes X or Y at Z{z:.4}, expected clearance Z{CLEARANCE_Z:.1}\n{raw}", job = self.job));
         }
-        if let Some(m5_at) = self.m5_line {
-            if xy_changed {
-                return Err(format!(
-                    "{job}:{line_no}: G0 changes X or Y before the G0 to Z{CLEARANCE_Z:.1} required after M5 at line {m5_at}\n{raw}",
-                    job = self.job
-                ));
-            }
-            if near(z, CLEARANCE_Z) {
-                self.m5_line = None;
-            }
-        }
         Ok(())
     }
 
@@ -312,12 +299,16 @@ impl<'a> Scan<'a> {
         expect_dwell(self.job, line_no, next, PIERCE_DWELL_S, "M3")
     }
 
+    /// The spindle stops only after the tool is already at or above the retract height.
     fn on_m5(&mut self, index: usize) -> Result<(), String> {
         let line_no = index + 1;
-        if self.m5_line.is_some() {
-            return Err(format!("{}:{line_no}: M5 while a previous M5 is still waiting for a G0 to Z{CLEARANCE_Z:.1}", self.job));
+        match self.z {
+            Some(z) if z + EPS >= RETRACT_Z => {}
+            Some(z) => {
+                return Err(format!("{}:{line_no}: M5 at Z{z:.4}, expected the tool already at or above retract Z{RETRACT_Z:.1}", self.job));
+            }
+            None => return Err(format!("{}:{line_no}: M5 before any move", self.job)),
         }
-        self.m5_line = Some(line_no);
         if !self.delays {
             return Ok(());
         }
@@ -331,13 +322,6 @@ impl<'a> Scan<'a> {
         }
         if self.section_open && !self.section_cut {
             return Err(format!("{}: a (toolpath section has no G1/G2/G3 cutting move at Z<0", self.job));
-        }
-        if let Some(line) = self.m5_line {
-            let tail = self.lines.iter().skip(line.saturating_sub(1)).take(6).copied().collect::<Vec<_>>().join("\n");
-            return Err(format!(
-                "{}: M5 at line {line} is not followed by a G0 to Z{CLEARANCE_Z:.1} before the next G0 that changes X or Y\n{tail}",
-                self.job
-            ));
         }
         Ok(())
     }

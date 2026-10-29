@@ -164,6 +164,12 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("haas").expect("haas").rotary_axes(), vec![RotaryAxisKind::A]);
     assert!(builtin("plasma").expect("plasma").rotary_axes().is_empty());
     assert!(builtin("grbl_laser").expect("grbl_laser").rotary_axes().is_empty());
+    assert_eq!(builtin("linuxcnc").expect("linuxcnc").process_cycle, "hold");
+    assert!(!builtin("mach3").expect("mach3").cycles_per_cut());
+    assert!(builtin("plasma").expect("plasma").cycles_per_cut());
+    assert!(builtin("grbl_laser").expect("grbl_laser").cycles_per_cut());
+    assert!(builtin("plasma").expect("plasma").description().contains("process_cycle is per_cut"), "plasma description");
+    assert!(builtin("grbl_laser").expect("grbl_laser").description().contains("process_cycle is per_cut"), "laser description");
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").is_lathe());
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").rotary_axes().is_empty());
     assert!(builtin("fanuc_lathe").expect("fanuc_lathe").is_lathe());
@@ -715,6 +721,113 @@ fn channel_programs_and_controller_compensation_are_rejected() {
     assert!(err.to_string().contains("not supported"), "{err}");
 }
 
+fn spindle_speed(speed: f64) -> ProcessParams {
+    ProcessParams::new().speed(Some(speed)).expect("speed")
+}
+
+/// One spindle start, two cuts, rapids between them, and a stop after the last retract.
+fn held_spindle() -> Program {
+    program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 5.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: spindle_speed(12_000.0) }),
+        ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 0.0), feed: 1000.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 0.0, 5.0), feed: None }),
+        ClBlock::Motion(ClMotion::Rapid { to: pose(30.0, 0.0, 5.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(40.0, 0.0, 0.0), feed: 1000.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Rapid { to: pose(40.0, 0.0, 5.0), feed: None }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
+        ClBlock::Event(Event::Dwell { seconds: 0.25 }),
+    ])
+}
+
+fn word_code(word: &str, letter: char) -> Option<f64> {
+    let rest = word.strip_prefix(letter)?;
+    if rest.is_empty() { None } else { rest.parse().ok() }
+}
+
+/// `G0` / `feed` / `on` / `off` in write order. A modal axis line keeps the previous motion.
+fn motion_marks(text: &str) -> Vec<&'static str> {
+    let mut motion: Option<u8> = None;
+    let mut marks = Vec::new();
+    for line in text.lines() {
+        let stripped = without_comments(line);
+        let words: Vec<&str> =
+            stripped.split_whitespace().filter(|word| !(word.starts_with('N') && word[1..].chars().all(|ch| ch.is_ascii_digit()))).collect();
+        if words.is_empty() {
+            continue;
+        }
+        if let Some(code) = words.iter().find_map(|word| word_code(word, 'M'))
+            && code.fract() == 0.0
+        {
+            let m = code as u16;
+            let spindle = words.iter().find_map(|word| word_code(word, 'S'));
+            if m == 5 {
+                marks.push("off");
+            } else if m == 3 || (m == 4 && spindle != Some(0.0)) {
+                marks.push("on");
+            }
+        }
+        if let Some(code) = words.iter().find_map(|word| word_code(word, 'G'))
+            && code.fract() == 0.0
+            && (0.0..4.0).contains(&code)
+        {
+            motion = Some(code as u8);
+        }
+        let moved = words.iter().any(|word| matches!(word.chars().next(), Some('X' | 'Y' | 'Z')));
+        if moved {
+            match motion {
+                Some(0) => marks.push("G0"),
+                Some(1..=3) => marks.push("feed"),
+                _ => {}
+            }
+        }
+    }
+    marks
+}
+
+fn assert_dark_travel(marks: &[&str], text: &str) {
+    let mut lit = false;
+    let mut ons = 0usize;
+    let mut offs = 0usize;
+    let mut cuts = 0usize;
+    let mut travels = 0usize;
+    let mut pending = false;
+    for mark in marks {
+        match *mark {
+            "on" => {
+                lit = true;
+                ons += 1;
+            }
+            "off" => {
+                assert!(lit, "process-off while already off\n{text}");
+                lit = false;
+                offs += 1;
+            }
+            "G0" => {
+                assert!(!lit, "rapid while the process is on\n{text}");
+                if cuts > 0 {
+                    pending = true;
+                }
+            }
+            "feed" => {
+                assert!(lit, "feed while the process is off\n{text}");
+                if pending {
+                    travels += 1;
+                    pending = false;
+                }
+                cuts += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(ons >= 2 && offs == ons && travels >= 1, "ons {ons} offs {offs} travels {travels} marks {marks:?}\n{text}");
+}
+
+fn count_word(text: &str, word: &str) -> usize {
+    text.lines().map(|line| without_comments(line).split_whitespace().filter(|token| *token == word).count()).sum()
+}
+
 fn without_comments(line: &str) -> String {
     let mut out = String::new();
     let mut chars = line.chars();
@@ -822,6 +935,11 @@ fn cutting_fields_are_validated() {
     assert!(post.drop_z());
     assert!(!post.process_feeds.rapid_z);
     assert_eq!(post.power_scale, Some(1000.0));
+    assert_eq!(post.process_cycle, "hold");
+    raw["process_cycle"] = serde_json::json!("always");
+    let err = load_post(&raw.to_string()).expect_err("cycle");
+    assert!(err.to_string().contains("process_cycle"), "{err}");
+    assert!(err.to_string().contains("per_cut"), "{err}");
 }
 
 #[test]
@@ -959,6 +1077,66 @@ fn thc_lines_follow_the_pierce_dwell() {
     let end_off = line_with_word(&open_text, "M5");
     assert!(line_with_word(&open_text, "G4") < on && on < line_with_word(&open_text, "G1") && off + 1 == end_off, "{open_text}");
     assert!(open_text.trim_end().ends_with("M2"), "{open_text}");
+}
+
+#[test]
+fn per_cut_turns_a_held_spindle_off_before_each_rapid() {
+    let program = held_spindle();
+    let plasma = builtin("plasma").expect("plasma");
+    let text = post_program(&program, &plasma, &options()).expect("plasma");
+    let marks = motion_marks(&text);
+    assert_dark_travel(&marks, &text);
+    assert_eq!(count_word(&text, "G4"), 2, "pierce dwell only on the cut that has one\n{text}");
+    assert!(text.contains("M3 S12000"), "{text}");
+    assert!(!text.contains("M3 S12000\nM3"), "no doubled start\n{text}");
+    let off_at = marks.iter().rposition(|mark| *mark == "off").expect("off");
+    let rapid_at = marks.iter().rposition(|mark| *mark == "G0").expect("rapid");
+    assert!(off_at < rapid_at, "stop stays before the retract\n{marks:?}\n{text}");
+    compare(&program, &read_back(&text, &plasma).expect("read"), 1e-3, &plasma).expect("compare");
+
+    let laser = builtin("grbl_laser").expect("grbl_laser");
+    let laser_text = post_program(&program, &laser, &options()).expect("laser");
+    assert_dark_travel(&motion_marks(&laser_text), &laser_text);
+    assert_eq!(laser_text.matches("M4 S1000").count(), 2, "{laser_text}");
+    assert_eq!(count_word(&laser_text, "M5"), 2, "{laser_text}");
+    compare(&program, &read_back(&laser_text, &laser).expect("read"), 1e-3, &laser).expect("compare");
+
+    let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/plasma.json")).expect("json");
+    raw["thc"] = serde_json::json!({"on": ["(THC ON)"], "off": ["(THC OFF)"]});
+    let thc = load_post(&raw.to_string()).expect("thc");
+    let thc_text = post_program(&program, &thc, &options()).expect("thc post");
+    assert_eq!(thc_text.matches("THC ON").count(), 1, "{thc_text}");
+    assert_eq!(thc_text.matches("THC OFF").count(), 1, "{thc_text}");
+    let thc_off = thc_text.lines().position(|line| line.contains("THC OFF")).expect("thc off");
+    let first_stop = thc_text.lines().position(|line| without_comments(line).split_whitespace().any(|word| word == "M5")).expect("m5");
+    assert_eq!(thc_off + 1, first_stop, "{thc_text}");
+
+    let mill = post_program(&program, &linux(), &options()).expect("linuxcnc");
+    let mill_marks = motion_marks(&mill);
+    assert_eq!(mill_marks.iter().filter(|mark| **mark == "on").count(), 1, "{mill}");
+    assert_eq!(mill_marks.iter().filter(|mark| **mark == "off").count(), 1, "{mill}");
+    let mill_off = mill_marks.iter().rposition(|mark| *mark == "off").expect("off");
+    let mill_rapid = mill_marks.iter().rposition(|mark| *mark == "G0").expect("rapid");
+    assert!(mill_off > mill_rapid, "mill stop follows the retract\n{mill_marks:?}\n{mill}");
+}
+
+#[test]
+fn hold_skips_a_repeated_spindle_on_and_per_cut_writes_it() {
+    let params = spindle_speed(12_000.0);
+    let blocks = vec![
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: params.clone() }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(1.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(2.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
+    ];
+    let program = program(blocks);
+    let mill = post_program(&program, &linux(), &options()).expect("linuxcnc");
+    assert_eq!(count_word(&mill, "M3"), 1, "{mill}");
+    assert_eq!(count_word(&mill, "M5"), 1, "{mill}");
+    let plasma = post_program(&program, &builtin("plasma").expect("plasma"), &options()).expect("plasma");
+    assert_eq!(count_word(&plasma, "M3"), 2, "{plasma}");
+    assert_eq!(count_word(&plasma, "M5"), 1, "{plasma}");
 }
 
 #[test]
