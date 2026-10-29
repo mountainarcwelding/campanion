@@ -760,6 +760,35 @@ fn subspindle_posts_haas_and_returns_to_the_main_before_the_end() -> Result<(), 
 }
 
 #[test]
+fn orient_posts_haas_m119_before_the_handoff_and_linuxcnc_rejects_it() -> Result<(), String> {
+    let root = workspace_root()?;
+    let job = path_arg(&root.join("examples/orient.lathe.json"))?;
+    let out = temp_path("campanion-lathe-orient.nc");
+    let _ = std::fs::remove_file(&out);
+    run_ok(&["lathe", &job, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    let posted = std::fs::read_to_string(&out).map_err(|err| err.to_string())?;
+    assert_golden("orient.haas_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["M119 R90.00", "G199", "G00 B4", "G14"])?;
+
+    let linux = temp_path("campanion-lathe-orient-linuxcnc.nc");
+    let _ = std::fs::remove_file(&linux);
+    let output = campanion(&["lathe", &job, "-o", &path_arg(&linux)?, "--post", "linuxcnc_lathe"])?;
+    let stderr = text(&output.stderr)?;
+    let code = output.status.code();
+    if code == Some(101) || stderr.to_ascii_lowercase().contains("panicked") {
+        return Err(format!("lathe panicked ({code:?}): {stderr}"));
+    }
+    if code != Some(1) {
+        return Err(format!("exit {code:?}, expected 1\n{stderr}"));
+    }
+    let needle = "post `linuxcnc_lathe` has no spindle orient";
+    if !stderr.contains(needle) {
+        return Err(format!("stderr missing {needle}: {stderr}"));
+    }
+    Ok(())
+}
+
+#[test]
 fn tailstock_posts_haas_m21_m22_and_linuxcnc_rejects_it() -> Result<(), String> {
     let root = workspace_root()?;
     let job = path_arg(&root.join("examples/tailstock.lathe.json"))?;

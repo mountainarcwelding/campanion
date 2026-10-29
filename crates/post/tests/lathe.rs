@@ -851,6 +851,7 @@ fn millturn_rejects_c_without_engage_spindle_while_engaged_and_missing_blocks() 
     let events = [
         Event::CAxis { spindle: "main".into(), engage: true },
         Event::SpindleBrake { spindle: "main".into(), clamp: false },
+        Event::SpindleOrient { spindle: "main".into(), angle_deg: 0.0 },
         Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Reverse },
         Event::LiveToolOff,
         Event::FaceInterpolation { on: true },
@@ -1420,6 +1421,74 @@ fn haas_rejects_a_spindle_it_does_not_serve() {
         program_on(vec![spindle_named("tail", None, 1_000.0)], vec![bound(0, "tail")], vec![path(Some("face"), Some(1), vec![rapid(10.0, 0.0)])]);
     let err = post_program(&program, &haas_lathe(), &options()).expect_err("tail");
     assert!(err.to_string().contains("post `haas_lathe` has no spindle `tail`"), "{err}");
+}
+
+fn orient_program(binding_spindle: &str, blocks: Vec<ClBlock>) -> Program {
+    program_on(
+        vec![spindle_named("main", Some(0), 3_000.0), spindle_named("sub", None, 2_500.0)],
+        vec![bound(0, binding_spindle)],
+        vec![path(Some("op"), None, blocks)],
+    )
+}
+
+#[test]
+fn haas_writes_orient_and_the_secondary_brake_to_two_decimals() {
+    let blocks = vec![
+        ClBlock::Event(Event::SpindleOrient { spindle: "main".into(), angle_deg: 90.0 }),
+        ClBlock::Event(Event::SpindleOrient { spindle: "sub".into(), angle_deg: 90.0 }),
+        ClBlock::Event(Event::SpindleOrient { spindle: "main".into(), angle_deg: 90.5 }),
+        ClBlock::Event(Event::SpindleOrient { spindle: "sub".into(), angle_deg: 0.0 }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "sub".into(), clamp: true }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "sub".into(), clamp: false }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
+        ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
+    ];
+    let program = orient_program("main", blocks);
+    let post = haas_lathe();
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert_in_order(&text, &["M19 R90.00", "M119 R90.00", "M19 R90.50", "M119 R0.00", "M114", "M115", "M14", "M15"]);
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    let held = orient_program("main", vec![ClBlock::Event(Event::SpindleBrake { spindle: "sub".into(), clamp: true })]);
+    let held_text = post_program(&held, &post, &options()).expect("release");
+    let m114 = index_of_word(&held_text, "M114");
+    let m115 = index_of_word(&held_text, "M115");
+    let home = index_of(&held_text, "G53");
+    assert!(m114 < m115 && m115 < home, "{held_text}");
+    assert_eq!(held_text.matches("M115").count(), 1, "{held_text}");
+}
+
+#[test]
+fn lathe_posts_without_orient_or_a_sub_brake_reject_those_events() {
+    let brake = orient_program("main", vec![ClBlock::Event(Event::SpindleBrake { spindle: "sub".into(), clamp: true })]);
+    let brake_err = post_program(&brake, &linux_lathe(), &options()).expect_err("brake");
+    assert!(brake_err.to_string().contains("post `linuxcnc_lathe` has no secondary spindle brake"), "{brake_err}");
+
+    let orient = orient_program("main", vec![ClBlock::Event(Event::SpindleOrient { spindle: "sub".into(), angle_deg: 90.0 })]);
+    let orient_err = post_program(&orient, &linux_lathe(), &options()).expect_err("orient");
+    assert!(orient_err.to_string().contains("post `linuxcnc_lathe` has no spindle orient"), "{orient_err}");
+}
+
+#[test]
+fn haas_rejects_m119_while_g14_is_selected() {
+    let blocks = vec![ClBlock::Event(Event::SpindleOrient { spindle: "sub".into(), angle_deg: 90.0 })];
+    let err = post_program(&orient_program("sub", blocks), &haas_lathe(), &options()).expect_err("g14");
+    assert!(err.to_string().contains("M119 is not allowed under G14"), "{err}");
+
+    let mut raw = haas_json();
+    raw["lathe"].as_object_mut().expect("lathe").remove("orient");
+    let missing = post_program(
+        &orient_program("sub", vec![ClBlock::Event(Event::SpindleOrient { spindle: "sub".into(), angle_deg: 10.0 })]),
+        &post_from(raw),
+        &options(),
+    )
+    .expect_err("no orient");
+    assert!(missing.to_string().contains("post `haas_lathe` has no spindle orient"), "{missing}");
+
+    let main = orient_program("sub", vec![ClBlock::Event(Event::SpindleOrient { spindle: "main".into(), angle_deg: 12.0 })]);
+    let text = post_program(&main, &haas_lathe(), &options()).expect("main orient under G14");
+    assert!(text.contains("M19 R12.00"), "{text}");
+    assert!(!text.contains("M119"), "{text}");
 }
 
 #[test]

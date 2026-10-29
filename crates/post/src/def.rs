@@ -29,7 +29,7 @@
 //!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
-//! `{offset2}`, `{phase}`, `{z}`, `{feed}`, `{b}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `live_tool`, `face_interp` and
+//! `{offset2}`, `{phase}`, `{z}`, `{feed}`, `{b}`, `{angle}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `brake_sub`, `orient`, `live_tool`, `face_interp` and
 //! `cylinder_interp` are optional mill-turn blocks. `b_head` is an optional tilting-B-head block. `transfer` is an optional part-transfer block. `c_axis.engage`, `c_axis.disengage`,
 //! `brake.clamp` and `brake.release` may be empty; an empty list writes nothing. Live-tool
 //! `forward`, `reverse` and `stop` must not be empty. Live-tool `{rpm}` is a whole number.
@@ -58,6 +58,7 @@ const LATHE_PHASE: &[&str] = &["phase", "date-free!"];
 const LATHE_MOVE: &[&str] = &["z", "date-free!"];
 const LATHE_MOVE_FEED: &[&str] = &["z", "feed", "date-free!"];
 const LATHE_B: &[&str] = &["b", "date-free!"];
+const LATHE_ANGLE: &[&str] = &["angle", "date-free!"];
 
 /// How circular moves are written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,6 +341,14 @@ pub(crate) struct LatheOutput {
     /// Spindle brake while the C axis holds. Absent: a brake event is rejected.
     #[serde(default)]
     pub(crate) brake: Option<BrakeOutput>,
+    /// Secondary spindle brake. Absent: a brake event for spindle `sub` is rejected.
+    #[serde(default)]
+    pub(crate) brake_sub: Option<BrakeOutput>,
+    /// Spindle orient lines. Absent: an orient event is rejected.
+    ///
+    /// `{angle}` is degrees with two decimal places.
+    #[serde(default)]
+    pub(crate) orient: Option<OrientOutput>,
     /// Driven tool. Absent: a live-tool event is rejected.
     #[serde(default)]
     pub(crate) live_tool: Option<LiveToolOutput>,
@@ -610,6 +619,18 @@ pub(crate) struct BrakeOutput {
     pub(crate) release: Vec<String>,
 }
 
+/// Orient lines for the main spindle and the secondary spindle.
+///
+/// `{angle}` is the angle in degrees, written with two decimal places (`90.00`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OrientOutput {
+    /// Written for the main spindle. `{angle}` is the angle.
+    pub(crate) main: String,
+    /// Written for the secondary spindle. `{angle}` is the angle.
+    pub(crate) sub: String,
+}
+
 /// Start and stop a live (driven) tool.
 ///
 /// `forward`, `reverse` and `stop` must each contain at least one line. `forward` and `reverse`
@@ -827,6 +848,20 @@ fn check_lathe(post: &PostDef) -> Result<()> {
     if let Some(brake) = &lathe.brake {
         check_templates("lathe.brake.clamp", &brake.clamp, LATHE_BARE)?;
         check_templates("lathe.brake.release", &brake.release, LATHE_BARE)?;
+    }
+    if let Some(brake) = &lathe.brake_sub {
+        check_templates("lathe.brake_sub.clamp", &brake.clamp, LATHE_BARE)?;
+        check_templates("lathe.brake_sub.release", &brake.release, LATHE_BARE)?;
+    }
+    if let Some(orient) = &lathe.orient {
+        if orient.main.is_empty() {
+            return Err(field("lathe.orient.main", "must not be empty"));
+        }
+        if orient.sub.is_empty() {
+            return Err(field("lathe.orient.sub", "must not be empty"));
+        }
+        check_templates("lathe.orient.main", std::slice::from_ref(&orient.main), LATHE_ANGLE)?;
+        check_templates("lathe.orient.sub", std::slice::from_ref(&orient.sub), LATHE_ANGLE)?;
     }
     if let Some(live) = &lathe.live_tool {
         require_lines("lathe.live_tool.forward", &live.forward)?;

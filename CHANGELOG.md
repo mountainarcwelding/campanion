@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Lathe `orient` and `sub_brake` operations. `haas_lathe` writes `M19 R` / `M119 R` for spindle orient (two decimal places) and `M114`/`M115` for the secondary spindle brake. M119 is not written while G14 is active (Haas NGC lathe operator's manual, 2025, §8.1.10, §8.1.37, §8.1.38, §7.1.8).
+
 ## 0.8.6 — 2026-10-29
 
 ### Added

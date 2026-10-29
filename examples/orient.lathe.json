@@ -1,0 +1,41 @@
+{
+  "format": "campanion-lathe/1",
+  "source": { "path": "subspindle.dxf", "layer": "PROFILE" },
+  "units": "mm",
+  "stock": { "kind": "bar", "diameter": 30, "length": 20, "front_allowance": 1.0 },
+  "spindle": { "max_rpm": 3000 },
+  "sub": {
+    "max_rpm": 2500,
+    "source": { "path": "subspindle.dxf", "layer": "PROFILE" },
+    "back_allowance": 0.5
+  },
+  "tools": [
+    {
+      "id": 1,
+      "station": 1,
+      "shape": "c80",
+      "nose_radius": 0.4,
+      "orientation_deg": 45,
+      "hand": "right",
+      "tip": "centre"
+    },
+    {
+      "id": 2,
+      "station": 2,
+      "shape": "c80",
+      "nose_radius": 0.4,
+      "orientation_deg": 45,
+      "hand": "right",
+      "tip": "centre"
+    }
+  ],
+  "operations": [
+    { "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 150, "speed": { "css": 180 } },
+    { "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 120, "speed": { "css": 200 } },
+    { "name": "orient_sub", "type": "orient", "spindle": "sub", "angle_deg": 90 },
+    { "name": "handoff", "type": "transfer", "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 250 },
+    { "name": "sub_face", "type": "face", "tool_id": 2, "spindle": "sub", "step_z": 0.25, "feed": 150, "speed": { "css": 160 } },
+    { "name": "sub_finish", "type": "finish", "tool_id": 2, "spindle": "sub", "side": "outside", "feed": 100, "speed": { "css": 180 } }
+  ],
+  "clearance": 2.0
+}

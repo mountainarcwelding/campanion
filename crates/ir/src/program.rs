@@ -449,7 +449,8 @@ fn check_turning(turning: &TurningSetup, toolpaths: &[ClPath], tool_ids: &BTreeS
     Ok(())
 }
 
-/// A C-axis or brake event names a spindle that already exists and has a C axis.
+/// A C-axis event names a spindle that already exists and has a C axis. A brake does too, except
+/// spindle `sub`, whose caliper brake does not need a C axis. An orient names a spindle that exists.
 fn check_spindle_modes(turning: &TurningSetup, toolpaths: &[ClPath], channels: &[ChannelProgram]) -> Result<()> {
     for path in toolpaths {
         for block in path.blocks() {
@@ -469,10 +470,23 @@ fn check_spindle_modes(turning: &TurningSetup, toolpaths: &[ClPath], channels: &
 }
 
 fn check_spindle_event(turning: &TurningSetup, event: &Event) -> Result<()> {
-    let spindle = match event {
-        Event::CAxis { spindle, .. } | Event::SpindleBrake { spindle, .. } => spindle.as_str(),
-        _ => return Ok(()),
-    };
+    match event {
+        Event::CAxis { spindle, .. } => require_c_axis(turning, spindle),
+        Event::SpindleBrake { spindle, .. } if spindle == "sub" => require_spindle(turning, spindle),
+        Event::SpindleBrake { spindle, .. } => require_c_axis(turning, spindle),
+        Event::SpindleOrient { spindle, .. } => require_spindle(turning, spindle),
+        _ => Ok(()),
+    }
+}
+
+fn require_spindle(turning: &TurningSetup, spindle: &str) -> Result<()> {
+    match turning.spindle(spindle) {
+        Some(_) => Ok(()),
+        None => Err(check::invalid(format!("unknown spindle {spindle}"))),
+    }
+}
+
+fn require_c_axis(turning: &TurningSetup, spindle: &str) -> Result<()> {
     match turning.spindle(spindle) {
         Some(found) if found.c_axis().is_some() => Ok(()),
         Some(_) => Err(check::invalid(format!("spindle {spindle} has no C axis"))),

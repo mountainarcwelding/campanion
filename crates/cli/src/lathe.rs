@@ -22,7 +22,10 @@
 //! is advanced, motion tips stay outside the quill cylinder. A `steady_rest` operation clamps or
 //! unclamps the steady rest the same way. While it is clamped, motion stays outside its Z band.
 //! A `bar_feed` operation is the last
-//! one: one event on channel 0, main spindle, no tool, written after the home lines. A `part`
+//! one: one event on channel 0, main spindle, no tool, written after the home lines. An `orient`
+//! operation turns a spindle to an angle: one event on channel 0, bound to the main spindle, no
+//! tool. The event names `main` or `sub`. A `sub_brake` operation clamps or releases the secondary
+//! spindle brake the same way. A `part`
 //! operation with `catch`
 //! extends the parts catcher after the approach rapid and retracts it after the final retract,
 //! when the part fits the job's `parts_catcher` limits. Speed is stored on the
@@ -99,7 +102,7 @@ const DEFAULT_FLANK_DEG: f64 = 29.5;
 const DEFAULT_FIRST_DEPTH_CAP: f64 = 0.35;
 /// Thread cycles emit rapids and synchronised moves. The path still needs a positive cut feed.
 const THREAD_RECORD_FEED: f64 = 100.0;
-/// Eject, tailstock, steady rest, bar feed and a transfer with no cut still need a positive recorded feed. Nothing posts it.
+/// Eject, tailstock, steady rest, bar feed, orient, sub brake and a transfer with no cut still need a positive recorded feed. Nothing posts it.
 const EVENT_ONLY_FEED: f64 = 1.0;
 /// Flank length, millimetres, used when a face, rough or finish path is checked for gouges.
 const TURN_EDGE_MM: f64 = 4.0;
@@ -434,6 +437,20 @@ enum Operation {
         /// Minimum clamping length. Job units, stored as millimetres.
         min_clamp: Option<f64>,
     },
+    /// Orient a spindle. No tool, channel 0, bound to the main spindle.
+    ///
+    /// The event names `target`. A sub orient can sit before the handoff.
+    Orient {
+        name: String,
+        target: WorkSpindle,
+        angle_deg: f64,
+    },
+    /// Clamp or release the secondary spindle brake. No tool, channel 0, bound to main.
+    SubBrake {
+        name: String,
+        /// `true` clamps. `false` releases.
+        clamp: bool,
+    },
 }
 
 /// Centre or quill diameter at the part face, and the clearance around that cylinder.
@@ -493,7 +510,9 @@ impl Operation {
             | Self::Eject { name }
             | Self::Tailstock { name, .. }
             | Self::SteadyRest { name, .. }
-            | Self::BarFeed { name, .. } => name,
+            | Self::BarFeed { name, .. }
+            | Self::Orient { name, .. }
+            | Self::SubBrake { name, .. } => name,
         }
     }
 
@@ -511,7 +530,12 @@ impl Operation {
             | Self::LiveSlot { spindle, .. }
             | Self::LiveFlat { spindle, .. }
             | Self::LiveMill { spindle, .. } => *spindle,
-            Self::Transfer { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => WorkSpindle::Main,
+            Self::Transfer { .. }
+            | Self::Tailstock { .. }
+            | Self::SteadyRest { .. }
+            | Self::BarFeed { .. }
+            | Self::Orient { .. }
+            | Self::SubBrake { .. } => WorkSpindle::Main,
             Self::Eject { .. } => WorkSpindle::Sub,
         }
     }
@@ -531,14 +555,24 @@ impl Operation {
             | Self::LiveFlat { tool_id, .. }
             | Self::LiveMill { tool_id, .. } => *tool_id,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id).unwrap_or(0),
-            Self::Eject { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => 0,
+            Self::Eject { .. }
+            | Self::Tailstock { .. }
+            | Self::SteadyRest { .. }
+            | Self::BarFeed { .. }
+            | Self::Orient { .. }
+            | Self::SubBrake { .. } => 0,
         }
     }
 
-    /// Tool the job file must name. Eject, tailstock, steady rest and a transfer with no part-off name none.
+    /// Tool the job file must name. Eject, tailstock, steady rest, bar feed, orient, sub brake and a transfer with no part-off name none.
     fn checked_tool(&self) -> Option<u32> {
         match self {
-            Self::Eject { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => None,
+            Self::Eject { .. }
+            | Self::Tailstock { .. }
+            | Self::SteadyRest { .. }
+            | Self::BarFeed { .. }
+            | Self::Orient { .. }
+            | Self::SubBrake { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id),
             _ => Some(self.tool_id()),
         }
@@ -552,7 +586,9 @@ impl Operation {
             | Self::Eject { .. }
             | Self::Tailstock { .. }
             | Self::SteadyRest { .. }
-            | Self::BarFeed { .. } => 0,
+            | Self::BarFeed { .. }
+            | Self::Orient { .. }
+            | Self::SubBrake { .. } => 0,
             Self::Face { channel, .. }
             | Self::Rough { channel, .. }
             | Self::Finish { channel, .. }
@@ -585,7 +621,12 @@ impl Operation {
             | Self::LiveMill { feed, .. } => *feed,
             Self::Thread { .. } => THREAD_RECORD_FEED,
             Self::Transfer { feed, part_off, .. } => part_off.as_ref().map(|part| part.feed).unwrap_or(*feed),
-            Self::Eject { .. } | Self::Tailstock { .. } | Self::SteadyRest { .. } | Self::BarFeed { .. } => EVENT_ONLY_FEED,
+            Self::Eject { .. }
+            | Self::Tailstock { .. }
+            | Self::SteadyRest { .. }
+            | Self::BarFeed { .. }
+            | Self::Orient { .. }
+            | Self::SubBrake { .. } => EVENT_ONLY_FEED,
             Self::Wait { .. } => 1.0,
         }
     }
@@ -608,6 +649,8 @@ impl Operation {
             | Self::Tailstock { .. }
             | Self::SteadyRest { .. }
             | Self::BarFeed { .. }
+            | Self::Orient { .. }
+            | Self::SubBrake { .. }
             | Self::Wait { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.speed),
         }
@@ -666,7 +709,19 @@ impl Operation {
     }
 
     fn uses_secondary_spindle(&self) -> bool {
-        self.is_transfer() || self.spindle() == WorkSpindle::Sub
+        match self {
+            Self::SubBrake { .. } => true,
+            Self::Orient { target, .. } => *target == WorkSpindle::Sub,
+            _ => self.is_transfer() || self.spindle() == WorkSpindle::Sub,
+        }
+    }
+
+    fn is_orient(&self) -> bool {
+        matches!(self, Self::Orient { .. })
+    }
+
+    fn is_sub_brake(&self) -> bool {
+        matches!(self, Self::SubBrake { .. })
     }
 
     /// Head angle on a face, rough, finish, groove or part. Absent means the tool table orientation.
@@ -1508,6 +1563,12 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
     if op_type == "bar_feed" {
         return parse_bar_feed(map, names);
     }
+    if op_type == "orient" {
+        return parse_orient(map, names, has_sub);
+    }
+    if op_type == "sub_brake" {
+        return parse_sub_brake(map, names, has_sub);
+    }
     let allowed: &[&str] = match op_type {
         "face" => &["name", "type", "tool_id", "spindle", "channel", "step_z", "feed", "speed", "b_deg"],
         "rough" => &["name", "type", "tool_id", "spindle", "channel", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed", "b_deg"],
@@ -1876,6 +1937,44 @@ fn parse_bar_feed(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Res
     let part_length = optional_positive(map, "part_length")?;
     let min_clamp = optional_positive(map, "min_clamp")?;
     Ok(Operation::BarFeed { name, part_length, min_clamp })
+}
+
+fn parse_orient(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_sub: bool) -> Result<Operation, CliError> {
+    check_keys(map, &["name", "type", "spindle", "angle_deg"], "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    let spindle = as_str(require(map, "spindle")?, "spindle")?;
+    let target = match spindle {
+        "main" => WorkSpindle::Main,
+        "sub" if !has_sub => return Err(CliError::invalid(format!("operation {name}: spindle sub needs a \"sub\" block"))),
+        "sub" => WorkSpindle::Sub,
+        other => return Err(CliError::invalid(format!("operation {name}: unknown spindle `{other}`"))),
+    };
+    let angle_deg = as_f64(require(map, "angle_deg")?, "angle_deg")?;
+    if !(0.0..360.0).contains(&angle_deg) {
+        return Err(CliError::invalid(format!("operation {name}: orient angle must be in 0..360")));
+    }
+    Ok(Operation::Orient { name, target, angle_deg })
+}
+
+fn parse_sub_brake(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_sub: bool) -> Result<Operation, CliError> {
+    check_keys(map, &["name", "type", "action"], "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    if !has_sub {
+        return Err(CliError::invalid(format!("operation {name}: sub_brake needs a \"sub\" block")));
+    }
+    let action = as_str(require(map, "action")?, "action")?;
+    let clamp = match action {
+        "clamp" => true,
+        "release" => false,
+        _ => return Err(CliError::invalid(format!("operation {name}: sub_brake action must be clamp or release"))),
+    };
+    Ok(Operation::SubBrake { name, clamp })
 }
 
 /// A bar feed is the last operation, after a `part`, and not on a job that has a sub spindle.
@@ -2449,6 +2548,10 @@ fn build_document(
             path
         } else if operation.is_bar_feed() {
             bar_feed_toolpath(operation)?
+        } else if operation.is_orient() {
+            orient_toolpath(operation)?
+        } else if operation.is_sub_brake() {
+            sub_brake_toolpath(operation)?
         } else {
             let turned = turn_operation(job, active_profile, operation)?;
             if let Some(step) = sample_step
@@ -2509,7 +2612,7 @@ fn build_document(
 }
 
 /// Face is always outside. Rough and finish use the operation side. Thread, groove, part, drill,
-/// transfer, eject, tailstock, steady rest, bar feed and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
+/// transfer, eject, tailstock, steady rest, bar feed, orient, sub brake and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
 fn gouge_side(operation: &Operation) -> Option<Side> {
     match operation {
         Operation::Face { .. } => Some(Side::Outside),
@@ -2527,6 +2630,8 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
         | Operation::Tailstock { .. }
         | Operation::SteadyRest { .. }
         | Operation::BarFeed { .. }
+        | Operation::Orient { .. }
+        | Operation::SubBrake { .. }
         | Operation::Wait { .. } => None,
     }
 }
@@ -2649,9 +2754,13 @@ fn mount_insert(job: &LatheJob, tool_id: u32, insert: &Insert) -> Result<Insert,
 fn mount_angle(operation: &Operation, tool_id: u32) -> Option<f64> {
     let uses = match operation {
         Operation::Transfer { part_off, .. } => part_off.as_ref().is_some_and(|part| part.tool_id == tool_id),
-        Operation::Wait { .. } | Operation::Eject { .. } | Operation::Tailstock { .. } | Operation::SteadyRest { .. } | Operation::BarFeed { .. } => {
-            false
-        }
+        Operation::Wait { .. }
+        | Operation::Eject { .. }
+        | Operation::Tailstock { .. }
+        | Operation::SteadyRest { .. }
+        | Operation::BarFeed { .. }
+        | Operation::Orient { .. }
+        | Operation::SubBrake { .. } => false,
         _ => operation.checked_tool() == Some(tool_id),
     };
     if uses { Some(operation.b_deg().unwrap_or(0.0)) } else { None }
@@ -2784,6 +2893,8 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
         || operation.is_tailstock()
         || operation.is_steady_rest()
         || operation.is_bar_feed()
+        || operation.is_orient()
+        || operation.is_sub_brake()
     {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
     }
@@ -2940,6 +3051,8 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
         | Operation::Tailstock { .. }
         | Operation::SteadyRest { .. }
         | Operation::BarFeed { .. }
+        | Operation::Orient { .. }
+        | Operation::SubBrake { .. }
         | Operation::Wait { .. } => Err(CliError::run(format!("internal: operation {} has no turning path", operation.name()))),
     }
 }
@@ -3062,6 +3175,24 @@ fn bar_feed_toolpath(operation: &Operation) -> Result<ClPath, CliError> {
         return Err(CliError::run(format!("internal: operation {} is not a bar feed", operation.name())));
     };
     let blocks = vec![ClBlock::Event(Event::BarFeed { part_length: *part_length, min_clamp: *min_clamp })];
+    let feeds = Feeds::try_new(EVENT_ONLY_FEED, None, None, None, None)?;
+    Ok(ClPath::try_new(Some(name.clone()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks)?)
+}
+
+fn orient_toolpath(operation: &Operation) -> Result<ClPath, CliError> {
+    let Operation::Orient { name, target, angle_deg } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not an orient", operation.name())));
+    };
+    let blocks = vec![ClBlock::Event(Event::SpindleOrient { spindle: target.name().to_string(), angle_deg: *angle_deg })];
+    let feeds = Feeds::try_new(EVENT_ONLY_FEED, None, None, None, None)?;
+    Ok(ClPath::try_new(Some(name.clone()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks)?)
+}
+
+fn sub_brake_toolpath(operation: &Operation) -> Result<ClPath, CliError> {
+    let Operation::SubBrake { name, clamp } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not a sub brake", operation.name())));
+    };
+    let blocks = vec![ClBlock::Event(Event::SpindleBrake { spindle: SUB_SPINDLE.to_string(), clamp: *clamp })];
     let feeds = Feeds::try_new(EVENT_ONLY_FEED, None, None, None, None)?;
     Ok(ClPath::try_new(Some(name.clone()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks)?)
 }
@@ -3769,6 +3900,47 @@ mod tests {
         let tailstock = job.tailstock.expect("block");
         assert!((tailstock.diameter - 12.0).abs() < 1e-12);
         assert!((tailstock.clearance - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn orient_and_sub_brake_parse_before_a_transfer_and_reject_bad_values() {
+        let sub = r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } },"#;
+        let ops = r#"{ "name": "aim", "type": "orient", "spindle": "sub", "angle_deg": 90 },
+            { "name": "hold", "type": "sub_brake", "action": "clamp" },
+            { "name": "free", "type": "sub_brake", "action": "release" },
+            { "name": "handoff", "type": "transfer", "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200 },
+            { "name": "main_aim", "type": "orient", "spindle": "main", "angle_deg": 0 }"#;
+        let job = unwrap_ok(super::parse_job(&tailstock_job(sub, ops)), "orient before transfer");
+        assert!(matches!(
+            job.operations[0],
+            super::Operation::Orient { target: super::WorkSpindle::Sub, angle_deg, .. } if (angle_deg - 90.0).abs() < 1e-12
+        ));
+        assert!(job.operations[0].spindle() == super::WorkSpindle::Main);
+        assert!(job.operations[0].uses_secondary_spindle());
+        assert!(matches!(job.operations[1], super::Operation::SubBrake { clamp: true, .. }));
+        assert!(job.operations[1].spindle() == super::WorkSpindle::Main);
+        assert!(job.operations[1].uses_secondary_spindle());
+        assert!(matches!(
+            job.operations[4],
+            super::Operation::Orient { target: super::WorkSpindle::Main, angle_deg, .. } if angle_deg.abs() < 1e-12
+        ));
+
+        let missing_orient = parse_err(&tailstock_job("", r#"{ "name": "aim", "type": "orient", "spindle": "sub", "angle_deg": 90 }"#));
+        assert!(missing_orient.contains("operation aim: spindle sub needs a \"sub\" block"), "{missing_orient}");
+        let missing_brake = parse_err(&tailstock_job("", r#"{ "name": "hold", "type": "sub_brake", "action": "clamp" }"#));
+        assert!(missing_brake.contains("operation hold: sub_brake needs a \"sub\" block"), "{missing_brake}");
+        let bad_action = parse_err(&tailstock_job(sub, r#"{ "name": "hold", "type": "sub_brake", "action": "park" }"#));
+        assert!(bad_action.contains("operation hold: sub_brake action must be clamp or release"), "{bad_action}");
+        let high = parse_err(&tailstock_job(sub, r#"{ "name": "aim", "type": "orient", "spindle": "sub", "angle_deg": 360 }"#));
+        assert!(high.contains("operation aim: orient angle must be in 0..360"), "{high}");
+        let low = parse_err(&tailstock_job("", r#"{ "name": "aim", "type": "orient", "spindle": "main", "angle_deg": -1 }"#));
+        assert!(low.contains("operation aim: orient angle must be in 0..360"), "{low}");
+        let unknown = parse_err(&tailstock_job(sub, r#"{ "name": "aim", "type": "orient", "spindle": "tail", "angle_deg": 10 }"#));
+        assert!(unknown.contains("operation aim: unknown spindle `tail`"), "{unknown}");
+        unwrap_ok(
+            super::parse_job(&tailstock_job("", r#"{ "name": "aim", "type": "orient", "spindle": "main", "angle_deg": 359.5 }"#)),
+            "main orient",
+        );
     }
 
     #[test]

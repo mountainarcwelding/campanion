@@ -179,7 +179,10 @@ struct Writer<'a> {
     /// Segments emitted for the fallback move in progress.
     polar_count: u32,
     /// True after a spindle brake clamp, until release. C may not move while it is set.
+    /// This is the main (C-axis) brake. The secondary caliper brake is [`Self::sub_brake_clamped`].
     brake_clamped: bool,
+    /// True after a secondary-spindle brake clamp, until release. It does not block C.
+    sub_brake_clamped: bool,
     /// True after a live-tool start, until stop.
     live_on: bool,
     /// True after a tailstock advance, until retract. Not cleared between channels: the quill stays advanced.
@@ -262,6 +265,7 @@ impl<'a> Writer<'a> {
             c_engaged: false,
             c_continuous: None,
             brake_clamped: false,
+            sub_brake_clamped: false,
             c_modal: None,
             cart: CartMode::Off,
             force_axes: false,
@@ -322,6 +326,7 @@ impl<'a> Writer<'a> {
         self.force_axes = false;
         self.polar_count = 0;
         self.brake_clamped = false;
+        self.sub_brake_clamped = false;
         self.live_on = false;
         self.live_feed_written = false;
         self.y_modal = None;
@@ -1509,6 +1514,7 @@ impl<'a> Writer<'a> {
                 event,
                 Event::CAxis { .. }
                     | Event::SpindleBrake { .. }
+                    | Event::SpindleOrient { .. }
                     | Event::LiveToolOn { .. }
                     | Event::LiveToolOff
                     | Event::FaceInterpolation { .. }
@@ -1524,7 +1530,8 @@ impl<'a> Writer<'a> {
                 Event::ProcessOff { process: ProcessKind::Spindle } => return self.lathe_spindle_off(),
                 Event::ToolChange { tool_id } => return self.lathe_tool_change(*tool_id),
                 Event::CAxis { engage, .. } => return self.c_axis(*engage),
-                Event::SpindleBrake { clamp, .. } => return self.spindle_brake(*clamp),
+                Event::SpindleBrake { spindle, clamp } => return self.spindle_brake(spindle, *clamp),
+                Event::SpindleOrient { spindle, angle_deg } => return self.spindle_orient(spindle, *angle_deg),
                 Event::LiveToolOn { rpm, direction } => return self.live_tool_on(*rpm, *direction),
                 Event::LiveToolOff => return self.live_tool_off(),
                 Event::FaceInterpolation { on } => return self.face_interpolation(*on),
@@ -1611,6 +1618,7 @@ impl<'a> Writer<'a> {
             }
             Event::CAxis { .. }
             | Event::SpindleBrake { .. }
+            | Event::SpindleOrient { .. }
             | Event::LiveToolOn { .. }
             | Event::LiveToolOff
             | Event::FaceInterpolation { .. }
@@ -2101,13 +2109,49 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    fn spindle_brake(&mut self, clamp: bool) -> Result<()> {
+    /// Secondary spindle: the event name `sub`, or the name in `transfer` / `sub_spindle`.
+    fn is_secondary_spindle(&self, spindle: &str) -> bool {
+        if spindle == "sub" {
+            return true;
+        }
+        let Some(lathe) = self.post.lathe.as_ref() else {
+            return false;
+        };
+        lathe.transfer.as_ref().is_some_and(|transfer| transfer.spindle == spindle)
+            || lathe.sub_spindle.as_ref().is_some_and(|sub| sub.spindle == spindle)
+    }
+
+    fn spindle_brake(&mut self, spindle: &str, clamp: bool) -> Result<()> {
         let lathe = self.post.lathe.clone().ok_or_else(|| invalid("spindle brake needs a lathe post"))?;
+        if self.is_secondary_spindle(spindle) {
+            let brake = lathe.brake_sub.ok_or_else(|| unsupported(format!("post `{}` has no secondary spindle brake", self.post.id())))?;
+            let (field_name, lines) = if clamp { ("lathe.brake_sub.clamp", brake.clamp) } else { ("lathe.brake_sub.release", brake.release) };
+            self.templates(field_name, &lines, &[("date-free!", "")])?;
+            self.sub_brake_clamped = clamp;
+            return Ok(());
+        }
         let brake = lathe.brake.ok_or_else(|| unsupported(format!("post `{}` has no spindle brake", self.post.id())))?;
         let (field_name, lines) = if clamp { ("lathe.brake.clamp", brake.clamp) } else { ("lathe.brake.release", brake.release) };
         self.templates(field_name, &lines, &[("date-free!", "")])?;
         self.brake_clamped = clamp;
         Ok(())
+    }
+
+    /// `{angle}` is two decimal places. Orienting the secondary spindle while it is selected
+    /// (Haas G14) is rejected: M119 alarms under G14.
+    fn spindle_orient(&mut self, spindle: &str, angle: f64) -> Result<()> {
+        let lathe = self.post.lathe.clone().ok_or_else(|| invalid("spindle orient needs a lathe post"))?;
+        let orient = lathe.orient.ok_or_else(|| unsupported(format!("post `{}` has no spindle orient", self.post.id())))?;
+        if self.is_secondary_spindle(spindle) && self.on_sub() {
+            return Err(invalid("M119 is not allowed under G14"));
+        }
+        if !angle.is_finite() {
+            return Err(invalid("orient angle must be finite"));
+        }
+        let angle_text = format!("{angle:.2}");
+        let (field_name, line) =
+            if self.is_secondary_spindle(spindle) { ("lathe.orient.sub", orient.sub) } else { ("lathe.orient.main", orient.main) };
+        self.templates(field_name, &[line], &[("angle", angle_text.as_str()), ("date-free!", "")])
     }
 
     fn live_tool_on(&mut self, rpm: f64, direction: LiveDirection) -> Result<()> {
@@ -2482,8 +2526,11 @@ impl<'a> Writer<'a> {
         if self.live_on {
             self.live_tool_off()?;
         }
+        if self.sub_brake_clamped {
+            self.spindle_brake("sub", false)?;
+        }
         if self.brake_clamped {
-            self.spindle_brake(false)?;
+            self.spindle_brake("main", false)?;
         }
         if self.c_engaged {
             self.c_axis(false)?;
