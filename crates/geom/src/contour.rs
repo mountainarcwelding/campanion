@@ -207,6 +207,30 @@ mod tests {
     }
 
     #[test]
+    fn split_vertex_on_the_ray_does_not_count_twice() {
+        // The shared corner is stored twice, one ulp above the ray and one ulp below.
+        // Counting both edges puts a point to the left of the contour inside it.
+        let tol = Tolerance::default();
+        let above = 1e-15;
+        let below = -1e-15;
+        let p = |x, y| Point::new(x, y).unwrap();
+        let line = |a, b| Segment::Line(Line::new(a, b).unwrap());
+        let shape = Contour::try_new(
+            vec![
+                line(p(2.0, 5.0), p(2.0, below)),
+                line(p(2.0, above), p(10.0, below)),
+                line(p(10.0, below), p(10.0, 5.0)),
+                line(p(10.0, 5.0), p(2.0, 5.0)),
+            ],
+            true,
+            &tol,
+        )
+        .unwrap();
+        assert_eq!(shape.containment(p(-1.0, 0.0), &tol).unwrap(), Containment::Outside);
+        assert_eq!(shape.containment(p(6.0, 2.0), &tol).unwrap(), Containment::Inside);
+    }
+
+    #[test]
     fn three_four_five_triangle() {
         let p = |x, y| Point::new(x, y).unwrap();
         let line = |a, b| Segment::Line(Line::new(a, b).unwrap());

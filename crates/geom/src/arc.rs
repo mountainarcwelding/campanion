@@ -236,9 +236,9 @@ impl Arc {
             if t1 - t0 <= 1e-15 {
                 continue;
             }
-            let y0 = self.point_at(t0).y();
-            let y1 = self.point_at(t1).y();
             let py = p.y();
+            let y0 = util::snap_ray_y(self.point_at(t0).y(), py);
+            let y1 = util::snap_ray_y(self.point_at(t1).y(), py);
             let upward = y0 <= py && y1 > py;
             let downward = y0 > py && y1 <= py;
             if !upward && !downward {

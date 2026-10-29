@@ -6,11 +6,12 @@
 //! [`PocketStrategy::OffsetRings`] cuts successive inward offsets through [`offset_region`].
 //! The first offset is the tool radius plus the finishing allowance. Each later offset moves in
 //! by at most one stepover. A band between the outer wall and an island that is narrower than
-//! two stepovers still gets a ring, so those passes stay within one stepover. A solid remainder
-//! thinner than two tool radii, whose middle is farther than the tool radius from the last ring,
-//! gets one more pass. A wider remainder that is still thinner than a stepover stays on the
-//! current ring: stepping by the tool radius would be one ring per radius and overflows the
-//! stack on a large off-grid disk. The ring count is capped by the region span divided by half
+//! two stepovers still gets a ring, so those passes stay within one stepover. A corner the full
+//! step leaves past the tool, and a remainder left when an inset splits, gets a shorter pass.
+//! A solid remainder thinner than two tool radii, whose middle is farther than the tool radius
+//! from the last ring, gets one more pass. A wider remainder that is still thinner than a stepover
+//! stays on the current ring: stepping by the tool radius would be one ring per radius and overflows
+//! the stack on a large off-grid disk. The ring count is capped by the region span divided by half
 //! a stepover. Rings are emitted outside-in ([`RingOrder::OutsideIn`]).
 //! Two rings are joined by a straight cut when that segment stays inside the region the tool
 //! centre may enter. Otherwise the tool retracts, rapids, and plunges.
@@ -477,7 +478,8 @@ fn ring_limit(region: &Region, stepover: f64, radius: f64) -> f64 {
 /// `true` when a full stepover inset leaves a patch that `ring_limit` says still needs a ring.
 ///
 /// The patch is the part of the `limit` inset that a grow of the full-step children does not
-/// cover. Corner skins thinner than [`ORPHAN_CLEARANCE_MM`] are offset noise.
+/// cover. Corner skins thinner than [`ORPHAN_CLEARANCE_MM`] are offset noise. A sharp corner of
+/// that inset is smaller than the area test in region classification, so it is checked on its own.
 fn facing_gap(region: &Region, children: &[Region], limit: f64, stepover: f64, tolerance: &Tolerance) -> Result<bool> {
     let eps = linear_eps(tolerance);
     if children.is_empty() || limit + eps >= stepover {
@@ -505,7 +507,111 @@ fn facing_gap(region: &Region, children: &[Region], limit: f64, stepover: f64, t
             return Ok(true);
         }
     }
+    // Region classification treats a corner whose area is under `scale * 1e-4` as fully covered
+    // and drops it. The vertex of a sharp inset corner still sits past the round grow of the child.
+    corners_left_out(&deep, &shadows, tolerance)
+}
+
+/// Sharp corners of `deep` that the round grow of the children does not reach.
+fn corners_left_out(deep: &[Region], shadows: &[Region], tolerance: &Tolerance) -> Result<bool> {
+    for region in deep {
+        if contour_corner_left_out(region.outer(), shadows, tolerance)? {
+            return Ok(true);
+        }
+        for hole in region.holes() {
+            if contour_corner_left_out(hole, shadows, tolerance)? {
+                return Ok(true);
+            }
+        }
+    }
     Ok(false)
+}
+
+fn contour_corner_left_out(contour: &Contour, shadows: &[Region], tolerance: &Tolerance) -> Result<bool> {
+    let segs = contour.segments();
+    let n = segs.len();
+    if n == 0 {
+        return Ok(false);
+    }
+    let ccw = contour.signed_area()? > 0.0;
+    for i in 0..n {
+        let Some(prev) = segs.get((i + n - 1) % n).copied() else {
+            continue;
+        };
+        let Some(curr) = segs.get(i).copied() else {
+            continue;
+        };
+        let Some(turn) = material_turn(prev, curr, ccw) else {
+            continue;
+        };
+        // Reflex corners fillet. Only a turn into the material leaves a sharp offset corner.
+        if turn <= 1e-3 {
+            continue;
+        }
+        if !shadow_covers(curr.start(), shadows, tolerance)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn distance_to_loop(point: Point, contour: &Contour) -> f64 {
+    contour.segments().iter().map(|seg| seg.distance_to_point(point)).fold(f64::INFINITY, f64::min)
+}
+
+fn shadow_covers(point: Point, shadows: &[Region], tolerance: &Tolerance) -> Result<bool> {
+    for shadow in shadows {
+        if in_region(point, shadow, tolerance)? {
+            return Ok(true);
+        }
+        let mut nearest = distance_to_loop(point, shadow.outer());
+        for hole in shadow.holes() {
+            nearest = nearest.min(distance_to_loop(point, hole));
+        }
+        if nearest <= ORPHAN_CLEARANCE_MM {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Turn into the material at the join, in radians. Positive is a convex corner.
+fn material_turn(prev: Segment, curr: Segment, ccw: bool) -> Option<f64> {
+    let from = end_heading(prev)?;
+    let to = start_heading(curr)?;
+    let left = signed_turn(from, to);
+    Some(if ccw { left } else { -left })
+}
+
+fn signed_turn(from: f64, to: f64) -> f64 {
+    let mut delta = (to - from).rem_euclid(std::f64::consts::TAU);
+    if delta > std::f64::consts::PI {
+        delta -= std::f64::consts::TAU;
+    }
+    delta
+}
+
+fn start_heading(seg: Segment) -> Option<f64> {
+    segment_heading(seg, false)
+}
+
+fn end_heading(seg: Segment) -> Option<f64> {
+    segment_heading(seg, true)
+}
+
+fn segment_heading(seg: Segment, at_end: bool) -> Option<f64> {
+    match seg {
+        Segment::Line(line) => {
+            let dir = line.end() - line.start();
+            let len = dir.length();
+            if !len.is_finite() || len <= f64::EPSILON { None } else { Some(dir.angle()) }
+        }
+        Segment::Arc(arc) => {
+            let theta = if at_end { arc.end_angle() } else { arc.start_angle() };
+            let offset = if arc.sweep() >= 0.0 { std::f64::consts::FRAC_PI_2 } else { -std::f64::consts::FRAC_PI_2 };
+            Some(theta + offset)
+        }
+    }
 }
 
 fn subtract_all(sources: &[Region], cuts: &[Region], tolerance: &Tolerance) -> Result<Vec<Region>> {
@@ -1561,6 +1667,34 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn l_pocket_split_by_a_corner_island_is_covered() {
+        // The island opens the inner corner and the inset splits into two arms. A wall sample
+        // sat on the ray through a vertex the offset stored twice, so it looked reachable.
+        let tol = Tolerance::default();
+        let width: f64 = 22.343343428381743;
+        let height: f64 = 48.828696746338174;
+        let diameter = 4.750103730694528;
+        let fraction = 0.6464345802283563;
+        let shift_y = 0.08538001473554664;
+        let stepover = diameter * fraction;
+        let arm = width.min(height) * 0.45;
+        let outer = l_shape(width, height, arm, &tol);
+        let hole = circle(arm * 0.5, arm * 0.5 + shift_y * arm * 0.12, arm * 0.16);
+        assert_pocket_covers(&outer, &[hole], diameter, stepover).unwrap();
+    }
+
+    #[test]
+    fn rectangle_corner_leftover_is_covered() {
+        // Stepover is wider than the tool radius, so the sharp corner between two rectangular
+        // rings used to leave a cusp the tool does not reach. The leftover corner gets a pass.
+        let width: f64 = 61.145906674186016;
+        let height: f64 = 60.49276885871193;
+        let diameter = 1.0;
+        let fraction = 0.9096455307358682;
+        assert_pocket_covers(&rect(width, height), &[], diameter, diameter * fraction).unwrap();
     }
 
     proptest! {
