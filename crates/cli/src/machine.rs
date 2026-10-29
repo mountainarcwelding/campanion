@@ -439,7 +439,8 @@ mod tests {
         let extra = bad(parse_machine(&serde_json::json!({"model": "haas_st15y", "serial": 1})), "field");
         assert!(extra.contains("unknown machine field `serial`"), "{extra}");
 
-        let upgrade = parse_machine(&serde_json::json!({"model": "haas_ds30y", "live_tool_upgrade": true})).unwrap_or_else(|_| panic!("upgrade flag is accepted"));
+        let upgrade = parse_machine(&serde_json::json!({"model": "haas_ds30y", "live_tool_upgrade": true}))
+            .unwrap_or_else(|_| panic!("upgrade flag is accepted"));
         assert_eq!(upgrade.live_limit(), 6_000.0);
 
         let tail = bad(parse_machine(&serde_json::json!({"model": "haas_ds30y", "tailstock": true})), "tail");
