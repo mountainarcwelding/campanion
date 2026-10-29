@@ -263,7 +263,8 @@ Haas ST/DS lathe completion (ahead of items 11–13; checked against the Haas NG
   spindle centreline on all three) and the rpm limits are checked directly. X and Z travel are
   checked as the extent of the program, because the work offset is not known. Then secondary
   spindle brake and orient (M114/M115, M119), and live tooling on the sub-spindle once its C-axis
-  addressing is confirmed.
+  addressing is confirmed. (Not confirmed as of 2026-10-29: sub-spindle live tooling
+  stays rejected.)
 - **H4. Optional threading and cycles:** multi-start and taper threads, canned G76 and G71/G70
   output.
 
@@ -273,6 +274,35 @@ Haas ST/DS lathe completion (ahead of items 11–13; checked against the Haas NG
     inverse kinematics; inverse-time feed where the control needs it.
 13. **Collision checks** for holder/head against stock, fixture and part for 5-axis and
     mill-turn, plus a viewer machine simulation (kinematic model, not a full machine CAD).
+Items 11–13 staging (one small spec and PR each; every stage ships with randomized property tests
+for its geometry and kinematics, and byte-exact goldens for each post it touches):
+- **5A. Continuous toolpaths in the IR:** poses already carry a tool axis; a toolpath can be
+  marked continuous so the axis may change inside it (3+2 still rejects that). The verifier checks
+  the largest axis change per move. Three-axis and 3+2 output stays byte-identical.
+- **5B. Continuous kinematics:** per-point inverse kinematics along a path with solution
+  continuity (no branch flips mid-cut), rotary unwinding within limits, and a reachability error
+  naming the first unreachable point. Tests compare forward(inverse(pose)) with the pose on random
+  poses for each kinematics type.
+- **5C. Singularity and smoothing:** detect the near-B=0 (or A=0) cone where the primary rotary
+  swings wildly; hold the primary rotary or bound its rate within a tolerance angle; subdivide moves
+  so the chord and tool-axis deviation stay within tolerance.
+- **5D. Non-TCP posts:** the post solves the inverse kinematics and writes machine XYZ plus rotary
+  words with inverse-time feed (G93) for `linuxcnc_5ax` and `haas_umc`. The pivot offsets come from
+  the kinematics file.
+- **5E. TCP posts:** Haas G234 (TCPC) and G43.4-style output on `haas_umc`. On LinuxCNC this means
+  the TCP kinematics module (switchkins/`xyzbca-trsrn` class) and part-frame XYZ. Every code is
+  cited against the control's public documentation.
+- **5F. Tool-axis strategies:** lead/tilt relative to the surface normal on mesh finishing; toward
+  a point and toward a curve; swarf on ruled surfaces between two curves.
+- **5G. Collision checks:** tool, holder and head envelopes (capsules and cylinders) against stock,
+  fixture and part meshes along the swept path, for 5-axis and mill-turn; the error names the
+  first colliding move.
+- **5H. Machine simulation in the viewer:** a kinematic model (links as simple solids) driven by
+  the posted joint values, with scrub and collision highlighting. This is not full machine CAD.
+
+Releases: v0.9.0 after 5A–5D (continuous 5-axis, non-TCP), v0.9.1 after 5E–5F, v0.9.2 after
+5G–5H. A code-gen bug found along the way ships first as a patch release.
+
 14. **Mesh ops on tilted planes (follow-up):** surface, rough and waterline on a 3+2 plane;
     v0.8.0 supports 2D ops only.
 
@@ -369,3 +399,7 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-29: v0.8.7 is the lathe machine limit profiles (Haas ST-15Y with tailstock, ST-20Y with
   sub-spindle, DS-30Y) with an ST-20Y sub-spindle transfer golden, and spindle orient plus
   secondary spindle brake on haas_lathe.
+- 2026-10-29: Live-tool cap on the Haas ST/DS profiles is 6000 rpm. Sub-spindle C-axis
+  addressing under G14 is not confirmed, so sub-spindle live tooling stays rejected. Keeping the
+  main chuck clamped through the ST-20Y transfer is accepted. M11 items 11–13 (continuous 5-axis,
+  TCP posts, collision checks, machine sim) start now, staged 5A–5H for v0.9.0–v0.9.2.
