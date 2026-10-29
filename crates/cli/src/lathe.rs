@@ -19,7 +19,9 @@
 //! main-spindle toolpath on channel 0 that hands the part to the sub, optionally parting it off
 //! without a spindle stop. An `eject` stops the sub and unclamps it. A `tailstock` operation
 //! advances or retracts the tailstock: one event on channel 0, main spindle, no tool. While it
-//! is advanced, motion tips stay outside the quill cylinder. A `part` operation with `catch`
+//! is advanced, motion tips stay outside the quill cylinder. A `bar_feed` operation is the last
+//! one: one event on channel 0, main spindle, no tool, written after the home lines. A `part`
+//! operation with `catch`
 //! extends the parts catcher after the approach rapid and retracts it after the final retract,
 //! when the part fits the job's `parts_catcher` limits. Speed is stored on the
 //! turning binding, which names the operation's spindle and channel. Channel 1 uses head `lower`.
@@ -92,7 +94,7 @@ const DEFAULT_FLANK_DEG: f64 = 29.5;
 const DEFAULT_FIRST_DEPTH_CAP: f64 = 0.35;
 /// Thread cycles emit rapids and synchronised moves. The path still needs a positive cut feed.
 const THREAD_RECORD_FEED: f64 = 100.0;
-/// Eject, tailstock and a transfer with no cut still need a positive recorded feed. Nothing posts it.
+/// Eject, tailstock, bar feed and a transfer with no cut still need a positive recorded feed. Nothing posts it.
 const EVENT_ONLY_FEED: f64 = 1.0;
 /// Flank length, millimetres, used when a face, rough or finish path is checked for gouges.
 const TURN_EDGE_MM: f64 = 4.0;
@@ -400,6 +402,14 @@ enum Operation {
         /// `true` advances. `false` retracts.
         engage: bool,
     },
+    /// Bar feed at program end. No tool, channel 0, main spindle.
+    BarFeed {
+        name: String,
+        /// Part length plus cutoff and facing allowance. Job units, stored as millimetres.
+        part_length: Option<f64>,
+        /// Minimum clamping length. Job units, stored as millimetres.
+        min_clamp: Option<f64>,
+    },
 }
 
 /// Centre or quill diameter at the part face, and the clearance around that cylinder.
@@ -447,7 +457,8 @@ impl Operation {
             | Self::LiveMill { name, .. }
             | Self::Transfer { name, .. }
             | Self::Eject { name }
-            | Self::Tailstock { name, .. } => name,
+            | Self::Tailstock { name, .. }
+            | Self::BarFeed { name, .. } => name,
         }
     }
 
@@ -465,7 +476,7 @@ impl Operation {
             | Self::LiveSlot { spindle, .. }
             | Self::LiveFlat { spindle, .. }
             | Self::LiveMill { spindle, .. } => *spindle,
-            Self::Transfer { .. } | Self::Tailstock { .. } => WorkSpindle::Main,
+            Self::Transfer { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => WorkSpindle::Main,
             Self::Eject { .. } => WorkSpindle::Sub,
         }
     }
@@ -485,14 +496,14 @@ impl Operation {
             | Self::LiveFlat { tool_id, .. }
             | Self::LiveMill { tool_id, .. } => *tool_id,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id).unwrap_or(0),
-            Self::Eject { .. } | Self::Tailstock { .. } => 0,
+            Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => 0,
         }
     }
 
     /// Tool the job file must name. Eject, tailstock and a transfer with no part-off name none.
     fn checked_tool(&self) -> Option<u32> {
         match self {
-            Self::Eject { .. } | Self::Tailstock { .. } => None,
+            Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.tool_id),
             _ => Some(self.tool_id()),
         }
@@ -501,7 +512,7 @@ impl Operation {
     /// 0 or 1. A wait is written on both channels and reports 0 here.
     fn channel(&self) -> u8 {
         match self {
-            Self::Wait { .. } | Self::Transfer { .. } | Self::Eject { .. } | Self::Tailstock { .. } => 0,
+            Self::Wait { .. } | Self::Transfer { .. } | Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => 0,
             Self::Face { channel, .. }
             | Self::Rough { channel, .. }
             | Self::Finish { channel, .. }
@@ -534,7 +545,7 @@ impl Operation {
             | Self::LiveMill { feed, .. } => *feed,
             Self::Thread { .. } => THREAD_RECORD_FEED,
             Self::Transfer { feed, part_off, .. } => part_off.as_ref().map(|part| part.feed).unwrap_or(*feed),
-            Self::Eject { .. } | Self::Tailstock { .. } => EVENT_ONLY_FEED,
+            Self::Eject { .. } | Self::Tailstock { .. } | Self::BarFeed { .. } => EVENT_ONLY_FEED,
             Self::Wait { .. } => 1.0,
         }
     }
@@ -555,6 +566,7 @@ impl Operation {
             | Self::LiveMill { .. }
             | Self::Eject { .. }
             | Self::Tailstock { .. }
+            | Self::BarFeed { .. }
             | Self::Wait { .. } => None,
             Self::Transfer { part_off, .. } => part_off.as_ref().map(|part| part.speed),
         }
@@ -574,6 +586,10 @@ impl Operation {
 
     fn is_tailstock(&self) -> bool {
         matches!(self, Self::Tailstock { .. })
+    }
+
+    fn is_bar_feed(&self) -> bool {
+        matches!(self, Self::BarFeed { .. })
     }
 
     /// `part` with `catch` true. A nested transfer part-off never sets it.
@@ -779,6 +795,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     let clearance = non_negative(require(map, "clearance")?, "clearance")?;
     let sub_rpm = sub.as_ref().map(|block| block.max_rpm);
     let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
+    check_bar_feed(&operations, sub.is_some())?;
     check_tailstock_ops(&operations, tailstock.is_some(), parts_catcher.is_some())?;
     for operation in &operations {
         check_b_deg(operation, &head)?;
@@ -817,9 +834,9 @@ fn parse_parts_catcher_block(value: &Value) -> Result<PartsCatcherBlock, CliErro
     Ok(PartsCatcherBlock { max_diameter, max_length })
 }
 
-/// Advance and retract must alternate. A transfer or a sub-spindle operation while the tailstock
-/// is advanced is rejected. Ending the program still advanced is allowed. A `part` with `catch`
-/// needs the parts-catcher block, and it is rejected while the tailstock is still advanced.
+/// Advance and retract must alternate. A transfer, a sub-spindle operation or a bar feed while the
+/// tailstock is advanced is rejected. Ending the program still advanced is allowed. A `part` with
+/// `catch` needs the parts-catcher block, and it is rejected while the tailstock is still advanced.
 fn check_tailstock_ops(operations: &[Operation], has_block: bool, has_catcher: bool) -> Result<(), CliError> {
     let mut advanced = false;
     for operation in operations {
@@ -844,7 +861,7 @@ fn check_tailstock_ops(operations: &[Operation], has_block: bool, has_catcher: b
             advanced = *engage;
             continue;
         }
-        if advanced && (operation.is_transfer() || operation.spindle() == WorkSpindle::Sub) {
+        if advanced && (operation.is_transfer() || operation.spindle() == WorkSpindle::Sub || operation.is_bar_feed()) {
             return Err(CliError::invalid(format!("operation {}: retract the tailstock first", operation.name())));
         }
     }
@@ -1294,6 +1311,9 @@ fn parse_operation(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance
     if op_type == "tailstock" {
         return parse_tailstock(map, names);
     }
+    if op_type == "bar_feed" {
+        return parse_bar_feed(map, names);
+    }
     let allowed: &[&str] = match op_type {
         "face" => &["name", "type", "tool_id", "spindle", "channel", "step_z", "feed", "speed", "b_deg"],
         "rough" => &["name", "type", "tool_id", "spindle", "channel", "side", "depth_of_cut", "leave_x", "leave_z", "feed", "speed", "b_deg"],
@@ -1635,6 +1655,37 @@ fn parse_tailstock(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Re
         _ => return Err(CliError::invalid(format!("operation {name}: tailstock action must be advance or retract"))),
     };
     Ok(Operation::Tailstock { name, engage })
+}
+
+fn parse_bar_feed(map: &Map<String, Value>, names: &mut BTreeSet<String>) -> Result<Operation, CliError> {
+    check_keys(map, &["name", "type", "part_length", "min_clamp"], "operation")?;
+    let name = required_name(as_str(require(map, "name")?, "operation name")?, "operation name")?;
+    if !names.insert(name.clone()) {
+        return Err(CliError::invalid(format!("duplicate operation name `{name}`")));
+    }
+    // Lathe jobs are millimetres, so the file number is already the IR length.
+    let part_length = optional_positive(map, "part_length")?;
+    let min_clamp = optional_positive(map, "min_clamp")?;
+    Ok(Operation::BarFeed { name, part_length, min_clamp })
+}
+
+/// A bar feed is the last operation, after a `part`, and not on a job that has a sub spindle.
+fn check_bar_feed(operations: &[Operation], has_sub: bool) -> Result<(), CliError> {
+    let Some(index) = operations.iter().position(|operation| operation.is_bar_feed()) else {
+        return Ok(());
+    };
+    let name = operations[index].name();
+    if index + 1 != operations.len() {
+        return Err(CliError::invalid(format!("operation {name}: bar_feed must be the last operation")));
+    }
+    let has_part = operations[..index].iter().any(|operation| matches!(operation, Operation::Part { .. }));
+    if !has_part {
+        return Err(CliError::invalid(format!("operation {name}: bar_feed needs a part operation before it")));
+    }
+    if has_sub {
+        return Err(CliError::invalid(format!("operation {name}: bar_feed is not supported with a \"sub\" block")));
+    }
+    Ok(())
 }
 
 fn parse_drill(map: &Map<String, Value>, name: String, spindle: WorkSpindle, tool_id: u32, channel: u8) -> Result<Operation, CliError> {
@@ -2179,6 +2230,8 @@ fn build_document(
             let (path, engage) = tailstock_toolpath(operation)?;
             tailstock_advanced = engage;
             path
+        } else if operation.is_bar_feed() {
+            bar_feed_toolpath(operation)?
         } else {
             let turned = turn_operation(job, active_profile, operation)?;
             if let Some(step) = sample_step
@@ -2227,7 +2280,7 @@ fn build_document(
 }
 
 /// Face is always outside. Rough and finish use the operation side. Thread, groove, part, drill,
-/// transfer, eject, tailstock and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
+/// transfer, eject, tailstock, bar feed and live cycles are skipped: those tools are meant to enter the profile, or they are not inserts.
 fn gouge_side(operation: &Operation) -> Option<Side> {
     match operation {
         Operation::Face { .. } => Some(Side::Outside),
@@ -2243,6 +2296,7 @@ fn gouge_side(operation: &Operation) -> Option<Side> {
         | Operation::Transfer { .. }
         | Operation::Eject { .. }
         | Operation::Tailstock { .. }
+        | Operation::BarFeed { .. }
         | Operation::Wait { .. } => None,
     }
 }
@@ -2365,7 +2419,7 @@ fn mount_insert(job: &LatheJob, tool_id: u32, insert: &Insert) -> Result<Insert,
 fn mount_angle(operation: &Operation, tool_id: u32) -> Option<f64> {
     let uses = match operation {
         Operation::Transfer { part_off, .. } => part_off.as_ref().is_some_and(|part| part.tool_id == tool_id),
-        Operation::Wait { .. } | Operation::Eject { .. } | Operation::Tailstock { .. } => false,
+        Operation::Wait { .. } | Operation::Eject { .. } | Operation::Tailstock { .. } | Operation::BarFeed { .. } => false,
         _ => operation.checked_tool() == Some(tool_id),
     };
     if uses { Some(operation.b_deg().unwrap_or(0.0)) } else { None }
@@ -2496,6 +2550,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
         || operation.is_transfer()
         || operation.is_eject()
         || operation.is_tailstock()
+        || operation.is_bar_feed()
     {
         return Err(CliError::run(format!("internal: operation {} has no turning path", operation.name())));
     }
@@ -2650,6 +2705,7 @@ fn turn_operation(job: &LatheJob, profile: &TurnProfile, operation: &Operation) 
         | Operation::Transfer { .. }
         | Operation::Eject { .. }
         | Operation::Tailstock { .. }
+        | Operation::BarFeed { .. }
         | Operation::Wait { .. } => Err(CliError::run(format!("internal: operation {} has no turning path", operation.name()))),
     }
 }
@@ -2765,6 +2821,15 @@ fn stock_outer_diameter(stock: &Stock) -> f64 {
         Stock::Bar { diameter, .. } => diameter,
         Stock::Tube { outer, .. } => outer,
     }
+}
+
+fn bar_feed_toolpath(operation: &Operation) -> Result<ClPath, CliError> {
+    let Operation::BarFeed { name, part_length, min_clamp } = operation else {
+        return Err(CliError::run(format!("internal: operation {} is not a bar feed", operation.name())));
+    };
+    let blocks = vec![ClBlock::Event(Event::BarFeed { part_length: *part_length, min_clamp: *min_clamp })];
+    let feeds = Feeds::try_new(EVENT_ONLY_FEED, None, None, None, None)?;
+    Ok(ClPath::try_new(Some(name.clone()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks)?)
 }
 
 fn tailstock_toolpath(operation: &Operation) -> Result<(ClPath, bool), CliError> {
@@ -3626,5 +3691,84 @@ mod tests {
         }
         let (doc, _) = unwrap_ok(super::build_document(Path::new("job.lathe.json"), &plain, &cylinder(15.0, 30.0), None), "uncatched part");
         assert!(catcher_events(doc.program().toolpaths().last().expect("part")).is_empty());
+    }
+
+    fn bar_job(extra: &str, operations: &str) -> String {
+        format!(
+            r#"{{
+            "format": "campanion-lathe/1",
+            "source": {{ "path": "shaft.dxf" }},
+            "units": "mm",
+            "stock": {{ "kind": "bar", "diameter": 40, "length": 40, "front_allowance": 1 }},
+            "spindle": {{ "max_rpm": 3000 }},
+            {extra}
+            "tools": [{{ "id": 1, "station": 1, "shape": "groove", "width": 3, "nose_radius": 0.2, "orientation_deg": 90, "hand": "neutral", "tip": "centre" }}],
+            "operations": [{operations}],
+            "clearance": 2
+        }}"#
+        )
+    }
+
+    const PART: &str = r#"{ "name": "cutoff", "type": "part", "tool_id": 1, "z": -10, "clearance": 1, "feed": 60, "speed": { "rpm": 400 } }"#;
+    const FEED: &str = r#"{ "name": "feed", "type": "bar_feed" }"#;
+
+    #[test]
+    fn bar_feed_must_be_last_after_a_part_and_not_with_a_sub_or_an_advanced_tailstock() {
+        let later = bar_job("", &format!("{PART}, {FEED}, {{ \"name\": \"later\", \"type\": \"tailstock\", \"action\": \"advance\" }}"));
+        let not_last = parse_err(&later);
+        assert!(not_last.contains("operation feed: bar_feed must be the last operation"), "{not_last}");
+
+        let twice = bar_job("", &format!(r#"{PART}, {FEED}, {{ "name": "again", "type": "bar_feed" }}"#));
+        let two = parse_err(&twice);
+        assert!(two.contains("operation feed: bar_feed must be the last operation"), "{two}");
+        assert!(!two.contains("operation again"), "{two}");
+
+        let alone = parse_err(&bar_job("", FEED));
+        assert!(alone.contains("operation feed: bar_feed needs a part operation before it"), "{alone}");
+
+        let handoff = bar_job(
+            r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } },"#,
+            r#"{ "name": "handoff", "type": "transfer", "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200,
+                "part_off": { "tool_id": 1, "z": -10, "clearance": 1, "feed": 60, "speed": { "rpm": 400 } } },
+              { "name": "feed", "type": "bar_feed" }"#,
+        );
+        let nested = parse_err(&handoff);
+        assert!(nested.contains("operation feed: bar_feed needs a part operation before it"), "{nested}");
+
+        let with_sub = bar_job(r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } },"#, &format!("{PART}, {FEED}"));
+        let sub = parse_err(&with_sub);
+        assert!(sub.contains("operation feed: bar_feed is not supported with a \"sub\" block"), "{sub}");
+
+        let advanced = bar_job(
+            r#""tailstock": { "diameter": 12 },"#,
+            &format!(r#"{PART}, {{ "name": "in", "type": "tailstock", "action": "advance" }}, {FEED}"#),
+        );
+        let quill = parse_err(&advanced);
+        assert!(quill.contains("operation feed: retract the tailstock first"), "{quill}");
+
+        let zero = parse_err(&bar_job("", &format!(r#"{PART}, {{ "name": "feed", "type": "bar_feed", "part_length": 0 }}"#)));
+        assert!(zero.contains("part_length must be positive"), "{zero}");
+        let negative = parse_err(&bar_job("", &format!(r#"{PART}, {{ "name": "feed", "type": "bar_feed", "min_clamp": -1 }}"#)));
+        assert!(negative.contains("min_clamp must be positive"), "{negative}");
+        let unknown = parse_err(&bar_job("", &format!(r#"{PART}, {{ "name": "feed", "type": "bar_feed", "push": 1 }}"#)));
+        assert!(unknown.contains("unknown operation field `push`"), "{unknown}");
+    }
+
+    #[test]
+    fn bar_feed_stores_millimetre_overrides_on_one_event() {
+        let body = bar_job("", &format!(r#"{PART}, {{ "name": "feed", "type": "bar_feed", "part_length": 30, "min_clamp": 12 }}"#));
+        let job = unwrap_ok(super::parse_job(&body), "bar feed");
+        let (doc, gouges) = unwrap_ok(super::build_document(Path::new("job.lathe.json"), &job, &cylinder(15.0, 30.0), None), "document");
+        assert!(gouges.is_empty());
+        let path = doc.program().toolpaths().last().expect("feed path");
+        assert_eq!(path.tool_id(), None);
+        let [ClBlock::Event(Event::BarFeed { part_length: Some(length), min_clamp: Some(clamp) })] = path.blocks() else {
+            panic!("feed path is not one bar-feed event: {:?}", path.blocks());
+        };
+        assert!(close(*length, 30.0) && close(*clamp, 12.0), "length {length} clamp {clamp}");
+        let binding = doc.program().turning().expect("turning").bindings().last().expect("binding");
+        assert_eq!(binding.spindle(), "main");
+        assert_eq!(binding.channel(), 0);
+        assert_eq!(binding.toolpath() as usize, doc.program().toolpaths().len() - 1);
     }
 }

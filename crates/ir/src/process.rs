@@ -334,7 +334,9 @@ pub enum CoolantMode {
 /// `(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold
 /// force and travel are machine settings; the event carries no position.
 /// [`Event::PartsCatcher`] moves the parts catcher into position to catch a part, or out of the
-/// work envelope.
+/// work envelope. [`Event::BarFeed`] commands a bar feeder. Optional lengths are one-line
+/// overrides in millimetres: part length plus cutoff and facing allowance, and minimum clamping
+/// length.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
@@ -492,6 +494,16 @@ pub enum Event {
         /// `true` moves the catcher in to catch a part. `false` moves it out of the work envelope.
         extend: bool,
     },
+    /// Bar feed (Haas G105) with optional one-line overrides in millimetres: part length plus
+    /// cutoff and facing allowance, and minimum clamping length.
+    BarFeed {
+        /// Part length plus cutoff and facing allowance, millimetres.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_length: Option<f64>,
+        /// Minimum clamping length, millimetres.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_clamp: Option<f64>,
+    },
 }
 
 impl Event {
@@ -529,6 +541,14 @@ impl Event {
                 }
             }
             Self::LiveToolOff | Self::FaceInterpolation { .. } | Self::Tailstock { .. } | Self::PartsCatcher { .. } => {}
+            Self::BarFeed { part_length, min_clamp } => {
+                if let Some(length) = part_length {
+                    positive(*length, "bar feed part length")?;
+                }
+                if let Some(clamp) = min_clamp {
+                    positive(*clamp, "bar feed minimum clamping length")?;
+                }
+            }
             Self::CylinderInterpolation { radius } => {
                 if let Some(radius) = radius {
                     positive(*radius, "cylinder interpolation radius")?;

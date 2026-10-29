@@ -743,7 +743,7 @@
       ]
     },
     "Event": {
-      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.\n[`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]\nhand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.\n[`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is\n`(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold\nforce and travel are machine settings; the event carries no position.\n[`Event::PartsCatcher`] moves the parts catcher into position to catch a part, or out of the\nwork envelope.",
+      "description": "One non-motion step.\n\nIn a turning program [`Event::CAxis`] engages a spindle as a positioning C axis and\n[`Event::SpindleBrake`] clamps that spindle. [`Event::LiveToolOn`] starts the driven tool.\n[`Event::FaceInterpolation`] and [`Event::CylinderInterpolation`] select a Cartesian face frame\nor an unrolled cylinder frame; both require the C axis to be engaged when a post writes them.\n`Pose::rotary` on a motion in that program is the C angle in degrees: finite, absolute value\nat most 99999. A live-tool event does not require a turning setup.\n[`Event::ChuckClamp`], [`Event::SpindleSync`], [`Event::SpindleRun`] and [`Event::SpindleMove`]\nhand a part between spindles. `SpindleRun` runs a spindle that is not the active binding's spindle.\n[`Event::HeadIndex`] sets the named head's B angle. The tool axis of the moves that follow is\n`(cos b_deg, 0, sin b_deg)`. [`Event::Tailstock`] advances or retracts the tailstock. Hold\nforce and travel are machine settings; the event carries no position.\n[`Event::PartsCatcher`] moves the parts catcher into position to catch a part, or out of the\nwork envelope. [`Event::BarFeed`] commands a bar feeder. Optional lengths are one-line\noverrides in millimetres: part length plus cutoff and facing allowance, and minimum clamping\nlength.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -1258,6 +1258,36 @@
           "required": [
             "type",
             "extend"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bar feed (Haas G105) with optional one-line overrides in millimetres: part length plus\ncutoff and facing allowance, and minimum clamping length.",
+          "properties": {
+            "min_clamp": {
+              "description": "Minimum clamping length, millimetres.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "part_length": {
+              "description": "Part length plus cutoff and facing allowance, millimetres.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "bar_feed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
           ],
           "type": "object"
         }
