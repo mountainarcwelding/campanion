@@ -1543,3 +1543,94 @@ fn transfer_posts_haas_with_part_off_phase_sub_face_and_eject() -> Result<(), St
     }
     Ok(())
 }
+
+#[test]
+fn shaft_with_haas_st20y_matches_the_unprofiled_program() -> Result<(), String> {
+    let root = workspace_root()?;
+    let source = root.join("examples/shaft.lathe.json");
+    let original = std::fs::read_to_string(&source).map_err(|err| err.to_string())?;
+    let plain_out = temp_path("campanion-lathe-shaft-plain-haas.nc");
+    let _ = std::fs::remove_file(&plain_out);
+    run_ok(&["lathe", &path_arg(&source)?, "-o", &path_arg(&plain_out)?, "--post", "haas_lathe"])?;
+    let plain = std::fs::read(&plain_out).map_err(|err| err.to_string())?;
+
+    let mut value: serde_json::Value = serde_json::from_str(&original).map_err(|err| err.to_string())?;
+    value["machine"] = serde_json::json!({"model": "haas_st20y"});
+    let dxf = std::fs::read(root.join("examples/shaft.dxf")).map_err(|err| err.to_string())?;
+    let dir = temp_path("campanion-lathe-shaft-st20y");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    std::fs::write(dir.join("shaft.dxf"), dxf).map_err(|err| err.to_string())?;
+    let stamped = dir.join("shaft.lathe.json");
+    std::fs::write(&stamped, serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())?).map_err(|err| err.to_string())?;
+    let profiled = post_lathe(&stamped, "campanion-lathe-shaft-st20y.nc")?;
+    if plain != profiled.into_bytes() {
+        return Err("haas_st20y shaft output differs from the job with no machine block".into());
+    }
+
+    value["spindle"]["max_rpm"] = serde_json::json!(4500);
+    let fast = dir.join("fast.lathe.json");
+    std::fs::write(&fast, serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())?).map_err(|err| err.to_string())?;
+    let out = fast.with_extension("nc");
+    let _ = std::fs::remove_file(&out);
+    let output = campanion(&["lathe", &path_arg(&fast)?, "-o", &path_arg(&out)?, "--post", "haas_lathe"])?;
+    let stderr = text(&output.stderr)?;
+    if output.status.code() != Some(1) {
+        return Err(format!("exit {:?}, expected 1\n{stderr}", output.status.code()));
+    }
+    let needle = "machine haas_st20y: main spindle max_rpm 4500 exceeds 4000";
+    if !stderr.contains(needle) {
+        return Err(format!("stderr missing {needle}: {stderr}"));
+    }
+    Ok(())
+}
+
+fn post_example(name: &str) -> Result<String, String> {
+    let root = workspace_root()?;
+    let job = root.join("examples").join(name);
+    post_lathe(&job, &format!("{name}.nc"))
+}
+
+/// Sync before the sub clamps, the part-off while both chucks are closed, then the sub retract.
+fn assert_transfer_stays_clamped_through_the_cutoff(posted: &str) -> Result<(), String> {
+    let handoff = posted.find("(toolpath handoff)").ok_or_else(|| format!("handoff is missing\n{posted}"))?;
+    let sync = posted[handoff..].find("G199").ok_or_else(|| format!("sync is missing\n{posted}"))? + handoff;
+    let clamp = posted[sync..].find("M110").ok_or_else(|| format!("sub clamp is missing\n{posted}"))? + sync;
+    let cut = posted[clamp..].find("G1 X-0.5").ok_or_else(|| format!("part-off is missing\n{posted}"))? + clamp;
+    let retract = posted[cut..].find("G00 B").ok_or_else(|| format!("sub retract is missing\n{posted}"))? + cut;
+    if posted[handoff..cut].split_whitespace().any(|word| word == "M11") {
+        return Err(format!("main chuck releases before the part-off\n{}", &posted[handoff..cut]));
+    }
+    if !(sync < clamp && clamp < cut && cut < retract) {
+        return Err(format!("transfer order is sync {sync} clamp {clamp} cut {cut} retract {retract}\n{posted}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn st15y_tailstock_posts_haas() -> Result<(), String> {
+    let posted = post_example("st15y_tailstock.lathe.json")?;
+    assert_golden("st15y_tailstock.haas_lathe.nc", &posted)?;
+    assert_in_order(&posted, &["M21", "M22", "M30"])?;
+    Ok(())
+}
+
+#[test]
+fn st20y_sub_posts_haas_and_keeps_both_chucks_clamped_through_cutoff() -> Result<(), String> {
+    let posted = post_example("st20y_sub.lathe.json")?;
+    assert_golden("st20y_sub.haas_lathe.nc", &posted)?;
+    assert_transfer_stays_clamped_through_the_cutoff(&posted)?;
+    assert_in_order(&posted, &["G199 R90", "M110", "G1 X-0.5", "G00 B5", "G198", "G14", "M30"])?;
+    Ok(())
+}
+
+#[test]
+fn ds30y_posts_haas() -> Result<(), String> {
+    let posted = post_example("ds30y.lathe.json")?;
+    assert_golden("ds30y.haas_lathe.nc", &posted)?;
+    assert_transfer_stays_clamped_through_the_cutoff(&posted)?;
+    if !posted.contains("G50 S4500") || !posted.contains("G97 S4000") {
+        return Err(format!("ds30y speeds are missing\n{posted}"));
+    }
+    Ok(())
+}

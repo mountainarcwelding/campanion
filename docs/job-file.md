@@ -650,6 +650,7 @@ Direct spindle speed is revolutions per minute.
 | `units` | yes | Only `mm`. |
 | `stock` | yes | Bar or tube, plus `front_allowance`. |
 | `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. Optional `c_axis` (boolean, default false). `true` builds spindle `main` with C axis id 0. |
+| `machine` | no | Haas limit profile. See [Machine](#machine). Without this block none of those limits are checked. |
 | `sub` | no | Second spindle. `max_rpm` (positive, at most 100000), `source` (the same shape as the job `source`), and `back_allowance` (`>= 0`, default 0). Adds IR spindle `sub` with no C axis, work zero 0 and `reversed` false. |
 | `tailstock` | no | Centre or quill at the finished face. `diameter` (positive) and `clearance` (`>= 0`, default 1). Lengths are millimetres. Not allowed together with `sub`. |
 | `steady_rest` | no | Jaw centre on the part. `z` (finite, `< 0`), `width` (positive) and `clearance` (`>= 0`, default 1). Lengths are millimetres. Not allowed together with `sub`. |
@@ -668,6 +669,53 @@ Direct spindle speed is revolutions per minute.
 - `.step` and `.stp` — [`TurnProfile::from_section_dxf`](../crates/turn/src/section.rs). `solidcraft-cli` sections the solid through world Z after `--up-axis` (`z`, `y`, or `auto`; default `z`). `auto` turns Y up onto Z when the exporter header says Y. The part must be turned about Z, with the finished front face where you want lathe Z 0, because model Z is lathe Z. Optional `body` names the solid and is required when the file lists more than one. The importer keeps one half (the +X half when both agree, otherwise the half that still joins from the axis back to the axis), which is how a seam on the section plane is avoided. A through-bore is not supported yet.
 
 Drawing X is Z and drawing Y is the radius for `.dxf` and `.svg`. Z = 0 is the finished front face and the part extends toward −Z. A closed drawing is opened by dropping the spindle-axis run.
+
+### Machine
+
+`machine` is optional. Without it, none of the checks in this section run, and a job that does not name a machine posts as before. The block names one Haas model and the options fitted on that machine. Unknown fields are rejected. Lengths below are millimetres. Speeds are revolutions per minute.
+
+```json
+"machine": { "model": "haas_st20y", "live_tool_upgrade": false, "sub_spindle": true, "tailstock": false }
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model` | yes | `haas_st15y`, `haas_st20y` or `haas_ds30y`. Anything else, including a missing model, is `machine.model must be haas_st15y, haas_st20y or haas_ds30y`. |
+| `live_tool_upgrade` | no | Boolean, default false. `true` raises the live-tool cap from 4000 rpm to 6000 rpm on the ST-15Y and ST-20Y. On the DS-30Y, `true` is `machine.live_tool_upgrade: haas_ds30y has no 6000 rpm live tool option`. |
+| `sub_spindle` | no | Boolean, default false. On `haas_ds30y` the sub-spindle is standard equipment, so the default is true. |
+| `tailstock` | no | Boolean, default false. `true` on `haas_ds30y` is rejected. |
+
+On the ST-15Y and the ST-20Y the sub-spindle option and the tailstock option cannot both be selected: `haas_st20y: the sub-spindle option is not compatible with the tailstock option (Haas ST-20Y spec page)`, and the same sentence with `haas_st15y` and `Haas ST-15Y spec page`.
+
+These profiles are the standard configuration; optional equipment may change the machine's specifications (Haas). The 6000 rpm live-tool figure for the ST-15Y and ST-20Y is the ST Y-axis flyer, <https://www.haascnc.com/content/dam/haascnc/assets/seriesflyers/21.07_st_yaxis_4_pager_39-20004b.pdf>.
+
+| | [ST-15Y](https://www.haascnc.com/machines/lathes/st/models/y-axis/st-15y.html) | [ST-20Y](https://www.haascnc.com/machines/lathes/st/models/y-axis/st-20y.html) | [DS-30Y](https://www.haascnc.com/machines/lathes/dual-spindle/models/ds-30y.html) |
+| --- | --- | --- | --- |
+| X travel | 200 mm | 213 mm | 239 mm |
+| Y travel | −51 mm to 51 mm | −51 mm to 51 mm | −51 mm to 51 mm |
+| Z travel | 406 mm | 572 mm | 826 mm |
+| Main spindle | 4000 rpm | 4000 rpm | 4500 rpm |
+| Main C axis | 60 rpm (not checked) | 60 rpm (not checked) | 60 rpm (not checked) |
+| Sub-spindle | optional, 6000 rpm, sync 4800 rpm | optional, 6000 rpm, sync 4800 rpm | standard, 4000 rpm, sync 4000 rpm |
+| Live tool | 4000 rpm, or 6000 rpm with `live_tool_upgrade` | 4000 rpm, or 6000 rpm with `live_tool_upgrade` | 4000 rpm, no upgrade |
+| Tailstock | optional, not with the sub-spindle | optional, not with the sub-spindle | none (the B axis is the secondary spindle) |
+
+The main C-axis speed is recorded on the profile and is not checked.
+
+When `machine` is present, a limit failure is `machine MODEL: …` inside `invalid input`, except the option errors quoted above. A value equal to the limit passes. A value just above it fails.
+
+- `spindle.max_rpm` above the main-spindle cap: `machine MODEL: main spindle max_rpm R exceeds L`.
+- `sub.max_rpm` above the sub-spindle cap, when `machine.sub_spindle` is true: `machine MODEL: sub spindle max_rpm R exceeds L`.
+- A `transfer` operation's `rpm` above the synchronized cap, when the sub-spindle is fitted: `machine MODEL: operation NAME: synchronized rpm R exceeds L`. That field is the handoff speed, not the nested part-off speed.
+- `head.y_axis` true with `y_min` below the profile or `y_max` above it: `machine MODEL: head Y travel [A, B] exceeds [-51, 51]`. The existing per-move check against the head's own travel still covers each Y move.
+- A live operation `rpm` above the live-tool cap: `machine MODEL: operation NAME: live tool rpm R exceeds L`. A live tool `max_rpm` above that cap: `machine MODEL: tool ID: live tool max_rpm R exceeds L`.
+- A `tailstock` block, or `"tailstock": true`, on `haas_ds30y`: `machine haas_ds30y: haas_ds30y has no tailstock (the B axis is the secondary spindle)`.
+- A sub-spindle, transfer or eject operation while `machine.sub_spindle` is false: `operation NAME: haas_st15y has no sub-spindle (machine.sub_spindle is false)` (the model id is the one the job named).
+- A `tailstock` operation while `machine.tailstock` is false on a model that offers the option: `operation NAME: machine has no tailstock (machine.tailstock is false)`.
+
+X and Z are an extent check only, because the work offset is not known. After every toolpath is built, main-frame motion tips are measured and sub-spindle operations are left out. Tip X in the cutter-location path is a radius, so the X extent is `max tip X − min tip X` in that radius, not a diameter. The Z extent is `max Z − min Z` on those same main-frame tips. An extent equal to the travel passes. Just above it fails, and the numbers are printed to three decimal places: `machine MODEL: program X extent E exceeds the X travel L` and `machine MODEL: program Z extent E exceeds the Z travel L`.
+
+`examples/st15y_tailstock.lathe.json` is the shaft with the ST-15Y tailstock option. `examples/st20y_sub.lathe.json` faces and finishes on an ST-20Y, synchronizes a transfer to the sub at the 4800 rpm sync limit, parts the bar off with both chucks clamped, then faces the sub. `examples/ds30y.lathe.json` is that handoff on a DS-30Y. `--post haas_lathe` writes each of them.
 
 ### Sub-spindle
 
