@@ -13,9 +13,12 @@
 //! engrave the tool rapids at clearance, rapids down to the job retract height, and then feeds
 //! the plunge, ramp or helix. A ramp or helix is planned from that retract height when it is
 //! above the stock, so the first descent covers the whole drop and stays at or below the entry
-//! angle. Later passes start at the previous level. The ramp follows the compensated contour.
-//! A profile ramp that would cross a tab below the bridge lifts across the bridge instead of
-//! descending through it. Those link rapids stay at or above the retract height. After linking, the
+//! angle. On a profile, engrave or pocket wall, later passes start at the previous level and
+//! the ramp follows the compensated contour. A profile ramp that would cross a tab below the
+//! bridge lifts across the bridge instead of descending through it. A pocket area pass enters
+//! from the retract height at every depth, and feeds from one ring to the next at the level
+//! when the link stays inside the pocket. A ramp longer than that ring, or a helix that leaves
+//! the pocket, is an error. Those link rapids stay at or above the retract height. After linking, the
 //! operation's process timing is applied: process on and the pierce dwell at the pierce height
 //! before the plunge, and process off and the post delay before the rapid retract to clearance.
 //! The first toolpath, and each later toolpath whose tool id differs from the previous one, starts
@@ -742,6 +745,7 @@ fn pocket_toolpath(cut: &Cut<'_>, region: &Region, z: f64, stepover: f64, allowa
         .allowance(allowance)
         .z(z)
         .retract_z(retract_z(cut.job))
+        .entry(cut.op.entry())
         .tolerance(cut.tolerance)
         .generate(region)
         .map_err(|err| op_err(cut.op, err))?;
@@ -907,9 +911,11 @@ fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> R
     // planned from the stock surface would be posted from that higher Z over a length sized
     // for the stock step, and the first descent would be steeper than angle_deg. Size the
     // first descent for the whole drop. Later passes already start at the previous level.
-    // A pocket area pass does not come through here: it plunges from the retract height.
-    // A pocket wall finish does, and uses the same entry. Tabs do not change that length:
-    // a ramp that meets a bridge lifts across it instead of cutting a steeper slot through it.
+    // A pocket area pass does not come through here. `pocket_toolpath` applies this entry at
+    // each depth, sized from the retract height for the whole drop to that level. A pocket
+    // wall finish does come through here, and uses the same entry. Tabs do not change that
+    // length: a ramp that meets a bridge lifts across it instead of cutting a steeper slot
+    // through it.
     if matches!(cut.op.entry(), DepthEntry::Ramp { .. } | DepthEntry::Helix { .. }) {
         let retract = retract_z(cut.job);
         if retract > 0.0 {

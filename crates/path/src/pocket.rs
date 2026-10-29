@@ -14,7 +14,11 @@
 //! the stack on a large off-grid disk. The ring count is capped by the region span divided by half
 //! a stepover. Rings are emitted outside-in ([`RingOrder::OutsideIn`]).
 //! Two rings are joined by a straight cut when that segment stays inside the region the tool
-//! centre may enter. Otherwise the tool retracts, rapids, and plunges.
+//! centre may enter. Otherwise the tool retracts and enters the next ring again. A plunge entry
+//! re-enters with a plunge. A ramp follows that ring for one circuit, sized for the full drop
+//! from the retract height, and fails when the circuit is shorter than the ramp. A helix is a
+//! circle about the ring's bounding-box centre and fails when the circle or the feed onto the
+//! ring leaves the pocket. Neither ramp nor helix is replaced by a plunge.
 //!
 //! [`PocketStrategy::Zigzag`] fills the inset region with parallel lines at `angle` radians from
 //! +X, spaced by the stepover and clipped to that region. Successive lines alternate direction.
@@ -27,13 +31,13 @@
 //! return [`crate::PathError::NotSupported`].
 
 use campanion_geom::{
-    Arc, BooleanOp, BoundingBox, Containment, Contour, Point, Region, Segment, Tolerance, Vec2, boolean_regions, cmp_float_key, offset_region,
+    Arc, BooleanOp, BoundingBox, Containment, Contour, Line, Point, Region, Segment, Tolerance, Vec2, boolean_regions, cmp_float_key, offset_region,
 };
 
 use crate::check::{self, finite, non_negative, positive};
 use crate::tool::Tool;
 use crate::toolpath::{CutKind, Move, ProcessEvent, Toolpath};
-use crate::{PathError, Result};
+use crate::{DepthEntry, DepthPlan, PathError, Result, depth_toolpath};
 
 /// Upper bound on offset levels and on zigzag lines. A hostile stepover fails instead of looping.
 const MAX_PASSES: usize = 1024;
@@ -78,6 +82,7 @@ pub struct PocketOp {
     z: f64,
     retract_z: f64,
     tolerance: Tolerance,
+    entry: DepthEntry,
 }
 
 impl PocketOp {
@@ -94,7 +99,19 @@ impl PocketOp {
             z: 0.0,
             retract_z: 0.0,
             tolerance: Tolerance::default(),
+            entry: DepthEntry::Plunge,
         }
+    }
+
+    /// How the tool enters each depth, and any later ring that cannot be reached at depth.
+    ///
+    /// [`DepthEntry::Plunge`] feeds straight down. A ramp follows that ring for one circuit
+    /// and fails when the drop from the retract height needs a longer path. A helix circles
+    /// the ring's bounding-box centre and fails when that circle or the feed onto the ring
+    /// leaves the pocket.
+    pub fn entry(mut self, entry: DepthEntry) -> Self {
+        self.entry = entry;
+        self
     }
 
     /// Extra stock left on walls and islands during roughing, in millimetres.
@@ -206,7 +223,7 @@ impl PocketOp {
         }
 
         let mut pen = Pen::new(z, retract_z);
-        emit(&mut pen, &pieces, &clearance, &self.tolerance)?;
+        emit(&mut pen, &pieces, &clearance, &self.tolerance, self.entry)?;
         Ok(Pocket { toolpath: Toolpath::new(pen.moves)?, rings, ring_order: RingOrder::OutsideIn })
     }
 }
@@ -255,7 +272,14 @@ impl Pen {
     }
 }
 
-fn emit(pen: &mut Pen, pieces: &[CutPiece], clearance: &[Region], tolerance: &Tolerance) -> Result<()> {
+fn emit(pen: &mut Pen, pieces: &[CutPiece], clearance: &[Region], tolerance: &Tolerance, entry: DepthEntry) -> Result<()> {
+    if matches!(entry, DepthEntry::Plunge) {
+        return emit_plunge(pen, pieces, clearance, tolerance);
+    }
+    emit_shaped(pen, pieces, clearance, tolerance, entry)
+}
+
+fn emit_plunge(pen: &mut Pen, pieces: &[CutPiece], clearance: &[Region], tolerance: &Tolerance) -> Result<()> {
     let Some(first) = pieces.first() else {
         return Err(invalid("pocket produced no toolpath"));
     };
@@ -268,6 +292,24 @@ fn emit(pen: &mut Pen, pieces: &[CutPiece], clearance: &[Region], tolerance: &To
         link(pen, piece_start(piece)?, clearance, tolerance)?;
         emit_body(pen, piece)?;
     }
+    finish_pen(pen)
+}
+
+fn emit_shaped(pen: &mut Pen, pieces: &[CutPiece], clearance: &[Region], tolerance: &Tolerance, entry: DepthEntry) -> Result<()> {
+    if let DepthEntry::Ramp { max_angle } = entry {
+        ramp_slope(max_angle)?;
+    }
+    let Some(first) = pieces.first() else {
+        return Err(invalid("pocket produced no toolpath"));
+    };
+    emit_entry(pen, first, clearance, tolerance, entry, false)?;
+    for piece in pieces.iter().skip(1) {
+        link_shaped(pen, piece, clearance, tolerance, entry)?;
+    }
+    finish_pen(pen)
+}
+
+fn finish_pen(pen: &mut Pen) -> Result<()> {
     check::push(&mut pen.moves, Move::Event(ProcessEvent::Off))?;
     if (pen.z_now - pen.retract_z).abs() > 1e-12 {
         let xy = pen.xy.ok_or_else(|| invalid("toolpath has no position"))?;
@@ -348,6 +390,369 @@ fn link(pen: &mut Pen, to: Point, clearance: &[Region], tolerance: &Tolerance) -
     }
     rapid_above(pen, to)?;
     plunge(pen)
+}
+
+/// At-depth link when the segment stays in the pocket. Otherwise retract and use `entry` again.
+fn link_shaped(pen: &mut Pen, piece: &CutPiece, clearance: &[Region], tolerance: &Tolerance, entry: DepthEntry) -> Result<()> {
+    let to = piece_start(piece)?;
+    let eps = linear_eps(tolerance);
+    if let Some(from) = pen.xy {
+        let at_depth = (pen.z_now - pen.cut_z).abs() <= eps;
+        if at_depth && from.almost_eq(to, eps) {
+            pen.xy = Some(to);
+            return emit_body(pen, piece);
+        }
+        if at_depth && stays_inside(from, to, clearance, tolerance)? {
+            let dest = check::point3(to, pen.cut_z)?;
+            check::push(&mut pen.moves, Move::Linear { to: dest, kind: CutKind::Cut })?;
+            pen.xy = Some(to);
+            pen.z_now = pen.cut_z;
+            return emit_body(pen, piece);
+        }
+    }
+    retract_up(pen)?;
+    emit_entry(pen, piece, clearance, tolerance, entry, true)
+}
+
+fn emit_entry(pen: &mut Pen, piece: &CutPiece, clearance: &[Region], tolerance: &Tolerance, entry: DepthEntry, already_on: bool) -> Result<()> {
+    match entry {
+        DepthEntry::Plunge => Err(invalid("plunge entry is not a shaped entry")),
+        DepthEntry::Ramp { max_angle } => {
+            let start = piece_start(piece)?;
+            rapid_at_retract(pen, start)?;
+            if !already_on {
+                check::push(&mut pen.moves, Move::Event(ProcessEvent::On))?;
+            }
+            ramp_piece(pen, piece, max_angle, tolerance)
+        }
+        DepthEntry::Helix { radius, pitch } => helix_piece(pen, piece, clearance, tolerance, radius, pitch, already_on),
+    }
+}
+
+fn ramp_slope(max_angle: f64) -> Result<f64> {
+    let max_angle = finite(max_angle, "ramp angle")?;
+    if max_angle <= 0.0 || max_angle >= std::f64::consts::FRAC_PI_2 {
+        return Err(invalid("ramp angle must be greater than 0 and less than a right angle"));
+    }
+    let slope = max_angle.tan();
+    if !slope.is_finite() || slope <= 0.0 {
+        return Err(invalid("ramp angle must be greater than 0 and less than a right angle"));
+    }
+    Ok(slope)
+}
+
+/// Ramp along one circuit of `piece`. The slope is the full drop from the retract height.
+fn ramp_piece(pen: &mut Pen, piece: &CutPiece, max_angle: f64, tolerance: &Tolerance) -> Result<()> {
+    let drop = pen.retract_z - pen.cut_z;
+    if drop <= linear_eps(tolerance) {
+        return emit_body(pen, piece);
+    }
+    let slope = ramp_slope(max_angle)?;
+    let segs = match piece {
+        CutPiece::Loop(contour) => contour_segments(contour)?,
+        CutPiece::Span(start, end) => vec![Segment::Line(Line::new(*start, *end)?)],
+    };
+    emit_ramp_segments(pen, &segs, slope)?;
+    // A partial arc's end can sit a fraction off the ring start, on the seam where
+    // containment misses the radial link back to the next ring. Land on the start.
+    snap_to_start(pen, piece, tolerance);
+    Ok(())
+}
+
+fn snap_to_start(pen: &mut Pen, piece: &CutPiece, tolerance: &Tolerance) {
+    let Ok(start) = piece_start(piece) else {
+        return;
+    };
+    let Some(xy) = pen.xy else {
+        return;
+    };
+    if xy.almost_eq(start, linear_eps(tolerance).max(1e-6)) {
+        pen.xy = Some(start);
+    }
+}
+
+fn contour_segments(contour: &Contour) -> Result<Vec<Segment>> {
+    let length = contour.length()?;
+    if !length.is_finite() || length <= 1e-9 {
+        return Err(invalid("ramp is longer than the pocket path"));
+    }
+    let segs = crate::curve::subdivide(contour, 0.0, length)?;
+    if segs.is_empty() {
+        return Err(invalid("ramp is longer than the pocket path"));
+    }
+    Ok(segs)
+}
+
+/// Descend at `slope` millimetres of Z per millimetre of path, then cut the rest flat.
+///
+/// One circuit only. A drop that needs more length is an error, not another lap and not a plunge.
+fn emit_ramp_segments(pen: &mut Pen, segs: &[Segment], slope: f64) -> Result<()> {
+    let mut total = 0.0;
+    for seg in segs {
+        let len = seg.length();
+        if !len.is_finite() || len < 0.0 {
+            return Err(invalid("segment length is not finite"));
+        }
+        total += len;
+    }
+    if !total.is_finite() || total <= 1e-12 {
+        return Err(invalid("ramp is longer than the pocket path"));
+    }
+    let drop = pen.z_now - pen.cut_z;
+    if drop > slope * total + 1e-6 {
+        return Err(invalid("ramp is longer than the pocket path"));
+    }
+    let target = pen.cut_z;
+    let mut index = 0;
+    while index < segs.len() && pen.z_now > target + 1e-9 {
+        let seg = segs[index];
+        let len = seg.length();
+        if len <= 1e-12 {
+            index += 1;
+            continue;
+        }
+        let need = pen.z_now - target;
+        let can = slope * len;
+        if can >= need - 1e-9 {
+            let travel = (need / slope).min(len);
+            if len - travel > 1e-8 {
+                let (head, tail) = split_segment(seg, travel / len)?;
+                emit_seg(pen, head, target, CutKind::LeadIn)?;
+                emit_seg(pen, tail, target, CutKind::Cut)?;
+            } else {
+                emit_seg(pen, seg, target, CutKind::LeadIn)?;
+            }
+            index += 1;
+            for rest in segs.iter().skip(index) {
+                if rest.length() > 1e-12 {
+                    emit_seg(pen, *rest, target, CutKind::Cut)?;
+                }
+            }
+            return Ok(());
+        }
+        let z1 = pen.z_now - can;
+        emit_seg(pen, seg, z1, CutKind::LeadIn)?;
+        index += 1;
+    }
+    if pen.z_now > target + 1e-6 {
+        return Err(invalid("ramp is longer than the pocket path"));
+    }
+    for rest in segs.iter().skip(index) {
+        if rest.length() > 1e-12 {
+            emit_seg(pen, *rest, target, CutKind::Cut)?;
+        }
+    }
+    Ok(())
+}
+
+fn split_segment(seg: Segment, t: f64) -> Result<(Segment, Segment)> {
+    let t = t.clamp(1e-9, 1.0 - 1e-9);
+    match seg {
+        Segment::Line(line) => {
+            let mid = line.start() + (line.end() - line.start()) * t;
+            Ok((Segment::Line(Line::new(line.start(), mid)?), Segment::Line(Line::new(mid, line.end())?)))
+        }
+        Segment::Arc(arc) => {
+            let sweep = arc.sweep();
+            let head = Arc::new(arc.center(), arc.radius(), arc.start_angle(), sweep * t)?;
+            let tail = Arc::new(arc.center(), arc.radius(), arc.start_angle() + sweep * t, sweep * (1.0 - t))?;
+            Ok((Segment::Arc(head), Segment::Arc(tail)))
+        }
+    }
+}
+
+fn emit_seg(pen: &mut Pen, seg: Segment, z: f64, kind: CutKind) -> Result<()> {
+    match seg {
+        Segment::Line(line) => {
+            let to = check::point3(line.end(), z)?;
+            check::push(&mut pen.moves, Move::Linear { to, kind })?;
+            pen.xy = Some(line.end());
+            pen.z_now = z;
+        }
+        Segment::Arc(arc) => {
+            let to = check::point3(arc.end_point(), z)?;
+            let centre = check::point3(arc.center(), z)?;
+            check::push(&mut pen.moves, Move::Arc { to, centre, ccw: arc.sweep() > 0.0, kind })?;
+            pen.xy = Some(arc.end_point());
+            pen.z_now = z;
+        }
+    }
+    Ok(())
+}
+
+fn helix_piece(
+    pen: &mut Pen,
+    piece: &CutPiece,
+    clearance: &[Region],
+    tolerance: &Tolerance,
+    radius: f64,
+    pitch: f64,
+    already_on: bool,
+) -> Result<()> {
+    let CutPiece::Loop(contour) = piece else {
+        return Err(invalid("helix does not fit in the pocket"));
+    };
+    if !contour.is_closed() {
+        return Err(invalid("helix does not fit in the pocket"));
+    }
+    let drop = pen.retract_z - pen.cut_z;
+    if drop <= linear_eps(tolerance) {
+        let start = piece_start(piece)?;
+        rapid_at_retract(pen, start)?;
+        if !already_on {
+            check::push(&mut pen.moves, Move::Event(ProcessEvent::On))?;
+        }
+        return emit_body(pen, piece);
+    }
+    let plan = DepthPlan::new(pen.retract_z, drop, drop, DepthEntry::Helix { radius, pitch }).entry_start(pen.retract_z);
+    let path = depth_toolpath(contour, &plan, tolerance)?;
+    if !helix_fits_pocket(&path, clearance, tolerance)? {
+        return Err(invalid("helix does not fit in the pocket"));
+    }
+    if pen.z_now + 1e-9 < pen.retract_z {
+        retract_up(pen)?;
+    }
+    play_entry(pen, &path, already_on)?;
+    snap_to_start(pen, piece, tolerance);
+    Ok(())
+}
+
+/// Lead-in arcs are the helix. The straight feed onto the ring has to stay in the pocket too.
+fn helix_fits_pocket(path: &Toolpath, clearance: &[Region], tolerance: &Tolerance) -> Result<bool> {
+    let mut cursor: Option<Point> = None;
+    let mut saw_arc = false;
+    let eps = linear_eps(tolerance);
+    for mv in path.moves() {
+        match *mv {
+            Move::Rapid { to } => cursor = Some(Point::new(to.x(), to.y())?),
+            Move::Linear { to, kind } => {
+                let end = Point::new(to.x(), to.y())?;
+                if kind == CutKind::LeadIn {
+                    let inside = match cursor {
+                        Some(from) if from.almost_eq(end, eps) => covered(end, clearance, tolerance)?,
+                        Some(from) => stays_inside(from, end, clearance, tolerance)?,
+                        None => false,
+                    };
+                    if !inside {
+                        return Ok(false);
+                    }
+                }
+                cursor = Some(end);
+            }
+            Move::Arc { to, centre, ccw, kind } => {
+                let end = Point::new(to.x(), to.y())?;
+                if kind == CutKind::LeadIn {
+                    saw_arc = true;
+                    let Some(from) = cursor else {
+                        return Ok(false);
+                    };
+                    let centre_xy = Point::new(centre.x(), centre.y())?;
+                    if !arc_covered(from, end, centre_xy, ccw, clearance, tolerance)? {
+                        return Ok(false);
+                    }
+                }
+                cursor = Some(end);
+            }
+            Move::Event(_) | Move::Dwell { .. } => {}
+        }
+    }
+    Ok(saw_arc)
+}
+
+fn arc_covered(from: Point, to: Point, centre: Point, ccw: bool, clearance: &[Region], tolerance: &Tolerance) -> Result<bool> {
+    let radius = from.distance(centre);
+    if !radius.is_finite() || radius < 1e-9 {
+        return covered(from, clearance, tolerance);
+    }
+    let sweep = xy_sweep(from, to, centre, ccw);
+    let chord = (8.0 * radius * 1.0e-4).sqrt().clamp(1.0e-3, 0.5);
+    let steps_f = (radius * sweep / chord).ceil().clamp(8.0, 8192.0);
+    if !steps_f.is_finite() {
+        return Ok(false);
+    }
+    let steps = steps_f as usize;
+    let a0 = (from.y() - centre.y()).atan2(from.x() - centre.x());
+    for index in 0..=steps {
+        let t = index as f64 / steps as f64;
+        let angle = if ccw { a0 + sweep * t } else { a0 - sweep * t };
+        let point = Point::new(centre.x() + radius * angle.cos(), centre.y() + radius * angle.sin())?;
+        if !covered(point, clearance, tolerance)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn xy_sweep(from: Point, to: Point, centre: Point, ccw: bool) -> f64 {
+    let a0 = (from.y() - centre.y()).atan2(from.x() - centre.x());
+    let a1 = (to.y() - centre.y()).atan2(to.x() - centre.x());
+    let mut sweep = if ccw { (a1 - a0).rem_euclid(std::f64::consts::TAU) } else { (a0 - a1).rem_euclid(std::f64::consts::TAU) };
+    if from.almost_eq(to, 1e-8) || sweep < 1e-8 {
+        sweep = std::f64::consts::TAU;
+    }
+    sweep
+}
+
+fn rapid_at_retract(pen: &mut Pen, to: Point) -> Result<()> {
+    if pen.z_now + 1e-9 < pen.retract_z {
+        return Err(invalid("rapid is below the retract height"));
+    }
+    let dest = check::point3(to, pen.retract_z)?;
+    let same = pen.xy.is_some_and(|xy| xy.almost_eq(to, 1e-9)) && (pen.z_now - pen.retract_z).abs() <= 1e-9;
+    if !same {
+        check::push(&mut pen.moves, Move::Rapid { to: dest })?;
+    }
+    pen.xy = Some(to);
+    pen.z_now = pen.retract_z;
+    Ok(())
+}
+
+fn retract_up(pen: &mut Pen) -> Result<()> {
+    let Some(xy) = pen.xy else {
+        pen.z_now = pen.retract_z;
+        return Ok(());
+    };
+    if (pen.z_now - pen.retract_z).abs() <= 1e-12 {
+        return Ok(());
+    }
+    let up = check::point3(xy, pen.retract_z)?;
+    check::push(&mut pen.moves, Move::Linear { to: up, kind: CutKind::Retract })?;
+    pen.z_now = pen.retract_z;
+    Ok(())
+}
+
+fn play_entry(pen: &mut Pen, path: &Toolpath, mut already_on: bool) -> Result<()> {
+    for mv in path.moves() {
+        match *mv {
+            Move::Event(ProcessEvent::Off) => break,
+            Move::Event(ProcessEvent::On) => {
+                if !already_on {
+                    check::push(&mut pen.moves, Move::Event(ProcessEvent::On))?;
+                    already_on = true;
+                }
+            }
+            Move::Rapid { to } => {
+                if pen.z_now + 1e-9 < pen.retract_z {
+                    retract_up(pen)?;
+                }
+                check::push(&mut pen.moves, Move::Rapid { to })?;
+                pen.xy = Some(Point::new(to.x(), to.y())?);
+                pen.z_now = to.z();
+            }
+            Move::Linear { to, kind } => {
+                check::push(&mut pen.moves, Move::Linear { to, kind })?;
+                pen.xy = Some(Point::new(to.x(), to.y())?);
+                pen.z_now = to.z();
+            }
+            Move::Arc { to, centre, ccw, kind } => {
+                check::push(&mut pen.moves, Move::Arc { to, centre, ccw, kind })?;
+                pen.xy = Some(Point::new(to.x(), to.y())?);
+                pen.z_now = to.z();
+            }
+            Move::Dwell { seconds } => check::push(&mut pen.moves, Move::Dwell { seconds })?,
+        }
+    }
+    Ok(())
 }
 
 fn offset_rings(start: &[Region], stepover: f64, radius: f64, tolerance: &Tolerance) -> Result<Vec<Contour>> {
@@ -799,7 +1204,7 @@ fn stays_inside(start: Point, end: Point, clearance: &[Region], tolerance: &Tole
     for i in 1..steps {
         let t = i as f64 / steps as f64;
         let sample = lerp(start, end, t)?;
-        if !covered(sample, clearance, tolerance)? {
+        if !covered(sample, clearance, tolerance)? && !seam_covered(sample, clearance, tolerance)? {
             return Ok(false);
         }
     }
@@ -891,6 +1296,18 @@ fn arc_params(start: Point, end: Point, arc: Arc, tolerance: &Tolerance) -> Resu
         }
     }
     Ok(params)
+}
+
+/// A circle that starts on +X reports interior points on that seam as outside.
+/// A 1 µm step off the seam is still inside the same face, and far too small to hide a gouge.
+fn seam_covered(point: Point, regions: &[Region], tolerance: &Tolerance) -> Result<bool> {
+    for (dx, dy) in [(0.0, 1e-6), (0.0, -1e-6), (1e-6, 0.0), (-1e-6, 0.0)] {
+        let nudged = Point::new(point.x() + dx, point.y() + dy)?;
+        if covered(nudged, regions, tolerance)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn covered(point: Point, regions: &[Region], tolerance: &Tolerance) -> Result<bool> {
@@ -1549,6 +1966,21 @@ mod tests {
         contour.segments().iter().map(|seg| seg.distance_to_point(point)).fold(f64::INFINITY, f64::min)
     }
 
+    /// `in_material`, plus a nudge off a circle seam. A point on the +X seam of a circle that
+    /// starts there is reported outside even when it sits in the interior.
+    fn in_pocket(point: Point, outer: &Contour, holes: &[Contour], tol: &Tolerance) -> Result<bool> {
+        if in_material(point, outer, holes, tol)? {
+            return Ok(true);
+        }
+        for (dx, dy) in [(0.0, 1e-6), (0.0, -1e-6), (1e-6, 0.0), (-1e-6, 0.0)] {
+            let nudged = Point::new(point.x() + dx, point.y() + dy)?;
+            if in_material(nudged, outer, holes, tol)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn in_material(point: Point, outer: &Contour, holes: &[Contour], tol: &Tolerance) -> Result<bool> {
         if !matches!(outer.containment(point, tol)?, Containment::Inside | Containment::Boundary) {
             return Ok(false);
@@ -1697,6 +2129,300 @@ mod tests {
         assert_pocket_covers(&rect(width, height), &[], diameter, diameter * fraction).unwrap();
     }
 
+    fn ramp_entry(angle_deg: f64) -> DepthEntry {
+        DepthEntry::Ramp { max_angle: angle_deg.to_radians() }
+    }
+
+    fn count_kind(path: &Toolpath, want: CutKind) -> usize {
+        path.moves()
+            .iter()
+            .filter(|mv| match **mv {
+                Move::Linear { kind, .. } | Move::Arc { kind, .. } => kind == want,
+                Move::Rapid { .. } | Move::Event(_) | Move::Dwell { .. } => false,
+            })
+            .count()
+    }
+
+    fn straight_plunges(path: &Toolpath) -> usize {
+        let mut cursor: Option<Point3> = None;
+        let mut count = 0;
+        for mv in path.moves() {
+            match *mv {
+                Move::Linear { to, kind } if kind != CutKind::Retract => {
+                    if let Some(from) = cursor {
+                        let horiz = (to.x() - from.x()).hypot(to.y() - from.y());
+                        if horiz < 1e-4 && to.z() < from.z() - 1e-9 && to.z() < 0.0 {
+                            count += 1;
+                        }
+                    }
+                    cursor = Some(to);
+                }
+                Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => cursor = Some(to),
+                Move::Event(_) | Move::Dwell { .. } => {}
+            }
+        }
+        count
+    }
+
+    fn xy_motion_len(from: Point3, to: Point3, centre: Option<(Point3, bool)>) -> f64 {
+        match centre {
+            None => (to.x() - from.x()).hypot(to.y() - from.y()),
+            Some((centre, ccw)) => {
+                let start = Point::new(from.x(), from.y()).unwrap();
+                let end = Point::new(to.x(), to.y()).unwrap();
+                let at = Point::new(centre.x(), centre.y()).unwrap();
+                start.distance(at) * xy_sweep(start, end, at, ccw)
+            }
+        }
+    }
+
+    fn assert_descent_bound(path: &Toolpath, max_angle: f64) {
+        let mut cursor: Option<Point3> = None;
+        for mv in path.moves() {
+            let next = match *mv {
+                Move::Linear { to, kind } if kind != CutKind::Retract => Some((to, None)),
+                Move::Arc { to, centre, ccw, kind } if kind != CutKind::Retract => Some((to, Some((centre, ccw)))),
+                Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => {
+                    cursor = Some(to);
+                    None
+                }
+                Move::Event(_) | Move::Dwell { .. } => None,
+            };
+            if let Some((to, centre)) = next {
+                if let Some(from) = cursor
+                    && to.z() < from.z() - 1e-9
+                {
+                    let angle = (from.z() - to.z()).atan2(xy_motion_len(from, to, centre));
+                    assert!(
+                        angle <= max_angle + 1e-6,
+                        "descent {:.6} rad ({:.4}°) exceeds {:.4}°",
+                        angle,
+                        angle.to_degrees(),
+                        max_angle.to_degrees()
+                    );
+                }
+                cursor = Some(to);
+            }
+        }
+    }
+
+    /// No motion ends at or above Z 0 between the first and last feed that finishes below Z 0.
+    fn assert_no_retract_between_rings(path: &Toolpath) {
+        let mut below = Vec::new();
+        for (index, mv) in path.moves().iter().enumerate() {
+            let z = match *mv {
+                Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => to.z(),
+                Move::Event(_) | Move::Dwell { .. } => continue,
+            };
+            if z < -1e-9 {
+                below.push(index);
+            }
+        }
+        assert!(below.len() >= 2, "expected several cuts below Z 0");
+        let first = below[0];
+        let last = *below.last().unwrap();
+        for mv in &path.moves()[first + 1..last] {
+            if let Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } = *mv {
+                assert!(to.z() < -1e-9, "retract to Z {} between rings", to.z());
+            }
+        }
+    }
+
+    fn feed_samples(path: &Toolpath) -> Vec<Point> {
+        let mut out = Vec::new();
+        let mut cursor: Option<Point> = None;
+        for mv in path.moves() {
+            match *mv {
+                Move::Linear { to, kind: CutKind::Cut | CutKind::LeadIn } => {
+                    if let Some(from) = cursor {
+                        let end = Point::new(to.x(), to.y()).unwrap();
+                        let len = from.distance(end);
+                        let n = ((len / 0.25).ceil() as usize).clamp(1, 400);
+                        for i in 0..=n {
+                            let t = i as f64 / n as f64;
+                            out.push(Point::new(from.x() + (end.x() - from.x()) * t, from.y() + (end.y() - from.y()) * t).unwrap());
+                        }
+                    }
+                    cursor = Some(Point::new(to.x(), to.y()).unwrap());
+                }
+                Move::Arc { to, centre, ccw, kind: CutKind::Cut | CutKind::LeadIn } => {
+                    if let Some(from) = cursor {
+                        sample_arc(from, Point::new(to.x(), to.y()).unwrap(), Point::new(centre.x(), centre.y()).unwrap(), ccw, &mut out);
+                    }
+                    cursor = Some(Point::new(to.x(), to.y()).unwrap());
+                }
+                Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => cursor = Some(Point::new(to.x(), to.y()).unwrap()),
+                Move::Event(_) | Move::Dwell { .. } => {}
+            }
+        }
+        out
+    }
+
+    fn assert_samples_clear(path: &Toolpath, outer: &Contour, holes: &[Contour], radius: f64) -> Result<()> {
+        let tol = Tolerance::default();
+        let samples = feed_samples(path);
+        if samples.is_empty() {
+            return Err(invalid("pocket produced no toolpath"));
+        }
+        for point in samples {
+            if !in_pocket(point, outer, holes, &tol)? {
+                return Err(invalid(format!("sample ({:.4}, {:.4}) leaves the pocket", point.x(), point.y())));
+            }
+            let mut clear = dist_to_contour(point, outer);
+            for hole in holes {
+                clear = clear.min(dist_to_contour(point, hole));
+            }
+            if clear + 1e-3 < radius {
+                return Err(invalid(format!("sample ({:.4}, {:.4}) is {clear:.4} from a wall, tool radius {radius}", point.x(), point.y())));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn omitted_entry_still_plunges() {
+        let cut = rings_op(2.0).z(-3.0).retract_z(2.0).generate(&square_pocket(30.0)).unwrap();
+        assert!(count_kind(cut.toolpath(), CutKind::Plunge) >= 1);
+        assert!(straight_plunges(cut.toolpath()) >= 1);
+    }
+
+    #[test]
+    fn ramp_on_annulus_and_square_links_at_depth() {
+        let angle = 5.0_f64.to_radians();
+        let annulus = PocketOp::new(tool_diameter(6.0), PocketStrategy::OffsetRings, 2.0)
+            .z(-3.0)
+            .retract_z(2.0)
+            .entry(ramp_entry(5.0))
+            .generate(&annulus(30.0, 15.0))
+            .unwrap();
+        let square = {
+            let contour = {
+                let p = |x, y| Point::new(x, y).unwrap();
+                let edge = |a, b| Segment::Line(Line::new(a, b).unwrap());
+                Contour::try_new(
+                    vec![
+                        edge(p(100.0, 25.0), p(150.0, 25.0)),
+                        edge(p(150.0, 25.0), p(150.0, 75.0)),
+                        edge(p(150.0, 75.0), p(100.0, 75.0)),
+                        edge(p(100.0, 75.0), p(100.0, 25.0)),
+                    ],
+                    true,
+                    &Tolerance::default(),
+                )
+                .unwrap()
+            };
+            PocketOp::new(tool_diameter(6.0), PocketStrategy::OffsetRings, 2.0)
+                .z(-3.0)
+                .retract_z(2.0)
+                .entry(ramp_entry(5.0))
+                .generate(&Region::from_contour(contour, &Tolerance::default()).unwrap())
+                .unwrap()
+        };
+        for (label, cut) in [("annulus", &annulus), ("square", &square)] {
+            assert!(cut.ring_count() > 1, "{label} rings {}", cut.ring_count());
+            assert_eq!(count_kind(cut.toolpath(), CutKind::Plunge), 0, "{label}");
+            assert_eq!(straight_plunges(cut.toolpath()), 0, "{label}");
+            assert_descent_bound(cut.toolpath(), angle);
+            assert_no_retract_between_rings(cut.toolpath());
+        }
+    }
+
+    #[test]
+    fn ramp_longer_than_the_ring_is_an_error() {
+        let err = PocketOp::new(tool_diameter(4.0), PocketStrategy::OffsetRings, 2.0)
+            .z(-10.0)
+            .retract_z(2.0)
+            .entry(ramp_entry(1.0))
+            .generate(&square_pocket(20.0))
+            .unwrap_err();
+        assert!(err.to_string().contains("ramp is longer than the pocket path"), "{err}");
+    }
+
+    #[test]
+    fn helix_that_leaves_the_pocket_is_an_error() {
+        let err = PocketOp::new(tool_diameter(4.0), PocketStrategy::OffsetRings, 2.0)
+            .z(-3.0)
+            .retract_z(2.0)
+            .entry(DepthEntry::Helix { radius: 40.0, pitch: 2.0 })
+            .generate(&square_pocket(20.0))
+            .unwrap_err();
+        assert!(err.to_string().contains("helix does not fit in the pocket"), "{err}");
+    }
+
+    #[test]
+    fn helix_inside_a_square_stays_within_the_angle() {
+        let radius = 2.0;
+        let angle = 5.0_f64.to_radians();
+        let pitch = radius * TAU * angle.tan();
+        let cut = PocketOp::new(tool_diameter(4.0), PocketStrategy::OffsetRings, 2.0)
+            .z(-3.0)
+            .retract_z(2.0)
+            .entry(DepthEntry::Helix { radius, pitch })
+            .generate(&square_pocket(40.0))
+            .unwrap();
+        assert_eq!(straight_plunges(cut.toolpath()), 0);
+        assert_eq!(count_kind(cut.toolpath(), CutKind::Plunge), 0);
+        assert_descent_bound(cut.toolpath(), angle);
+        assert_no_retract_between_rings(cut.toolpath());
+        let outer = rect(40.0, 40.0);
+        assert_samples_clear(cut.toolpath(), &outer, &[], 2.0).unwrap();
+    }
+
+    #[test]
+    fn right_angle_ramp_is_rejected() {
+        let err = rings_op(2.0)
+            .z(-1.0)
+            .retract_z(1.0)
+            .entry(DepthEntry::Ramp { max_angle: std::f64::consts::FRAC_PI_2 })
+            .generate(&square_pocket(20.0))
+            .unwrap_err();
+        assert!(err.to_string().contains("ramp angle"), "{err}");
+    }
+
+    fn assert_shaped_entry(outer: &Contour, holes: &[Contour], diameter: f64, stepover: f64, entry: DepthEntry) -> Result<()> {
+        let tol = Tolerance::default();
+        let region =
+            if holes.is_empty() { Region::from_contour(outer.clone(), &tol)? } else { Region::try_new(outer.clone(), holes.to_vec(), &tol)? };
+        let max_angle = match entry {
+            DepthEntry::Ramp { max_angle } => max_angle,
+            DepthEntry::Helix { radius, pitch } => (pitch / (radius * TAU)).atan(),
+            DepthEntry::Plunge => return Err(invalid("expected a ramp or helix")),
+        };
+        let cut = PocketOp::new(Tool::Diameter { diameter }, PocketStrategy::OffsetRings, stepover)
+            .z(-1.0)
+            .retract_z(2.0)
+            .entry(entry)
+            .tolerance(tol)
+            .generate(&region)?;
+        if straight_plunges(cut.toolpath()) != 0 || count_kind(cut.toolpath(), CutKind::Plunge) != 0 {
+            return Err(invalid("shaped entry plunged"));
+        }
+        let mut cursor: Option<Point3> = None;
+        for mv in cut.toolpath().moves() {
+            let stepped = match *mv {
+                Move::Linear { to, kind } if kind != CutKind::Retract => Some((to, None)),
+                Move::Arc { to, centre, ccw, kind } if kind != CutKind::Retract => Some((to, Some((centre, ccw)))),
+                Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => {
+                    cursor = Some(to);
+                    None
+                }
+                Move::Event(_) | Move::Dwell { .. } => None,
+            };
+            if let Some((to, centre)) = stepped {
+                if let Some(from) = cursor
+                    && to.z() < from.z() - 1e-9
+                {
+                    let angle = (from.z() - to.z()).atan2(xy_motion_len(from, to, centre));
+                    if angle > max_angle + 1e-6 {
+                        return Err(invalid(format!("descent {:.4}° exceeds {:.4}°", angle.to_degrees(), max_angle.to_degrees())));
+                    }
+                }
+                cursor = Some(to);
+            }
+        }
+        assert_samples_clear(cut.toolpath(), outer, holes, diameter * 0.5)
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(24))]
 
@@ -1744,6 +2470,75 @@ mod tests {
             match assert_pocket_covers(&outer, &holes, diameter, stepover) {
                 Ok(()) => {}
                 Err(err) if err.to_string().contains("fit") || err.to_string().contains("no toolpath") || err.to_string().contains("too many") => {
+                    prop_assume!(false);
+                }
+                Err(err) => prop_assert!(false, "{err}"),
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn random_pockets_ramp_or_helix_without_gouging(
+            width in 24.0..64.0,
+            height in 24.0..64.0,
+            kind in 0u8..3,
+            diameter in 2.0..8.0,
+            fraction in 0.35..0.8,
+            island in proptest::bool::ANY,
+            shift_x in -0.7..0.7,
+            shift_y in -0.7..0.7,
+            angle_deg in 20.0..50.0,
+            helix in proptest::bool::ANY,
+        ) {
+            let stepover = diameter * fraction;
+            let tol = Tolerance::default();
+            let outer = match kind {
+                0 => rect(width, height),
+                1 => circle(0.0, 0.0, width * 0.5),
+                _ => l_shape(width, height, width.min(height) * 0.45, &tol),
+            };
+            let mut holes = Vec::new();
+            if island {
+                let hole = match kind {
+                    0 => {
+                        let radius = width.min(height) * 0.15;
+                        let cx = width * 0.5 + shift_x * (width * 0.5 - radius - 1.0);
+                        let cy = height * 0.5 + shift_y * (height * 0.5 - radius - 1.0);
+                        circle(cx, cy, radius)
+                    }
+                    1 => {
+                        let outer_r = width * 0.5;
+                        let radius = outer_r * 0.28;
+                        let room = outer_r - radius - 1.0;
+                        circle(shift_x * room, shift_y * room, radius)
+                    }
+                    _ => {
+                        let arm = width.min(height) * 0.45;
+                        let radius = arm * 0.16;
+                        circle(arm * 0.5 + shift_x * arm * 0.12, arm * 0.5 + shift_y * arm * 0.12, radius)
+                    }
+                };
+                holes.push(hole);
+            }
+            let entry = if helix {
+                let radius = 1.5_f64;
+                let angle = f64::to_radians(angle_deg);
+                DepthEntry::Helix { radius, pitch: radius * std::f64::consts::TAU * angle.tan() }
+            } else {
+                ramp_entry(angle_deg)
+            };
+            match assert_shaped_entry(&outer, &holes, diameter, stepover, entry) {
+                Ok(()) => {}
+                Err(err)
+                    if err.to_string().contains("fit")
+                        || err.to_string().contains("longer")
+                        || err.to_string().contains("too many")
+                        || err.to_string().contains("no toolpath")
+                        || err.to_string().contains("right angle") =>
+                {
                     prop_assume!(false);
                 }
                 Err(err) => prop_assert!(false, "{err}"),
