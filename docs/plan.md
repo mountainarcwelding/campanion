@@ -366,3 +366,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-10-29: v0.8.6 is the Haas lathe bar feeder (G105 at program end) and steady rest
   (M146/M147 with a jaw band check). Machine limit profiles and sub-spindle brake/orient follow in
   v0.8.7.
+- 2026-10-29: v0.8.7 is the lathe machine limit profiles (Haas ST-15Y with tailstock, ST-20Y with
+  sub-spindle, DS-30Y) with an ST-20Y sub-spindle transfer golden, and spindle orient plus
+  secondary spindle brake on haas_lathe.
