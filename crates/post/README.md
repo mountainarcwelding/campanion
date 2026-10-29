@@ -67,6 +67,8 @@ An arc or helix whose start and end angles are equal is written as an arc in the
 
 The writer starts at rotary angles `[0, 0]` and tool axis +Z. Before the first motion of a toolpath, if that pose's axis differs by more than 1e-9 or this is the first toolpath of a five-axis program, it writes `off` when a frame is already active, then `retract`, solves `Kinematics::choose` for that pose at tool length 0, writes `index`, writes `on`, and marks the frame active. The first motion after an index is two rapids: X and Y, then Z. Later poses in that toolpath must keep the axis chosen at the start. A change is `toolpath N changes tool axis inside a 3+2 move`. At program end, an active frame writes `off`, then `retract`, then `index` with every angle 0, before `program_end`.
 
+A toolpath with `continuous` set is rejected before any of that indexing: `post `<id>` has no continuous five-axis output`. The indexed writer is not asked to emit the path.
+
 An arc that is cardinal in the written frame (XY, ZX, or YZ) stays an arc. Any other arc is chorded at the arc tolerance. With a zero tolerance that arc is `arc is not in a cardinal plane after the 3+2 rotation`. Read-back does not apply to a five-axis post.
 
 ## Lathe posts

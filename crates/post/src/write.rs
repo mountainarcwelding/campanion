@@ -49,6 +49,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     check_thread_support(program, post)?;
     check_lathe_program(program, post)?;
     check_rotary_program(program, post)?;
+    check_continuous(program, post)?;
     check_tilted_plane(program, post)?;
     let sections = crate::balance::channel_sections(program, post)?;
     let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning(), program.five_axis());
@@ -418,6 +419,9 @@ impl<'a> Writer<'a> {
         }
         if let Some(name) = path.name() {
             self.comment(&format!("toolpath {}", sanitize(name)))?;
+        }
+        if path.continuous() {
+            return Err(continuous_unsupported(self.post));
         }
         let mut first_motion = true;
         for block in path.blocks() {
@@ -3026,6 +3030,14 @@ fn motion_pose(motion: &ClMotion) -> Pose {
         | ClMotion::Helix { to, .. }
         | ClMotion::Thread { to, .. } => *to,
     }
+}
+
+fn check_continuous(program: &Program, post: &PostDef) -> Result<()> {
+    if program.toolpaths().iter().any(ClPath::continuous) { Err(continuous_unsupported(post)) } else { Ok(()) }
+}
+
+fn continuous_unsupported(post: &PostDef) -> crate::error::PostError {
+    unsupported(format!("post `{}` has no continuous five-axis output", post.id()))
 }
 
 /// A tilted mill axis needs `five_axis` on the post and kinematics on the program.

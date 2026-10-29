@@ -25,6 +25,8 @@ use crate::program::Program;
 const TAU: f64 = std::f64::consts::TAU;
 /// Stock top for 2.5D mill programs. Z is up.
 const STOCK_TOP_Z: f64 = 0.0;
+/// A computed step this close to the limit still counts as the limit.
+const AXIS_STEP_TOL_DEG: f64 = 1e-6;
 
 /// Heights used by the rapid checks. Millimetres. Z is up.
 ///
@@ -133,6 +135,18 @@ pub enum Issue {
     },
     /// The program names an axis or channel the machine does not have.
     UnknownRef(RefKind),
+    /// A feed on a continuous toolpath changes the tool axis by more than the program limit.
+    ///
+    /// The angle is the change from the previous motion in this toolpath, in degrees. A change
+    /// equal to [`crate::Program::max_axis_step_deg`] is allowed.
+    AxisStep {
+        /// Index into [`crate::Program::toolpaths`].
+        toolpath: usize,
+        /// Index of this motion among the toolpath's motions. Events are not counted.
+        move_index: usize,
+        /// Tool-axis change, degrees.
+        angle_deg: f64,
+    },
 }
 
 /// Lengths, a time estimate, bounds and every issue [`verify`] found.
@@ -224,9 +238,10 @@ pub fn verify_with(program: &Program, options: &VerifyOptions) -> VerifyReport {
     // the spindle on the toolpath that opened it.
     let mut cursor = None;
     let mut carry = SpindleCarry { span: program.turning().is_none(), open: Vec::new() };
+    let max_axis_step_deg = program.max_axis_step_deg();
     for (index, path) in program.toolpaths().iter().enumerate() {
         let bound = program.turning().and_then(|turning| turning.binding_for(index as u32)).map(|binding| binding.spindle());
-        verify_toolpath(index, path, bound, heights, &mut cursor, &mut out, &mut carry);
+        verify_toolpath(index, path, bound, heights, max_axis_step_deg, &mut cursor, &mut out, &mut carry);
     }
     if carry.span {
         close_processes(&carry.open, None, None, &mut out);
@@ -327,14 +342,24 @@ fn verify_toolpath(
     path: &ClPath,
     bound_spindle: Option<&str>,
     heights: Heights,
+    max_axis_step_deg: f64,
     cursor: &mut Option<Vec3>,
     out: &mut VerifyReport,
     carry: &mut SpindleCarry,
 ) {
     let mut open = if carry.span { std::mem::take(&mut carry.open) } else { Vec::new() };
+    let mut previous_axis = None;
+    let mut move_index = 0usize;
     for (block_index, block) in path.blocks().iter().enumerate() {
         match block {
-            ClBlock::Motion(motion) => verify_cl_motion(index, block_index, motion, cursor, heights, out),
+            ClBlock::Motion(motion) => {
+                if path.continuous() {
+                    note_axis_step(index, move_index, motion, previous_axis, max_axis_step_deg, out);
+                    previous_axis = Some(motion_end(motion).axis());
+                }
+                verify_cl_motion(index, block_index, motion, cursor, heights, out);
+                move_index += 1;
+            }
             ClBlock::Event(event) => verify_event(event, bound_spindle, &mut open, out),
         }
     }
@@ -434,6 +459,45 @@ fn close_processes(open: &[ProcessKind], toolpath: Option<usize>, channel: Optio
     for process in open {
         out.issues.push(Issue::ProcessNotClosed { toolpath, channel, process: process.clone() });
     }
+}
+
+/// Feed moves on a continuous toolpath may not swing the tool axis faster than the program limit.
+///
+/// The first motion has no previous axis. A rapid may reorient; the feed that follows is
+/// measured from that rapid. A step equal to the limit passes.
+fn note_axis_step(toolpath: usize, move_index: usize, motion: &ClMotion, previous: Option<Vec3>, max_axis_step_deg: f64, out: &mut VerifyReport) {
+    if matches!(motion, ClMotion::Rapid { .. }) {
+        return;
+    }
+    let Some(previous) = previous else {
+        return;
+    };
+    let Some(angle) = axis_change_deg(previous, motion_end(motion).axis()) else {
+        out.issues.push(Issue::NonFinite { what: "tool axis".into() });
+        return;
+    };
+    if angle > max_axis_step_deg + AXIS_STEP_TOL_DEG {
+        out.issues.push(Issue::AxisStep { toolpath, move_index, angle_deg: angle });
+    }
+}
+
+fn axis_change_deg(from: Vec3, to: Vec3) -> Option<f64> {
+    let from = unit_axis(from)?;
+    let to = unit_axis(to)?;
+    let dot = (from.x() * to.x() + from.y() * to.y() + from.z() * to.z()).clamp(-1.0, 1.0);
+    let angle = dot.acos().to_degrees();
+    if angle.is_finite() { Some(angle) } else { None }
+}
+
+fn unit_axis(axis: Vec3) -> Option<Vec3> {
+    if !axis.x().is_finite() || !axis.y().is_finite() || !axis.z().is_finite() {
+        return None;
+    }
+    let len = (axis.x() * axis.x() + axis.y() * axis.y() + axis.z() * axis.z()).sqrt();
+    if !len.is_finite() || len <= check::MIN_COMPONENT {
+        return None;
+    }
+    Vec3::new(axis.x() / len, axis.y() / len, axis.z() / len).ok()
 }
 
 fn verify_cl_motion(toolpath: usize, block: usize, motion: &ClMotion, cursor: &mut Option<Vec3>, heights: Heights, out: &mut VerifyReport) {
@@ -1339,5 +1403,75 @@ mod tests {
         let at_stock = vec![rapid(0.0, 0.0, 0.0), rapid(10.0, 0.0, 0.0)];
         let report = verify(&program_with_path(at_stock));
         assert!(report.rapid_safe_errors().is_empty(), "{:?}", report.rapid_safe_errors());
+    }
+
+    fn axis_pose(deg: f64) -> Pose {
+        let radians = deg.to_radians();
+        Pose::new(Vec3::new(1.0, 2.0, 3.0).expect("tip"), Vec3::new(radians.sin(), 0.0, radians.cos()).expect("axis")).expect("pose")
+    }
+
+    fn rapid_at(deg: f64) -> ClBlock {
+        ClBlock::Motion(ClMotion::Rapid { to: axis_pose(deg), feed: None })
+    }
+
+    fn linear_at(deg: f64) -> ClBlock {
+        ClBlock::Motion(ClMotion::Linear { to: axis_pose(deg), feed: 100.0, role: MoveRole::Cut })
+    }
+
+    fn marked(continuous: bool, blocks: Vec<ClBlock>) -> ClPath {
+        path(blocks).with_continuous(continuous)
+    }
+
+    fn program_of(paths: Vec<ClPath>) -> Program {
+        Program::try_new(None, Vec::new(), None, paths, Vec::new(), Vec::new(), None).expect("program")
+    }
+
+    fn axis_steps(program: &Program) -> Vec<Issue> {
+        verify(program).issues().iter().filter(|issue| matches!(issue, Issue::AxisStep { .. })).cloned().collect()
+    }
+
+    #[test]
+    fn continuous_feed_passes_at_the_axis_step_limit_and_fails_just_above() {
+        // Toolpath 0 swings 40° and is not continuous, so today's check stays quiet.
+        let indexed = marked(false, vec![rapid_at(0.0), linear_at(40.0)]);
+        // A comment is not a move. The rapid is move 0. The feed is move 1.
+        let at_limit = marked(true, vec![ClBlock::Event(Event::Comment { text: "note".into() }), rapid_at(0.0), linear_at(5.0)]);
+        let program = program_of(vec![indexed, at_limit]);
+        assert!(axis_steps(&program).is_empty(), "{:?}", verify(&program).issues());
+
+        let just_over = marked(true, vec![ClBlock::Event(Event::Comment { text: "note".into() }), rapid_at(0.0), linear_at(5.0 + 1e-4)]);
+        let program = program_of(vec![marked(false, vec![rapid_at(0.0), linear_at(40.0)]), just_over]);
+        let steps = axis_steps(&program);
+        assert_eq!(steps.len(), 1, "{:?}", verify(&program).issues());
+        match &steps[0] {
+            Issue::AxisStep { toolpath, move_index, angle_deg } => {
+                assert_eq!((*toolpath, *move_index), (1, 1));
+                assert!((angle_deg - (5.0 + 1e-4)).abs() < 1e-6, "{angle_deg}");
+            }
+            other => panic!("expected an axis step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continuous_rapid_may_swing_and_ninety_degrees_is_the_largest_step() {
+        let rapids = program_of(vec![marked(true, vec![rapid_at(0.0), rapid_at(40.0)])]);
+        assert!(axis_steps(&rapids).is_empty(), "{:?}", verify(&rapids).issues());
+
+        let at_ninety = program_of(vec![marked(true, vec![rapid_at(0.0), linear_at(90.0)])]).with_max_axis_step_deg(90.0).expect("90");
+        assert!(axis_steps(&at_ninety).is_empty(), "{:?}", verify(&at_ninety).issues());
+
+        let over = program_of(vec![marked(true, vec![rapid_at(0.0), linear_at(90.0 + 1e-4)])]).with_max_axis_step_deg(90.0).expect("90");
+        match axis_steps(&over).as_slice() {
+            [Issue::AxisStep { toolpath: 0, move_index: 1, angle_deg }] => {
+                assert!(*angle_deg > 90.0, "{angle_deg}");
+            }
+            other => panic!("expected one step just past 90°, got {other:?}"),
+        }
+
+        for bad in [0.0, -1.0, f64::NAN, 90.0 + 1e-6] {
+            let err = Program::default().with_max_axis_step_deg(bad).expect_err("range");
+            assert_eq!(err.to_string(), "invalid input: max_axis_step_deg must be in (0, 90]");
+        }
+        Program::default().with_max_axis_step_deg(90.0).expect("accept 90");
     }
 }

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- A toolpath may set `continuous` (default false, omitted from JSON). On a continuous toolpath the verifier rejects a feed whose tool axis changes by more than the program setting `max_axis_step_deg` (default 5°, range `(0, 90]`). The error names the toolpath index, the move index and the angle.
+- `solve_path` turns a list of tool poses into joint positions. It keeps the rotary branch, unwinds continuous rotaries so a joint does not jump by 360°, and reports the first pose that leaves a travel limit or that no solution can reach.
+- Posts reject a continuous toolpath with `post `{id}` has no continuous five-axis output`.
+
 ### Changed
 
 - The Haas ST-15Y, ST-20Y and DS-30Y profiles cap live-tool rpm at 6000 instead of 4000. `machine.live_tool_upgrade` is still accepted and no longer changes anything, including on the DS-30Y.

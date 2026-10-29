@@ -45,6 +45,16 @@ That happens when the tilt is 0° or 180°. The spindle stays on a rotary axis, 
 
 `Nearest(prev)` passes `prev` as the hint, so a free joint keeps its angle from `prev`. `FirstPositive` and `FirstNegative` hint `[0, 0]`, so a free joint is 0 unless selection picks another returned solution.
 
+## Path solutions
+
+`solve_path` takes a `FiveAxisSetup`, a list of tool poses and an optional starting joint position. It returns one joint position per pose. The tool length is 0, so the gauge point is the tip. The setup's `SolutionPolicy` is not used: each pose takes the solution closest to the previous joints.
+
+The distance is the Euclidean length of the rotary-angle changes after each angle is unwound by whole turns onto the previous angle. An unlimited rotary may leave `(-180, 180]`. A joint does not jump by 360°.
+
+The closest solution is the branch already in use. A solution that differs by more than 90° on a rotary is another branch. When the closest solution is outside a travel limit and another branch is inside, the error is `pose {index} flips the rotary branch`. When every solution is outside the limits, the error is `pose {index} leaves axis {letter}` for the first rotary of that closest solution that is outside. No orientation solution, and a zero tool axis, are `pose {index} is unreachable`.
+
+`start` seeds the previous angles. Without it the previous angles are `[0, 0]`.
+
 ## JSON
 
 Unknown fields are rejected. `spindle_axis` is optional and defaults to +Z `(0, 0, 1)`. Each axis is normalised on load. A zero axis is rejected.
