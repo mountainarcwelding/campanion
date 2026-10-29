@@ -35,6 +35,9 @@
 //! the operation sets `y_axis`). That binding stores no spindle speed. The IR
 //! stores the main finished section on the turning setup, sampled from the main profile at the
 //! job chord tolerance.
+//! An optional `machine` block names a Haas limit profile. The cited speeds and travels are
+//! checked only when that block is present. X and Z are an extent check of main-frame tips,
+//! because the work offset is not known. The profile's C-axis rpm is recorded and not checked.
 //!
 //! `campanion_ir::verify` runs before anything is written. Issues are printed and the process
 //! exits 1. Face, rough and finish paths are checked against that spindle's finished profile for
@@ -126,6 +129,8 @@ struct LatheJob {
     head: LatheHead,
     tools: Vec<LatheTool>,
     operations: Vec<Operation>,
+    /// Cited Haas limit profile. Absent: none of those limits are checked.
+    machine: Option<crate::machine::MachineConfig>,
     linear: f64,
     chord: f64,
     clearance: f64,
@@ -223,6 +228,15 @@ enum LiveKind {
 impl ToolBody {
     fn is_live(&self) -> bool {
         matches!(self, Self::Live { .. })
+    }
+}
+
+impl LatheTool {
+    fn live_max_rpm(&self) -> Option<f64> {
+        match &self.body {
+            ToolBody::Live { max_rpm, .. } => *max_rpm,
+            ToolBody::Insert { .. } => None,
+        }
     }
 }
 
@@ -643,6 +657,18 @@ impl Operation {
         }
     }
 
+    /// Synchronized handoff speed. Only the transfer `rpm` field, not the nested part-off speed.
+    fn transfer_rpm(&self) -> Option<f64> {
+        match self {
+            Self::Transfer { rpm, .. } => Some(*rpm),
+            _ => None,
+        }
+    }
+
+    fn uses_secondary_spindle(&self) -> bool {
+        self.is_transfer() || self.spindle() == WorkSpindle::Sub
+    }
+
     /// Head angle on a face, rough, finish, groove or part. Absent means the tool table orientation.
     fn b_deg(&self) -> Option<f64> {
         match self {
@@ -796,6 +822,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
             "operations",
             "tolerance",
             "clearance",
+            "machine",
         ],
         "job",
     )?;
@@ -829,11 +856,21 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         return Err(CliError::invalid("\"steady_rest\" is not allowed with a \"sub\" block"));
     }
     let head = parse_head(optional(map, "head"))?;
+    let machine = match optional(map, "machine") {
+        Some(value) => Some(crate::machine::parse_machine(value)?),
+        None => None,
+    };
+    if let Some(machine) = &machine
+        && tailstock.is_some()
+        && !machine.profile.tailstock_option
+    {
+        return Err(crate::machine::no_tailstock(machine.profile));
+    }
     let tools = parse_tools(require(map, "tools")?)?;
     let (linear, chord) = parse_tolerance(optional(map, "tolerance"))?;
     let clearance = non_negative(require(map, "clearance")?, "clearance")?;
     let sub_rpm = sub.as_ref().map(|block| block.max_rpm);
-    let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance)?;
+    let operations = parse_operations(require(map, "operations")?, max_rpm, sub_rpm, clearance, machine.as_ref())?;
     check_bar_feed(&operations, sub.is_some())?;
     check_tailstock_ops(&operations, tailstock.is_some(), parts_catcher.is_some())?;
     check_steady_rest_ops(&operations, steady_rest.is_some())?;
@@ -852,6 +889,9 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         check_flat(operation, tool, &head, clearance)?;
         check_mill_head(operation, &head)?;
     }
+    if let Some(machine) = &machine {
+        check_machine_limits(machine, max_rpm, sub.as_ref(), &head, &tools, &operations)?;
+    }
     Ok(LatheJob {
         source,
         stock,
@@ -865,6 +905,7 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         head,
         tools,
         operations,
+        machine,
         linear,
         chord,
         clearance,
@@ -1348,7 +1389,13 @@ fn programmed_tip(insert: &Insert, tip: &str) -> Result<TipPoint, CliError> {
     }
 }
 
-fn parse_operations(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearance: f64) -> Result<Vec<Operation>, CliError> {
+fn parse_operations(
+    value: &Value,
+    main_rpm: f64,
+    sub_rpm: Option<f64>,
+    clearance: f64,
+    machine: Option<&crate::machine::MachineConfig>,
+) -> Result<Vec<Operation>, CliError> {
     let list = array(value, "operations", MAX_OPERATIONS)?;
     let mut names = BTreeSet::new();
     let mut operations = Vec::with_capacity(list.len());
@@ -1357,6 +1404,9 @@ fn parse_operations(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearanc
     }
     let mut saw_transfer = false;
     for operation in &operations {
+        if let Some(machine) = machine {
+            check_operation_fits(machine, operation)?;
+        }
         if operation.spindle() == WorkSpindle::Sub && !saw_transfer {
             return Err(CliError::invalid(format!("operation {}: sub-spindle op before any transfer", operation.name())));
         }
@@ -1365,6 +1415,45 @@ fn parse_operations(value: &Value, main_rpm: f64, sub_rpm: Option<f64>, clearanc
         }
     }
     Ok(operations)
+}
+
+/// A sub, transfer or eject needs the sub-spindle option. A tailstock move needs the tailstock option.
+fn check_operation_fits(machine: &crate::machine::MachineConfig, operation: &Operation) -> Result<(), CliError> {
+    let model = machine.profile.id;
+    if !machine.sub_spindle && operation.uses_secondary_spindle() {
+        return Err(CliError::invalid(format!("operation {}: {model} has no sub-spindle (machine.sub_spindle is false)", operation.name())));
+    }
+    if operation.is_tailstock() && !machine.tailstock {
+        if !machine.profile.tailstock_option {
+            return Err(crate::machine::no_tailstock(machine.profile));
+        }
+        return Err(CliError::invalid(format!("operation {}: machine has no tailstock (machine.tailstock is false)", operation.name())));
+    }
+    Ok(())
+}
+
+fn check_machine_limits(
+    machine: &crate::machine::MachineConfig,
+    main_rpm: f64,
+    sub: Option<&SubBlock>,
+    head: &LatheHead,
+    tools: &[LatheTool],
+    operations: &[Operation],
+) -> Result<(), CliError> {
+    let sub_rpm = if machine.sub_spindle { sub.map(|block| block.max_rpm) } else { None };
+    let sync: Vec<(&str, f64)> = if machine.sub_spindle {
+        operations.iter().filter_map(|operation| operation.transfer_rpm().map(|rpm| (operation.name(), rpm))).collect()
+    } else {
+        Vec::new()
+    };
+    let head_y = match (head.y_axis, head.y_min, head.y_max) {
+        (true, Some(y_min), Some(y_max)) => Some((y_min, y_max)),
+        _ => None,
+    };
+    let live_tools: Vec<(u32, f64)> = tools.iter().filter_map(|tool| tool.live_max_rpm().map(|rpm| (tool.id, rpm))).collect();
+    let live_ops: Vec<(&str, f64)> = operations.iter().filter_map(|operation| operation.live_rpm().map(|rpm| (operation.name(), rpm))).collect();
+    let programmed = crate::machine::ProgrammedLimits { main_rpm, sub_rpm, sync: &sync, head_y, live_tools: &live_tools, live_ops: &live_ops };
+    crate::machine::check_programmed(machine, &programmed)
 }
 
 fn parse_work_spindle(map: &Map<String, Value>, name: &str, has_sub: bool, live: bool) -> Result<WorkSpindle, CliError> {
@@ -2311,6 +2400,9 @@ fn build_document(
     let mut tailstock_advanced = false;
     let mut steady_rest_clamped = false;
     let mut zone_start: Option<Vec3> = None;
+    // Main-frame tip range. Sub-spindle operations are excluded: their tips are in the sub frame.
+    // The work offset is not known, so this stays an extent and is not a machine coordinate.
+    let mut travel = crate::machine::AxisExtent::new();
     for operation in &job.operations {
         if operation.is_wait() {
             sync_id = sync_id.saturating_add(1);
@@ -2371,6 +2463,9 @@ fn build_document(
             with_events(motion, operation.tool_id(), previous_slot)?
         };
         let toolpath = with_head_index(toolpath, head_for(channel), &mut b_now[usize::from(channel)], operation.b_target())?;
+        if counts_toward_travel(operation) {
+            record_main_tips(&toolpath, &mut travel);
+        }
         if tailstock_advanced
             && !operation.is_tailstock()
             && let Some(tailstock) = &job.tailstock
@@ -2394,6 +2489,9 @@ fn build_document(
         let binding =
             TurnBinding::try_new(index, operation.spindle().name(), head_for(channel), u16::from(channel))?.with_speed(operation.turning_speed())?;
         setup = setup.with_binding(binding)?;
+    }
+    if let Some(machine) = &job.machine {
+        travel.check(machine)?;
     }
     let tools = job
         .tools
@@ -3138,6 +3236,22 @@ fn segment_zone_hit(from: Vec3, to: Vec3, face: bool, cylinder: bool, z_min: f64
     // A hit exactly on the z boundary only counts if the segment continues inside.
     let inside_z = z > z_min || (hi > lo && radius < limit);
     (inside_z && radius < limit).then_some((radius, z))
+}
+
+/// Sub-spindle motions are in the sub frame, so only main-spindle toolpaths count.
+fn counts_toward_travel(operation: &Operation) -> bool {
+    operation.spindle() == WorkSpindle::Main
+}
+
+/// Tip X is the radius stored on the cutter-location pose.
+fn record_main_tips(path: &ClPath, travel: &mut crate::machine::AxisExtent) {
+    for block in path.blocks() {
+        let ClBlock::Motion(motion) = block else {
+            continue;
+        };
+        let tip = motion_tip(motion);
+        travel.include_radius(tip.x(), tip.z());
+    }
 }
 
 fn last_motion_tip(path: &ClPath) -> Option<Vec3> {
@@ -4086,5 +4200,204 @@ mod tests {
         assert_eq!(binding.spindle(), "main");
         assert_eq!(binding.channel(), 0);
         assert_eq!(binding.toolpath() as usize, doc.program().toolpaths().len() - 1);
+    }
+
+    fn machine_shell(spindle_rpm: f64, machine: &str, extra: &str, tools: &str, operations: &str) -> String {
+        format!(
+            r#"{{
+            "format": "campanion-lathe/1",
+            "source": {{ "path": "shaft.dxf" }},
+            "units": "mm",
+            "stock": {{ "kind": "bar", "diameter": 40, "length": 40, "front_allowance": 1 }},
+            "spindle": {{ "max_rpm": {spindle_rpm} }},
+            {machine}
+            {extra}
+            "tools": [{tools}],
+            "operations": [{operations}],
+            "clearance": 2
+        }}"#
+        )
+    }
+
+    const TURN_TOOL: &str =
+        r#"{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }"#;
+    const FACE_OP: &str = r#"{ "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 100, "speed": { "rpm": 800 } }"#;
+
+    #[test]
+    fn machine_block_is_optional_and_unknown_models_are_rejected() {
+        unwrap_ok(super::parse_job(&machine_shell(4_500.0, "", "", TURN_TOOL, FACE_OP)), "no machine");
+        let unknown = parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_st10" },"#, "", TURN_TOOL, FACE_OP));
+        assert!(unknown.contains("machine.model must be haas_st15y, haas_st20y or haas_ds30y"), "{unknown}");
+        let extra = parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_st20y", "serial": 1 },"#, "", TURN_TOOL, FACE_OP));
+        assert!(extra.contains("unknown machine field `serial`"), "{extra}");
+    }
+
+    #[test]
+    fn machine_spindle_sub_sync_and_y_pass_at_the_limit() {
+        let at = machine_shell(
+            4_000.0,
+            r#""machine": { "model": "haas_st20y", "sub_spindle": true },"#,
+            r#""sub": { "max_rpm": 6000, "source": { "path": "shaft.dxf" } },"#,
+            TURN_TOOL,
+            r#"{ "name": "handoff", "type": "transfer", "rpm": 4800, "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200 }"#,
+        );
+        unwrap_ok(super::parse_job(&at), "at the limits");
+
+        let over = machine_shell(4_000.001, r#""machine": { "model": "haas_st20y" },"#, "", TURN_TOOL, FACE_OP);
+        let message = parse_err(&over);
+        assert!(message.contains("machine haas_st20y: main spindle max_rpm 4000.001 exceeds 4000"), "{message}");
+
+        let sub_over = machine_shell(
+            4_000.0,
+            r#""machine": { "model": "haas_st20y", "sub_spindle": true },"#,
+            r#""sub": { "max_rpm": 6000.001, "source": { "path": "shaft.dxf" } },"#,
+            TURN_TOOL,
+            r#"{ "name": "handoff", "type": "transfer", "rpm": 1000, "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200 }"#,
+        );
+        let message = parse_err(&sub_over);
+        assert!(message.contains("machine haas_st20y: sub spindle max_rpm 6000.001 exceeds 6000"), "{message}");
+
+        let sync_over = machine_shell(
+            4_000.0,
+            r#""machine": { "model": "haas_st15y", "sub_spindle": true },"#,
+            r#""sub": { "max_rpm": 6000, "source": { "path": "shaft.dxf" } },"#,
+            TURN_TOOL,
+            r#"{ "name": "handoff", "type": "transfer", "rpm": 4800.001, "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200 }"#,
+        );
+        let message = parse_err(&sync_over);
+        assert!(message.contains("machine haas_st15y: operation handoff: synchronized rpm 4800.001 exceeds 4800"), "{message}");
+
+        let y_ok = machine_shell(
+            3_000.0,
+            r#""machine": { "model": "haas_ds30y" },"#,
+            r#""head": { "y_axis": true, "y_min": -51, "y_max": 51 },"#,
+            TURN_TOOL,
+            FACE_OP,
+        );
+        let job = unwrap_ok(super::parse_job(&y_ok), "y at the limit");
+        assert!(job.machine.is_some_and(|machine| machine.sub_spindle), "ds sub-spindle defaults on");
+
+        let y_over = machine_shell(
+            3_000.0,
+            r#""machine": { "model": "haas_st20y" },"#,
+            r#""head": { "y_axis": true, "y_min": -51, "y_max": 51.001 },"#,
+            TURN_TOOL,
+            FACE_OP,
+        );
+        let message = parse_err(&y_over);
+        assert!(message.contains("machine haas_st20y: head Y travel [-51, 51.001] exceeds [-51, 51]"), "{message}");
+    }
+
+    #[test]
+    fn live_upgrade_and_missing_options_use_the_profile() {
+        let live_tool = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6, "max_rpm": 4000 }"#;
+        let holes = r#"{ "name": "holes", "type": "live_drill", "tool_id": 2, "face": "front", "z_start": 0, "positions": [{ "c": 0, "r": 10 }], "depth": 5, "rpm": 4000, "feed": 80 }"#;
+        let at = machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, "", live_tool, holes)
+            .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
+        unwrap_ok(super::parse_job(&at), "live at 4000");
+
+        let fast_tool = live_tool.replace("4000", "4000.001");
+        let tool_over = machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, "", &fast_tool, holes)
+            .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
+        let message = parse_err(&tool_over);
+        assert!(message.contains("machine haas_st15y: tool 2: live tool max_rpm 4000.001 exceeds 4000"), "{message}");
+
+        // The tool cap is checked first, so this operation uses a live tool with no max_rpm.
+        let uncapped = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6 }"#;
+        let fast_op = holes.replace("\"rpm\": 4000", "\"rpm\": 4000.001");
+        let op_over = machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, "", uncapped, &fast_op)
+            .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
+        let message = parse_err(&op_over);
+        assert!(message.contains("machine haas_st15y: operation holes: live tool rpm 4000.001 exceeds 4000"), "{message}");
+
+        let upgraded = holes.replace("\"rpm\": 4000", "\"rpm\": 6000");
+        let tool = live_tool.replace("4000", "6000");
+        let raised = machine_shell(3_000.0, r#""machine": { "model": "haas_st20y", "live_tool_upgrade": true },"#, "", &tool, &upgraded)
+            .replace(r#""spindle": { "max_rpm": 3000 },"#, r#""spindle": { "max_rpm": 3000, "c_axis": true },"#);
+        unwrap_ok(super::parse_job(&raised), "6000 with the upgrade");
+
+        let ds = parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_ds30y", "live_tool_upgrade": true },"#, "", TURN_TOOL, FACE_OP));
+        assert!(ds.contains("machine.live_tool_upgrade: haas_ds30y has no 6000 rpm live tool option"), "{ds}");
+    }
+
+    #[test]
+    fn sub_and_tailstock_options_gate_operations_and_the_ds_has_no_tailstock() {
+        let handoff = r#"{ "name": "handoff", "type": "transfer", "approach_z": 4, "grip_z": -1, "park_z": -50, "feed": 200 }"#;
+        let sub = r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } },"#;
+        let bare = parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, sub, TURN_TOOL, handoff));
+        assert!(bare.contains("operation handoff: haas_st15y has no sub-spindle (machine.sub_spindle is false)"), "{bare}");
+
+        let fitted = machine_shell(3_000.0, r#""machine": { "model": "haas_st20y", "sub_spindle": true },"#, sub, TURN_TOOL, handoff);
+        let job = unwrap_ok(super::parse_job(&fitted), "sub option");
+        assert!(super::counts_toward_travel(&job.operations[0]), "a transfer is main-frame");
+
+        let early = r#"{ "name": "back", "type": "face", "tool_id": 1, "spindle": "sub", "step_z": 0.5, "feed": 100, "speed": { "rpm": 800 } }"#;
+        let before = parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, sub, TURN_TOOL, early));
+        assert!(before.contains("operation back: haas_st15y has no sub-spindle (machine.sub_spindle is false)"), "{before}");
+
+        let advance = r#"{ "name": "in", "type": "tailstock", "action": "advance" }"#;
+        let no_option =
+            parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_st20y" },"#, r#""tailstock": { "diameter": 12 },"#, TURN_TOOL, advance));
+        assert!(no_option.contains("operation in: machine has no tailstock (machine.tailstock is false)"), "{no_option}");
+
+        let with_option = machine_shell(
+            3_000.0,
+            r#""machine": { "model": "haas_st15y", "tailstock": true },"#,
+            r#""tailstock": { "diameter": 12 },"#,
+            TURN_TOOL,
+            advance,
+        );
+        unwrap_ok(super::parse_job(&with_option), "tailstock option");
+
+        let ds_block =
+            parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_ds30y" },"#, r#""tailstock": { "diameter": 12 },"#, TURN_TOOL, FACE_OP));
+        assert!(ds_block.contains("machine haas_ds30y: haas_ds30y has no tailstock (the B axis is the secondary spindle)"), "{ds_block}");
+        let ds_flag = parse_err(&machine_shell(3_000.0, r#""machine": { "model": "haas_ds30y", "tailstock": true },"#, "", TURN_TOOL, FACE_OP));
+        assert!(ds_flag.contains("machine haas_ds30y: haas_ds30y has no tailstock (the B axis is the secondary spindle)"), "{ds_flag}");
+
+        let both = parse_err(&machine_shell(
+            3_000.0,
+            r#""machine": { "model": "haas_st20y", "sub_spindle": true, "tailstock": true },"#,
+            "",
+            TURN_TOOL,
+            FACE_OP,
+        ));
+        assert!(both.contains("haas_st20y: the sub-spindle option is not compatible with the tailstock option (Haas ST-20Y spec page)"), "{both}");
+    }
+
+    #[test]
+    fn program_extents_use_main_frame_tip_radii() {
+        let wide = machine_shell(3_000.0, r#""machine": { "model": "haas_st15y" },"#, "", TURN_TOOL, FACE_OP)
+            .replace(r#""diameter": 40"#, r#""diameter": 500"#);
+        let job = unwrap_ok(super::parse_job(&wide), "wide face");
+        let err = match super::build_document(Path::new("job.lathe.json"), &job, &cylinder(15.0, 20.0), None) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("x travel was accepted"),
+        };
+        assert!(err.contains("machine haas_st15y: program X extent"), "{err}");
+        assert!(err.contains("exceeds the X travel 200.000"), "{err}");
+
+        let long = r#"{
+            "format": "campanion-lathe/1",
+            "source": { "path": "shaft.dxf" },
+            "units": "mm",
+            "stock": { "kind": "bar", "diameter": 30, "length": 520, "front_allowance": 1 },
+            "spindle": { "max_rpm": 3000 },
+            "machine": { "model": "haas_st15y" },
+            "tools": [{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }],
+            "operations": [{ "name": "finish", "type": "finish", "tool_id": 1, "side": "outside", "feed": 100, "speed": { "rpm": 800 } }],
+            "clearance": 2
+        }"#;
+        let job = unwrap_ok(super::parse_job(long), "long finish");
+        let err = match super::build_document(Path::new("job.lathe.json"), &job, &cylinder(15.0, 500.0), None) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("z travel was accepted"),
+        };
+        assert!(err.contains("machine haas_st15y: program Z extent"), "{err}");
+        assert!(err.contains("exceeds the Z travel 406.000"), "{err}");
+
+        let small = unwrap_ok(super::parse_job(&machine_shell(3_000.0, r#""machine": { "model": "haas_st20y" },"#, "", TURN_TOOL, FACE_OP)), "small");
+        let (doc, _) = unwrap_ok(super::build_document(Path::new("job.lathe.json"), &small, &cylinder(15.0, 30.0), None), "inside travel");
+        assert_eq!(doc.program().toolpaths().len(), 1);
     }
 }

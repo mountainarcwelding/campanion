@@ -6,6 +6,7 @@
 
 ### Added
 
+- Lathe `machine` block with cited limit profiles for the Haas ST-15Y, ST-20Y and DS-30Y (travel extents, Y travel, spindle, sync and live-tool rpm).
 - Lathe `steady_rest` operation (clamp/unclamp) with a band check; `haas_lathe` writes M146/M147.
 - Lathe `bar_feed` operation at program end; `haas_lathe` homes and writes G105 alone on its line, with optional J/K overrides.
 
