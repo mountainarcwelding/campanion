@@ -3,6 +3,7 @@
 use crate::Result;
 use crate::bbox::BoundingBox;
 use crate::point::{Point, Vec2};
+use crate::util;
 
 /// A finite straight segment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,9 +63,9 @@ impl Line {
     /// Uses the half-open rule: an upward crossing counts when the end is strictly
     /// above the ray, a downward crossing when the end is at or below it.
     pub(crate) fn winding(self, p: Point) -> i32 {
-        let y0 = self.start.y();
-        let y1 = self.end.y();
         let py = p.y();
+        let y0 = util::snap_ray_y(self.start.y(), py);
+        let y1 = util::snap_ray_y(self.end.y(), py);
         let upward = y0 <= py && y1 > py;
         let downward = y0 > py && y1 <= py;
         if !upward && !downward {
