@@ -1017,6 +1017,33 @@ impl<'a> Writer<'a> {
                 }
             }
         }
+        // Rounded `IJK` offsets on a sub-quantum arc can leave both rounded ends at the same angle
+        // about the written centre, which a controller cuts as a full circle (or the long way
+        // round). Write any piece the controller would sweep past the program as lines instead.
+        // Checked in program coordinates and sense; turning and frames rescale or remap axes.
+        if self.post.arc_mode() == ArcMode::Ijk && angle.is_none() && !full_turn && !self.frame_active && self.turning.is_none() {
+            let curve_start = self.exact.unwrap_or(start);
+            let ir_radius = geom::in_plane_len(plane, curve_start, center);
+            if ir_radius > 1e-12 {
+                let quantum = 10_f64.powi(-i32::from(self.post.decimals.linear));
+                let mut read_center = start;
+                for (offset, (axis, value)) in read_center.iter_mut().zip(start.iter().zip(center.iter())) {
+                    let text = self.format_axis(value - axis, self.post.decimals.linear)?;
+                    *offset += text.parse::<f64>().map_err(|_| invalid("axis value is not a number"))?;
+                }
+                let controller = geom::forward_delta(
+                    geom::angle_of(plane, start, read_center),
+                    geom::angle_of(plane, rounded, read_center),
+                    matches!(sense, campanion_ir::ArcSense::Ccw),
+                );
+                let allowance = 4.0 * quantum / ir_radius + 1e-3;
+                // `forward_delta` reads equal angles as 0; a controller cuts them as a full turn.
+                let same_angle = controller <= 1e-12 && geom::in_plane_len(plane, start, rounded) > 1e-12;
+                if same_angle || controller > sweep + allowance {
+                    return self.linearise_curve(sense, plane, curve_start, end, center, sweep, feed);
+                }
+            }
+        }
         let mut words = Vec::new();
         if self.post.planes && self.plane != Some(plane) {
             words.push(plane_word(plane).to_string());

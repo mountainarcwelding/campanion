@@ -87,6 +87,7 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                 }
                 let written_end = written_tip(setup, end_pose)?;
                 let rotating = rotary::angle_changes(prev_angle, end_angle);
+                let part_before = part;
                 match motion {
                     ClMotion::Rapid { .. } => {
                         if rotating || !skip_z_only(post, written, written_end, true)? {
@@ -177,7 +178,23 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                     }
                 }
                 part = Some(part_end);
-                written = Some(written_end);
+                // The writer posts a full-turn arc with its in-plane end on the start, so the next
+                // block's "unchanged axes" test runs against the start, not the drifted program end.
+                written = Some(match (motion, written) {
+                    (ClMotion::Arc { plane, center, sense, .. }, Some(before)) if setup.is_none() => {
+                        let start = part_before.unwrap_or(before);
+                        let full = geom::arc_sweep(start, part_end, xyz(*center), *plane, *sense, 0.0)
+                            .is_ok_and(|sweep| sweep >= std::f64::consts::TAU - 1e-8);
+                        if full {
+                            let (su, sv, _) = geom::plane_uv(*plane, before);
+                            let (_, _, axial) = geom::plane_uv(*plane, written_end);
+                            geom::compose(*plane, su, sv, axial)
+                        } else {
+                            written_end
+                        }
+                    }
+                    _ => written_end,
+                });
                 prev_angle = end_angle;
                 if program.turning().is_some()
                     && let Some(angle) = end_angle

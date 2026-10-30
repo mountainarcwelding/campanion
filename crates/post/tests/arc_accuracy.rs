@@ -270,3 +270,21 @@ fn fitted_short_arcs_compare_on_every_mill_post() {
         }
     }
 }
+
+/// IJK offsets rounded onto a sub-quantum arc put both rounded ends at the same angle about the
+/// written centre, which a controller cuts as a full circle. Found by `short_arcs_post_and_read_back`.
+#[test]
+fn ijk_rounding_does_not_turn_a_tiny_arc_into_a_full_circle() {
+    assert_mill_arc_compared_at(
+        ArcCase {
+            x: 99.574_502_137_997_03,
+            y: 55.749_905_237_014_445,
+            z: 0.0,
+            radius: 0.011_070_593_457_945_62,
+            sweep: 0.027_362_656_349_396_8,
+            ccw: false,
+            feed: 50.0,
+        },
+        Some(ARC_TOLERANCE),
+    );
+}
