@@ -30,6 +30,8 @@ const AXIS_STEP_TOL_DEG: f64 = 1e-6;
 const COLLAPSE_XY: f64 = 1e-9;
 /// Below this span a step that still exceeds the limit is a contact-normal jump, not a steep slope.
 const BREAK_SPAN: f64 = 1e-3;
+/// Added to a step / limit ratio before `ceil`, so platform libm differences cannot change a count.
+const RATIO_NUDGE: f64 = 1e-6;
 /// Posted non-TCP Z is the gauge point. At least this far above machine Z 0, so a 3-decimal
 /// post cannot round the rapid negative. The rapid-safety scan rejects a rotary G0 below Z 0.
 const SAFE_MACHINE_Z: f64 = 0.001;
@@ -521,9 +523,12 @@ fn push_orientation_rapids(
     mut hint: [f64; 2],
 ) -> Result<[f64; 2], CliError> {
     let step = axis_change_deg(from_axis, to_axis);
+    // The angle comes from libm, which differs between platforms in the last bits. A step on a
+    // whole multiple of the limit (20 deg at 5 deg) must split the same way everywhere, so the
+    // ratio is nudged up: anything within 1e-6 of a multiple takes the extra piece.
     let mut count = 1usize;
-    if step.is_finite() && step > DEFAULT_MAX_AXIS_STEP_DEG {
-        let pieces = (step / DEFAULT_MAX_AXIS_STEP_DEG).ceil();
+    if step.is_finite() {
+        let pieces = (step / DEFAULT_MAX_AXIS_STEP_DEG + RATIO_NUDGE).ceil();
         if pieces.is_finite() && pieces > 1.0 {
             count = pieces as usize;
         }
