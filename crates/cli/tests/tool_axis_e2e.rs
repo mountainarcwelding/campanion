@@ -52,10 +52,55 @@ fn assert_golden(name: &str, actual: &str) -> Result<(), String> {
         return Ok(());
     }
     let expected = std::fs::read_to_string(&path).map_err(|err| format!("read {}: {err} (set UPDATE_GOLDEN=1 to create)", path.display()))?;
-    if actual != expected {
-        return Err(format!("golden mismatch for {} (set UPDATE_GOLDEN=1 to regenerate)", path.display()));
+    if actual == expected {
+        return Ok(());
+    }
+    // libm differs between glibc builds, so a value on a rounding boundary may print one unit
+    // apart in the last digit. Words, letters and line structure must still match exactly.
+    let actual_lines: Vec<&str> = actual.lines().collect();
+    let expected_lines: Vec<&str> = expected.lines().collect();
+    if actual_lines.len() != expected_lines.len() {
+        return Err(format!(
+            "golden mismatch for {}: {} lines, expected {} (set UPDATE_GOLDEN=1 to regenerate)",
+            path.display(),
+            actual_lines.len(),
+            expected_lines.len()
+        ));
+    }
+    for (index, (got, want)) in actual_lines.iter().zip(&expected_lines).enumerate() {
+        if !lines_match_last_digit(got, want) {
+            return Err(format!(
+                "golden mismatch for {} line {}:\n  got  {got}\n  want {want}\n(set UPDATE_GOLDEN=1 to regenerate)",
+                path.display(),
+                index + 1
+            ));
+        }
     }
     Ok(())
+}
+
+/// Same words; a numeric value may differ by one unit in its last printed decimal place.
+fn lines_match_last_digit(got: &str, want: &str) -> bool {
+    let got_words: Vec<&str> = got.split_whitespace().collect();
+    let want_words: Vec<&str> = want.split_whitespace().collect();
+    got_words.len() == want_words.len() && got_words.iter().zip(&want_words).all(|(left, right)| left == right || words_match_last_digit(left, right))
+}
+
+fn words_match_last_digit(left: &str, right: &str) -> bool {
+    let split = |word: &str| -> Option<(char, f64, usize)> {
+        let mut chars = word.chars();
+        let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+        let number = chars.as_str();
+        let value: f64 = number.parse().ok()?;
+        let decimals = number.split_once('.').map_or(0, |(_, frac)| frac.len());
+        Some((letter, value, decimals))
+    };
+    let (Some((left_letter, left_value, left_decimals)), Some((right_letter, right_value, right_decimals))) = (split(left), split(right)) else {
+        return false;
+    };
+    let decimals = left_decimals.max(right_decimals).max(1);
+    let unit = 10_f64.powi(-i32::try_from(decimals).unwrap_or(9));
+    left_letter == right_letter && (left_value - right_value).abs() <= unit * 1.000_001
 }
 
 #[test]
