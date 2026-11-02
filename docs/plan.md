@@ -406,3 +406,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-11-02: v0.9.0 is continuous five-axis stages 5A–5D (continuous toolpaths, path kinematics,
   singular cone and subdivision, posts without TCP on `linuxcnc_5ax` and `haas_umc`), plus the
   sub-resolution arc fix (#120). Next: 5E–5F (TCP posts, tool-axis strategies) for v0.9.1.
+- 2026-11-02: v0.9.1 is stages 5E–5F (TCP posts `haas_umc_tcpc` and `linuxcnc_5ax_tcp`,
+  surface tool-axis strategies), plus the reindex fix (#124) to 0.9.0 continuous-then-indexed
+  output. Next: 5G–5H (collision checks, machine sim) for v0.9.2.

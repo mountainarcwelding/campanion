@@ -2,9 +2,13 @@
 
 ## [Unreleased]
 
+## 0.9.1 — 2026-11-02
+
+TCP posts and tool-axis strategies (five-axis stages 5E–5F). This release fixes wrong output from 0.9.0: repost any `haas_umc` or `linuxcnc_5ax` program from 0.9.0 that has an indexed (3+2) toolpath after a continuous toolpath with the same tool axis.
+
 ### Fixed
 
-- An indexed toolpath after a continuous five-axis toolpath on the same tool axis now reindexes and turns the work frame back on. The frame had stayed off, so the cut was written as part-frame XYZ while the rotaries remained at the continuous pose.
+- An indexed toolpath after a continuous five-axis toolpath on the same tool axis now reindexes and turns the work frame back on. In 0.9.0 the frame stayed off, so on `haas_umc` (no G254) and `linuxcnc_5ax` (no machine transform) the cut was written as raw part-frame XYZ while the rotaries remained at the continuous pose.
 
 ### Added
 
