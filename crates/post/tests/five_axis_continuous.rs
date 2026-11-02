@@ -966,8 +966,8 @@ fn tcp_rapid_that_changes_a_rotary_is_inverse_time_g1() {
     let feed = text.lines().find(|line| token_is(line, "G1") && word_on(line, 'F').is_some()).expect("g1");
     let f = word_on(feed, 'F').expect("f");
     assert!((f - expected).abs() < 5e-4, "{feed} vs {expected}\n{text}");
-    assert!(text.contains("G234 H0"), "{text}");
-    assert!(text.contains("G43 H0"), "{text}");
+    assert!(text.contains("G234 H1"), "{text}");
+    assert!(text.contains("G43 H1"), "{text}");
     let g49 = text.rfind("G49").expect("G49");
     let g43 = text.rfind("G43").expect("G43");
     assert!(g43 > g49, "restore length after G49\n{text}");
