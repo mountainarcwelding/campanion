@@ -1,0 +1,41 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "dome.stl",
+    "hash": "63fcad5e5dca92dc"
+  },
+  "units": "mm",
+  "kinematics": "table_table_bc.kin.json",
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0,
+      "shape": "ball",
+      "speed": 12000
+    }
+  ],
+  "operations": [
+    {
+      "name": "dome",
+      "type": "surface",
+      "tool_id": 1,
+      "stepover": 6.0,
+      "sample_step": 2.0,
+      "tool_axis": {
+        "mode": "lead_tilt",
+        "lead_deg": 10,
+        "tilt_deg": 0,
+        "max_tilt_deg": 30
+      },
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.05
+  }
+}

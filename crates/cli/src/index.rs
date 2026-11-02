@@ -484,8 +484,18 @@ fn rapid_path(tool_id: Option<u32>, feeds: Feeds, to: Pose) -> Result<ClPath, Cl
 }
 
 pub(crate) fn rebuild(path: &ClPath, blocks: Vec<ClBlock>) -> Result<ClPath, CliError> {
-    ClPath::try_new(path.name().map(str::to_string), path.tool_id(), path.compensation(), path.feeds(), path.pierce(), path.tabs().to_vec(), blocks)
-        .map_err(CliError::from)
+    let continuous = path.continuous();
+    let cone = path.singular_cone_deg();
+    let rebuilt = ClPath::try_new(
+        path.name().map(str::to_string),
+        path.tool_id(),
+        path.compensation(),
+        path.feeds(),
+        path.pierce(),
+        path.tabs().to_vec(),
+        blocks,
+    )?;
+    rebuilt.with_continuous(continuous).with_singular_cone_deg(cone).map_err(CliError::from)
 }
 
 fn first_motion_tip(paths: &[ClPath]) -> Result<Vec3, CliError> {

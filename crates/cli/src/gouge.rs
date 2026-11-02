@@ -144,8 +144,50 @@ fn check_one(
     }
     let view = indexed_mesh(mesh, setup, angle)?;
     let dc = DropCutter::new(view.as_ref(), cutter).map_err(|err| CliError::run(format!("operation {name}: {err}")))?;
-    let segments = cutting_segments(path, sample_step, setup)?;
+    // A tilted ball keeps the 3-axis sphere. Compare that sphere's lowest point, `c - r*Z`,
+    // with the drop-cutter. The shank and the holder are not part of this check.
+    let segments = if op.tool_axis().is_some() {
+        let Some(diameter) = tool.diameter() else {
+            return Err(CliError::run(format!("operation {name}: surface is not valid with a kerf tool")));
+        };
+        virtual_ball_segments(path, diameter * 0.5)?
+    } else {
+        cutting_segments(path, sample_step, setup)?
+    };
     notes_for(name, &dc, &segments, sample_step, tolerance)
+}
+
+/// Cutting moves of a tilted ball, as the 3-axis tip of the same sphere.
+fn virtual_ball_segments(path: &ClPath, radius: f64) -> Result<Vec<(MeshVec, MeshVec)>, CliError> {
+    let mut cursor: Option<Pose> = None;
+    let mut segments = Vec::new();
+    for block in path.blocks() {
+        let ClBlock::Motion(motion) = block else {
+            continue;
+        };
+        match motion {
+            ClMotion::Rapid { to, .. } => cursor = Some(*to),
+            ClMotion::Linear { to, role, .. } => {
+                if cutting(*role) {
+                    let start = cursor.unwrap_or(*to);
+                    push_segment(&mut segments, virtual_ball_tip(start, radius), virtual_ball_tip(*to, radius))?;
+                }
+                cursor = Some(*to);
+            }
+            ClMotion::Thread { .. } | ClMotion::Arc { .. } | ClMotion::Helix { .. } => {
+                return Err(CliError::run("gouge check cannot sample a tilted arc; a tool_axis surface emits lines"));
+            }
+        }
+    }
+    Ok(segments)
+}
+
+fn virtual_ball_tip(pose: Pose, radius: f64) -> MeshVec {
+    let axis = pose.axis();
+    let len = (axis.x() * axis.x() + axis.y() * axis.y() + axis.z() * axis.z()).sqrt();
+    let scale = if len.is_finite() && len > 0.0 { radius / len } else { 0.0 };
+    let tip = pose.tip();
+    MeshVec::new(tip.x() + axis.x() * scale, tip.y() + axis.y() * scale, tip.z() + axis.z() * scale - radius)
 }
 
 /// One angle's cutting segments, already in the machine view.

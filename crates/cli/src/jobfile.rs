@@ -33,6 +33,8 @@
 //! `margin` grows the mesh XY bounds, and `floor_z` defaults to the mesh minimum Z.
 //! `stock_to_leave` on a surface is one length that raises every cutter-location Z. That is an
 //! axial offset, not a 3D rest offset. `layers`, `depth`, `step_down` and `side` are rejected.
+//! An optional `tool_axis` on a surface needs a ball and a kinematics file. Lengths in that
+//! object scale with `units`; the angles do not. See `docs/job-file.md`.
 //!
 //! `rough` is Z-level roughing. `step_down` is required. `stepover` defaults to 0.4 times the
 //! tool diameter. `margin` defaults to the tool radius and grows the mesh XY bounds into the
@@ -556,6 +558,57 @@ pub struct Operation {
     speed: Option<f64>,
     /// Bridges on a profile. `None` when the file omits `tabs`, and on every other kind.
     tabs: Option<TabSpec>,
+    /// Continuous tool axis. `None` except on a surface that sets `tool_axis`.
+    tool_axis: Option<ToolAxis>,
+}
+
+/// How a surface aims the tool, then clamps it toward +Z.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ToolAxisMode {
+    /// Lead about the side direction, then tilt about the feed.
+    LeadTilt {
+        /// Degrees, positive toward the feed. Not scaled by `units`.
+        lead_deg: f64,
+        /// Degrees, right-handed about the feed. Not scaled by `units`.
+        tilt_deg: f64,
+    },
+    /// From the ball centre toward `point`.
+    TowardPoint {
+        /// Target, millimetres.
+        point: Vec3,
+    },
+    /// From `point` through the ball centre.
+    AwayFromPoint {
+        /// Target, millimetres.
+        point: Vec3,
+    },
+    /// From the ball centre toward the closest point of `curve`.
+    TowardCurve {
+        /// Polyline, at least two points, millimetres.
+        curve: Vec<Vec3>,
+    },
+}
+
+/// Tool-axis strategy for one surface. `max_tilt_deg` is in `(0, 90)`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ToolAxis {
+    mode: ToolAxisMode,
+    max_tilt_deg: f64,
+}
+
+impl ToolAxis {
+    pub(crate) fn new(mode: ToolAxisMode, max_tilt_deg: f64) -> Self {
+        Self { mode, max_tilt_deg }
+    }
+
+    pub(crate) fn mode(&self) -> &ToolAxisMode {
+        &self.mode
+    }
+
+    /// Largest angle from +Z, in degrees.
+    pub(crate) fn max_tilt_deg(&self) -> f64 {
+        self.max_tilt_deg
+    }
 }
 
 /// Work plane for one indexed 3+2 operation.
@@ -803,6 +856,11 @@ impl Operation {
         self.plane
     }
 
+    /// Continuous tool axis. `None` when the file omits `tool_axis`, and on every kind other than a surface.
+    pub(crate) fn tool_axis(&self) -> Option<&ToolAxis> {
+        self.tool_axis.as_ref()
+    }
+
     /// Spindle speed in rpm from the operation. `None` when the file omits `operations[].speed`.
     pub fn speed(&self) -> Option<f64> {
         self.speed
@@ -1033,6 +1091,11 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         && kinematics.is_none()
     {
         return Err(JobFileError::invalid(format!("operation `{}`: plane needs a kinematics file", operation.name())));
+    }
+    if let Some(operation) = operations.iter().find(|operation| operation.tool_axis().is_some())
+        && kinematics.is_none()
+    {
+        return Err(JobFileError::invalid(format!("operation `{}`: tool_axis needs a kinematics file", operation.name())));
     }
     if let Some(kinematics) = &kinematics {
         for operation in &operations {
@@ -1349,6 +1412,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "plane",
             "speed",
             "tabs",
+            "tool_axis",
         ],
         "operation",
     )
@@ -1360,6 +1424,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let kind = parse_kind(map)?;
     if optional(map, "tabs").is_some() && !matches!(kind, OperationKind::Profile { .. }) {
         return Err(op_invalid(&name, "tabs is only valid on a profile"));
+    }
+    if optional(map, "tool_axis").is_some() && !matches!(kind, OperationKind::Surface) {
+        return Err(JobFileError::invalid("tool_axis is only valid on a surface"));
     }
     let dwell = parse_dwell(optional(map, "dwell"), kind)?;
     let plane = take_plane(&name, map, &kind, index_deg.is_some(), scale)?;
@@ -1457,6 +1524,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         plane,
         speed,
         tabs,
+        tool_axis: None,
     })
 }
 
@@ -1541,6 +1609,15 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
     let stock_to_leave = parse_stock_to_leave(optional(map, "stock_to_leave"), OperationKind::Surface, 0.0, scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_params(None).map_err(from_cli)?;
+    let tool_axis = match optional(map, "tool_axis") {
+        Some(value) => {
+            if !matches!(tool.shape(), ToolShape::Ball) {
+                return Err(op_invalid(&name, "tool_axis needs a ball tool"));
+            }
+            Some(parse_tool_axis(&name, value, scale)?)
+        }
+        None => None,
+    };
     Ok(Operation {
         name,
         kind: OperationKind::Surface,
@@ -1573,7 +1650,120 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         plane: None,
         speed: None,
         tabs: None,
+        tool_axis,
     })
+}
+
+/// `mode` plus the fields that mode reads. Angles are not scaled. `point` and `curve` are.
+fn parse_tool_axis(name: &str, value: &Value, scale: f64) -> Result<ToolAxis, JobFileError> {
+    let map = object(value, "tool_axis").map_err(|err| named_field(name, from_cli(err)))?;
+    let mode_name = match optional(map, "mode").and_then(Value::as_str) {
+        Some(text) => text,
+        None => {
+            return Err(op_invalid(name, "tool_axis mode must be \"lead_tilt\", \"toward_point\", \"away_from_point\" or \"toward_curve\""));
+        }
+    };
+    let mode = match mode_name {
+        "lead_tilt" => {
+            check_keys(map, &["mode", "lead_deg", "tilt_deg", "max_tilt_deg"], "tool_axis").map_err(|err| named_field(name, from_cli(err)))?;
+            ToolAxisMode::LeadTilt { lead_deg: tool_axis_deg(name, map, "lead_deg")?, tilt_deg: tool_axis_deg(name, map, "tilt_deg")? }
+        }
+        "toward_point" => {
+            check_keys(map, &["mode", "point", "max_tilt_deg"], "tool_axis").map_err(|err| named_field(name, from_cli(err)))?;
+            let point = tool_axis_point(name, tool_axis_required(name, map, "point")?, scale)?;
+            ToolAxisMode::TowardPoint { point }
+        }
+        "away_from_point" => {
+            check_keys(map, &["mode", "point", "max_tilt_deg"], "tool_axis").map_err(|err| named_field(name, from_cli(err)))?;
+            let point = tool_axis_point(name, tool_axis_required(name, map, "point")?, scale)?;
+            ToolAxisMode::AwayFromPoint { point }
+        }
+        "toward_curve" => {
+            check_keys(map, &["mode", "curve", "max_tilt_deg"], "tool_axis").map_err(|err| named_field(name, from_cli(err)))?;
+            ToolAxisMode::TowardCurve { curve: tool_axis_curve(name, tool_axis_required(name, map, "curve")?, scale)? }
+        }
+        _ => {
+            return Err(op_invalid(name, "tool_axis mode must be \"lead_tilt\", \"toward_point\", \"away_from_point\" or \"toward_curve\""));
+        }
+    };
+    let max_tilt_deg = match optional(map, "max_tilt_deg") {
+        Some(value) => {
+            let degrees = value.as_f64().filter(|degrees| degrees.is_finite());
+            match degrees {
+                Some(degrees) if degrees > 0.0 && degrees < 90.0 => degrees,
+                _ => return Err(op_invalid(name, "tool_axis max_tilt_deg must be in (0, 90)")),
+            }
+        }
+        None => 60.0,
+    };
+    Ok(ToolAxis { mode, max_tilt_deg })
+}
+
+fn tool_axis_required<'a>(name: &str, map: &'a Map<String, Value>, key: &str) -> Result<&'a Value, JobFileError> {
+    optional(map, key).ok_or_else(|| op_invalid(name, format!("missing tool_axis {key}")))
+}
+
+fn tool_axis_deg(name: &str, map: &Map<String, Value>, key: &str) -> Result<f64, JobFileError> {
+    let value = tool_axis_required(name, map, key)?;
+    match value.as_f64() {
+        Some(degrees) if degrees.is_finite() => Ok(degrees),
+        _ => Err(op_invalid(name, format!("tool_axis {key} must be finite"))),
+    }
+}
+
+fn tool_axis_point(name: &str, value: &Value, scale: f64) -> Result<Vec3, JobFileError> {
+    let Some(list) = value.as_array() else {
+        return Err(op_invalid(name, "tool_axis point must be exactly 3 numbers"));
+    };
+    if list.len() != 3 {
+        return Err(op_invalid(name, "tool_axis point must be exactly 3 numbers"));
+    }
+    let mut coords = [0.0; 3];
+    for (slot, item) in coords.iter_mut().zip(list.iter()) {
+        let Some(number) = item.as_f64() else {
+            return Err(op_invalid(name, "tool_axis point must be exactly 3 numbers"));
+        };
+        let scaled = number * scale;
+        if !scaled.is_finite() {
+            return Err(op_invalid(name, "tool_axis point must be finite"));
+        }
+        *slot = scaled;
+    }
+    Vec3::new(coords[0], coords[1], coords[2]).map_err(|err| op_invalid(name, err))
+}
+
+fn tool_axis_curve(name: &str, value: &Value, scale: f64) -> Result<Vec<Vec3>, JobFileError> {
+    let Some(list) = value.as_array() else {
+        return Err(op_invalid(name, "tool_axis curve needs at least 2 points"));
+    };
+    if list.len() < 2 {
+        return Err(op_invalid(name, "tool_axis curve needs at least 2 points"));
+    }
+    if list.len() > 10_000 {
+        return Err(op_invalid(name, format!("too many tool_axis curve points: {} > 10000", list.len())));
+    }
+    let mut curve = Vec::with_capacity(list.len());
+    for item in list {
+        let Some(point) = item.as_array() else {
+            return Err(op_invalid(name, "tool_axis curve point must be exactly 3 numbers"));
+        };
+        if point.len() != 3 {
+            return Err(op_invalid(name, "tool_axis curve point must be exactly 3 numbers"));
+        }
+        let mut coords = [0.0; 3];
+        for (slot, coord) in coords.iter_mut().zip(point.iter()) {
+            let Some(number) = coord.as_f64() else {
+                return Err(op_invalid(name, "tool_axis curve point must be exactly 3 numbers"));
+            };
+            let scaled = number * scale;
+            if !scaled.is_finite() {
+                return Err(op_invalid(name, "tool_axis curve point must be finite"));
+            }
+            *slot = scaled;
+        }
+        curve.push(Vec3::new(coords[0], coords[1], coords[2]).map_err(|err| op_invalid(name, err))?);
+    }
+    Ok(curve)
 }
 
 /// Keys a rough does not accept. `side` is already rejected by [`parse_kind`].
@@ -1696,6 +1886,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         plane: None,
         speed: None,
         tabs: None,
+        tool_axis: None,
     })
 }
 
@@ -1818,6 +2009,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         plane: None,
         speed: None,
         tabs: None,
+        tool_axis: None,
     })
 }
 
@@ -1911,6 +2103,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         plane: None,
         speed: None,
         tabs: None,
+        tool_axis: None,
     })
 }
 
@@ -2030,6 +2223,7 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         plane: None,
         speed: None,
         tabs: None,
+        tool_axis: None,
     })
 }
 
@@ -5293,5 +5487,172 @@ mod tests {
         );
         let err = load(&write_job("tabs-rotary", &rotary)).expect_err("rotary");
         assert!(invalid_detail(&err).contains("operation `spin`: tabs is only valid on a profile"), "{err}");
+    }
+
+    fn tool_axis_job(units: &str, shape: &str, kinematics: bool, axis: &str) -> String {
+        let kin = if kinematics { r#","kinematics":"table_table_bc.kin.json""# } else { "" };
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"dome.stl","hash":"{EMPTY_HASH}"}},"units":"{units}"{kin},"tools":[{{"id":1,"diameter":6,"shape":{shape}}}],"operations":[{{"name":"dome","type":"surface","tool_id":1,"stepover":2,{axis},"feeds":{{"cut":100}}}}]}}"#
+        )
+    }
+
+    fn load_tool_axis(name: &str, text: &str, kinematics: bool) -> Result<JobFile, JobFileError> {
+        let path = write_job(name, text);
+        if kinematics {
+            write_beside(&path, "table_table_bc.kin.json", &example_kinematics());
+        }
+        load(&path)
+    }
+
+    #[test]
+    fn tool_axis_parses_modes_and_rejects_bad_input() {
+        let lead = load_tool_axis(
+            "axis-lead",
+            &tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":10,"tilt_deg":-3}"#),
+            true,
+        )
+        .expect("lead");
+        let axis = lead.operations()[0].tool_axis().expect("axis");
+        assert_eq!(axis.max_tilt_deg(), 60.0);
+        assert_eq!(*axis.mode(), ToolAxisMode::LeadTilt { lead_deg: 10.0, tilt_deg: -3.0 });
+
+        let tilted = load_tool_axis(
+            "axis-tilt-cap",
+            &tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":1,"tilt_deg":2,"max_tilt_deg":89.9}"#),
+            true,
+        )
+        .expect("cap");
+        assert_eq!(tilted.operations()[0].tool_axis().expect("axis").max_tilt_deg(), 89.9);
+
+        let inch = load_tool_axis(
+            "axis-inch",
+            &tool_axis_job("inch", r#""ball""#, true, r#""tool_axis":{"mode":"toward_point","point":[1,0,0],"lead_deg":10,"max_tilt_deg":45}"#),
+            true,
+        );
+        // `lead_deg` is not a toward_point field, so this must fail before scaling is the question.
+        // A clean inch point is checked below. This call is only here so a stray key still names the field.
+        let err = inch.expect_err("stray lead");
+        assert_eq!(invalid_detail(&err), "operation `dome`: unknown tool_axis field `lead_deg`");
+
+        let inch = load_tool_axis(
+            "axis-inch-point",
+            &tool_axis_job("inch", r#""ball""#, true, r#""tool_axis":{"mode":"toward_point","point":[1,0,2],"max_tilt_deg":45}"#),
+            true,
+        )
+        .expect("inch point");
+        match inch.operations()[0].tool_axis().expect("axis").mode() {
+            ToolAxisMode::TowardPoint { point } => {
+                assert_eq!(point.x(), 25.4);
+                assert_eq!(point.y(), 0.0);
+                assert_eq!(point.z(), 50.8);
+            }
+            other => panic!("mode {other:?}"),
+        }
+        assert_eq!(inch.operations()[0].tool_axis().expect("axis").max_tilt_deg(), 45.0);
+
+        let curve = load_tool_axis(
+            "axis-curve",
+            &tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"toward_curve","curve":[[0,0,10],[5,0,12]]}"#),
+            true,
+        )
+        .expect("curve");
+        match curve.operations()[0].tool_axis().expect("axis").mode() {
+            ToolAxisMode::TowardCurve { curve } => assert_eq!(curve.len(), 2),
+            other => panic!("mode {other:?}"),
+        }
+
+        let cases = [
+            (
+                tool_axis_job("mm", r#""flat""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0}"#),
+                "operation `dome`: tool_axis needs a ball tool",
+            ),
+            (
+                tool_axis_job("mm", r#"{"bull":1}"#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0}"#),
+                "operation `dome`: tool_axis needs a ball tool",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, false, r#""tool_axis":{"mode":"lead_tilt","lead_deg":1,"tilt_deg":0}"#),
+                "operation `dome`: tool_axis needs a kinematics file",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"sideways","lead_deg":0,"tilt_deg":0}"#),
+                "operation `dome`: tool_axis mode must be \"lead_tilt\", \"toward_point\", \"away_from_point\" or \"toward_curve\"",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"lead_deg":0,"tilt_deg":0}"#),
+                "operation `dome`: tool_axis mode must be \"lead_tilt\", \"toward_point\", \"away_from_point\" or \"toward_curve\"",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","tilt_deg":0}"#),
+                "operation `dome`: missing tool_axis lead_deg",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":"no","tilt_deg":0}"#),
+                "operation `dome`: tool_axis lead_deg must be finite",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":1}"#),
+                "operation `dome`: missing tool_axis tilt_deg",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":1,"tilt_deg":"no"}"#),
+                "operation `dome`: tool_axis tilt_deg must be finite",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"toward_point","point":[1,2]}"#),
+                "operation `dome`: tool_axis point must be exactly 3 numbers",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"away_from_point","point":[1,2,"no"]}"#),
+                "operation `dome`: tool_axis point must be exactly 3 numbers",
+            ),
+            (
+                tool_axis_job("inch", r#""ball""#, true, r#""tool_axis":{"mode":"toward_point","point":[1e308,0,0]}"#),
+                "operation `dome`: tool_axis point must be finite",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"toward_curve","curve":[[0,0,1]]}"#),
+                "operation `dome`: tool_axis curve needs at least 2 points",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"toward_curve","curve":[[0,0],[1,0,0]]}"#),
+                "operation `dome`: tool_axis curve point must be exactly 3 numbers",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0,"max_tilt_deg":0}"#),
+                "operation `dome`: tool_axis max_tilt_deg must be in (0, 90)",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0,"max_tilt_deg":90}"#),
+                "operation `dome`: tool_axis max_tilt_deg must be in (0, 90)",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0,"max_tilt_deg":-1}"#),
+                "operation `dome`: tool_axis max_tilt_deg must be in (0, 90)",
+            ),
+            (
+                tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0,"foo":1}"#),
+                "operation `dome`: unknown tool_axis field `foo`",
+            ),
+            (tool_axis_job("mm", r#""ball""#, true, r#""tool_axis":[]"#), "operation `dome`: tool_axis must be an object"),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let err = load_tool_axis(&format!("axis-bad-{index}"), text, text.contains("kinematics")).expect_err(needle);
+            assert_eq!(invalid_detail(&err), *needle, "{needle}: {err}");
+        }
+
+        let profile = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"mm","tools":[{{"id":1,"diameter":6}}],"operations":[{{"name":"outer","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"tool_axis":{{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0}},"feeds":{{"cut":1}}}}]}}"#
+        );
+        let err = load(&write_job("axis-profile", &profile)).expect_err("profile");
+        assert_eq!(invalid_detail(&err), "operation 0: tool_axis is only valid on a surface");
+
+        let rough = envelope(
+            "part.stl",
+            r#"[{"id":1,"diameter":6,"shape":"ball"}]"#,
+            r#"[{"name":"hog","type":"rough","tool_id":1,"step_down":1,"tool_axis":{"mode":"lead_tilt","lead_deg":0,"tilt_deg":0},"feeds":{"cut":1}}]"#,
+        );
+        let err = load(&write_job("axis-rough", &rough)).expect_err("rough");
+        assert!(invalid_detail(&err).contains("tool_axis is only valid on a surface"), "{err}");
     }
 }

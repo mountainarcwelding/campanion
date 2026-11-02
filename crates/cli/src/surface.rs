@@ -11,11 +11,19 @@
 //! above the stock top, and plunges between the remaining hits, and it does the same when a
 //! chord between hits would gouge.
 
+use campanion_ir::ClPath;
 use campanion_mesh::{Cutter, DropCutter, Mesh, RasterAngle, RasterParams, Vec3 as MeshVec, parallel_finish, scallop_stepover};
 use campanion_path::{CutKind, Move, Point3, ProcessEvent, Toolpath};
 
 use crate::error::CliError;
 use crate::jobfile::{JobFile, JobTool, Operation, ToolShape};
+use crate::toolaxis;
+
+/// A 3-axis surface, or one continuous toolpath when the operation sets `tool_axis`.
+pub(crate) enum SurfacePaths {
+    Plain(Toolpath),
+    Tilted(ClPath),
+}
 
 /// Matches the move cap in `campanion-path`. A longer list is rejected before it is built.
 const MAX_MOVES: usize = 65_536;
@@ -25,7 +33,10 @@ const PATH_OVERHEAD: usize = 5;
 const MAX_LINK_STEPS: usize = 100_000;
 
 /// One surface toolpath. `mesh` is the job's STL. Z of every cutter location includes axial stock.
-pub(crate) fn finish(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh) -> Result<Toolpath, CliError> {
+///
+/// Without `tool_axis` the moves match the 3-axis or indexed surface. With `tool_axis` the raster
+/// is tilted about each ball centre and returned as one continuous path.
+pub(crate) fn finish(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh) -> Result<SurfacePaths, CliError> {
     let bounds = mesh.bounds().map_err(|err| op_err(op, err))?;
     let floor = op.floor_z().unwrap_or_else(|| bounds.min().z);
     let stock = op.stock_to_leave().floor();
@@ -41,11 +52,19 @@ pub(crate) fn finish(job: &JobFile, op: &Operation, tool: &JobTool, mesh: &Mesh)
     let area_min = (bounds.min().x - margin, bounds.min().y - margin);
     let area_max = (bounds.max().x + margin, bounds.max().y + margin);
     let lines = parallel_finish(&dc, area_min, area_max, &params).map_err(|err| op_err(op, err))?;
-    let points = collect_points(op, &dc, &lines, sample_step, floor, stock)?;
     // A clearance below the mesh would rapid through the stock. The safe height is the
     // higher of the job clearance, the job retract, and the mesh top.
     let rapid_z = job.clearance().max(bounds.max().z).max(job.retract());
-    if job.rotary().is_some() { emit_indexed(op, job, &dc, &points, rapid_z) } else { emit_plain(op, job, &points, rapid_z) }
+    if op.tool_axis().is_some() {
+        let Some(radius) = cutter.radius() else {
+            return Err(op_err(op, "tool_axis needs a ball tool"));
+        };
+        let path = toolaxis::plan(job, op, tool, &dc, &lines, floor, stock, radius, rapid_z)?;
+        return Ok(SurfacePaths::Tilted(path));
+    }
+    let points = collect_points(op, &dc, &lines, sample_step, floor, stock)?;
+    let path = if job.rotary().is_some() { emit_indexed(op, job, &dc, &points, rapid_z)? } else { emit_plain(op, job, &points, rapid_z)? };
+    Ok(SurfacePaths::Plain(path))
 }
 
 /// Every raster sample, misses included. This is the 3-axis surface. Rapids use `rapid_z`.
@@ -353,14 +372,20 @@ mod tests {
         let dc = DropCutter::new(&mesh, tool_cutter).expect("index");
 
         let plain_job = job(false);
-        let plain =
-            finish(&plain_job, &plain_job.operations()[0], plain_job.tool(1).expect("tool"), &mesh).unwrap_or_else(|err| panic!("plain: {err}"));
+        let plain = match finish(&plain_job, &plain_job.operations()[0], plain_job.tool(1).expect("tool"), &mesh) {
+            Ok(SurfacePaths::Plain(path)) => path,
+            Ok(SurfacePaths::Tilted(_)) => panic!("plain surface tilted"),
+            Err(err) => panic!("plain: {err}"),
+        };
         let plain_miss = plain.moves().iter().filter_map(cutting_tip).any(|tip| dc.tip_z(tip.x(), tip.y()).is_none());
         assert!(plain_miss, "3-axis surface dropped a cutter miss");
 
         let indexed_job = job(true);
-        let indexed = finish(&indexed_job, &indexed_job.operations()[0], indexed_job.tool(1).expect("tool"), &mesh)
-            .unwrap_or_else(|err| panic!("indexed: {err}"));
+        let indexed = match finish(&indexed_job, &indexed_job.operations()[0], indexed_job.tool(1).expect("tool"), &mesh) {
+            Ok(SurfacePaths::Plain(path)) => path,
+            Ok(SurfacePaths::Tilted(_)) => panic!("indexed surface tilted"),
+            Err(err) => panic!("indexed: {err}"),
+        };
         let mut cursor: Option<Point3> = None;
         let mut segments = Vec::new();
         for mv in indexed.moves() {

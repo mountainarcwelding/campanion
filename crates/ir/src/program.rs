@@ -63,7 +63,7 @@ impl SyncPoint {
 }
 
 /// Largest tool-axis change, in degrees, allowed on one feed of a continuous toolpath.
-pub(crate) const DEFAULT_MAX_AXIS_STEP_DEG: f64 = 5.0;
+pub const DEFAULT_MAX_AXIS_STEP_DEG: f64 = 5.0;
 
 fn default_max_axis_step_deg() -> f64 {
     DEFAULT_MAX_AXIS_STEP_DEG

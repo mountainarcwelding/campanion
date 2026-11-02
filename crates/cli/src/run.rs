@@ -251,15 +251,23 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
             continue;
         }
         let view = planning_mesh(job, mesh, op)?;
-        let path = match op.kind() {
-            OperationKind::Surface => surface::finish(job, op, tool, view.as_ref())?,
-            OperationKind::Rough => rough::rough(job, op, tool, view.as_ref())?,
-            OperationKind::Waterline => waterline::finish(job, op, tool, view.as_ref())?,
+        let mut paths = Vec::new();
+        match op.kind() {
+            OperationKind::Surface => match surface::finish(job, op, tool, view.as_ref())? {
+                surface::SurfacePaths::Plain(path) => push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?,
+                surface::SurfacePaths::Tilted(path) => paths.push(path),
+            },
+            OperationKind::Rough => {
+                let path = rough::rough(job, op, tool, view.as_ref())?;
+                push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
+            }
+            OperationKind::Waterline => {
+                let path = waterline::finish(job, op, tool, view.as_ref())?;
+                push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
+            }
             OperationKind::RotaryFinish => return Err(op_err(op, "rotary finish needs a rotary setup")),
             _ => return Err(op_err(op, "an STL source only allows surface, rough, waterline or rotary_finish operations")),
-        };
-        let mut paths = Vec::new();
-        push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
+        }
         // Stock top is the highest Z of this planning mesh. The R plane is the job retract
         // height. The floor is the higher of the two, so a retract below the mesh still rejects
         // a rapid inside the part under the stock top. Surface rapids are raised to that floor.

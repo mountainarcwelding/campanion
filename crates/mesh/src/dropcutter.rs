@@ -516,6 +516,45 @@ impl<'a> DropCutter<'a> {
         }
     }
 
+    /// Closest point of the mesh to `(x, y, z)`, among triangles in that XY bucket.
+    ///
+    /// The bucket is the same cell [`Self::tip_z`] searches. Triangles are stored expanded by
+    /// the tool radius, so a sphere that touches the mesh has its contact in this cell when the
+    /// query is the ball centre. `None` when the query is not finite or falls outside the grid.
+    /// Equal distances keep the lexicographically smaller point.
+    pub fn nearest_point(&self, x: f64, y: f64, z: f64) -> Option<Vec3> {
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() || self.nx == 0 || self.ny == 0 {
+            return None;
+        }
+        let ix = cell_of(self.origin_x, self.cell, self.nx, x)?;
+        let iy = cell_of(self.origin_y, self.cell, self.ny, y)?;
+        let slot = iy.checked_mul(self.nx)?.checked_add(ix)?;
+        let query = Vec3::new(x, y, z);
+        let mut best: Option<(f64, Vec3)> = None;
+        let bucket = self.buckets.get(slot)?;
+        for &index in bucket {
+            let Some(triangle) = self.mesh.triangles().get(index) else {
+                continue;
+            };
+            let hit = closest_point_on_triangle(query, *triangle);
+            let delta = query.sub(hit);
+            let distance = delta.dot(delta);
+            if !distance.is_finite() {
+                continue;
+            }
+            let replace = match best {
+                None => true,
+                Some((best_distance, best_hit)) => {
+                    distance < best_distance - 1e-18 || ((distance - best_distance).abs() <= 1e-18 && lex_less(hit, best_hit))
+                }
+            };
+            if replace {
+                best = Some((distance, hit));
+            }
+        }
+        best.map(|(_, hit)| hit)
+    }
+
     fn fill_buckets(&mut self, pad: f64) {
         for (index, tri) in self.mesh.triangles().iter().enumerate() {
             let bb = tri.bbox();
@@ -597,6 +636,114 @@ fn cell_clamped(origin: f64, cell: f64, n: usize, value: f64) -> usize {
     if n == 0 || value < origin { 0 } else { cell_of(origin, cell, n, value).unwrap_or(n - 1) }
 }
 
+fn lex_less(left: Vec3, right: Vec3) -> bool {
+    left.x < right.x - 1e-15
+        || ((left.x - right.x).abs() <= 1e-15 && (left.y < right.y - 1e-15 || ((left.y - right.y).abs() <= 1e-15 && left.z < right.z)))
+}
+
+/// Closest point of `triangle` to `point`.
+///
+/// The result is the plane projection when that lies inside the triangle, and otherwise the
+/// closest point of the three edges. A degenerate triangle uses the edges that still have length.
+pub fn closest_point_on_triangle(point: Vec3, triangle: Triangle) -> Vec3 {
+    if let Some(hit) = closest_barycentric(point, triangle)
+        && hit.x.is_finite()
+        && hit.y.is_finite()
+        && hit.z.is_finite()
+    {
+        return hit;
+    }
+    closest_of_edges(point, triangle)
+}
+
+/// Barycentric closest point. `None` when a denominator is not usable.
+fn closest_barycentric(point: Vec3, triangle: Triangle) -> Option<Vec3> {
+    let a = triangle.a;
+    let b = triangle.b;
+    let c = triangle.c;
+    let ab = b.sub(a);
+    let ac = c.sub(a);
+    let ap = point.sub(a);
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return Some(a);
+    }
+    let bp = point.sub(b);
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return Some(b);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let denom = d1 - d3;
+        if !(denom > 0.0) {
+            return None;
+        }
+        return Some(a.add(ab.scale(d1 / denom)));
+    }
+    let cp = point.sub(c);
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return Some(c);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let denom = d2 - d6;
+        if !(denom > 0.0) {
+            return None;
+        }
+        return Some(a.add(ac.scale(d2 / denom)));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let denom = (d4 - d3) + (d5 - d6);
+        if !(denom > 0.0) {
+            return None;
+        }
+        return Some(b.add(c.sub(b).scale((d4 - d3) / denom)));
+    }
+    let denom = va + vb + vc;
+    if !(denom > 0.0) || !denom.is_finite() {
+        return None;
+    }
+    let v = vb / denom;
+    let w = vc / denom;
+    if !v.is_finite() || !w.is_finite() {
+        return None;
+    }
+    Some(a.add(ab.scale(v)).add(ac.scale(w)))
+}
+
+fn closest_of_edges(point: Vec3, triangle: Triangle) -> Vec3 {
+    let ab = closest_on_segment(point, triangle.a, triangle.b);
+    let bc = closest_on_segment(point, triangle.b, triangle.c);
+    let ca = closest_on_segment(point, triangle.c, triangle.a);
+    let dab = point.sub(ab).dot(point.sub(ab));
+    let dbc = point.sub(bc).dot(point.sub(bc));
+    let dca = point.sub(ca).dot(point.sub(ca));
+    if dab <= dbc && dab <= dca {
+        ab
+    } else if dbc <= dca {
+        bc
+    } else {
+        ca
+    }
+}
+
+fn closest_on_segment(point: Vec3, a: Vec3, b: Vec3) -> Vec3 {
+    let ab = b.sub(a);
+    let len2 = ab.dot(ab);
+    if !(len2 > 0.0) || !len2.is_finite() {
+        return a;
+    }
+    let t = point.sub(a).dot(ab) / len2;
+    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    a.add(ab.scale(t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +801,30 @@ mod tests {
         close(drop_cutter_triangle(&ball, 1.0, 1.5, &plane).expect("hit"), 5.0, 1e-12);
         assert!(drop_cutter_triangle(&ball, 40.0, 40.0, &plane).is_none());
         assert!(drop_cutter_triangle(&ball, f64::NAN, 1.0, &plane).is_none());
+    }
+
+    #[test]
+    fn closest_point_hits_the_face_an_edge_and_a_vertex() {
+        let triangle = tri(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 2.0, 0.0));
+        let face = closest_point_on_triangle(Vec3::new(0.25, 0.25, 4.0), triangle);
+        close(face.x, 0.25, 1e-12);
+        close(face.y, 0.25, 1e-12);
+        close(face.z, 0.0, 1e-12);
+        let edge = closest_point_on_triangle(Vec3::new(1.0, -2.0, 0.5), triangle);
+        close(edge.x, 1.0, 1e-12);
+        close(edge.y, 0.0, 1e-12);
+        close(edge.z, 0.0, 1e-12);
+        let vertex = closest_point_on_triangle(Vec3::new(-3.0, -1.0, 2.0), triangle);
+        close(vertex.x, 0.0, 1e-12);
+        close(vertex.y, 0.0, 1e-12);
+        close(vertex.z, 0.0, 1e-12);
+        let mesh = Mesh::new(vec![triangle]).expect("mesh");
+        let cutter = Cutter::new_ball(1.0).expect("ball");
+        let dc = DropCutter::new(&mesh, cutter).expect("index");
+        let nearest = dc.nearest_point(0.25, 0.25, 3.0).expect("nearest");
+        close(nearest.x, 0.25, 1e-9);
+        close(nearest.y, 0.25, 1e-9);
+        close(nearest.z, 0.0, 1e-9);
     }
 
     #[test]

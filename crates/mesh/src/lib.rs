@@ -16,7 +16,7 @@ mod stl;
 mod waterline;
 mod zlevel;
 
-pub use dropcutter::{Cutter, DropCutter, drop_cutter_triangle};
+pub use dropcutter::{Cutter, DropCutter, closest_point_on_triangle, drop_cutter_triangle};
 pub use gouge::{Gouge, check_gouges};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};
 pub use rotary::{RotaryLine, RotaryLineAxis, rotary_lines};

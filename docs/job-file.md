@@ -287,6 +287,61 @@ The tool retracts, rapids at clearance, and plunges onto the next point.
 a 0.01 mm chord tolerance. The mesh is a 40 mm square plate at Z = 0 with a dome of radius 15 mm
 at the centre, rising to Z = 10 mm.
 
+### Tool axis
+
+A surface may set `tool_axis` when the job has `kinematics`. The tool must be a ball. A flat or
+bull nose fails with `operation `<name>`: tool_axis needs a ball tool`. Without kinematics the
+error is `operation `<name>`: tool_axis needs a kinematics file`. Any other operation kind
+rejects the key.
+
+For a ball of radius `r` the 3-axis drop-cutter gives the tip `p` and the ball centre
+`c = p + r*Z`. Tilting the tool axis to any unit direction `a` with `a·Z > 0`, about that
+centre, keeps the same sphere. The tilted tip is `c - r*a` and the surface contact is unchanged.
+This is exact for the sphere. The shank and the holder are not checked; that waits for the
+collision stage. The posted output has not been proven on a machine.
+
+```json
+"tool_axis": { "mode": "lead_tilt", "lead_deg": 10, "tilt_deg": 0, "max_tilt_deg": 60 }
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `mode` | yes | `lead_tilt`, `toward_point`, `away_from_point` or `toward_curve`. |
+| `lead_deg` | for `lead_tilt` | Degrees, positive toward the feed. Not scaled by `units`. |
+| `tilt_deg` | for `lead_tilt` | Degrees, right-handed about the feed. Not scaled by `units`. |
+| `point` | for `toward_point` and `away_from_point` | `[x, y, z]`. A length in `units`. |
+| `curve` | for `toward_curve` | Polyline of at least two `[x, y, z]` points. Lengths in `units`. At most 10000 points. |
+| `max_tilt_deg` | no | Largest angle from +Z. Default 60. Range `(0, 90)`. Not scaled by `units`. |
+
+`lead_tilt` uses the surface normal at the contact. That unit normal points from the mesh
+contact to the ball centre. Where the cutter misses the mesh and the tip sits on `floor_z`, the
+normal is +Z. The axis is the normal rotated by `lead_deg` about the side direction
+(normal × feed) toward the feed, then by `tilt_deg` about the feed. The feed is the pass
+direction in XY, including the reverse pass of a zigzag.
+
+`toward_point` aims the axis from the ball centre at `point`. `away_from_point` aims it the
+other way, from `point` through the centre. `toward_curve` aims it from the centre at the
+closest point of `curve`.
+
+Every mode then clamps the axis to at most `max_tilt_deg` from +Z, rotating it toward +Z in the
+plane of the axis and Z. The cutting moves are one continuous toolpath. Plunge and retract move
+along the current tool axis. A rapid between passes, and a rapid across a contact-normal jump,
+changes a rotary. That rapid, and a rapid that follows the reorientation, starts at a safe
+retract. The retract keeps going along the tool axis until the part clearance is reached and the
+kinematics machine Z is at least 0, so the posted rapid stays on or above that plane. The rapid
+ends on the axis of the next cut, still at a safe retract, and the plunge feeds down that axis.
+The rapid is stepped so each block stays within the program `max_axis_step_deg` (default 5°).
+The raster is densified so each feed stays within that limit too. Needing more than ten times
+the original raster samples is an error. Where the contact normal jumps across a tiny span, the
+path retracts, rapids with the new axis, and plunges, instead of feeding across the jump. The
+post subdivides the continuous path; the planner does not. The first sample the kinematics
+cannot reach, from the rotary angles at zero, is an error that names the operation and that
+sample. An operation without `tool_axis` is unchanged.
+
+`examples/dome_lead_tilt.job.json` finishes `examples/dome.stl` with a 6 mm ball, `lead_tilt` of
+10° lead and 0° tilt, `max_tilt_deg` 30, and `examples/table_table_bc.kin.json`. The tilt cap
+keeps the axis inside that file's B travel.
+
 ### Roughing
 
 `type` `rough` is Z-level roughing of an STL mesh. The source path must end in `.stl` (any case).
@@ -477,7 +532,7 @@ When the next operation's frame differs (the origin or an axis differs by more t
 | `normal` | yes | `[i, j, k]` tool axis in the part frame. A direction, not scaled. Stored as a unit vector. |
 | `x_dir` | no | `[i, j, k]` view +X. A direction, not scaled. Stored as a unit vector in the plane. Omitted, part +X is projected onto the plane. When the normal is within 1e-9 of ±X, part +Y is projected instead. |
 
-`plane` needs `kinematics`. It cannot be combined with `index_deg`. It is not supported on `wrap`, `rotary_finish`, `surface`, `rough` or `waterline`. On load, every operation is checked against the kinematics: a plane uses its origin and normal, and an operation without a plane uses tool axis +Z. A job with kinematics and no plane is planned in the part frame, and the program stores the five-axis setup.
+`plane` needs `kinematics`. It cannot be combined with `index_deg`. It is not supported on `wrap`, `rotary_finish`, `surface`, `rough` or `waterline`. On load, every operation is checked against the kinematics: a plane uses its origin and normal, and an operation without a plane uses tool axis +Z. A surface `tool_axis` is checked again, sample by sample, when the toolpath is planned. A job with kinematics and no plane is planned in the part frame, and the program stores the five-axis setup.
 
 Load failures:
 

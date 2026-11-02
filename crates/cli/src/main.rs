@@ -28,6 +28,7 @@ mod rough;
 mod run;
 mod safety;
 mod surface;
+mod toolaxis;
 mod waterline;
 mod wrap;
 // STEP faces are exported by shelling out to SolidCraft.
