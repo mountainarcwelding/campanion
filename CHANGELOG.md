@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## 0.9.0 — 2026-11-02
+
+First continuous five-axis release (posts without TCP). Check any program that has a G2/G3 shorter than the output resolution: it now posts as a line.
+
+### Fixed
+
+- An arc shorter than the output resolution, whose rounded ends share an angle about the rounded IJK centre, is posted as a line. It was posted as a G2/G3 that a controller cuts as a full circle.
+
 ### Added
 
 - Posts `linuxcnc_5ax` and `haas_umc` write continuous five-axis output without TCP. `five_axis.continuous` selects inverse-time feed (`G93`/`G94`), chord and axis tolerances, and linear `G0`/`G1` blocks with XYZ plus rotary words. The post runs `solve_path` and `subdivide_path`. Arcs and helices are linearised. On `haas_umc` G255 is active and XYZ are G54 coordinates with pivots measured from G54, the same rule as `linuxcnc_5ax`. This output has not been proven on a machine.

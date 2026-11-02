@@ -403,3 +403,6 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   addressing under G14 is not confirmed, so sub-spindle live tooling stays rejected. Keeping the
   main chuck clamped through the ST-20Y transfer is accepted. M11 items 11–13 (continuous 5-axis,
   TCP posts, collision checks, machine sim) start now, staged 5A–5H for v0.9.0–v0.9.2.
+- 2026-11-02: v0.9.0 is continuous five-axis stages 5A–5D (continuous toolpaths, path kinematics,
+  singular cone and subdivision, posts without TCP on `linuxcnc_5ax` and `haas_umc`), plus the
+  sub-resolution arc fix (#120). Next: 5E–5F (TCP posts, tool-axis strategies) for v0.9.1.
