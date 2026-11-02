@@ -86,6 +86,27 @@ fn program_of(five: FiveAxisSetup, blocks: Vec<ClBlock>) -> Program {
         .expect("five")
 }
 
+/// TCP hooks name `{tool}`, so TCP programs start with a tool change to tool 1.
+fn tcp_program_of(five: FiveAxisSetup, mut blocks: Vec<ClBlock>) -> Program {
+    blocks.insert(0, ClBlock::Event(Event::ToolChange { tool_id: 1 }));
+    let tool = Tool::try_new(1, None, None, None).expect("tool");
+    Program::try_new(Some("swarf".into()), vec![tool], None, vec![path_of(blocks)], Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_five_axis(five)
+        .expect("five")
+}
+
+/// The same program with a tool change to tool 1 at the start of each toolpath.
+fn with_tool_change(program: &Program) -> Program {
+    let doc = Document::new(program.clone()).expect("doc");
+    let mut raw: serde_json::Value = serde_json::from_str(&doc.to_json_pretty().expect("json")).expect("value");
+    raw["program"]["tools"] = serde_json::json!([{"id": 1, "name": null, "diameter": null, "kerf": null}]);
+    for path in raw["program"]["toolpaths"].as_array_mut().expect("toolpaths") {
+        path["blocks"].as_array_mut().expect("blocks").insert(0, serde_json::json!({"type": "tool_change", "tool_id": 1}));
+    }
+    Document::from_json(&raw.to_string()).expect("load").program().clone()
+}
+
 fn options() -> PostOptions {
     PostOptions { arc_tolerance: CHORD_TOL }
 }
@@ -321,9 +342,11 @@ fn swarf_cylinder_matches_golden() {
     } else {
         program.clone()
     };
+    let posted_tcp = with_tool_change(&posted);
     for id in POST_IDS.into_iter().chain(TCP_POST_IDS) {
         let post = builtin(id).expect(id);
-        let text = post_program(&posted, &post, &options()).expect(id);
+        let input = if TCP_POST_IDS.contains(&id) { &posted_tcp } else { &posted };
+        let text = post_program(input, &post, &options()).expect(id);
         assert!(!has_g2g3(&text), "{id} wrote an arc\n{text}");
         assert!(text.contains("G93") && text.contains("G94"), "{id}\n{text}");
         let golden_path = manifest_path(&["tests", "golden", &format!("swarf_cylinder.{id}.nc")]);
@@ -931,7 +954,7 @@ fn tcp_rapid_that_changes_a_rotary_is_inverse_time_g1() {
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(tip, axis), feed: None }),
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(14.0, 5.0, 6.0).expect("away"), axis), feed: None }),
     ];
-    let program = program_of(setup_of(B_TABLE_JSON), blocks);
+    let program = tcp_program_of(setup_of(B_TABLE_JSON), blocks);
     let kin = kinematics(B_TABLE_JSON);
     let joints = kin.choose(&ToolPose { tip, axis }, 0.0, Choice::Nearest([0.0, 0.0])).expect("choose");
     let expected = RAPID_FEED / joints.angles[0].abs();
@@ -1021,7 +1044,7 @@ proptest! {
         let Some((blocks, ir_tips, ir_axes, segs)) = build_blocks(spec, &tilts, &spins, near_cone, with_arc) else {
             return Ok(());
         };
-        let program = program_of(setup_of(spec.text), blocks);
+        let program = tcp_program_of(setup_of(spec.text), blocks);
         let kin = kinematics(spec.text);
         for id in TCP_POST_IDS {
             let post = builtin(id).expect(id);
@@ -1056,4 +1079,20 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn haas_tcpc_without_a_tool_is_refused() {
+    let tip = Vec3::new(4.0, 5.0, 6.0).expect("tip");
+    let axis = Vec3::new(10_f64.to_radians().sin(), 0.0, 10_f64.to_radians().cos()).expect("axis");
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose_of(tip, Vec3::Z), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut }),
+    ];
+    let program = program_of(setup_of(B_TABLE_JSON), blocks.clone());
+    let err = post_program(&program, &builtin("haas_umc_tcpc").expect("tcp"), &options()).expect_err("no tool");
+    assert!(err.to_string().contains("needs a tool number"), "{err}");
+    let text = post_program(&tcp_program_of(setup_of(B_TABLE_JSON), blocks), &builtin("haas_umc_tcpc").expect("tcp"), &options()).expect("tool");
+    assert!(text.lines().any(|line| line.ends_with("G234 H1")), "{text}");
+    assert!(!text.contains("H0"), "{text}");
 }

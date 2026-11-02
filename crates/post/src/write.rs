@@ -813,7 +813,7 @@ impl<'a> Writer<'a> {
         self.tool_axis = Vec3::Z;
         let words = self.rotary_words([0.0, 0.0])?;
         self.templates("five_axis.index", &five.index, &[("rotaries", words.as_str()), ("date-free!", "")])?;
-        let tool = self.tool_token();
+        let tool = self.tool_token(tcp)?;
         self.templates("five_axis.continuous.tcp.on", &tcp.on, &[("tool", tool.as_str()), ("program_name", ""), ("date-free!", "")])?;
         let part = [tip.x(), tip.y(), tip.z()];
         self.rapid_xy_then_z(Posted { xyz: part, part, angle: None, c: None, axis: Vec3::Z })
@@ -821,16 +821,21 @@ impl<'a> Writer<'a> {
 
     /// `off`, then `restore_length`, before any later non-TCP motion.
     fn end_tcp(&mut self, tcp: &TcpContinuous) -> Result<()> {
-        let tool = self.tool_token();
+        let tool = self.tool_token(tcp)?;
         let vars = [("tool", tool.as_str()), ("program_name", ""), ("date-free!", "")];
         self.templates("five_axis.continuous.tcp.off", &tcp.off, &vars)?;
         self.templates("five_axis.continuous.tcp.restore_length", &tcp.restore_length, &vars)
     }
 
-    fn tool_token(&self) -> String {
+    /// Tool number for the TCP hooks. A hook that names `{tool}` needs a known tool: on Haas,
+    /// `G234 H0` would run TCPC with no length offset and put the tip a tool length away.
+    fn tool_token(&self, tcp: &TcpContinuous) -> Result<String> {
         match self.tool_id {
-            Some(id) => id.to_string(),
-            None => "0".to_string(),
+            Some(id) => Ok(id.to_string()),
+            None => {
+                let named = tcp.on.iter().chain(&tcp.off).chain(&tcp.restore_length).any(|line| line.contains("{tool}"));
+                if named { Err(invalid("TCP output needs a tool number for {tool}, but the toolpath has no tool")) } else { Ok(String::new()) }
+            }
         }
     }
 
