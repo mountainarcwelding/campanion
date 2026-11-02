@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 
 use campanion_ir::{
-    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Document, Feeds, FiveAxisSetup, Joints, Kinematics, MoveRole, Plane, Pose, Program,
-    SolutionPolicy, ToolPose, Vec3,
+    ArcSense, Choice, ClBlock, ClMotion, ClPath, CompensationMode, Document, Feeds, FiveAxisSetup, Joints, Kinematics, MoveRole, Plane, Pose,
+    Program, SolutionPolicy, ToolPose, Vec3,
 };
 use campanion_post::{PostDef, PostOptions, ReadMove, builtin, load_post, post_program, read_back};
 use proptest::prelude::*;
@@ -406,6 +406,70 @@ fn continuous_after_indexed_cancels_the_work_frame() {
     let last_254 = text.rfind("G254").expect("254");
     let last_255 = text.rfind("G255").expect("255");
     assert!(last_255 > last_254, "G255 after G254: {text}");
+}
+
+fn word_on(line: &str, letter: char) -> Option<f64> {
+    line.split_whitespace().find_map(|token| {
+        let rest = token.strip_prefix(letter)?;
+        if rest.is_empty() || !rest.starts_with(|ch: char| ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.')) {
+            return None;
+        }
+        rest.parse().ok()
+    })
+}
+
+fn has_token(line: &str, code: &str) -> bool {
+    line.split_whitespace().any(|token| token == code)
+}
+
+/// Continuous output leaves the work frame off. A later indexed toolpath on the same axis
+/// must turn the frame back on and write frame coordinates, not the raw part tip.
+#[test]
+fn indexed_after_continuous_restores_the_work_frame() {
+    let axis = Vec3::new(-1.0, 0.0, 0.0).expect("axis");
+    let cont = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(4.0, 5.0, 6.0).expect("c"), axis), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("d"), axis), feed: FEED, role: MoveRole::Cut }),
+    ];
+    let indexed = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(4.0, 5.0, 6.0).expect("a"), axis), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(1.0, 2.0, 3.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut }),
+    ];
+    let indexed_path = ClPath::try_new(
+        Some("index".into()),
+        None,
+        CompensationMode::Off,
+        Feeds::try_new(FEED, None, None, None, None).expect("feeds"),
+        None,
+        Vec::new(),
+        indexed,
+    )
+    .expect("indexed");
+    let program = Program::try_new(Some("mix".into()), Vec::new(), None, vec![path_of(cont), indexed_path], Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_five_axis(setup_of(B_TABLE_JSON))
+        .expect("five");
+    let kin = kinematics(B_TABLE_JSON);
+    let held = kin.choose(&ToolPose { tip: Vec3::new(4.0, 5.0, 6.0).expect("tip"), axis }, 0.0, Choice::Nearest([0.0, 0.0])).expect("choose");
+    let feed_tip = Vec3::new(1.0, 2.0, 3.0).expect("feed");
+    let machine = kin.choose(&ToolPose { tip: feed_tip, axis }, 0.0, Choice::Nearest(held.angles)).expect("feed joints");
+
+    let haas = post_program(&program, &builtin("haas_umc").expect("umc"), &options()).expect("haas");
+    let g94 = haas.find("G94").expect("G94");
+    let g254 = haas.rfind("G254").expect("G254 after continuous");
+    assert!(g254 > g94, "G254 must follow G94\n{haas}");
+    let haas_feed = haas.lines().rev().find(|line| has_token(line, "G1")).expect("haas feed");
+    // B90 about +Y, pivots ignored: (x, y, z) -> (z, y, -x).
+    assert!((word_on(haas_feed, 'X').expect("x") - 3.0).abs() < 1e-3, "{haas_feed}\n{haas}");
+    assert!((word_on(haas_feed, 'Y').expect("y") - 2.0).abs() < 1e-3, "{haas_feed}");
+    assert!((word_on(haas_feed, 'Z').expect("z") - -1.0).abs() < 1e-3, "{haas_feed}");
+
+    let linux = post_program(&program, &builtin("linuxcnc_5ax").expect("5ax"), &options()).expect("linux");
+    let linux_feed = linux.lines().rev().find(|line| has_token(line, "G1")).expect("linux feed");
+    assert!((word_on(linux_feed, 'X').expect("x") - machine.xyz.x()).abs() < 5e-4, "{linux_feed} vs {:?}", machine.xyz);
+    assert!((word_on(linux_feed, 'Y').expect("y") - machine.xyz.y()).abs() < 5e-4, "{linux_feed}");
+    assert!((word_on(linux_feed, 'Z').expect("z") - machine.xyz.z()).abs() < 5e-4, "{linux_feed}");
+    assert!((machine.xyz.x() - 1.0).abs() > 0.5, "fixture must not match the raw tip");
 }
 
 fn chord_sagitta(sweep: f64, radius: f64, segments: u32) -> f64 {

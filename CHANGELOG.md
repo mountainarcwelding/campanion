@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An indexed toolpath after a continuous five-axis toolpath on the same tool axis now reindexes and turns the work frame back on. The frame had stayed off, so the cut was written as part-frame XYZ while the rotaries remained at the continuous pose.
+
 ## 0.9.0 — 2026-11-02
 
 First continuous five-axis release (posts without TCP). Check any program that has a G2/G3 shorter than the output resolution: it now posts as a line.

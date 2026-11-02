@@ -686,13 +686,16 @@ impl<'a> Writer<'a> {
         rotary::inverse_minutes_feed(feed, angle_change_deg)
     }
 
-    /// Index when this is the first five-axis toolpath or the tool axis changed.
+    /// Index when this is the first five-axis toolpath, the frame is off, or the tool axis changed.
     ///
-    /// Every later pose in the toolpath must keep that axis. 3+2 positions the rotaries, then cuts.
+    /// Continuous output cancels the frame and leaves the rotaries tilted. A later indexed
+    /// toolpath on that same axis still needs `index` and `on`, or the cut is written in the
+    /// part frame while the table stays rotated. Every later pose in the toolpath must keep
+    /// that axis. 3+2 positions the rotaries, then cuts.
     fn prepare_indexed(&mut self, index: u32, motion: &ClMotion, first: bool) -> Result<()> {
         let pose = motion_pose(motion);
         if first {
-            if !self.five_started || axis_apart(pose.axis(), self.tool_axis) {
+            if !self.frame_active || !self.five_started || axis_apart(pose.axis(), self.tool_axis) {
                 self.index_to(Some(pose), true)?;
             }
             self.five_started = true;
