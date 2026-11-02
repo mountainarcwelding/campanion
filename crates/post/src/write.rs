@@ -259,7 +259,7 @@ struct Writer<'a> {
     split_next: bool,
     /// True after the first motion of a five-axis program has been indexed.
     five_started: bool,
-    /// Latest tool id from the path or a tool-change event. TCP `{tool}` uses this, or 0.
+    /// Latest tool id from the path or a tool-change event. TCP `{tool}` needs it.
     tool_id: Option<u32>,
     /// Bar-feed lengths to write after the home lines. `None` until a bar-feed event. Last event wins.
     /// Not cleared between channels: the feed is a program-end command.
