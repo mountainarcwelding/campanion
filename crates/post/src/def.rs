@@ -29,7 +29,8 @@
 //!
 //! `five_axis.continuous` is optional. Without it a continuous toolpath is rejected. With it the
 //! post writes inverse-time `G0`/`G1` blocks with XYZ and rotary words; `chord_tol` and
-//! `axis_tol_deg` default to `0.005` mm and `0.1` deg.
+//! `axis_tol_deg` default to `0.005` mm and `0.1` deg. `five_axis.continuous.tcp` is optional.
+//! With it, XYZ is the part-frame tool tip and the rotary words still come from `solve_path`.
 //!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
@@ -1295,7 +1296,8 @@ fn default_continuous_axis_tol_deg() -> f64 {
     0.1
 }
 
-/// Inverse-time simultaneous five-axis. The post solves the inverse; XYZ is the gauge point.
+/// Inverse-time simultaneous five-axis. Without `tcp` the post solves the inverse and XYZ is
+/// the gauge point. With `tcp`, XYZ is the part-frame tool tip.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FiveAxisContinuous {
@@ -1311,6 +1313,43 @@ pub(crate) struct FiveAxisContinuous {
     /// Tool-axis tolerance for [`campanion_ir::subdivide_path`], degrees.
     #[serde(default = "default_continuous_axis_tol_deg")]
     pub(crate) axis_tol_deg: f64,
+    /// Tool-center-point output. Absent keeps the gauge-point inverse.
+    #[serde(default)]
+    pub(crate) tcp: Option<TcpContinuous>,
+}
+
+fn default_tcp_rapid_feed() -> f64 {
+    5000.0
+}
+
+/// What to do with a rapid that changes a rotary while TCP is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TcpRapidRotary {
+    /// Write `G1` at `rapid_feed` in the active inverse-time mode.
+    Feed,
+    /// Reject the move.
+    Error,
+}
+
+/// TCP templates and the rapid-with-rotary rule. `{tool}` is allowed. Empty lists write nothing.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TcpContinuous {
+    /// Turn TCP on. Haas uses `G234 H{tool}`.
+    #[serde(default)]
+    pub(crate) on: Vec<String>,
+    /// Turn TCP off. Haas uses `G49`.
+    #[serde(default)]
+    pub(crate) off: Vec<String>,
+    /// A rapid that changes a rotary.
+    pub(crate) rapid_rotary: TcpRapidRotary,
+    /// Feed for that rapid, millimetres per minute. Default 5000.
+    #[serde(default = "default_tcp_rapid_feed")]
+    pub(crate) rapid_feed: f64,
+    /// Length compensation after TCP turns off, before any later non-TCP motion.
+    #[serde(default)]
+    pub(crate) restore_length: Vec<String>,
 }
 
 impl FiveAxisContinuous {
@@ -1375,6 +1414,19 @@ fn check_five_axis_continuous(continuous: &mut FiveAxisContinuous) -> Result<()>
     if !continuous.axis_tol_deg.is_finite() || continuous.axis_tol_deg <= 0.0 {
         return Err(field("five_axis.continuous.axis_tol_deg", "must be positive and finite"));
     }
+    if let Some(tcp) = &continuous.tcp {
+        check_tcp(tcp)?;
+    }
+    Ok(())
+}
+
+fn check_tcp(tcp: &TcpContinuous) -> Result<()> {
+    if !tcp.rapid_feed.is_finite() || tcp.rapid_feed <= 0.0 {
+        return Err(field("five_axis.continuous.tcp.rapid_feed", "must be positive and finite"));
+    }
+    check_templates("five_axis.continuous.tcp.on", &tcp.on, TOOL_KEYS)?;
+    check_templates("five_axis.continuous.tcp.off", &tcp.off, TOOL_KEYS)?;
+    check_templates("five_axis.continuous.tcp.restore_length", &tcp.restore_length, TOOL_KEYS)?;
     Ok(())
 }
 

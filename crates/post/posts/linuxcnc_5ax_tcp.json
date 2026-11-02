@@ -1,0 +1,71 @@
+{
+  "id": "linuxcnc_5ax_tcp",
+  "name": "LinuxCNC 5ax TCP",
+  "description": "Millimetre RS274 dialect for LinuxCNC indexed 3+2 and continuous five-axis with TCP. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. The machine must run TCP kinematics (for example xyzac-trt-kins, xyzbc-trt-kins, or switchkins); G-code programs the tool tip in the part frame together with the rotary words. On and off hooks are empty because the switching codes are configuration-specific. A rapid that changes a rotary is G1 under G93 at 5000 mm/min. Pivots are measured from the G54 origin. This output has not been proven on a machine.",
+  "references": [
+    "TCP is a kinematics-module property; G-code programs the tool tip in the work frame. https://linuxcnc.org/docs/html/motion/5-axis-kinematics.html",
+    "Switching codes such as remapped M428/M429 are configuration-specific. https://linuxcnc.org/docs/html/motion/switchkins.html"
+  ],
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 4, "feed": 4, "dwell": 3 },
+  "trailing_zeros": true,
+  "header": [
+    "({program_name})",
+    "(TCP kinematics required)",
+    "G21",
+    "G90",
+    "G17",
+    "G40",
+    "G49",
+    "G64 P0.01"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "s" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
+  },
+  "tool_change": ["T{tool} M6"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M2"],
+  "max_line_length": 256,
+  "axis_letters": "XYZ",
+  "rotary": {
+    "axes": ["a"],
+    "decimals": 3,
+    "feed_mode": "inverse_time",
+    "inverse_time_on": "G93",
+    "inverse_time_off": "G94"
+  },
+  "five_axis": {
+    "mode": "machine",
+    "decimals": 3,
+    "retract": ["G53 G0 Z0"],
+    "index": ["G0 {rotaries}"],
+    "on": [],
+    "off": [],
+    "continuous": {
+      "feed": "inverse_time",
+      "inverse_time_on": "G93",
+      "inverse_time_off": "G94",
+      "chord_tol": 0.005,
+      "axis_tol_deg": 0.1,
+      "tcp": {
+        "on": [],
+        "off": [],
+        "rapid_rotary": "feed",
+        "rapid_feed": 5000,
+        "restore_length": []
+      }
+    }
+  }
+}

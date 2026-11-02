@@ -136,11 +136,13 @@ fn builtins_load_and_match_ids() {
         &[
             "linuxcnc",
             "linuxcnc_5ax",
+            "linuxcnc_5ax_tcp",
             "grbl",
             "mach3",
             "fanuc",
             "haas",
             "haas_umc",
+            "haas_umc_tcpc",
             "plasma",
             "grbl_laser",
             "linuxcnc_lathe",
@@ -195,10 +197,10 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("fanuc").expect("fanuc").max_line_length(), Some(80));
     assert_eq!(builtin("haas").expect("haas").linear_decimals(), 3);
     assert_eq!(builtin("haas").expect("haas").max_line_length(), Some(80));
-    for id in ["fanuc", "haas", "haas_umc", "fanuc_lathe", "haas_lathe", "generic_lathe_2ch"] {
+    for id in ["fanuc", "haas", "haas_umc", "haas_umc_tcpc", "fanuc_lathe", "haas_lathe", "generic_lathe_2ch"] {
         assert!(builtin(id).expect(id).decimal_point, "{id}");
     }
-    for id in ["linuxcnc", "linuxcnc_5ax", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"] {
+    for id in ["linuxcnc", "linuxcnc_5ax", "linuxcnc_5ax_tcp", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"] {
         assert!(!builtin(id).expect(id).decimal_point, "{id}");
     }
     assert!(builtin("centroid").is_none());
@@ -1440,6 +1442,39 @@ fn five_axis_continuous_schema_is_validated() {
     raw = five_json();
     raw["five_axis"].as_object_mut().expect("five").remove("continuous");
     load_post(&raw.to_string()).expect("indexed only");
+
+    raw = five_json();
+    raw["five_axis"]["continuous"]["tcp"] = serde_json::json!({
+        "on": ["G234 H{tool}"],
+        "off": ["G49"],
+        "rapid_rotary": "feed",
+        "restore_length": ["G43 H{tool}"]
+    });
+    load_post(&raw.to_string()).expect("tcp defaults");
+
+    raw["five_axis"]["continuous"]["tcp"]["rapid_rotary"] = serde_json::json!("plunge");
+    let err = load_post(&raw.to_string()).expect_err("rapid");
+    assert!(err.to_string().contains("unknown variant") || err.to_string().contains("rapid_rotary"), "{err}");
+
+    raw["five_axis"]["continuous"]["tcp"]["rapid_rotary"] = serde_json::json!("error");
+    raw["five_axis"]["continuous"]["tcp"]["rapid_feed"] = serde_json::json!(0.0);
+    let err = load_post(&raw.to_string()).expect_err("feed");
+    assert!(err.to_string().contains("rapid_feed"), "{err}");
+
+    raw["five_axis"]["continuous"]["tcp"]["rapid_feed"] = serde_json::json!(5000.0);
+    raw["five_axis"]["continuous"]["tcp"]["nope"] = serde_json::json!(1);
+    let err = load_post(&raw.to_string()).expect_err("unknown");
+    assert!(err.to_string().contains("nope") || err.to_string().contains("unknown field"), "{err}");
+
+    raw["five_axis"]["continuous"]["tcp"].as_object_mut().expect("tcp").remove("nope");
+    raw["five_axis"]["continuous"]["tcp"]["on"] = serde_json::json!(["G234 H{nope}"]);
+    let err = load_post(&raw.to_string()).expect_err("placeholder");
+    assert!(err.to_string().contains("unknown placeholder"), "{err}");
+
+    raw["five_axis"]["continuous"]["tcp"]["on"] = serde_json::json!([]);
+    raw["five_axis"]["continuous"]["tcp"]["off"] = serde_json::json!([]);
+    raw["five_axis"]["continuous"]["tcp"]["restore_length"] = serde_json::json!([]);
+    load_post(&raw.to_string()).expect("empty hooks");
 }
 
 #[test]

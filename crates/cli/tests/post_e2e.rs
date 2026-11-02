@@ -155,11 +155,13 @@ fn posts_lists_every_builtin() -> Result<(), String> {
         != [
             "linuxcnc",
             "linuxcnc_5ax",
+            "linuxcnc_5ax_tcp",
             "grbl",
             "mach3",
             "fanuc",
             "haas",
             "haas_umc",
+            "haas_umc_tcpc",
             "plasma",
             "grbl_laser",
             "linuxcnc_lathe",

@@ -65,7 +65,7 @@ An arc or helix whose start and end angles are equal is written as an arc in the
 
 `mode` `machine` writes the gauge point from the kinematics inverse at tool length 0, so the pivots are in the coordinates and the tool length stays with G43. `linuxcnc_5ax` uses this. There is no TCP. The kinematics file's pivots must be measured from the G54 origin. `on` and `off` are empty.
 
-The writer starts at rotary angles `[0, 0]` and tool axis +Z. Before the first motion of a toolpath, if that pose's axis differs by more than 1e-9 or this is the first toolpath of a five-axis program, it writes `off` when a frame is already active, then `retract`, solves `Kinematics::choose` for that pose at tool length 0, writes `index`, writes `on`, and marks the frame active. The first motion after an index is two rapids: X and Y, then Z. Later poses in that toolpath must keep the axis chosen at the start. A change is `toolpath N changes tool axis inside a 3+2 move`. At program end, an active frame writes `off`, then `retract`, then `index` with every angle 0, before `program_end`.
+The writer starts at rotary angles `[0, 0]` and tool axis +Z. Before the first motion of a toolpath, if the frame is off, that pose's axis differs by more than 1e-9, or this is the first toolpath of a five-axis program, it writes `off` when a frame is already active, then `retract`, solves `Kinematics::choose` for that pose at tool length 0, writes `index`, writes `on`, and marks the frame active. Continuous output turns the frame off and leaves the rotaries where that path ended, so the next indexed toolpath indexes again even when the tool axis did not change. The first motion after an index is two rapids: X and Y, then Z. Later poses in that toolpath must keep the axis chosen at the start. A change is `toolpath N changes tool axis inside a 3+2 move`. At program end, an active frame writes `off`, then `retract`, then `index` with every angle 0, before `program_end`.
 
 An arc that is cardinal in the written frame (XY, ZX, or YZ) stays an arc. Any other arc is chorded at the arc tolerance. With a zero tolerance that arc is `arc is not in a cardinal plane after the 3+2 rotation`.
 
@@ -93,7 +93,33 @@ Feeds are inverse time. `inverse_time_on` (`G93`) is written before the first fe
 
 On `haas_umc`, continuous output keeps G255 active: an active G254 frame is cancelled first. The written `X` `Y` `Z` are G54 coordinates and the kinematics pivots are measured from G54, the same rule as `linuxcnc_5ax`. This output has not been proven on a machine.
 
-Indexed 3+2 and 3-axis output are unchanged. Read-back parses A, B and C as modal five-axis words, G93/G94 from this block, G254/G255, and G53 as a machine retract, so a posted continuous program can be replayed through forward kinematics.
+#### TCP (`five_axis.continuous.tcp`)
+
+`tcp` is optional. Without it the continuous path is the gauge-point inverse above. With it, programmed `X` `Y` `Z` are the part-frame tool tip. The rotary angles still come from `solve_path`, including branch continuity, the singular cone and the `90° + 2 × singular_cone_deg` step bound. Reachability and travel-limit errors are unchanged. `solve_path` starts from `[0, 0]` because the post commands the rotaries to zero before TCP turns on.
+
+The control is assumed to interpolate the programmed tip linearly and the rotary words linearly (joint interpolation, not a spherical slerp). The tool axis along the move is the forward kinematics of those interpolated angles at tool length 0. The tip therefore lies on the straight chord, so `chord_tol` does not insert samples on a straight TCP move. Arcs and helices are still linearised to `chord_tol` in the part frame first. A sample is inserted when the forward axis at the joint midpoint leaves the slerp of the endpoint forward axes by more than `axis_tol_deg`. More than 10000 inserted poses is `toolpath `{name}` inserts more than 10000 poses`. Inverse time uses the part-frame tip length, and a rotary-only move uses the same angle-change fallback as the non-TCP path.
+
+```json
+{
+  "on": ["G234 H{tool}"],
+  "off": ["G49"],
+  "rapid_rotary": "feed",
+  "rapid_feed": 5000,
+  "restore_length": ["G43 H{tool}"]
+}
+```
+
+`on`, `off` and `restore_length` are template lists. `{tool}` is allowed. Empty lists write nothing. `rapid_rotary` is `feed` or `error`. `rapid_feed` is millimetres per minute, default 5000, and must be positive and finite. `{tool}` is the latest tool id, or `0` when none has been named.
+
+For each continuous toolpath the post writes any leading events (a tool change's length offset is on before TCP, because G43 cancels G234), cancels an active work frame, writes `retract`, indexes the rotaries to zero, writes `on`, then rapids to the first tip: X and Y, then Z. That Z is the retract height in the work frame; the post has no separate clearance. The moves follow. `G94` is written when inverse time was used, then `off`, then `restore_length`, before any later non-TCP motion.
+
+A rapid that does not change a rotary stays `G0` and carries no rotary word. A rapid that does change a rotary is, when `rapid_rotary` is `feed`, a `G1` in the same `G93` inverse-time mode with `F = rapid_feed / tip length` (or the angle-change fallback when the tip does not move). `G93` is turned on before that block if it is not already on. `rapid_rotary` `error` rejects the move: `toolpath {i} move {j}: TCP rapid changes a rotary`.
+
+`haas_umc_tcpc` uses the object above. Haas mill G-code reference, G234 Tool Center Point Control (https://www.haascnc.com/service/codes-settings.type=gcode.machine=mill.value=G234.html): G234 turns TCPC on and cancels G43, so the H code is on the same block; G43 and G234 cannot both be active; G234 cannot be used with G254, and a work offset must be active; the rotaries must be at 0 before G234; programmed XYZ is the tool tip in the work offset, which rotates with the table; the tip is not held during a rapid that moves a rotary, so this post does not write a `G0` with a rotary word while TCPC is on; G49 (also G43, G44, M30) cancels G234. The post establishes XYZ with the rapid immediately after `G234 H`. Invoke TCP near the centre of the work offset so the rotating envelope does not over-travel. This output has not been proven on a machine.
+
+`linuxcnc_5ax_tcp` uses empty `on`, `off` and `restore_length`. TCP on LinuxCNC is a property of the kinematics module (`xyzac-trt-kins`, `xyzbc-trt-kins`, or a switchkins setup); G-code then programs the tool tip in the part frame with the rotary words (https://linuxcnc.org/docs/html/motion/5-axis-kinematics.html, https://linuxcnc.org/docs/html/motion/switchkins.html). Switching codes are configuration-specific, so the hooks stay empty. The program header contains `(TCP kinematics required)`. The machine must run TCP kinematics. This output has not been proven on a machine.
+
+Indexed 3+2 and 3-axis output are unchanged. Read-back parses A, B and C as modal five-axis words, G93/G94 from this block, G254/G255, G234 from `tcp.on`, and G53 as a machine retract. A TCP program replays posted XYZ against the part-frame tip and the rotary words through forward kinematics against the tool axis.
 
 ## Lathe posts
 

@@ -6,8 +6,9 @@
 //! uses the straight-line distance between the part-frame tips.
 //!
 //! A continuous five-axis toolpath on a post with `five_axis.continuous` is solved with
-//! [`campanion_ir::solve_path`] and [`campanion_ir::subdivide_path`]. Written `X` `Y` `Z` are the
-//! gauge point (tool length 0). Rotary words share the block. Feeds are inverse time.
+//! [`campanion_ir::solve_path`] and [`campanion_ir::subdivide_path`]. Without TCP, written `X` `Y`
+//! `Z` are the gauge point (tool length 0). With `tcp`, `X` `Y` `Z` are the part-frame tool tip
+//! and the rotary words still come from that solution. Feeds are inverse time.
 //!
 //! A turning program is written in the part frame. X is a radius until the lathe block asks for
 //! diameters. Y is a modal word and is never doubled when the post has `y_axis`; otherwise Y is
@@ -25,7 +26,7 @@ use campanion_ir::{
     ProcessParams, Program, RotaryAxisKind, RotarySetup, SpindleSpeed, ToolPose, TurningSetup, Vec3, part_to_machine, solve_path, subdivide_path,
 };
 
-use crate::def::{ArcMode, FiveAxisContinuous, FiveAxisMode, PostDef, ProcessWords, RotaryFeedMode};
+use crate::def::{ArcMode, FiveAxisContinuous, FiveAxisMode, PostDef, ProcessWords, RotaryFeedMode, TcpContinuous, TcpRapidRotary};
 use crate::error::{Result, invalid, unsupported};
 use crate::fmt::{format_dim, format_fixed, xy_text_eq};
 use crate::geom::{self, Xyz};
@@ -258,6 +259,8 @@ struct Writer<'a> {
     split_next: bool,
     /// True after the first motion of a five-axis program has been indexed.
     five_started: bool,
+    /// Latest tool id from the path or a tool-change event. TCP `{tool}` uses this, or 0.
+    tool_id: Option<u32>,
     /// Bar-feed lengths to write after the home lines. `None` until a bar-feed event. Last event wins.
     /// Not cleared between channels: the feed is a program-end command.
     pending_bar_feed: Option<(Option<f64>, Option<f64>)>,
@@ -321,6 +324,7 @@ impl<'a> Writer<'a> {
             frame_active: false,
             split_next: false,
             five_started: false,
+            tool_id: None,
             pending_bar_feed: None,
         }
     }
@@ -429,6 +433,9 @@ impl<'a> Writer<'a> {
 
     fn toolpath(&mut self, index: u32, path: &ClPath) -> Result<()> {
         self.path_index = index;
+        if let Some(id) = path.tool_id() {
+            self.tool_id = Some(id);
+        }
         self.sync_spindle()?;
         match path.compensation() {
             CompensationMode::ControllerLeft => return Err(unsupported("controller left compensation is not supported")),
@@ -463,6 +470,9 @@ impl<'a> Writer<'a> {
     /// Inverse kinematics for a continuous toolpath: linearise arcs, solve, subdivide, write G0/G1.
     fn continuous_toolpath(&mut self, index: u32, path: &ClPath) -> Result<()> {
         let spec = self.post.five_axis.as_ref().and_then(|five| five.continuous.clone()).ok_or_else(|| continuous_unsupported(self.post))?;
+        if spec.tcp.is_some() {
+            return self.tcp_continuous_toolpath(index, path, spec);
+        }
         let setup = self.five.ok_or_else(|| invalid("program has a continuous toolpath but no kinematics"))?;
         self.cancel_work_frame()?;
         self.split_next = false;
@@ -623,40 +633,54 @@ impl<'a> Writer<'a> {
                 self.resume_processes()?;
             }
         }
-        let code = if sample.rapid { "G0" } else { "G1" };
         let part = [pose.tip.x(), pose.tip.y(), pose.tip.z()];
-        let xyz = [joints.xyz.x(), joints.xyz.y(), joints.xyz.z()];
+        let machine = [joints.xyz.x(), joints.xyz.y(), joints.xyz.z()];
         let length = self.part_tip.map(|start| geom::dist3(start, part)).unwrap_or(0.0);
         let da0 = (joints.angles[0] - self.rotary_angles[0]).abs();
         let da1 = (joints.angles[1] - self.rotary_angles[1]).abs();
         let angle_change = da0.hypot(da1);
-        if !sample.rapid && length <= 1e-6 && angle_change <= 1e-9 {
+        let tcp = spec.tcp.as_ref();
+        let rotary_rapid = sample.rapid && angle_change > 1e-9;
+        if rotary_rapid && tcp.is_some_and(|tcp| tcp.rapid_rotary == TcpRapidRotary::Error) {
+            return Err(invalid(format!("toolpath {path_index} move {}: TCP rapid changes a rotary", sample.move_index)));
+        }
+        // TCP skips a zero rapid too: the approach already sits on the first tip.
+        let zero = length <= 1e-6 && angle_change <= 1e-9;
+        if zero && (!sample.rapid || tcp.is_some()) {
             self.part_tip = Some(part);
             self.rotary_angles = joints.angles;
             self.tool_axis = pose.axis;
             return Ok(());
         }
+        // A TCP rapid that changes a rotary stays in G93 and is written as G1 at rapid_feed.
+        // A linear rapid stays G0 and carries no rotary word.
+        let write_g0 = sample.rapid && !(tcp.is_some() && rotary_rapid);
         let mut feed = None;
-        if !sample.rapid {
+        if !write_g0 {
             if !*saw_feed {
                 self.emit_line(&spec.inverse_time_on)?;
                 self.inverse_time = true;
                 self.feed = None;
                 *saw_feed = true;
             }
-            feed = Some(self.continuous_inverse_feed(length, angle_change, sample.feed, path_index, sample.move_index)?);
+            let programmed = if rotary_rapid { tcp.map(|tcp| tcp.rapid_feed) } else { sample.feed };
+            feed = Some(self.continuous_inverse_feed(length, angle_change, programmed, path_index, sample.move_index)?);
         }
+        let code = if write_g0 { "G0" } else { "G1" };
         let mut words = Vec::new();
         if !(self.post.modal_motion && self.linear == Some(code)) {
             words.push(code.to_string());
         }
+        let xyz = if tcp.is_some() { part } else { machine };
         let rounded = self.push_axes(&mut words, xyz)?;
-        let rotaries = self.rotary_words(joints.angles)?;
-        for word in rotaries.split_whitespace() {
-            words.push(word.to_string());
+        if !(write_g0 && tcp.is_some()) {
+            let rotaries = self.rotary_words(joints.angles)?;
+            for word in rotaries.split_whitespace() {
+                words.push(word.to_string());
+            }
         }
         self.push_feed(&mut words, feed, true)?;
-        self.linear = Some(if sample.rapid { "G0" } else { "G1" });
+        self.linear = Some(code);
         self.pos = Some(rounded);
         self.exact = Some(xyz);
         self.part_tip = Some(part);
@@ -684,6 +708,130 @@ impl<'a> Writer<'a> {
             return Err(invalid(format!("toolpath {path_index} move {move_index}: rotary-only move needs a feed")));
         }
         rotary::inverse_minutes_feed(feed, angle_change_deg)
+    }
+
+    /// TCP continuous toolpath. Events before the first motion run first, so a tool change's
+    /// length offset is on before TCP (G43 cancels G234).
+    fn tcp_continuous_toolpath(&mut self, index: u32, path: &ClPath, spec: FiveAxisContinuous) -> Result<()> {
+        let tcp = spec.tcp.clone().ok_or_else(|| invalid("tcp output is missing"))?;
+        let setup = self.five.ok_or_else(|| invalid("program has a continuous toolpath but no kinematics"))?;
+        self.split_next = false;
+        self.five_started = true;
+
+        let mut items = Vec::new();
+        let mut prev: Option<Pose> = None;
+        let mut move_index = 0u32;
+        for block in path.blocks() {
+            match block {
+                ClBlock::Event(event) => items.push(ContItem::Event(event)),
+                ClBlock::Motion(motion) => {
+                    let samples = self.linearise_continuous_motion(motion, prev, spec.chord_tol, move_index)?;
+                    if let Some(last) = samples.last() {
+                        prev = Some(pose_from_tool(last.pose)?);
+                    }
+                    for sample in samples {
+                        items.push(ContItem::Sample(sample));
+                    }
+                    move_index = move_index.saturating_add(1);
+                }
+            }
+        }
+
+        let originals: Vec<ContSample> = items
+            .iter()
+            .filter_map(|item| match item {
+                ContItem::Sample(sample) => Some(*sample),
+                ContItem::Event(_) => None,
+            })
+            .collect();
+        if originals.is_empty() {
+            for item in items {
+                if let ContItem::Event(event) = item {
+                    self.event(event)?;
+                }
+            }
+            return Ok(());
+        }
+
+        let poses: Vec<ToolPose> = originals.iter().map(|sample| sample.pose).collect();
+        // Solve from the commanded zero, not the previous toolpath. TCP indexes the rotaries
+        // to 0 before the first move, and the branch has to match that.
+        let start = Joints { xyz: Vec3::ZERO, angles: [0.0, 0.0] };
+        let joints = solve_path(setup, &poses, Some(start), path.singular_cone_deg()).map_err(|err| invalid(err.to_string()))?;
+        let name = path.name().unwrap_or("");
+        let subdivided = subdivide_tcp(setup, name, &poses, &joints, spec.chord_tol, spec.axis_tol_deg)?;
+
+        let approach = originals[0].pose.tip;
+        let mut sub_i = 0usize;
+        let mut saw_feed = false;
+        let mut begun = false;
+        for item in items {
+            match item {
+                ContItem::Event(event) => self.event(event)?,
+                ContItem::Sample(sample) => {
+                    if !begun {
+                        self.begin_tcp(&tcp, approach)?;
+                        begun = true;
+                    }
+                    while sub_i < subdivided.len() && !subdivided[sub_i].original {
+                        let point = subdivided[sub_i];
+                        self.continuous_move(&spec, point.pose, point.joints, sample, index, &mut saw_feed)?;
+                        sub_i += 1;
+                    }
+                    if sub_i >= subdivided.len() || subdivided[sub_i].pose != sample.pose {
+                        return Err(invalid("continuous subdivision lost a pose"));
+                    }
+                    let point = subdivided[sub_i];
+                    self.continuous_move(&spec, point.pose, point.joints, sample, index, &mut saw_feed)?;
+                    sub_i += 1;
+                }
+            }
+        }
+        if sub_i != subdivided.len() {
+            return Err(invalid("continuous subdivision lost a pose"));
+        }
+        if saw_feed {
+            self.emit_line(&spec.inverse_time_off)?;
+            self.inverse_time = false;
+            self.feed = None;
+        }
+        if begun {
+            self.end_tcp(&tcp)?;
+        }
+        Ok(())
+    }
+
+    /// Cancel the work frame, retract, zero the rotaries, turn TCP on, then rapid to the first tip.
+    ///
+    /// The rapid is X and Y, then Z of that tip. The post has no separate clearance, so that Z is
+    /// the retract height in the work frame. Rotaries stay at 0 through both rapids.
+    fn begin_tcp(&mut self, tcp: &TcpContinuous, tip: Vec3) -> Result<()> {
+        self.cancel_work_frame()?;
+        let five = self.post.five_axis.clone().ok_or_else(|| invalid("five axis output is missing"))?;
+        self.templates("five_axis.retract", &five.retract, &[("date-free!", "")])?;
+        self.rotary_angles = [0.0, 0.0];
+        self.tool_axis = Vec3::Z;
+        let words = self.rotary_words([0.0, 0.0])?;
+        self.templates("five_axis.index", &five.index, &[("rotaries", words.as_str()), ("date-free!", "")])?;
+        let tool = self.tool_token();
+        self.templates("five_axis.continuous.tcp.on", &tcp.on, &[("tool", tool.as_str()), ("program_name", ""), ("date-free!", "")])?;
+        let part = [tip.x(), tip.y(), tip.z()];
+        self.rapid_xy_then_z(Posted { xyz: part, part, angle: None, c: None, axis: Vec3::Z })
+    }
+
+    /// `off`, then `restore_length`, before any later non-TCP motion.
+    fn end_tcp(&mut self, tcp: &TcpContinuous) -> Result<()> {
+        let tool = self.tool_token();
+        let vars = [("tool", tool.as_str()), ("program_name", ""), ("date-free!", "")];
+        self.templates("five_axis.continuous.tcp.off", &tcp.off, &vars)?;
+        self.templates("five_axis.continuous.tcp.restore_length", &tcp.restore_length, &vars)
+    }
+
+    fn tool_token(&self) -> String {
+        match self.tool_id {
+            Some(id) => id.to_string(),
+            None => "0".to_string(),
+        }
     }
 
     /// Index when this is the first five-axis toolpath, the frame is off, or the tool axis changed.
@@ -1881,6 +2029,7 @@ impl<'a> Writer<'a> {
                 self.dwell(*seconds)
             }
             Event::ToolChange { tool_id } => {
+                self.tool_id = Some(*tool_id);
                 let lines = self.post.tool_change.clone();
                 let tool = tool_id.to_string();
                 self.templates("tool_change", &lines, &[("tool", tool.as_str()), ("program_name", ""), ("date-free!", "")])
@@ -3110,6 +3259,135 @@ fn process_key(kind: &ProcessKind) -> &str {
         ProcessKind::Knife => "knife",
         ProcessKind::Other(name) => name.as_str(),
     }
+}
+
+/// One TCP sample. `original` poses are the IR samples and compare equal to those poses.
+/// Inserted samples are the part-frame midpoint and the forward axis of the lerped angles.
+#[derive(Clone, Copy)]
+struct TcpOut {
+    pose: ToolPose,
+    joints: Joints,
+    original: bool,
+}
+
+/// Part-frame subdivision for TCP.
+///
+/// The control linearly interpolates the programmed tip and linearly interpolates the rotary
+/// words. The tool axis along that move is the forward kinematics of the interpolated angles at
+/// tool length 0. The tip therefore lies on the chord, so `chord_tol` does not insert samples on
+/// a straight move. A sample is inserted when that forward axis leaves the slerp of the endpoint
+/// forward axes by more than `axis_tol_deg`. Arcs are already chorded in the part frame.
+fn subdivide_tcp(
+    setup: &FiveAxisSetup,
+    toolpath: &str,
+    poses: &[ToolPose],
+    joints: &[Joints],
+    chord_tol_mm: f64,
+    axis_tol_deg: f64,
+) -> Result<Vec<TcpOut>> {
+    if poses.len() != joints.len() {
+        return Err(invalid(format!("toolpath `{toolpath}` poses and joints differ in length")));
+    }
+    let Some((&first_pose, rest_poses)) = poses.split_first() else {
+        return Ok(Vec::new());
+    };
+    let Some((&first_joints, rest_joints)) = joints.split_first() else {
+        return Ok(Vec::new());
+    };
+    let kin = &setup.kinematics;
+    let mut out = Vec::with_capacity(poses.len());
+    out.push(TcpOut { pose: first_pose, joints: first_joints, original: true });
+    let mut prev_pose = first_pose;
+    let mut prev_joints = first_joints;
+    let mut inserted = 0usize;
+    for (&pose, &end_joints) in rest_poses.iter().zip(rest_joints) {
+        // Right half is pushed first so the left half is refined next. One segment finishes
+        // before the next starts, so the samples stay in path order.
+        let mut stack = vec![(prev_pose, prev_joints, pose, end_joints, true)];
+        while let Some((left_pose, left_joints, right_pose, right_joints, right_original)) = stack.pop() {
+            if tcp_segment_ok(kin, left_pose, left_joints, right_pose, right_joints, chord_tol_mm, axis_tol_deg)? {
+                out.push(TcpOut { pose: right_pose, joints: right_joints, original: right_original });
+                continue;
+            }
+            let mid_angles = lerp_angles(left_joints.angles, right_joints.angles);
+            if angles_close(mid_angles, left_joints.angles) || angles_close(mid_angles, right_joints.angles) {
+                out.push(TcpOut { pose: right_pose, joints: right_joints, original: right_original });
+                continue;
+            }
+            inserted = inserted.saturating_add(1);
+            if inserted > 10_000 {
+                return Err(invalid(format!("toolpath `{toolpath}` inserts more than 10000 poses")));
+            }
+            let mid_tip = lerp_vec3(left_pose.tip, right_pose.tip, 0.5)?;
+            let mid_axis = tcp_fk_axis(kin, mid_angles)?;
+            let mid_pose = ToolPose { tip: mid_tip, axis: mid_axis };
+            let mid_joints = Joints { xyz: mid_tip, angles: mid_angles };
+            stack.push((mid_pose, mid_joints, right_pose, right_joints, right_original));
+            stack.push((left_pose, left_joints, mid_pose, mid_joints, false));
+        }
+        prev_pose = pose;
+        prev_joints = end_joints;
+    }
+    Ok(out)
+}
+
+fn tcp_segment_ok(
+    kin: &campanion_ir::Kinematics,
+    left_pose: ToolPose,
+    left_joints: Joints,
+    right_pose: ToolPose,
+    right_joints: Joints,
+    chord_tol_mm: f64,
+    axis_tol_deg: f64,
+) -> Result<bool> {
+    if angles_close(left_joints.angles, right_joints.angles) {
+        return Ok(true);
+    }
+    let left_axis = tcp_fk_axis(kin, left_joints.angles)?;
+    let right_axis = tcp_fk_axis(kin, right_joints.angles)?;
+    let mid_axis = tcp_fk_axis(kin, lerp_angles(left_joints.angles, right_joints.angles))?;
+    let desired = slerp_tool_axis(left_axis, right_axis, 0.5)?;
+    let axis_gap = axis_degrees(mid_axis, desired);
+    // Both ends are programmed tips. Linear interpolation is the chord, so this gap is zero.
+    // `chord_tol` still bounds it. Arc chords were already limited to `chord_tol`.
+    let control_tip = lerp_vec3(left_pose.tip, right_pose.tip, 0.5)?;
+    let chord_mid = lerp_vec3(left_pose.tip, right_pose.tip, 0.5)?;
+    let tip_gap = gap3(control_tip, chord_mid);
+    Ok(tip_gap <= chord_tol_mm && axis_gap <= axis_tol_deg)
+}
+
+fn tcp_fk_axis(kin: &campanion_ir::Kinematics, angles: [f64; 2]) -> Result<Vec3> {
+    let pose = kin.forward(&Joints { xyz: Vec3::ZERO, angles }, 0.0).map_err(|err| invalid(err.to_string()))?;
+    Ok(pose.axis)
+}
+
+fn lerp_angles(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
+    [left[0] + (right[0] - left[0]) * 0.5, left[1] + (right[1] - left[1]) * 0.5]
+}
+
+fn angles_close(left: [f64; 2], right: [f64; 2]) -> bool {
+    (left[0] - right[0]).abs() <= 1e-9 && (left[1] - right[1]).abs() <= 1e-9
+}
+
+fn lerp_vec3(left: Vec3, right: Vec3, t: f64) -> Result<Vec3> {
+    Vec3::new(left.x() + (right.x() - left.x()) * t, left.y() + (right.y() - left.y()) * t, left.z() + (right.z() - left.z()) * t)
+        .map_err(|err| invalid(err.to_string()))
+}
+
+fn gap3(left: Vec3, right: Vec3) -> f64 {
+    let dx = left.x() - right.x();
+    let dy = left.y() - right.y();
+    let dz = left.z() - right.z();
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn axis_degrees(left: Vec3, right: Vec3) -> f64 {
+    let dot = (left.x() * right.x() + left.y() * right.y() + left.z() * right.z()).clamp(-1.0, 1.0);
+    let cx = left.y() * right.z() - left.z() * right.y();
+    let cy = left.z() * right.x() - left.x() * right.z();
+    let cz = left.x() * right.y() - left.y() * right.x();
+    let sine = (cx * cx + cy * cy + cz * cz).sqrt();
+    sine.atan2(dot).abs().to_degrees()
 }
 
 fn tool_pose(pose: Pose) -> ToolPose {

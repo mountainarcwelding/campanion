@@ -6,6 +6,12 @@
 
 - An indexed toolpath after a continuous five-axis toolpath on the same tool axis now reindexes and turns the work frame back on. The frame had stayed off, so the cut was written as part-frame XYZ while the rotaries remained at the continuous pose.
 
+### Added
+
+- `five_axis.continuous.tcp` writes a continuous toolpath in TCP mode. XYZ is the part-frame tool tip. Rotary angles still come from `solve_path` (branch continuity, singular cone, and the same reachability and limit errors). Subdivision uses the same chord and axis tolerances: the control is assumed to interpolate the tip linearly and the rotary words linearly, and the tool axis is the forward kinematics of those angles. Inverse time is unchanged.
+- Post `haas_umc_tcpc` commands Haas G234 TCPC (`G234 H{tool}` after the rotaries are at zero, `G49` then `G43 H{tool}` after the path). A rapid that changes a rotary is `G1` in `G93` at 5000 mm/min. This output has not been proven on a machine.
+- Post `linuxcnc_5ax_tcp` programs the tool tip with rotary words and empty TCP on/off hooks. The machine must run TCP kinematics. The header says `(TCP kinematics required)`. This output has not been proven on a machine.
+
 ## 0.9.0 — 2026-11-02
 
 First continuous five-axis release (posts without TCP). Check any program that has a G2/G3 shorter than the output resolution: it now posts as a line.

@@ -11,8 +11,9 @@
 //! A post may declare a rotary axis. Poses that carry an angle are written in the machine frame.
 //! The feed rule for a move that changes the angle is in the crate README.
 //!
-//! A post with `five_axis.continuous` writes simultaneous five-axis motion without TCP: the post
-//! solves the inverse and emits linear blocks with XYZ and rotary words.
+//! A post with `five_axis.continuous` writes simultaneous five-axis motion. Without `tcp` the post
+//! solves the inverse and emits linear blocks with XYZ and rotary words. With `tcp`, XYZ is the
+//! part-frame tool tip and the rotary words still come from that solution.
 //!
 //! A post may declare a lathe block. A turning program is written in the part XZ frame. Diameter
 //! mode, constant surface speed and the G2/G3 sense are described in the crate README.
@@ -40,11 +41,13 @@ pub use error::{PostError, Result};
 
 const LINUXCNC_JSON: &str = include_str!("../posts/linuxcnc.json");
 const LINUXCNC_5AX_JSON: &str = include_str!("../posts/linuxcnc_5ax.json");
+const LINUXCNC_5AX_TCP_JSON: &str = include_str!("../posts/linuxcnc_5ax_tcp.json");
 const GRBL_JSON: &str = include_str!("../posts/grbl.json");
 const MACH3_JSON: &str = include_str!("../posts/mach3.json");
 const FANUC_JSON: &str = include_str!("../posts/fanuc.json");
 const HAAS_JSON: &str = include_str!("../posts/haas.json");
 const HAAS_UMC_JSON: &str = include_str!("../posts/haas_umc.json");
+const HAAS_UMC_TCPC_JSON: &str = include_str!("../posts/haas_umc_tcpc.json");
 const PLASMA_JSON: &str = include_str!("../posts/plasma.json");
 const GRBL_LASER_JSON: &str = include_str!("../posts/grbl_laser.json");
 const LINUXCNC_LATHE_JSON: &str = include_str!("../posts/linuxcnc_lathe.json");
@@ -58,11 +61,13 @@ pub fn builtin_ids() -> &'static [&'static str] {
     &[
         "linuxcnc",
         "linuxcnc_5ax",
+        "linuxcnc_5ax_tcp",
         "grbl",
         "mach3",
         "fanuc",
         "haas",
         "haas_umc",
+        "haas_umc_tcpc",
         "plasma",
         "grbl_laser",
         "linuxcnc_lathe",
@@ -78,11 +83,13 @@ pub fn builtin(id: &str) -> Option<PostDef> {
     let json = match id {
         "linuxcnc" => LINUXCNC_JSON,
         "linuxcnc_5ax" => LINUXCNC_5AX_JSON,
+        "linuxcnc_5ax_tcp" => LINUXCNC_5AX_TCP_JSON,
         "grbl" => GRBL_JSON,
         "mach3" => MACH3_JSON,
         "fanuc" => FANUC_JSON,
         "haas" => HAAS_JSON,
         "haas_umc" => HAAS_UMC_JSON,
+        "haas_umc_tcpc" => HAAS_UMC_TCPC_JSON,
         "plasma" => PLASMA_JSON,
         "grbl_laser" => GRBL_LASER_JSON,
         "linuxcnc_lathe" => LINUXCNC_LATHE_JSON,

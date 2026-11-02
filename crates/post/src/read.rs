@@ -605,7 +605,15 @@ impl<'a> Parser<'a> {
         let Some(five) = &self.post.five_axis else {
             return false;
         };
-        template_g_codes(&five.on).contains(&code) || template_g_codes(&five.off).contains(&code)
+        if template_g_codes(&five.on).contains(&code) || template_g_codes(&five.off).contains(&code) {
+            return true;
+        }
+        let Some(tcp) = five.continuous.as_ref().and_then(|continuous| continuous.tcp.as_ref()) else {
+            return false;
+        };
+        template_g_codes(&tcp.on).contains(&code)
+            || template_g_codes(&tcp.off).contains(&code)
+            || template_g_codes(&tcp.restore_length).contains(&code)
     }
 
     fn c_axis_letter(&self) -> Option<char> {

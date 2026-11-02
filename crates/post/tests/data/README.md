@@ -18,7 +18,7 @@ cargo run -p campanion-cli -- run examples/wrap.job.json -o /tmp/wrap.ngc --ir c
 
 `turn.ir.json` is a turning program (bar, one insert, one CSS pass). The golden test posts it with every lathe post.
 
-`swarf_cylinder.json` is a continuous five-axis toolpath (tilt 0→30° around a cylinder, one arc). Golden G-code is `swarf_cylinder.linuxcnc_5ax.nc` and `swarf_cylinder.haas_umc.nc`. Rewrite those with `UPDATE_GOLDEN=1 cargo test -p campanion-post --test five_axis_continuous`.
+`swarf_cylinder.json` is a continuous five-axis toolpath (tilt 0→30° around a cylinder, one arc). Golden G-code is `swarf_cylinder.linuxcnc_5ax.nc`, `swarf_cylinder.haas_umc.nc`, `swarf_cylinder.linuxcnc_5ax_tcp.nc` and `swarf_cylinder.haas_umc_tcpc.nc`. Rewrite those with `UPDATE_GOLDEN=1 cargo test -p campanion-post --test five_axis_continuous`.
 
 Then rewrite the goldens. The test posts each program with `arc_tolerance` of `0.01` mm:
 
