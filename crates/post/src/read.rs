@@ -4,6 +4,8 @@
 //! A signed `R` is the radius. Comments, line numbers, `%` tape edges and `O` program numbers are
 //! skipped. `G4` is a dwell. A post with a rotary block also accepts its A/B word and the
 //! inverse-time codes (`G93` / `G94` on LinuxCNC). Those stay modal the way `X` `Y` `Z` do.
+//! A post with `five_axis` also accepts A, B and C as modal joint words, G93/G94 from
+//! `five_axis.continuous`, the on/off templates (G254/G255 on Haas), and G53 as a machine retract.
 //!
 //! A lathe post returns part-frame positions. In diameter mode each X word is divided by two.
 //! Y is 0, except while face or cylinder interpolation (from the post's `face_interp` /
@@ -42,6 +44,8 @@ pub enum ReadMove {
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
         inverse_time: bool,
+        /// Modal A, B, C after this block when the post has `five_axis`. `None` until that letter is written.
+        five: [Option<f64>; 3],
     },
     /// `G1`.
     Linear {
@@ -53,6 +57,8 @@ pub enum ReadMove {
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
         inverse_time: bool,
+        /// Modal A, B, C after this block when the post has `five_axis`. `None` until that letter is written.
+        five: [Option<f64>; 3],
     },
     /// `G2` or `G3`.
     Arc {
@@ -70,6 +76,8 @@ pub enum ReadMove {
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
         inverse_time: bool,
+        /// Modal A, B, C after this block when the post has `five_axis`. `None` until that letter is written.
+        five: [Option<f64>; 3],
     },
     /// `G4`, in seconds.
     Dwell {
@@ -86,12 +94,24 @@ pub enum ReadMove {
         rotary: Option<f64>,
         /// Modal inverse-time state after this block.
         inverse_time: bool,
+        /// Modal A, B, C after this block when the post has `five_axis`. `None` until that letter is written.
+        five: [Option<f64>; 3],
     },
     /// An `M` or `T` block that does not move.
     Other {
         /// The block with comments and the line number removed.
         text: String,
     },
+}
+
+impl ReadMove {
+    /// Modal A, B, C after this block. `[None; 3]` on a dwell or a post without `five_axis`.
+    pub fn five(&self) -> [Option<f64>; 3] {
+        match self {
+            Self::Rapid { five, .. } | Self::Linear { five, .. } | Self::Arc { five, .. } | Self::Thread { five, .. } => *five,
+            Self::Dwell { .. } | Self::Other { .. } => [None; 3],
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +132,8 @@ struct Parser<'a> {
     angle: Option<f64>,
     /// Modal inverse time. `G94` (or the post's off code) clears it.
     inverse_time: bool,
+    /// Modal A, B, C for a five-axis post. Updated when that letter appears.
+    five: [Option<f64>; 3],
     /// Cartesian face frame. X scaling follows `face_interp.x_diameter` and Y is kept.
     face_mode: bool,
     /// Unrolled cylinder frame. Y is kept and X follows lathe diameter mode.
@@ -134,6 +156,7 @@ impl<'a> Parser<'a> {
             feed: None,
             angle: None,
             inverse_time: false,
+            five: [None; 3],
             face_mode: false,
             cyl_mode: false,
             on_sub: false,
@@ -208,6 +231,7 @@ impl<'a> Parser<'a> {
                     if axes.contains(&letter)
                         || letter == dwell_letter
                         || self.is_rotary_letter(letter)
+                        || self.is_five_letter(letter)
                         || self.is_c_letter(letter)
                         || self.is_y_letter(letter)
                         || self.is_b_head_letter(letter)
@@ -225,6 +249,7 @@ impl<'a> Parser<'a> {
         if let Some(angle) = self.rotary_word(&words)? {
             self.angle = Some(angle);
         }
+        self.take_five_words(&words)?;
         let mut plane = self.plane;
         let mut motion = self.motion;
         let mut dwell = false;
@@ -236,11 +261,11 @@ impl<'a> Parser<'a> {
         let thread_feed = self.thread_feed_code();
         let lathe_feed = self.lathe_feed_code();
         for &code in &g_codes {
-            if self.post.rotary.as_ref().is_some_and(|rotary| rotary.on_code() == Some(code)) {
+            if self.is_inverse_on(code) {
                 inverse_time = true;
                 continue;
             }
-            if self.post.rotary.as_ref().is_some_and(|rotary| rotary.off_code() == Some(code)) {
+            if self.is_inverse_off(code) {
                 inverse_time = false;
                 continue;
             }
@@ -292,8 +317,10 @@ impl<'a> Parser<'a> {
                 20 => return Err(invalid("inches are not supported")),
                 91 => return Err(invalid("incremental motion is not supported")),
                 7 | 8 | 50 | 96 | 97 | 98 if self.post.is_lathe() => {}
-                28 | 53 if self.post.is_lathe() => {}
+                28 if self.post.is_lathe() => {}
+                53 => {}
                 21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
+                code if self.is_five_mode_g(code) => {}
                 code if self.is_sub_spindle_g(code) => {}
                 code if self.is_transfer_g(code) => {}
                 code if self.is_bar_feed_g(code) => {}
@@ -315,7 +342,7 @@ impl<'a> Parser<'a> {
         self.inverse_time = inverse_time;
         // G53 is a non-modal machine-coordinate move. G28 is a reference return (Fanuc writes
         // U0 W0). Neither block is a part-frame point.
-        if self.post.is_lathe() && (g_codes.contains(&28) || g_codes.contains(&53)) {
+        if g_codes.contains(&53) || (self.post.is_lathe() && g_codes.contains(&28)) {
             return Ok(None);
         }
         // G105 (or the post's bar-feed code) is a feeder command. J and K on that line are
@@ -394,9 +421,10 @@ impl<'a> Parser<'a> {
         let feed = self.feed;
         let rotary = self.angle;
         let inverse_time = self.inverse_time;
+        let five = self.five;
         let move_ = match motion {
-            Motion::Rapid => ReadMove::Rapid { end, feed, rotary, inverse_time },
-            Motion::Linear => ReadMove::Linear { end, feed, rotary, inverse_time },
+            Motion::Rapid => ReadMove::Rapid { end, feed, rotary, inverse_time, five },
+            Motion::Linear => ReadMove::Linear { end, feed, rotary, inverse_time, five },
             Motion::Cw | Motion::Ccw => {
                 let mut sense = if matches!(motion, Motion::Cw) { ArcSense::Cw } else { ArcSense::Ccw };
                 if plane == Plane::Zx && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip) {
@@ -421,7 +449,7 @@ impl<'a> Parser<'a> {
                 } else {
                     return Err(invalid("arc needs IJK or R"));
                 };
-                ReadMove::Arc { sense, end, center, radius, feed, rotary, inverse_time }
+                ReadMove::Arc { sense, end, center, radius, feed, rotary, inverse_time, five }
             }
         };
         self.pos = end;
@@ -446,7 +474,7 @@ impl<'a> Parser<'a> {
         if !(lead.is_finite() && lead > 0.0) {
             return Err(invalid("thread lead must be positive"));
         }
-        let move_ = ReadMove::Thread { end, lead, rotary: self.angle, inverse_time: self.inverse_time };
+        let move_ = ReadMove::Thread { end, lead, rotary: self.angle, inverse_time: self.inverse_time, five: self.five };
         self.pos = end;
         self.motion = None;
         self.plane = plane;
@@ -545,6 +573,39 @@ impl<'a> Parser<'a> {
             return false;
         };
         (letter == 'A' && rotary.supports(RotaryAxisKind::A)) || (letter == 'B' && rotary.supports(RotaryAxisKind::B))
+    }
+
+    fn is_five_letter(&self, letter: char) -> bool {
+        self.post.five_axis.is_some() && matches!(letter, 'A' | 'B' | 'C')
+    }
+
+    fn take_five_words(&mut self, words: &[(char, f64)]) -> Result<()> {
+        if self.post.five_axis.is_none() {
+            return Ok(());
+        }
+        for (index, letter) in ['A', 'B', 'C'].into_iter().enumerate() {
+            if let Some(value) = unique(words, letter)? {
+                self.five[index] = Some(value);
+            }
+        }
+        Ok(())
+    }
+
+    fn is_inverse_on(&self, code: u16) -> bool {
+        self.post.rotary.as_ref().is_some_and(|rotary| rotary.on_code() == Some(code))
+            || self.post.five_axis.as_ref().and_then(|five| five.continuous.as_ref()).is_some_and(|cont| cont.on_code() == Some(code))
+    }
+
+    fn is_inverse_off(&self, code: u16) -> bool {
+        self.post.rotary.as_ref().is_some_and(|rotary| rotary.off_code() == Some(code))
+            || self.post.five_axis.as_ref().and_then(|five| five.continuous.as_ref()).is_some_and(|cont| cont.off_code() == Some(code))
+    }
+
+    fn is_five_mode_g(&self, code: u16) -> bool {
+        let Some(five) = &self.post.five_axis else {
+            return false;
+        };
+        template_g_codes(&five.on).contains(&code) || template_g_codes(&five.off).contains(&code)
     }
 
     fn c_axis_letter(&self) -> Option<char> {
@@ -718,6 +779,9 @@ impl<'a> Parser<'a> {
         };
         let a = if rotary.supports(RotaryAxisKind::A) { unique(words, 'A')? } else { None };
         let b = if rotary.supports(RotaryAxisKind::B) { unique(words, 'B')? } else { None };
+        if self.post.five_axis.is_some() {
+            return Ok(a.or(b));
+        }
         match (a, b) {
             (Some(_), Some(_)) => Err(invalid("block has both an A word and a B word")),
             (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
@@ -955,7 +1019,7 @@ fn mapping_present(lines: &[String], words: &[(char, f64)]) -> Result<bool> {
 }
 
 fn g_number(value: f64) -> Result<u16> {
-    if !(value.is_finite() && (0.0..=200.0).contains(&value)) {
+    if !(value.is_finite() && (0.0..=999.0).contains(&value)) {
         return Err(invalid("G code is out of range"));
     }
     let rounded = value.round();

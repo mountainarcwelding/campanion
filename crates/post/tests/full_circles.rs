@@ -425,7 +425,7 @@ fn full_circle_across_a_rounding_boundary_posts() {
 #[test]
 fn trace_rejects_a_missing_half_and_a_near_full_gap() {
     let circle = FullCircle { cx: 0.0, cy: 0.0, radius: 10.0 };
-    let rapid = |end: [f64; 3]| ReadMove::Rapid { end, feed: None, rotary: None, inverse_time: false };
+    let rapid = |end: [f64; 3]| ReadMove::Rapid { end, feed: None, rotary: None, inverse_time: false, five: [None; 3] };
     let arc = |end: [f64; 3]| ReadMove::Arc {
         sense: ArcSense::Ccw,
         end,
@@ -434,6 +434,7 @@ fn trace_rejects_a_missing_half_and_a_near_full_gap() {
         feed: Some(100.0),
         rotary: None,
         inverse_time: false,
+        five: [None; 3],
     };
     let half = vec![rapid([10.0, 0.0, 0.0]), arc([-10.0, 0.0, 0.0])];
     let err = trace_circles(&half, &[circle], 1e-4).expect_err("half");

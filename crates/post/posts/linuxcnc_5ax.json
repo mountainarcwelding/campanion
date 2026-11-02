@@ -1,7 +1,7 @@
 {
   "id": "linuxcnc_5ax",
   "name": "LinuxCNC 5ax",
-  "description": "Millimetre RS274 dialect for LinuxCNC indexed 3+2. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. Trivial kinematics: the kinematics file's pivots must be measured from the G54 origin. No TCP.",
+  "description": "Millimetre RS274 dialect for LinuxCNC indexed 3+2 and continuous five-axis without TCP. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. Continuous output writes G54 XYZ plus rotary words; the post solves the inverse. The kinematics file's pivots must be measured from the G54 origin. No TCP.",
   "units": "mm",
   "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
   "decimals": { "linear": 4, "feed": 4, "dwell": 3 },
@@ -47,6 +47,13 @@
     "retract": ["G53 G0 Z0"],
     "index": ["G0 {rotaries}"],
     "on": [],
-    "off": []
+    "off": [],
+    "continuous": {
+      "feed": "inverse_time",
+      "inverse_time_on": "G93",
+      "inverse_time_off": "G94",
+      "chord_tol": 0.005,
+      "axis_tol_deg": 0.1
+    }
   }
 }

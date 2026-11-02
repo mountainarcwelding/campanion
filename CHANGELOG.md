@@ -4,11 +4,12 @@
 
 ### Added
 
+- Posts `linuxcnc_5ax` and `haas_umc` write continuous five-axis output without TCP. `five_axis.continuous` selects inverse-time feed (`G93`/`G94`), chord and axis tolerances, and linear `G0`/`G1` blocks with XYZ plus rotary words. The post runs `solve_path` and `subdivide_path`. Arcs and helices are linearised. On `haas_umc` G255 is active and XYZ are G54 coordinates with pivots measured from G54, the same rule as `linuxcnc_5ax`. This output has not been proven on a machine.
 - A toolpath may set `singular_cone_deg` (default 1°, range `(0, 10]`, omitted from JSON at the default). Inside that cone of the singular direction, `solve_path` holds the primary rotary at its previous angle and lets the secondary rotary take the tilt. The tool axis stays within the cone of the requested axis. A step that enters or leaves the cone changes the primary by at most `90° + 2 × singular_cone_deg`.
 - `subdivide_path` inserts joint-space samples until each segment's midpoint stays within a chord tolerance and a tool-axis tolerance. More than 10000 inserted poses is an error that names the toolpath.
 - A toolpath may set `continuous` (default false, omitted from JSON). On a continuous toolpath the verifier rejects a feed whose tool axis changes by more than the program setting `max_axis_step_deg` (default 5°, range `(0, 90]`). The error names the toolpath index, the move index and the angle.
 - `solve_path` turns a list of tool poses into joint positions. It keeps the rotary branch, unwinds continuous rotaries so a joint does not jump by 360°, and reports the first pose that leaves a travel limit or that no solution can reach.
-- Posts reject a continuous toolpath with `post `{id}` has no continuous five-axis output`.
+- Posts without `five_axis.continuous` reject a continuous toolpath with `post `{id}` has no continuous five-axis output`.
 
 ### Changed
 

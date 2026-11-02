@@ -180,11 +180,25 @@ fn continuous_toolpath_is_rejected_before_indexed_output() {
             Some(five) => program.with_five_axis(five).expect("five"),
             None => program,
         };
-        for id in ["haas", "haas_umc", "linuxcnc"] {
+        for id in ["haas", "linuxcnc"] {
             let err = post_program(&program, &builtin(id).expect(id), &options(0.05)).expect_err(id);
             assert_eq!(err.to_string(), format!("not supported: post `{id}` has no continuous five-axis output"));
         }
     }
+    let path = path(constant_blocks()).with_continuous(true);
+    let missing = Program::try_new(Some("plate".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
+    for id in ["haas_umc", "linuxcnc_5ax"] {
+        let err = post_program(&missing, &builtin(id).expect(id), &options(0.05)).expect_err(id);
+        assert_eq!(err.to_string(), "invalid input: program has a continuous toolpath but no kinematics");
+    }
+}
+
+fn constant_blocks() -> Vec<ClBlock> {
+    let axis_z = Vec3::Z;
+    vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(Vec3::new(1.0, 2.0, 3.0).expect("a"), axis_z), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(4.0, 2.0, 3.0).expect("b"), axis_z), feed: 80.0, role: MoveRole::Cut }),
+    ]
 }
 
 #[test]
@@ -246,6 +260,40 @@ fn cardinal_arc_after_b90_stays_an_arc() {
     assert!(arc.contains("G3"), "{arc}");
     assert!(arc.contains("J0."), "{arc}");
     assert!(arc.contains("K1."), "{arc}");
+}
+
+#[test]
+fn continuous_machine_output_writes_xyz_and_inverse_time() {
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(Vec3::new(4.0, 5.0, 6.0).expect("a"), Vec3::Z), feed: None }),
+        ClBlock::Motion(ClMotion::Linear {
+            to: pose(Vec3::new(4.0, 5.0, 6.0).expect("b"), Vec3::new(-0.5, 0.0, 0.8660254037844386).expect("axis")),
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+        ClBlock::Motion(ClMotion::Linear {
+            to: pose(Vec3::new(10.0, 5.0, 6.0).expect("c"), Vec3::new(-0.5, 0.0, 0.8660254037844386).expect("axis")),
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+    ];
+    let path = path(blocks).with_continuous(true);
+    let program = Program::try_new(Some("plate".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new(), None)
+        .expect("program")
+        .with_five_axis(setup(B_TABLE))
+        .expect("five");
+    for id in ["linuxcnc_5ax", "haas_umc"] {
+        let text = post_program(&program, &builtin(id).expect(id), &options(0.05)).expect(id);
+        assert!(text.contains("G93"), "{id}: {text}");
+        assert!(text.contains("G94"), "{id}: {text}");
+        assert!(text.contains("B"), "{id}: {text}");
+        assert!(!text.lines().any(|line| line.split_whitespace().any(|word| word == "G2" || word == "G3")), "{id}: {text}");
+        if id == "haas_umc" {
+            assert!(!text.contains("G254"), "continuous keeps G255: {text}");
+        }
+        let moves = campanion_post::read_back(&text, &builtin(id).expect(id)).expect("read");
+        assert!(moves.iter().any(|mv| matches!(mv, campanion_post::ReadMove::Linear { inverse_time: true, .. })), "{id}: {moves:?}");
+    }
 }
 
 #[test]

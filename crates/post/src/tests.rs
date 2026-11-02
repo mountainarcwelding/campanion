@@ -1405,6 +1405,43 @@ fn rotary_schema_is_validated() {
     assert!(err.to_string().contains("nope") || err.to_string().contains("unknown field"), "{err}");
 }
 
+fn five_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("../posts/linuxcnc_5ax.json")).expect("json")
+}
+
+#[test]
+fn five_axis_continuous_schema_is_validated() {
+    let mut raw = five_json();
+    load_post(&raw.to_string()).expect("defaults");
+    raw["five_axis"]["continuous"]["feed"] = serde_json::json!("degrees_per_minute");
+    let err = load_post(&raw.to_string()).expect_err("feed");
+    assert!(err.to_string().contains("five_axis.continuous.feed"), "{err}");
+
+    raw = five_json();
+    raw["five_axis"]["continuous"]["inverse_time_off"] = serde_json::json!("G93");
+    let err = load_post(&raw.to_string()).expect_err("same");
+    assert!(err.to_string().contains("inverse_time_off"), "{err}");
+
+    raw = five_json();
+    raw["five_axis"]["continuous"]["chord_tol"] = serde_json::json!(0.0);
+    let err = load_post(&raw.to_string()).expect_err("chord");
+    assert!(err.to_string().contains("chord_tol"), "{err}");
+
+    raw = five_json();
+    raw["five_axis"]["continuous"]["axis_tol_deg"] = serde_json::json!(-1.0);
+    let err = load_post(&raw.to_string()).expect_err("axis");
+    assert!(err.to_string().contains("axis_tol_deg"), "{err}");
+
+    raw = five_json();
+    raw["five_axis"]["continuous"].as_object_mut().expect("cont").remove("chord_tol");
+    raw["five_axis"]["continuous"].as_object_mut().expect("cont").remove("axis_tol_deg");
+    load_post(&raw.to_string()).expect("optional tols");
+
+    raw = five_json();
+    raw["five_axis"].as_object_mut().expect("five").remove("continuous");
+    load_post(&raw.to_string()).expect("indexed only");
+}
+
 #[test]
 fn long_lines_are_rejected() {
     let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/grbl.json")).expect("json");

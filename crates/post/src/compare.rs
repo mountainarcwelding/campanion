@@ -421,8 +421,8 @@ fn take_line(
     };
     *cursor += 1;
     let (got_rapid, got, got_angle, got_feed, got_inverse) = match mv {
-        ReadMove::Rapid { end, feed, rotary, inverse_time } => (true, *end, *rotary, *feed, *inverse_time),
-        ReadMove::Linear { end, feed, rotary, inverse_time } => (false, *end, *rotary, *feed, *inverse_time),
+        ReadMove::Rapid { end, feed, rotary, inverse_time, .. } => (true, *end, *rotary, *feed, *inverse_time),
+        ReadMove::Linear { end, feed, rotary, inverse_time, .. } => (false, *end, *rotary, *feed, *inverse_time),
         ReadMove::Arc { .. } | ReadMove::Thread { .. } => return Err(invalid(format!("motion {index}: expected a line"))),
         _ => return Err(invalid(format!("motion {index}: expected a line"))),
     };

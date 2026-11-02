@@ -27,6 +27,10 @@
 //! (`90.`, `0.`). `feed_mode` is `inverse_time`, `degrees_per_minute`, or `surface`. Inverse time
 //! requires `inverse_time_on` and `inverse_time_off` (LinuxCNC uses `G93` and `G94`).
 //!
+//! `five_axis.continuous` is optional. Without it a continuous toolpath is rejected. With it the
+//! post writes inverse-time `G0`/`G1` blocks with XYZ and rotary words; `chord_tol` and
+//! `axis_tol_deg` default to `0.005` mm and `0.1` deg.
+//!
 //! `lathe` is optional. A turning program requires it, and a lathe post requires a turning
 //! program. Lathe templates may use `{surface}`, `{max_rpm}`, `{rpm}`, `{tool}`, `{tool2}`,
 //! `{offset2}`, `{phase}`, `{z}`, `{feed}`, `{b}`, `{angle}` and `{date-free!}`, each only on the lines that name that value. `c_axis`, `brake`, `brake_sub`, `orient`, `live_tool`, `face_interp` and
@@ -735,7 +739,7 @@ impl PostDef {
         check_dwell_word(&self.dwell.word, &self.axis_letters, &self.line_numbers.prefix)?;
         check_rotary(&mut self)?;
         check_lathe(&self)?;
-        check_five_axis(&self)?;
+        check_five_axis(&mut self)?;
         Ok(self)
     }
 
@@ -747,6 +751,11 @@ impl PostDef {
     /// True when this post writes indexed 3+2 (`five_axis`).
     pub fn has_five_axis(&self) -> bool {
         self.five_axis.is_some()
+    }
+
+    /// True when this post writes simultaneous five-axis (`five_axis.continuous`).
+    pub fn has_continuous_five_axis(&self) -> bool {
+        self.five_axis.as_ref().is_some_and(|five| five.continuous.is_some())
     }
 
     /// Rotary axes this post writes, in the order the JSON lists them.
@@ -1273,6 +1282,45 @@ pub(crate) struct FiveAxisOutput {
     pub(crate) on: Vec<String>,
     /// Frame off, before the next index. Empty writes nothing. No placeholders.
     pub(crate) off: Vec<String>,
+    /// Simultaneous five-axis without TCP. Absent keeps rejecting a continuous toolpath.
+    #[serde(default)]
+    pub(crate) continuous: Option<FiveAxisContinuous>,
+}
+
+fn default_continuous_chord_tol() -> f64 {
+    0.005
+}
+
+fn default_continuous_axis_tol_deg() -> f64 {
+    0.1
+}
+
+/// Inverse-time simultaneous five-axis. The post solves the inverse; XYZ is the gauge point.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FiveAxisContinuous {
+    /// Must be `inverse_time`.
+    pub(crate) feed: String,
+    /// Modal code that selects inverse time, such as `G93`.
+    pub(crate) inverse_time_on: String,
+    /// Modal code that returns to units per minute, such as `G94`.
+    pub(crate) inverse_time_off: String,
+    /// Chord tolerance for linearising arcs and for [`campanion_ir::subdivide_path`], millimetres.
+    #[serde(default = "default_continuous_chord_tol")]
+    pub(crate) chord_tol: f64,
+    /// Tool-axis tolerance for [`campanion_ir::subdivide_path`], degrees.
+    #[serde(default = "default_continuous_axis_tol_deg")]
+    pub(crate) axis_tol_deg: f64,
+}
+
+impl FiveAxisContinuous {
+    pub(crate) fn on_code(&self) -> Option<u16> {
+        g_code_number(&self.inverse_time_on)
+    }
+
+    pub(crate) fn off_code(&self) -> Option<u16> {
+        g_code_number(&self.inverse_time_off)
+    }
 }
 
 /// Where a 3+2 post reads coordinates while the frame is active.
@@ -1285,8 +1333,8 @@ pub(crate) enum FiveAxisMode {
     Machine,
 }
 
-fn check_five_axis(post: &PostDef) -> Result<()> {
-    let Some(five) = &post.five_axis else {
+fn check_five_axis(post: &mut PostDef) -> Result<()> {
+    let Some(five) = &mut post.five_axis else {
         return Ok(());
     };
     if five.decimals > 8 {
@@ -1303,6 +1351,29 @@ fn check_five_axis(post: &PostDef) -> Result<()> {
         if !line.contains("{rotaries}") {
             return Err(field("five_axis.index", "requires {rotaries}"));
         }
+    }
+    if let Some(continuous) = &mut five.continuous {
+        check_five_axis_continuous(continuous)?;
+    }
+    Ok(())
+}
+
+fn check_five_axis_continuous(continuous: &mut FiveAxisContinuous) -> Result<()> {
+    if continuous.feed != "inverse_time" {
+        return Err(field("five_axis.continuous.feed", "must be inverse_time"));
+    }
+    let on = canonical_g(&continuous.inverse_time_on, "five_axis.continuous.inverse_time_on")?;
+    let off = canonical_g(&continuous.inverse_time_off, "five_axis.continuous.inverse_time_off")?;
+    if on == off {
+        return Err(field("five_axis.continuous.inverse_time_off", "must differ from inverse_time_on"));
+    }
+    continuous.inverse_time_on = on;
+    continuous.inverse_time_off = off;
+    if !continuous.chord_tol.is_finite() || continuous.chord_tol <= 0.0 {
+        return Err(field("five_axis.continuous.chord_tol", "must be positive and finite"));
+    }
+    if !continuous.axis_tol_deg.is_finite() || continuous.axis_tol_deg <= 0.0 {
+        return Err(field("five_axis.continuous.axis_tol_deg", "must be positive and finite"));
     }
     Ok(())
 }

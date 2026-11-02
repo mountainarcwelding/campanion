@@ -1,0 +1,132 @@
+{
+  "format": "campanion-ir/1",
+  "program": {
+    "name": "swarf",
+    "tools": [],
+    "machine": null,
+    "toolpaths": [
+      {
+        "name": "cut",
+        "tool_id": null,
+        "compensation": "off",
+        "feeds": {
+          "cut": 100.0,
+          "lead_in": null,
+          "lead_out": null,
+          "plunge": null,
+          "retract": null
+        },
+        "pierce": null,
+        "tabs": [],
+        "blocks": [
+          {
+            "type": "rapid",
+            "to": {
+              "tip": {
+                "x": 20.0,
+                "y": -8.0,
+                "z": 10.0
+              },
+              "axis": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 1.0
+              }
+            },
+            "feed": null
+          },
+          {
+            "type": "linear",
+            "to": {
+              "tip": {
+                "x": 20.0,
+                "y": 0.0,
+                "z": 10.0
+              },
+              "axis": {
+                "x": 0.25881904510252074,
+                "y": 0.0,
+                "z": 0.9659258262890683
+              }
+            },
+            "feed": 100.0,
+            "role": "cut"
+          },
+          {
+            "type": "arc",
+            "to": {
+              "tip": {
+                "x": 17.320508075688775,
+                "y": 9.999999999999998,
+                "z": 10.0
+              },
+              "axis": {
+                "x": 0.49999999999999994,
+                "y": 0.0,
+                "z": 0.8660254037844387
+              }
+            },
+            "plane": "xy",
+            "center": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 10.0
+            },
+            "sense": "ccw",
+            "feed": 100.0,
+            "role": "cut"
+          }
+        ],
+        "continuous": true
+      }
+    ],
+    "channel_programs": [],
+    "syncs": [],
+    "five_axis": {
+      "kinematics": {
+        "name": "table_table_bc",
+        "rotaries": [
+          {
+            "letter": "B",
+            "carrier": "table",
+            "axis": {
+              "x": 0.0,
+              "y": 1.0,
+              "z": 0.0
+            },
+            "pivot": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "limits": {
+              "min_deg": -35.0,
+              "max_deg": 120.0
+            }
+          },
+          {
+            "letter": "C",
+            "carrier": "table",
+            "axis": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 1.0
+            },
+            "pivot": {
+              "x": 60.0,
+              "y": 0.0,
+              "z": 30.0
+            },
+            "limits": null
+          }
+        ],
+        "spindle_axis": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 1.0
+        }
+      },
+      "policy": "nearest"
+    }
+  }
+}

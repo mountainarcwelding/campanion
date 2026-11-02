@@ -1,7 +1,7 @@
 {
   "id": "haas_umc",
   "name": "Haas UMC",
-  "description": "Millimetre Haas mill dialect for indexed 3+2. Percent-delimited program O00001, sequence numbers, incremental IJK arcs and helices, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. G254 is the dynamic work offset and G255 cancels it. The kinematics file must match the machine. This output has not been proven on a machine.",
+  "description": "Millimetre Haas mill dialect for indexed 3+2 and continuous five-axis without TCP. Percent-delimited program O00001, sequence numbers, incremental IJK arcs and helices, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. G254 is the dynamic work offset and G255 cancels it. Indexed 3+2 uses G254. Continuous output keeps G255 active and writes G54 XYZ plus rotary words; the post solves the inverse and the kinematics pivots are measured from G54, the same rule as linuxcnc_5ax. The kinematics file must match the machine. This output has not been proven on a machine.",
   "references": [
     "G254/G255: B and C positioning only; invoke after rotary motion; X and Y in one block then Z; cancel with G255 before any rotary motion; G53 not affected. https://www.haascnc.com/service/codes-settings.type=gcode.machine=mill.value=G254.html",
     "G53 machine-coordinate move, not affected by G254: https://www.haascnc.com/service/codes-settings.type=gcode.machine=mill.value=G53.html"
@@ -50,6 +50,13 @@
     "retract": ["G53 G00 Z0."],
     "index": ["G00 {rotaries}"],
     "on": ["G254"],
-    "off": ["G255"]
+    "off": ["G255"],
+    "continuous": {
+      "feed": "inverse_time",
+      "inverse_time_on": "G93",
+      "inverse_time_off": "G94",
+      "chord_tol": 0.005,
+      "axis_tol_deg": 0.1
+    }
   }
 }

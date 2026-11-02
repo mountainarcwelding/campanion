@@ -11,6 +11,9 @@
 //! A post may declare a rotary axis. Poses that carry an angle are written in the machine frame.
 //! The feed rule for a move that changes the angle is in the crate README.
 //!
+//! A post with `five_axis.continuous` writes simultaneous five-axis motion without TCP: the post
+//! solves the inverse and emits linear blocks with XYZ and rotary words.
+//!
 //! A post may declare a lathe block. A turning program is written in the part XZ frame. Diameter
 //! mode, constant surface speed and the G2/G3 sense are described in the crate README.
 

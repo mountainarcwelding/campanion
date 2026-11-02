@@ -73,6 +73,10 @@ It inserts samples between neighbouring poses. Each inserted sample is linear in
 
 More than 10000 inserted poses is an error: `toolpath `{name}` inserts more than 10000 poses`.
 
+## Continuous output
+
+A post with `five_axis.continuous` writes a continuous toolpath without TCP. It calls `solve_path` from the current rotary angles, then `subdivide_path` at the post's `chord_tol` and `axis_tol_deg`. The IR tool table has no gauge length, so the tool length is 0 and the written XYZ is the gauge point, which is the tip. Each sample is one `G0` or `G1` with XYZ and the rotary words. Arcs and helices are linearised to `chord_tol` first. Feeds are inverse time (`G93`, `F = 1 / minutes` from the part-frame tip length, `G94` after the toolpath). `linuxcnc_5ax` and `haas_umc` both write G54 coordinates; their kinematics pivots are measured from G54. On `haas_umc` G255 is active for this output.
+
 ## JSON
 
 Unknown fields are rejected. `spindle_axis` is optional and defaults to +Z `(0, 0, 1)`. Each axis is normalised on load. A zero axis is rejected.

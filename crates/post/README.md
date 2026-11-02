@@ -67,9 +67,33 @@ An arc or helix whose start and end angles are equal is written as an arc in the
 
 The writer starts at rotary angles `[0, 0]` and tool axis +Z. Before the first motion of a toolpath, if that pose's axis differs by more than 1e-9 or this is the first toolpath of a five-axis program, it writes `off` when a frame is already active, then `retract`, solves `Kinematics::choose` for that pose at tool length 0, writes `index`, writes `on`, and marks the frame active. The first motion after an index is two rapids: X and Y, then Z. Later poses in that toolpath must keep the axis chosen at the start. A change is `toolpath N changes tool axis inside a 3+2 move`. At program end, an active frame writes `off`, then `retract`, then `index` with every angle 0, before `program_end`.
 
-A toolpath with `continuous` set is rejected before any of that indexing: `post `<id>` has no continuous five-axis output`. The indexed writer is not asked to emit the path.
+An arc that is cardinal in the written frame (XY, ZX, or YZ) stays an arc. Any other arc is chorded at the arc tolerance. With a zero tolerance that arc is `arc is not in a cardinal plane after the 3+2 rotation`.
 
-An arc that is cardinal in the written frame (XY, ZX, or YZ) stays an arc. Any other arc is chorded at the arc tolerance. With a zero tolerance that arc is `arc is not in a cardinal plane after the 3+2 rotation`. Read-back does not apply to a five-axis post.
+### Continuous five-axis (`five_axis.continuous`)
+
+`five_axis.continuous` is optional. Without it, a toolpath with `continuous` set is still rejected before indexing: `post `<id>` has no continuous five-axis output`. `linuxcnc_5ax` and `haas_umc` set:
+
+```json
+{
+  "feed": "inverse_time",
+  "inverse_time_on": "G93",
+  "inverse_time_off": "G94",
+  "chord_tol": 0.005,
+  "axis_tol_deg": 0.1
+}
+```
+
+`feed` must be `inverse_time`. `chord_tol` (millimetres) and `axis_tol_deg` (degrees) are optional, default `0.005` and `0.1`, and must be positive and finite.
+
+The post solves the inverse. There is no TCP. `solve_path` starts from the current rotary angles. The IR tool table has no gauge length, so the tool length is 0 and the written `X` `Y` `Z` are the gauge point, which is the tip (`docs/kinematics.md`). `subdivide_path` then inserts samples at `chord_tol` and `axis_tol_deg`. Each sample is one linear block: `G0` for a rapid, `G1` for a feed, with `X` `Y` `Z` and the rotary words in kinematics order.
+
+Arcs and helices inside a continuous toolpath are linearised to `chord_tol` first. No `G2`/`G3` is written while the rotaries move.
+
+Feeds are inverse time. `inverse_time_on` (`G93`) is written before the first feed block of the toolpath. `F = 1 / minutes` with `minutes = (part-frame tip length of that block) / (programmed feed in mm/min)`, so `F` is written on every feed block. A zero-length tip move that still changes a rotary uses the rotary angle change as the length, in degrees, at the post's `rotary` inverse-time fallback; without a `rotary` block the error is `toolpath {i} move {j}: rotary-only move needs a feed`. `inverse_time_off` (`G94`) is written after the toolpath.
+
+On `haas_umc`, continuous output keeps G255 active: an active G254 frame is cancelled first. The written `X` `Y` `Z` are G54 coordinates and the kinematics pivots are measured from G54, the same rule as `linuxcnc_5ax`. This output has not been proven on a machine.
+
+Indexed 3+2 and 3-axis output are unchanged. Read-back parses A, B and C as modal five-axis words, G93/G94 from this block, G254/G255, and G53 as a machine retract, so a posted continuous program can be replayed through forward kinematics.
 
 ## Lathe posts
 

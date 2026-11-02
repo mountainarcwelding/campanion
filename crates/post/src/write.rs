@@ -5,6 +5,10 @@
 //! stored on the IR. Feeds for those moves are described in the post crate README: inverse time
 //! uses the straight-line distance between the part-frame tips.
 //!
+//! A continuous five-axis toolpath on a post with `five_axis.continuous` is solved with
+//! [`campanion_ir::solve_path`] and [`campanion_ir::subdivide_path`]. Written `X` `Y` `Z` are the
+//! gauge point (tool length 0). Rotary words share the block. Feeds are inverse time.
+//!
 //! A turning program is written in the part frame. X is a radius until the lathe block asks for
 //! diameters. Y is a modal word and is never doubled when the post has `y_axis`; otherwise Y is
 //! omitted, except during face and cylinder interpolation. While the C axis is engaged, `G0` and
@@ -17,11 +21,11 @@
 //! to `lathe.feed_mode` (`G94` when that word is empty).
 
 use campanion_ir::{
-    Carrier, Choice, ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, FiveAxisSetup, LiveDirection, Plane, Pose, ProcessKind,
-    ProcessParams, Program, RotaryAxisKind, RotarySetup, SpindleSpeed, ToolPose, TurningSetup, Vec3, part_to_machine,
+    Carrier, Choice, ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, FiveAxisSetup, Joints, LiveDirection, Plane, Pose, ProcessKind,
+    ProcessParams, Program, RotaryAxisKind, RotarySetup, SpindleSpeed, ToolPose, TurningSetup, Vec3, part_to_machine, solve_path, subdivide_path,
 };
 
-use crate::def::{ArcMode, FiveAxisMode, PostDef, ProcessWords, RotaryFeedMode};
+use crate::def::{ArcMode, FiveAxisContinuous, FiveAxisMode, PostDef, ProcessWords, RotaryFeedMode};
 use crate::error::{Result, invalid, unsupported};
 use crate::fmt::{format_dim, format_fixed, xy_text_eq};
 use crate::geom::{self, Xyz};
@@ -110,6 +114,20 @@ enum ThcPhase {
     AwaitCut,
     /// Height control is on.
     On,
+}
+
+/// One linearized pose of a continuous toolpath.
+#[derive(Clone, Copy)]
+struct ContSample {
+    pose: ToolPose,
+    rapid: bool,
+    feed: Option<f64>,
+    move_index: u32,
+}
+
+enum ContItem<'a> {
+    Sample(ContSample),
+    Event(&'a Event),
 }
 
 /// One motion end as the writer emits it.
@@ -421,7 +439,9 @@ impl<'a> Writer<'a> {
             self.comment(&format!("toolpath {}", sanitize(name)))?;
         }
         if path.continuous() {
-            return Err(continuous_unsupported(self.post));
+            self.continuous_toolpath(index, path)?;
+            self.restore_feed_mode()?;
+            return Ok(());
         }
         let mut first_motion = true;
         for block in path.blocks() {
@@ -438,6 +458,232 @@ impl<'a> Writer<'a> {
         }
         self.restore_feed_mode()?;
         Ok(())
+    }
+
+    /// Inverse kinematics for a continuous toolpath: linearise arcs, solve, subdivide, write G0/G1.
+    fn continuous_toolpath(&mut self, index: u32, path: &ClPath) -> Result<()> {
+        let spec = self.post.five_axis.as_ref().and_then(|five| five.continuous.clone()).ok_or_else(|| continuous_unsupported(self.post))?;
+        let setup = self.five.ok_or_else(|| invalid("program has a continuous toolpath but no kinematics"))?;
+        self.cancel_work_frame()?;
+        self.split_next = false;
+        self.five_started = true;
+
+        let mut items = Vec::new();
+        let mut prev: Option<Pose> = None;
+        let mut move_index = 0u32;
+        for block in path.blocks() {
+            match block {
+                ClBlock::Event(event) => items.push(ContItem::Event(event)),
+                ClBlock::Motion(motion) => {
+                    let samples = self.linearise_continuous_motion(motion, prev, spec.chord_tol, move_index)?;
+                    if let Some(last) = samples.last() {
+                        prev = Some(pose_from_tool(last.pose)?);
+                    }
+                    for sample in samples {
+                        items.push(ContItem::Sample(sample));
+                    }
+                    move_index = move_index.saturating_add(1);
+                }
+            }
+        }
+
+        let originals: Vec<ContSample> = items
+            .iter()
+            .filter_map(|item| match item {
+                ContItem::Sample(sample) => Some(*sample),
+                ContItem::Event(_) => None,
+            })
+            .collect();
+        if originals.is_empty() {
+            for item in items {
+                if let ContItem::Event(event) = item {
+                    self.event(event)?;
+                }
+            }
+            return Ok(());
+        }
+
+        let poses: Vec<ToolPose> = originals.iter().map(|sample| sample.pose).collect();
+        // Tool length is 0: the IR tool table has no gauge length, so the gauge point is the tip
+        // (`docs/kinematics.md`, `solve_path`).
+        let start = Joints { xyz: Vec3::ZERO, angles: self.rotary_angles };
+        let joints = solve_path(setup, &poses, Some(start), path.singular_cone_deg()).map_err(|err| invalid(err.to_string()))?;
+        let name = path.name().unwrap_or("");
+        let (sub_poses, sub_joints) =
+            subdivide_path(setup, name, &poses, &joints, spec.chord_tol, spec.axis_tol_deg).map_err(|err| invalid(err.to_string()))?;
+        if sub_poses.len() != sub_joints.len() {
+            return Err(invalid("subdivide_path returned poses and joints of different lengths"));
+        }
+
+        let mut sub_i = 0usize;
+        let mut saw_feed = false;
+        for item in items {
+            match item {
+                ContItem::Event(event) => self.event(event)?,
+                ContItem::Sample(sample) => {
+                    while sub_i < sub_poses.len() && sub_poses[sub_i] != sample.pose {
+                        self.continuous_move(&spec, sub_poses[sub_i], sub_joints[sub_i], sample, index, &mut saw_feed)?;
+                        sub_i += 1;
+                    }
+                    if sub_i >= sub_poses.len() || sub_poses[sub_i] != sample.pose {
+                        return Err(invalid("continuous subdivision lost a pose"));
+                    }
+                    self.continuous_move(&spec, sub_poses[sub_i], sub_joints[sub_i], sample, index, &mut saw_feed)?;
+                    sub_i += 1;
+                }
+            }
+        }
+        if saw_feed {
+            self.emit_line(&spec.inverse_time_off)?;
+            self.inverse_time = false;
+            self.feed = None;
+        }
+        Ok(())
+    }
+
+    /// Cancel G254 (or the post's `off` lines) so continuous output runs in G54, not a work frame.
+    fn cancel_work_frame(&mut self) -> Result<()> {
+        if !self.frame_active {
+            return Ok(());
+        }
+        let spec = self.post.five_axis.clone().ok_or_else(|| invalid("five axis output is missing"))?;
+        self.templates("five_axis.off", &spec.off, &[("date-free!", "")])?;
+        self.frame_active = false;
+        Ok(())
+    }
+
+    fn linearise_continuous_motion(&self, motion: &ClMotion, prev: Option<Pose>, chord_tol: f64, move_index: u32) -> Result<Vec<ContSample>> {
+        match motion {
+            ClMotion::Rapid { to, .. } => Ok(vec![ContSample { pose: tool_pose(*to), rapid: true, feed: None, move_index }]),
+            ClMotion::Linear { to, feed, .. } => Ok(vec![ContSample { pose: tool_pose(*to), rapid: false, feed: Some(*feed), move_index }]),
+            ClMotion::Arc { to, plane, center, sense, feed, .. } => {
+                let start = prev.ok_or_else(|| invalid("arc needs a prior position"))?;
+                self.linearise_continuous_curve(start, *to, *plane, xyz(*center), *sense, None, *feed, chord_tol, move_index)
+            }
+            ClMotion::Helix { to, plane, center, sense, sweep, feed, .. } => {
+                let start = prev.ok_or_else(|| invalid("arc needs a prior position"))?;
+                self.linearise_continuous_curve(start, *to, *plane, xyz(*center), *sense, Some(*sweep), *feed, chord_tol, move_index)
+            }
+            ClMotion::Thread { .. } => Err(invalid("continuous toolpath does not support threading")),
+        }
+    }
+
+    fn linearise_continuous_curve(
+        &self,
+        start: Pose,
+        end: Pose,
+        plane: Plane,
+        center: Xyz,
+        sense: campanion_ir::ArcSense,
+        sweep: Option<f64>,
+        feed: f64,
+        chord_tol: f64,
+        move_index: u32,
+    ) -> Result<Vec<ContSample>> {
+        let part_start = tip(start);
+        let part_end = tip(end);
+        let sweep = if let Some(sweep) = sweep {
+            geom::same_radius(part_start, part_end, center, plane, 0.0)?;
+            if !(sweep.is_finite() && sweep > 0.0) {
+                return Err(invalid("helix sweep must be positive"));
+            }
+            if sweep > std::f64::consts::TAU * 10_000.0 {
+                return Err(invalid("helix has more than 10000 turns"));
+            }
+            sweep
+        } else {
+            geom::arc_sweep(part_start, part_end, center, plane, sense, 0.0)?
+        };
+        let radius = geom::in_plane_len(plane, part_start, center);
+        let segments = geom::chord_segments(sweep, radius, chord_tol)?;
+        let mut out = Vec::with_capacity(segments as usize);
+        for index in 1..=segments {
+            let t = if index == segments { 1.0 } else { f64::from(index) / f64::from(segments) };
+            let part = geom::point_at(part_start, part_end, center, plane, sense, sweep, t, true);
+            let axis = slerp_tool_axis(start.axis(), end.axis(), t)?;
+            let tip = Vec3::new(part[0], part[1], part[2]).map_err(|err| invalid(err.to_string()))?;
+            out.push(ContSample { pose: ToolPose { tip, axis }, rapid: false, feed: Some(feed), move_index });
+        }
+        Ok(out)
+    }
+
+    fn continuous_move(
+        &mut self,
+        spec: &FiveAxisContinuous,
+        pose: ToolPose,
+        joints: Joints,
+        sample: ContSample,
+        path_index: u32,
+        saw_feed: &mut bool,
+    ) -> Result<()> {
+        if self.per_cut() {
+            if sample.rapid {
+                self.suspend_processes()?;
+            } else {
+                self.resume_processes()?;
+            }
+        }
+        let code = if sample.rapid { "G0" } else { "G1" };
+        let part = [pose.tip.x(), pose.tip.y(), pose.tip.z()];
+        let xyz = [joints.xyz.x(), joints.xyz.y(), joints.xyz.z()];
+        let length = self.part_tip.map(|start| geom::dist3(start, part)).unwrap_or(0.0);
+        let da0 = (joints.angles[0] - self.rotary_angles[0]).abs();
+        let da1 = (joints.angles[1] - self.rotary_angles[1]).abs();
+        let angle_change = da0.hypot(da1);
+        if !sample.rapid && length <= 1e-6 && angle_change <= 1e-9 {
+            self.part_tip = Some(part);
+            self.rotary_angles = joints.angles;
+            self.tool_axis = pose.axis;
+            return Ok(());
+        }
+        let mut feed = None;
+        if !sample.rapid {
+            if !*saw_feed {
+                self.emit_line(&spec.inverse_time_on)?;
+                self.inverse_time = true;
+                self.feed = None;
+                *saw_feed = true;
+            }
+            feed = Some(self.continuous_inverse_feed(length, angle_change, sample.feed, path_index, sample.move_index)?);
+        }
+        let mut words = Vec::new();
+        if !(self.post.modal_motion && self.linear == Some(code)) {
+            words.push(code.to_string());
+        }
+        let rounded = self.push_axes(&mut words, xyz)?;
+        let rotaries = self.rotary_words(joints.angles)?;
+        for word in rotaries.split_whitespace() {
+            words.push(word.to_string());
+        }
+        self.push_feed(&mut words, feed, true)?;
+        self.linear = Some(if sample.rapid { "G0" } else { "G1" });
+        self.pos = Some(rounded);
+        self.exact = Some(xyz);
+        self.part_tip = Some(part);
+        self.rotary_angles = joints.angles;
+        self.tool_axis = pose.axis;
+        self.force_axes = false;
+        self.emit_words(&words)
+    }
+
+    fn continuous_inverse_feed(&self, length: f64, angle_change_deg: f64, feed: Option<f64>, path_index: u32, move_index: u32) -> Result<f64> {
+        if length > 1e-6 {
+            let feed = feed.ok_or_else(|| invalid(format!("toolpath {path_index} move {move_index}: rotary-only move needs a feed")))?;
+            let value = rotary::inverse_minutes_feed(feed, length)?;
+            if value.abs() <= 1.0e9 {
+                return Ok(value);
+            }
+        }
+        if angle_change_deg <= 1e-6 {
+            return Err(invalid(format!("toolpath {path_index} move {move_index}: rotary-only move needs a feed")));
+        }
+        let Some(feed) = feed else {
+            return Err(invalid(format!("toolpath {path_index} move {move_index}: rotary-only move needs a feed")));
+        };
+        if self.post.rotary.is_none() {
+            return Err(invalid(format!("toolpath {path_index} move {move_index}: rotary-only move needs a feed")));
+        }
+        rotary::inverse_minutes_feed(feed, angle_change_deg)
     }
 
     /// Index when this is the first five-axis toolpath or the tool axis changed.
@@ -2863,6 +3109,44 @@ fn process_key(kind: &ProcessKind) -> &str {
     }
 }
 
+fn tool_pose(pose: Pose) -> ToolPose {
+    ToolPose { tip: pose.tip(), axis: pose.axis() }
+}
+
+fn pose_from_tool(pose: ToolPose) -> Result<Pose> {
+    Pose::new(pose.tip, pose.axis).map_err(|err| invalid(err.to_string()))
+}
+
+fn slerp_tool_axis(start: Vec3, end: Vec3, t: f64) -> Result<Vec3> {
+    let start = unit_direction(start).ok_or_else(|| invalid("tool axis is zero"))?;
+    let end = unit_direction(end).ok_or_else(|| invalid("tool axis is zero"))?;
+    let cosine = (start.x() * end.x() + start.y() * end.y() + start.z() * end.z()).clamp(-1.0, 1.0);
+    let theta = cosine.acos();
+    let sin_theta = theta.sin();
+    if sin_theta <= 1e-12 {
+        if cosine > 0.0 {
+            return Ok(start);
+        }
+        let helper = if start.x().abs() > 0.9 { Vec3::Y } else { Vec3::X };
+        let cx = start.y() * helper.z() - start.z() * helper.y();
+        let cy = start.z() * helper.x() - start.x() * helper.z();
+        let cz = start.x() * helper.y() - start.y() * helper.x();
+        let side = unit_direction(Vec3::new(cx, cy, cz).unwrap_or(Vec3::X)).unwrap_or(Vec3::X);
+        let angle = t * std::f64::consts::PI;
+        let (sin_t, cos_t) = angle.sin_cos();
+        let x = start.x() * cos_t + side.x() * sin_t;
+        let y = start.y() * cos_t + side.y() * sin_t;
+        let z = start.z() * cos_t + side.z() * sin_t;
+        return unit_direction(Vec3::new(x, y, z).unwrap_or(start)).ok_or_else(|| invalid("tool axis is zero"));
+    }
+    let w0 = ((1.0 - t) * theta).sin() / sin_theta;
+    let w1 = (t * theta).sin() / sin_theta;
+    let x = start.x() * w0 + end.x() * w1;
+    let y = start.y() * w0 + end.y() * w1;
+    let z = start.z() * w0 + end.z() * w1;
+    unit_direction(Vec3::new(x, y, z).unwrap_or(start)).ok_or_else(|| invalid("tool axis is zero"))
+}
+
 fn tip(pose: Pose) -> Xyz {
     let point = pose.tip();
     [point.x(), point.y(), point.z()]
@@ -3060,7 +3344,16 @@ fn motion_pose(motion: &ClMotion) -> Pose {
 }
 
 fn check_continuous(program: &Program, post: &PostDef) -> Result<()> {
-    if program.toolpaths().iter().any(ClPath::continuous) { Err(continuous_unsupported(post)) } else { Ok(()) }
+    if !program.toolpaths().iter().any(ClPath::continuous) {
+        return Ok(());
+    }
+    if !post.has_continuous_five_axis() {
+        return Err(continuous_unsupported(post));
+    }
+    if program.five_axis().is_none() {
+        return Err(invalid("program has a continuous toolpath but no kinematics"));
+    }
+    Ok(())
 }
 
 fn continuous_unsupported(post: &PostDef) -> crate::error::PostError {
@@ -3085,7 +3378,10 @@ fn check_tilted_plane(program: &Program, post: &PostDef) -> Result<()> {
         }
         return Ok(());
     };
-    if spec.mode == FiveAxisMode::Work && setup.kinematics.rotaries.iter().any(|joint| joint.carrier == Carrier::Head) {
+    if spec.mode == FiveAxisMode::Work
+        && setup.kinematics.rotaries.iter().any(|joint| joint.carrier == Carrier::Head)
+        && program.toolpaths().iter().any(|path| !path.continuous())
+    {
         return Err(unsupported(format!("post `{}` work mode needs table rotaries only", post.id())));
     }
     Ok(())
