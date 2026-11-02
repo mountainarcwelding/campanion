@@ -69,6 +69,9 @@ fn assert_golden(name: &str, actual: &str) -> Result<(), String> {
     }
     for (index, (got, want)) in actual_lines.iter().zip(&expected_lines).enumerate() {
         if !lines_match_last_digit(got, want) {
+            let from = index.saturating_sub(10);
+            let to = (index + 40).min(actual_lines.len());
+            eprintln!("--- got lines {}..{} of {}\n{}", from + 1, to, path.display(), actual_lines[from..to].join("\n"));
             return Err(format!(
                 "golden mismatch for {} line {}:\n  got  {got}\n  want {want}\n(set UPDATE_GOLDEN=1 to regenerate)",
                 path.display(),
