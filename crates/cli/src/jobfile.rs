@@ -23,6 +23,10 @@
 //! The source hash is FNV-1a 64 of the part file's bytes. It is a change-detection checksum,
 //! not a cryptographic hash. See `docs/job-file.md`.
 //!
+//! Optional `stock` is a box in the part frame. Optional `stock_model` selects the in-process
+//! Z-dexel used by `campanion run`. When both are omitted the model stays off, so an existing
+//! job posts the same bytes.
+//!
 //! An STL source, a path ending in `.stl` in any case, is a triangle mesh. Its hash is those
 //! raw bytes. A mesh job may only contain `surface`, `rough`, `waterline` and `rotary_finish`
 //! operations, and those kinds are rejected on every other source. A surface rasters the mesh. It requires exactly one of
@@ -408,6 +412,48 @@ impl ToolAssembly {
     /// Spindle-head cylinder stacked on the last holder segment.
     pub fn head(&self) -> Option<HolderSegment> {
         self.head
+    }
+}
+
+/// Axis-aligned stock box in the part frame, millimetres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StockBounds {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl StockBounds {
+    /// Minimum corner.
+    pub fn min(self) -> Vec3 {
+        self.min
+    }
+
+    /// Maximum corner.
+    pub fn max(self) -> Vec3 {
+        self.max
+    }
+}
+
+/// In-process Z-dexel options. Lengths are millimetres.
+///
+/// `cell` and `enabled` are `None` when the file omits them. The default cell is the smallest
+/// tool radius divided by 4, clamped to 0.05 mm and 2 mm. The default enabled flag is true only
+/// when the file sets [`StockBounds`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StockModelOptions {
+    cell: Option<f64>,
+    enabled: Option<bool>,
+}
+
+impl StockModelOptions {
+    /// Explicit cell size. `None` selects the default.
+    pub fn cell(self) -> Option<f64> {
+        self.cell
+    }
+
+    /// Explicit on/off flag. `None` follows whether `stock` is set.
+    pub fn enabled(self) -> Option<bool> {
+        self.enabled
     }
 }
 
@@ -1035,6 +1081,8 @@ pub struct JobFile {
     five_axis: Option<FiveAxisSetup>,
     fixtures: Vec<Fixture>,
     collision: CollisionSettings,
+    stock: Option<StockBounds>,
+    stock_model: StockModelOptions,
 }
 
 impl JobFile {
@@ -1105,6 +1153,23 @@ impl JobFile {
         self.collision
     }
 
+    /// Explicit stock box in the part frame. `None` when the file omits `stock`.
+    pub fn stock(&self) -> Option<StockBounds> {
+        self.stock
+    }
+
+    /// In-process stock model options. The cell and the enabled flag are `None` when omitted.
+    pub fn stock_model(&self) -> StockModelOptions {
+        self.stock_model
+    }
+
+    /// True when `run` should build the Z-dexel.
+    ///
+    /// An omitted `enabled` is true when [`Self::stock`] is set, and false otherwise.
+    pub fn stock_model_enabled(&self) -> bool {
+        self.stock_model.enabled.unwrap_or(self.stock.is_some())
+    }
+
     /// True when any mill tool carries an assembly envelope.
     pub fn has_assembly(&self) -> bool {
         self.tools.iter().any(|tool| tool.assembly.is_some())
@@ -1123,6 +1188,8 @@ struct Body {
     five_axis: Option<FiveAxisSetup>,
     fixtures: Vec<Fixture>,
     collision: CollisionSettings,
+    stock: Option<StockBounds>,
+    stock_model: StockModelOptions,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -1142,6 +1209,8 @@ pub fn load(path: &Path) -> Result<JobFile, JobFileError> {
         five_axis: body.five_axis,
         fixtures: body.fixtures,
         collision: body.collision,
+        stock: body.stock,
+        stock_model: body.stock_model,
     })
 }
 
@@ -1214,7 +1283,22 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     check_format(tag)?;
     check_keys(
         map,
-        &["format", "source", "units", "tolerance", "heights", "tools", "operations", "rotary", "kinematics", "solution", "fixtures", "collision"],
+        &[
+            "format",
+            "source",
+            "units",
+            "tolerance",
+            "heights",
+            "tools",
+            "operations",
+            "rotary",
+            "kinematics",
+            "solution",
+            "fixtures",
+            "collision",
+            "stock",
+            "stock_model",
+        ],
         "job",
     )
     .map_err(from_cli)?;
@@ -1271,8 +1355,10 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     check_mesh_source(&source, &operations, &tools)?;
     let fixtures = parse_fixtures(optional(map, "fixtures"), scale)?;
     let collision = parse_collision(optional(map, "collision"), scale)?;
+    let stock = parse_stock(optional(map, "stock"), scale)?;
+    let stock_model = parse_stock_model(optional(map, "stock_model"), scale)?;
     let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
-    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary, five_axis, fixtures, collision })
+    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary, five_axis, fixtures, collision, stock, stock_model })
 }
 
 /// An STL part only accepts `surface`, `rough`, `waterline` and `rotary_finish`. Each only accepts an STL part.
@@ -1669,6 +1755,39 @@ fn parse_collision(value: Option<&Value>, scale: f64) -> Result<CollisionSetting
         settings.max_angle_step_deg = degrees;
     }
     Ok(settings)
+}
+
+fn parse_stock(value: Option<&Value>, scale: f64) -> Result<Option<StockBounds>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let map = object(value, "stock").map_err(from_cli)?;
+    check_keys(map, &["box"], "stock").map_err(from_cli)?;
+    let boxed = object(require(map, "box").map_err(from_cli)?, "stock box").map_err(from_cli)?;
+    check_keys(boxed, &["min", "max"], "stock box").map_err(from_cli)?;
+    let min = parse_box_corner(require(boxed, "min").map_err(from_cli)?, scale, "stock box min")?;
+    let max = parse_box_corner(require(boxed, "max").map_err(from_cli)?, scale, "stock box max")?;
+    if !(max.x() > min.x() && max.y() > min.y() && max.z() > min.z()) {
+        return Err(JobFileError::invalid("stock box max must be greater than min"));
+    }
+    Ok(Some(StockBounds { min, max }))
+}
+
+fn parse_stock_model(value: Option<&Value>, scale: f64) -> Result<StockModelOptions, JobFileError> {
+    let Some(value) = value else {
+        return Ok(StockModelOptions { cell: None, enabled: None });
+    };
+    let map = object(value, "stock_model").map_err(from_cli)?;
+    check_keys(map, &["cell", "enabled"], "stock_model").map_err(from_cli)?;
+    let cell = match optional(map, "cell") {
+        Some(value) => Some(positive_length(value, scale, "stock_model.cell")?),
+        None => None,
+    };
+    let enabled = match optional(map, "enabled") {
+        Some(value) => Some(as_bool(value, "stock_model.enabled").map_err(from_cli)?),
+        None => None,
+    };
+    Ok(StockModelOptions { cell, enabled })
 }
 
 fn parse_operations(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Vec<Operation>, JobFileError> {
@@ -6026,6 +6145,44 @@ mod tests {
         near(job.collision().sample_step(), 1.0);
         near(job.collision().max_angle_step_deg(), 1.0);
         assert!(job.fixtures().is_empty());
+        assert!(job.stock().is_none());
+        assert!(!job.stock_model_enabled());
+        assert!(job.stock_model().cell().is_none());
+    }
+
+    #[test]
+    fn parses_stock_box_and_model_options() {
+        let extra = r#","stock":{"box":{"min":[-1,-2,-3],"max":[4,5,6]}},"stock_model":{"cell":0.4,"enabled":false}"#;
+        let tools = r#"[{"id":1,"diameter":6,"shape":"ball"}]"#;
+        let job = load(&write_job("stock-ok", &assembly_job(tools, extra))).expect("load");
+        let stock = job.stock().expect("stock");
+        near(stock.min().x(), -1.0);
+        near(stock.max().z(), 6.0);
+        near(job.stock_model().cell().expect("cell"), 0.4);
+        assert_eq!(job.stock_model().enabled(), Some(false));
+        assert!(!job.stock_model_enabled());
+        let on = r#","stock":{"box":{"min":[0,0,0],"max":[1,1,1]}}"#;
+        let implied = load(&write_job("stock-implied", &assembly_job(tools, on))).expect("load");
+        assert!(implied.stock_model_enabled());
+        assert!(implied.stock_model().cell().is_none());
+    }
+
+    #[test]
+    fn rejects_stock_schema_errors() {
+        let tools = r#"[{"id":1,"diameter":6,"shape":"ball"}]"#;
+        let cases = [
+            (r#","stock":{"min":[0,0,0],"max":[1,1,1]}"#, "unknown stock field `max`"),
+            (r#","stock":{"box":{"min":[0,0,0],"max":[1,1,1],"pad":1}}"#, "unknown stock box field `pad`"),
+            (r#","stock":{"box":{"min":[0,0,0],"max":[0,1,1]}}"#, "stock box max must be greater than min"),
+            (r#","stock_model":{"cell":0}"#, "stock_model.cell must be greater than 0"),
+            (r#","stock_model":{"enabled":"yes"}"#, "stock_model.enabled must be a boolean"),
+            (r#","stock_model":{"cell":1,"grid":0.2}"#, "unknown stock_model field `grid`"),
+            (r#","stock":{"box":{"min":[1,0,0],"max":[2,1,1]}},"foo":1"#, "unknown job field `foo`"),
+        ];
+        for (index, (extra, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("stock-bad-{index}"), &assembly_job(tools, extra))).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
     }
 
     #[test]

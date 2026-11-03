@@ -28,6 +28,7 @@ mod rotary;
 mod rough;
 mod run;
 mod safety;
+mod stock;
 mod surface;
 mod toolaxis;
 mod waterline;

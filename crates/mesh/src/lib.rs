@@ -7,6 +7,7 @@
 //! [`cylinder_triangle`], [`sphere_triangle`] and [`cylinder_aabb`] are the collision primitives
 //! used to test a mill tool assembly against the part and the fixtures.
 //! [`RevolvedSolid`] is the signed distance to a lathe section revolved about the spindle.
+//! [`StockModel`] is an in-process multi-interval Z-dexel of the stock.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -18,6 +19,7 @@ mod revolve;
 mod rotary;
 mod scallop;
 mod stl;
+mod stock;
 mod waterline;
 mod zlevel;
 
@@ -32,6 +34,10 @@ pub use revolve::{RevolvedSolid, aabb_polygon_distance, convex_polygon_distance}
 pub use rotary::{RotaryLine, RotaryLineAxis, rotary_lines};
 pub use scallop::scallop_stepover;
 pub use stl::{parse_stl, write_stl_binary};
+pub use stock::{
+    Flute, LeftoverReport, MAX_COLUMN_INTERVALS, MAX_STOCK_CELLS, STOCK_CELL_MAX_MM, STOCK_CELL_MIN_MM, StockHit, StockModel, ZInterval,
+    default_stock_cell, ray_cylinder_interval, ray_sphere_interval, ray_swept_cylinder_interval,
+};
 pub use waterline::{WaterlineLevel, WaterlineParams, waterline};
 pub use zlevel::{ZLevel, ZLevelParams, zlevel_rough};
 

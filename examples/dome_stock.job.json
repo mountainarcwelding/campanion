@@ -1,0 +1,65 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "dome.stl",
+    "hash": "63fcad5e5dca92dc"
+  },
+  "units": "mm",
+  "heights": {
+    "clearance": 15.0,
+    "retract": 12.0
+  },
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0,
+      "shape": "flat",
+      "speed": 12000
+    },
+    {
+      "id": 2,
+      "diameter": 6.0,
+      "shape": "ball",
+      "speed": 12000
+    }
+  ],
+  "operations": [
+    {
+      "name": "rough",
+      "type": "rough",
+      "tool_id": 1,
+      "step_down": 5.0,
+      "stepover": 4.8,
+      "stock_to_leave": 0.3,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    },
+    {
+      "name": "dome",
+      "type": "surface",
+      "tool_id": 2,
+      "stepover": 4.0,
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "tolerance": {
+    "linear": 0.01,
+    "angular": 0.01,
+    "chord": 0.05
+  },
+  "stock": {
+    "box": {
+      "min": [-23, -23, -1],
+      "max": [23, 23, 10]
+    }
+  },
+  "stock_model": {
+    "cell": 2.0,
+    "enabled": true
+  }
+}

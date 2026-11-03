@@ -9,6 +9,10 @@
 - A short arc that ends near the previous arc was treated as another block of that arc, so a correct program failed `compare`. It stays its own move unless it shares that arc's centre.
 - A ZX or YZ arc on `grbl_laser` was written with the Z word left out, so the curve was not the programmed arc. That arc is now rejected. XY moves still omit Z.
 
+### Added
+
+- Mill jobs may set `stock` (a box in the part frame) and `stock_model` (`cell`, `enabled`). When the model is on, `campanion run` replays the toolpaths through a Z-dexel of the remaining stock. A rapid that enters the stock, or a shank, holder or head that meets it, fails the run and nothing is written. After an STL program the run prints the leftover and the model-gouge count. A sphere and a finite cylinder are exact on each dexel; a straight cut with a constant axis also subtracts the exact swept cylinder. A rotating axis, an arc and the ball nose are sampled. Steep walls are only as sharp as the cell. This output has not been proven on a machine.
+
 ## 0.9.2 — 2026-11-02
 
 Collision checks and machine simulation (five-axis stages 5G–5H). This completes the staged continuous five-axis plan (5A–5H). The checks cover the tool assembly against the finished part, fixtures and work-holding; in-process stock is not modelled. This output has not been proven on a machine.

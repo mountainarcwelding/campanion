@@ -47,6 +47,9 @@
 //! and retract height is the job retract. Issues are printed and the process exits 1. On a 3-axis
 //! job, a rapid that ends below the retract height, or that traverses below it, is an error too.
 //! Rotary and tilted programs are checked in the planning frame instead.
+//! When the in-process stock model is on, toolpaths are replayed through the Z-dexel before that
+//! verify. A rapid or a holder that meets the remaining stock fails the run and nothing is written.
+//! An STL job then prints the leftover summary on stderr.
 //!
 //! `--post` writes that dialect instead of the test-sink NGC. The text is read back and compared
 //! at the job chord tolerance. A mismatch exits 1 and nothing is written. Without `--post` the
@@ -178,6 +181,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         let doc = build_surface(&job, &mesh)?;
         let gouges = crate::gouge::check_job(&job, &mesh, doc.program())?;
         crate::collision::check_job(&job, Some(&mesh), doc.program())?;
+        apply_stock(&job, Some(&mesh), doc.program(), None)?;
         return emit_program(&args, &job, doc, &gouges, post.as_ref());
     }
     let text = read_text(&source)?;
@@ -213,7 +217,54 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
     }
     let doc = build(&job, &drawing)?;
     crate::collision::check_job(&job, None, doc.program())?;
+    let implicit = if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(&job, &drawing)?) } else { None };
+    apply_stock(&job, None, doc.program(), implicit)?;
     emit_program(&args, &job, doc, &[], post.as_ref())
+}
+
+/// Replay the program when the stock model is on, and print the STL leftover summary.
+///
+/// The summary is written before verify, so a later gouge still leaves the line on stderr.
+/// A rapid or holder hit returns an error and the caller writes nothing.
+fn apply_stock(
+    job: &JobFile,
+    part: Option<&Mesh>,
+    program: &Program,
+    implicit: Option<(campanion_mesh::Vec3, campanion_mesh::Vec3)>,
+) -> Result<(), CliError> {
+    let Some(check) = crate::stock::check_job(job, part, program, implicit)? else {
+        return Ok(());
+    };
+    if let Some(report) = check.leftover {
+        let mut err_out = io::stderr().lock();
+        writeln!(
+            err_out,
+            "stock: max leftover {:.3} mm, mean leftover {:.3} mm, model gouges {}",
+            report.max_leftover, report.mean_leftover, report.model_gouges
+        )?;
+        err_out.flush()?;
+    }
+    Ok(())
+}
+
+/// Drawing stock when the file enables the model and omits `stock`.
+///
+/// XY is the selected contours. Z runs from `-depth` to 0. Wrap contours are cylinder coordinates,
+/// so they are skipped. A flat box is an error.
+fn drawing_stock_bounds(job: &JobFile, drawing: &Drawing) -> Result<(campanion_mesh::Vec3, campanion_mesh::Vec3), CliError> {
+    let step_labels = if job.source().is_step() { Some(step_contour_labels(drawing, &job.tolerance())?) } else { None };
+    let mut stock = StockBox::default();
+    for op in job.operations() {
+        if matches!(op.kind(), OperationKind::Wrap) {
+            continue;
+        }
+        let contours = select(drawing, op.layers(), step_labels.as_deref());
+        stock.include(op, &contours)?;
+    }
+    if !(stock.any && stock.max_x > stock.min_x && stock.max_y > stock.min_y && stock.deepest > 0.0) {
+        return Err(CliError::run("stock model needs a stock box"));
+    }
+    Ok((campanion_mesh::Vec3::new(stock.min_x, stock.min_y, -stock.deepest), campanion_mesh::Vec3::new(stock.max_x, stock.max_y, 0.0)))
 }
 
 fn warn_if_changed(job: &JobFile, bytes: &[u8]) -> Result<(), CliError> {

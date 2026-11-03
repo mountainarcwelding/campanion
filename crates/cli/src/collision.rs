@@ -8,7 +8,7 @@
 //! Sampling uses the IR poses in the part frame: the tip is lerped, the axis is slerped, and an
 //! arc or helix is sampled along the curve. A non-TCP control interpolates the joints linearly,
 //! so between samples the real path can differ from this; the sample density is the bound.
-//! In-process stock is not modelled.
+//! In-process stock is a separate check. This one still uses the finished part and the fixtures.
 
 use campanion_ir::{ArcSense, ClBlock, ClMotion, ClPath, Plane, Pose, Program, Vec3 as IrVec};
 use campanion_mesh::{Aabb, CollisionHit, CollisionIndex, Cylinder, Mesh, Sphere, Vec3 as MeshVec, collides, cylinder_aabb, parse_stl};

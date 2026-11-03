@@ -352,8 +352,9 @@ tool `assembly` and a box fixture (a vise jaw beside the dome) that the holder c
 ### Tool assembly and collisions
 
 A mill tool may describe the metal above the cutter so `campanion run` can reject a path that
-drives the shank, the holder or the spindle head into the finished part or a fixture. In-process
-stock is not modelled: only the finished part mesh (an STL source) and the fixtures are obstacles.
+drives the shank, the holder or the spindle head into the finished part or a fixture. This check
+uses the finished part mesh (an STL source) and the fixtures. In-process stock is a separate
+check; see [In-process stock](#in-process-stock).
 The check uses the sampled IR poses in the part frame. A non-TCP control interpolates the joints
 linearly, so between samples the real path can differ from this; the sample density is the bound.
 The posted output has not been proven on a machine.
@@ -657,6 +658,84 @@ On a 3-axis program, with no rotary setup and no kinematics, the IR verifier's r
 
 `toolpath <T> block <B>: rapid traverse at Z <z> below the safe plane <r>`
 
+### In-process stock
+
+`campanion run` can keep a Z-dexel of the stock that is still there and test the toolpath against
+it. The grid is regular in XY. Each cell holds a sorted list of disjoint solid intervals along Z,
+so a tilted tool can leave an undercut instead of filling it. This output has not been proven on
+a machine.
+
+The model stays off when the file omits both `stock` and `stock_model`, and an existing job posts
+the same bytes. A `stock` box turns the model on. `stock_model.enabled` false keeps the box and
+skips the check. With no `stock` object, `enabled` true uses the stock the job already assumes:
+for a drawing, the box of the selected contours (wrap contours are cylinder coordinates and are
+skipped) from `-depth` up to Z 0; for a mesh, the mesh bounds, with the top raised by the largest
+rough or waterline margin. A drawing box with no thickness, or a mesh whose top is not above its
+bottom, is an error: `stock model needs a stock box`.
+
+```json
+"stock": { "box": { "min": [-23, -23, -1], "max": [23, 23, 10] } },
+"stock_model": { "cell": 0.5, "enabled": true }
+```
+
+`stock.box` is in the part frame. Lengths are in `units`. Unknown keys are an error. `max` must be
+strictly greater than `min` on every axis.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `stock_model.cell` | no | XY cell size. Default is the smallest tool radius divided by 4, clamped to 0.05 mm and 2 mm. The clamp applies only to that default. An explicit cell is used as given, and must be greater than 0. |
+| `stock_model.enabled` | no | Default true when `stock` is set, and false otherwise. |
+
+The cell count is `ceil(width / cell) * ceil(height / cell)`, and it must be at most 16,000,000.
+A larger grid fails before it is allocated:
+
+`stock: stock model has N cells, above the limit of 16000000; use a larger stock_model.cell`
+
+On each vertical dexel the interval inside a sphere, and inside a finite cylinder at any
+orientation, is exact. A straight feed whose tool axis does not change also removes the exact
+swept solid of each flute cylinder, so a long cut does not leave sampling scallops in the
+cylinder. The ball sphere and the bull torus are removed only at the same samples as the assembly
+collision check (tip step `collision.sample_step`, axis step `collision.max_angle_step_deg`). An
+arc, a helix, or a move whose axis changes subtracts the whole flute only at those samples. The
+nose between samples is not exact.
+
+A Z-dexel resolves a steep wall only to one cell in XY. The vertical error on a slope is about
+the slope times the cell. A rotating axis is only as faithful as the angle step.
+
+The flute is the cutter from the tip along the tool axis for `flute_length`. Without an assembly
+that length is the tool diameter. A ball is a sphere of radius `r` plus a cylinder from `r` to the
+flute length. A flat is one cylinder. A bull nose is an inner cylinder, an outer cylinder, and the
+corner torus. A kerf tool has no flute, so it removes nothing and is not tested as a rapid flute.
+
+When the model is on, `run` replays the IR toolpaths in order. Each feed subtracts the flute.
+Rapids are tested and not subtracted. The finished-part and fixture checks still run.
+
+A rapid whose flute meets the remaining stock by more than 0.001 mm is an error. One cell of
+quantisation is allowed: a wall can sit a cell away from the true surface, and a graze shallower
+than 0.001 mm is not an error. The depth is the longest Z overlap on any dexel, not a Euclidean
+penetration. Exit 1, and nothing is written.
+
+`operation `NAME` toolpath I move J: rapid into stock at (x, y, z), depth D`
+
+When the tool has an assembly, the shank, each holder segment and the head are tested against the
+stock still there at the start of the move. The radius is grown by `collision.clearance`. The
+message matches the part check, with the obstacle `stock`.
+
+`operation `NAME` toolpath I move J: holder 1 hits stock at (x, y, z)`
+
+After an STL program, each cell centre is compared with the part mesh. The leftover thickness is
+the top of the lowest remaining solid that still covers the surface. Stock removed below the
+surface by more than the chord tolerance plus one cell is a model gouge. The count is reported and
+does not by itself fail the run. A drawing has no mesh, so it prints no summary. The line goes to
+stderr, including when a later gouge check blocks the file:
+
+`stock: max leftover L mm, mean leftover M mm, model gouges G`
+
+`L` and `M` are millimetres to three decimal places. `G` is an integer.
+
+`examples/dome_stock.job.json` roughs and finishes `examples/dome.stl` with an explicit stock box
+and a 2 mm cell.
+
 ## Limits
 
 Hostile numbers and sizes fail the load instead of being passed on:
@@ -664,7 +743,7 @@ Hostile numbers and sizes fail the load instead of being passed on:
 - JSON file at most 32 MiB, UTF-8.
 - 256 tools, 1024 operations, 64 layers on one operation.
 - Names at most 256 bytes. Source path at most 4096 bytes.
-- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, grid, floor Z, top Z, wrap diameter and offsets, surface, rough and waterline stock, heights, assembly lengths, fixture box coordinates, collision clearance and sample step, chuck and sub-chuck diameter and length, and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source. At most 64 fixtures and 32 holder segments.
+- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, grid, floor Z, top Z, wrap diameter and offsets, surface, rough and waterline stock, heights, assembly lengths, fixture box coordinates, stock box coordinates, `stock_model.cell`, collision clearance and sample step, chuck and sub-chuck diameter and length, and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source. At most 64 fixtures and 32 holder segments. The in-process stock grid is at most 16,000,000 cells.
 - Feeds at most 1e9 mm/min. Delays at most 1e6 s.
 - At most 1024 depth passes.
 
