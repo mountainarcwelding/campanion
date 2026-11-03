@@ -1600,3 +1600,17 @@ fn reader_rejects_a_feed_move_in_haas_thread_feed_mode() {
     let err = read_back("G99\nG1 X10. Z-1. F100.\n", &haas_lathe()).expect_err("feed");
     assert!(err.to_string().contains("feed move in thread feed mode"), "{err}");
 }
+
+#[test]
+fn a_positive_feed_that_rounds_to_zero_is_rejected() {
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(1.0, 0.0, 1.0), feed: 0.00004, role: MoveRole::Cut }),
+    ];
+    let program = program(blocks);
+    for id in ["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"] {
+        let post = builtin(id).expect(id);
+        let err = post_program(&program, &post, &options()).expect_err(id);
+        assert!(err.to_string().contains("feed rounds to zero"), "{id}: {err}");
+    }
+}

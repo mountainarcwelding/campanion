@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A positive feed that rounded to zero at the post's F precision was written as `F0` or `F0.0000`. The move is now rejected. Every built-in post that writes an `F` word was affected (mill, lathe, and five-axis).
+
 ## 0.9.2 — 2026-11-02
 
 Collision checks and machine simulation (five-axis stages 5G–5H). This completes the staged continuous five-axis plan (5A–5H). The checks cover the tool assembly against the finished part, fixtures and work-holding; in-process stock is not modelled. This output has not been proven on a machine.

@@ -1927,6 +1927,11 @@ impl<'a> Writer<'a> {
             return Err(invalid("feed must be positive"));
         }
         let text = format_fixed(feed, self.post.decimals.feed, self.post.trailing_zeros)?;
+        // A positive feed can still round to 0 at this post's F precision (`F0`, `F0.0000`).
+        let written: f64 = text.parse().map_err(|_| invalid("feed is not a number"))?;
+        if !(written.is_finite() && written > 0.0) {
+            return Err(invalid("feed rounds to zero"));
+        }
         if !force && self.feed.as_deref() == Some(text.as_str()) {
             return Ok(());
         }
