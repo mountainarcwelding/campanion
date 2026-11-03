@@ -4,9 +4,12 @@
 //! bytes ([`parse_stl`], [`write_stl_binary`]); this crate does not touch the filesystem, so it
 //! builds for `wasm32`. [`check_gouges`] samples a tool-tip path against a [`DropCutter`].
 //! [`rotary_lines`] turns the mesh about an A or B axis and samples tip radii above that axis.
+//! [`cylinder_triangle`], [`sphere_triangle`] and [`cylinder_aabb`] are the collision primitives
+//! used to test a mill tool assembly against the part and the fixtures.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod collide;
 mod dropcutter;
 mod gouge;
 mod raster;
@@ -16,6 +19,7 @@ mod stl;
 mod waterline;
 mod zlevel;
 
+pub use collide::{CollisionHit, CollisionIndex, Cylinder, Sphere, TOUCH_SLACK, collides, cylinder_aabb, cylinder_triangle, sphere_triangle};
 pub use dropcutter::{Cutter, DropCutter, closest_point_on_triangle, drop_cutter_triangle};
 pub use gouge::{Gouge, check_gouges};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};
@@ -111,6 +115,16 @@ impl Vec3 {
         self.x.hypot(self.y).hypot(self.z)
     }
 
+    /// Squared length. Finite when the coordinates are.
+    pub const fn length_sq(self) -> f64 {
+        self.dot(self)
+    }
+
+    /// Linear interpolation. `t = 0` is `self`.
+    pub const fn lerp(self, other: Self, t: f64) -> Self {
+        Self { x: self.x + (other.x - self.x) * t, y: self.y + (other.y - self.y) * t, z: self.z + (other.z - self.z) * t }
+    }
+
     /// Unit vector in the same direction, or `None` when the length is zero or not finite.
     pub fn normalized(self) -> Option<Self> {
         let len = self.length();
@@ -165,6 +179,11 @@ impl Aabb {
         Self { min: point, max: point }
     }
 
+    /// Axis-aligned box of two corners. The corners need not be ordered.
+    pub fn from_corners(a: Vec3, b: Vec3) -> Self {
+        Self::from_point(a).include(b)
+    }
+
     /// `None` when `points` is empty.
     pub fn from_points(points: impl IntoIterator<Item = Vec3>) -> Option<Self> {
         let mut points = points.into_iter();
@@ -183,9 +202,37 @@ impl Aabb {
         self.include(other.min).include(other.max)
     }
 
+    /// Grow (or shrink) every side by `pad` millimetres.
+    pub fn expand(self, pad: f64) -> Self {
+        Self {
+            min: Vec3::new(self.min.x - pad, self.min.y - pad, self.min.z - pad),
+            max: Vec3::new(self.max.x + pad, self.max.y + pad, self.max.z + pad),
+        }
+    }
+
     /// `x` and `y` lie inside the box, ignoring Z. Edges are inclusive.
     pub fn contains_xy(self, x: f64, y: f64) -> bool {
         x >= self.min.x && x <= self.max.x && y >= self.min.y && y <= self.max.y
+    }
+
+    /// Inclusive 3D containment.
+    pub fn contains(self, point: Vec3) -> bool {
+        point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
+            && point.z >= self.min.z
+            && point.z <= self.max.z
+    }
+
+    /// Inclusive overlap. Touching faces count.
+    pub fn overlaps(self, other: Self) -> bool {
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
     }
 
     pub fn min(self) -> Vec3 {
@@ -194,6 +241,53 @@ impl Aabb {
 
     pub fn max(self) -> Vec3 {
         self.max
+    }
+
+    /// Longest side, or 0 when X, Y and Z are tied for empty.
+    fn longest_axis(self) -> usize {
+        let dx = self.max.x - self.min.x;
+        let dy = self.max.y - self.min.y;
+        let dz = self.max.z - self.min.z;
+        if dx >= dy && dx >= dz {
+            0
+        } else if dy >= dz {
+            1
+        } else {
+            2
+        }
+    }
+
+    fn centroid(self) -> Vec3 {
+        Vec3::new((self.min.x + self.max.x) * 0.5, (self.min.y + self.max.y) * 0.5, (self.min.z + self.max.z) * 0.5)
+    }
+
+    /// Twelve triangles covering the six faces. Degenerate faces (zero area) are still listed.
+    pub fn face_triangles(self) -> [Triangle; 12] {
+        let p = |x, y, z| Vec3::new(x, y, z);
+        let (x0, y0, z0) = (self.min.x, self.min.y, self.min.z);
+        let (x1, y1, z1) = (self.max.x, self.max.y, self.max.z);
+        let a = p(x0, y0, z0);
+        let b = p(x1, y0, z0);
+        let c = p(x1, y1, z0);
+        let d = p(x0, y1, z0);
+        let e = p(x0, y0, z1);
+        let f = p(x1, y0, z1);
+        let g = p(x1, y1, z1);
+        let h = p(x0, y1, z1);
+        [
+            Triangle { a: e, b: f, c: g },
+            Triangle { a: e, b: g, c: h },
+            Triangle { a, b: d, c },
+            Triangle { a, b: c, c: b },
+            Triangle { a: d, b: h, c: g },
+            Triangle { a: d, b: g, c },
+            Triangle { a, b, c: f },
+            Triangle { a, b: f, c: e },
+            Triangle { a: b, b: c, c: g },
+            Triangle { a: b, b: g, c: f },
+            Triangle { a, b: e, c: h },
+            Triangle { a, b: h, c: d },
+        ]
     }
 }
 

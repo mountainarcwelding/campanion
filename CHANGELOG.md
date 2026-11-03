@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Mill jobs may set a tool `assembly` (stickout, flute, shank, holder stack, optional head) and job-level `fixtures` and `collision`. After the gouge check, `campanion run` tests the shank, holder and head — and the flute on a rapid — against the finished part mesh and the fixtures. The first hit names the operation, toolpath, move, body, obstacle and part-frame point. In-process stock is not modelled. The check samples the IR poses; a non-TCP control interpolates joints, so the real path can differ between samples. This output has not been proven on a machine.
+
 ## 0.9.1 — 2026-11-02
 
 TCP posts and tool-axis strategies (five-axis stages 5E–5F). This release fixes wrong output from 0.9.0: repost any `haas_umc` or `linuxcnc_5ax` program from 0.9.0 that has an indexed (3+2) toolpath after a continuous toolpath with the same tool axis.

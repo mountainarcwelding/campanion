@@ -77,7 +77,11 @@
 //! rotary finish are compared with the drop-cutter surface of the part. `stock_to_leave` is not
 //! added to that surface: the cuts sit above the surface plus the stock. A rotary finish checks
 //! each constant angle on the mesh turned by that angle, and samples angle-changing links in
-//! between.
+//! between. After the gouge check, a mill tool with an `assembly` is tested against the finished
+//! part mesh and the job `fixtures`. The shank, holder and head must not touch either; a rapid
+//! also keeps the flute off the part. Feeds may let the flute touch the part. The check samples
+//! the IR poses: lerp the tip, slerp the axis, and walk arcs along the curve. A non-TCP control
+//! interpolates joints, so the real path can differ between samples.
 //!
 //! A job with a rotary setup plans each indexed operation in the indexed view at `index_deg`
 //! (0° when that field is omitted). Two-dimensional geometry is used as drawn. Mesh operations
@@ -172,6 +176,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
         let doc = build_surface(&job, &mesh)?;
         let gouges = crate::gouge::check_job(&job, &mesh, doc.program())?;
+        crate::collision::check_job(&job, Some(&mesh), doc.program())?;
         return emit_program(&args, &job, doc, &gouges, post.as_ref());
     }
     let text = read_text(&source)?;
@@ -206,6 +211,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         warn(&format!("skipped {format} entities: {kinds}"))?;
     }
     let doc = build(&job, &drawing)?;
+    crate::collision::check_job(&job, None, doc.program())?;
     emit_program(&args, &job, doc, &[], post.as_ref())
 }
 
@@ -1321,7 +1327,7 @@ fn program_name(job: &JobFile) -> Option<String> {
     if stem.is_empty() || stem.len() > 256 { None } else { Some(stem.to_string()) }
 }
 
-fn warn(message: &str) -> Result<(), CliError> {
+pub(crate) fn warn(message: &str) -> Result<(), CliError> {
     let mut out = io::stderr().lock();
     writeln!(out, "campanion: warning: {message}")?;
     out.flush()?;

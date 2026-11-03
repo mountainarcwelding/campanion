@@ -107,6 +107,12 @@
 //! `units`; the directions are normalised. A plane needs kinematics, and kinematics cannot be
 //! combined with `rotary`. A 2D operation with `plane` is planned in that view and mapped
 //! into the part frame. `surface`, `rough` and `waterline` reject `plane`. See `docs/job-file.md`.
+//!
+//! A mill tool may set `assembly`: stickout, flute, shank, a holder stack and an optional head.
+//! Top-level `fixtures` are STL meshes or axis-aligned boxes in the part frame. Top-level
+//! `collision` sets the clearance, sample step and axis-angle step used when `campanion run`
+//! checks the assembly against the finished part and the fixtures. A kerf tool cannot carry an
+//! assembly. See `docs/job-file.md`.
 
 use std::fmt;
 use std::fs::File;
@@ -166,6 +172,10 @@ const MAX_TOOLS: usize = 256;
 const MAX_OPERATIONS: usize = 1_024;
 const MAX_LAYERS: usize = 64;
 const MAX_SOURCE_PATH: usize = 4_096;
+const MAX_FIXTURES: usize = 64;
+const MAX_HOLDER_SEGMENTS: usize = 32;
+const DEFAULT_COLLISION_SAMPLE_MM: f64 = 1.0;
+const DEFAULT_COLLISION_ANGLE_DEG: f64 = 1.0;
 
 /// A job file could not be read or did not match `campanion-job/1`.
 #[derive(Debug, PartialEq, Eq)]
@@ -339,6 +349,113 @@ impl ToolShape {
     }
 }
 
+/// One cylinder in a holder stack, millimetres, stacked from the holder face toward the spindle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HolderSegment {
+    diameter: f64,
+    length: f64,
+}
+
+impl HolderSegment {
+    pub fn diameter(self) -> f64 {
+        self.diameter
+    }
+
+    pub fn length(self) -> f64 {
+        self.length
+    }
+}
+
+/// Mill tool envelope from the tip toward the spindle. Lengths are millimetres.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolAssembly {
+    stickout: f64,
+    flute_length: f64,
+    shank_diameter: f64,
+    holder: Vec<HolderSegment>,
+    head: Option<HolderSegment>,
+}
+
+impl ToolAssembly {
+    /// Tip to holder face.
+    pub fn stickout(&self) -> f64 {
+        self.stickout
+    }
+
+    /// Cutter body length from the tip. At most [`Self::stickout`].
+    pub fn flute_length(&self) -> f64 {
+        self.flute_length
+    }
+
+    /// Shank diameter. Zero is a degenerate cylinder along the axis.
+    pub fn shank_diameter(&self) -> f64 {
+        self.shank_diameter
+    }
+
+    /// Holder segments, first at the holder face.
+    pub fn holder(&self) -> &[HolderSegment] {
+        &self.holder
+    }
+
+    /// Spindle-head cylinder stacked on the last holder segment.
+    pub fn head(&self) -> Option<HolderSegment> {
+        self.head
+    }
+}
+
+/// Job-level collision sampling. Lengths are millimetres, the angle is degrees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CollisionSettings {
+    clearance: f64,
+    sample_step: f64,
+    max_angle_step_deg: f64,
+}
+
+impl CollisionSettings {
+    /// Default: clearance 0, sample step 1 mm, axis step 1°.
+    pub fn default_values() -> Self {
+        Self { clearance: 0.0, sample_step: DEFAULT_COLLISION_SAMPLE_MM, max_angle_step_deg: DEFAULT_COLLISION_ANGLE_DEG }
+    }
+
+    pub fn clearance(self) -> f64 {
+        self.clearance
+    }
+
+    pub fn sample_step(self) -> f64 {
+        self.sample_step
+    }
+
+    pub fn max_angle_step_deg(self) -> f64 {
+        self.max_angle_step_deg
+    }
+}
+
+/// An STL fixture or a solid box, in the part frame.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FixtureKind {
+    /// Triangle mesh. `path` is relative to the job file. `hash` is FNV-1a 64 of the raw bytes.
+    Stl { path: String, hash: String },
+    /// Axis-aligned box. Coordinates are millimetres.
+    Box { min: Vec3, max: Vec3 },
+}
+
+/// Named obstacle in the part frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fixture {
+    name: String,
+    kind: FixtureKind,
+}
+
+impl Fixture {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> &FixtureKind {
+        &self.kind
+    }
+}
+
 /// One cutter. `id` matches [`IrTool::id`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobTool {
@@ -348,6 +465,7 @@ pub struct JobTool {
     shape: ToolShape,
     /// Spindle speed in rpm. `None` when the file omits `tools[].speed`.
     speed: Option<f64>,
+    assembly: Option<ToolAssembly>,
 }
 
 impl JobTool {
@@ -378,6 +496,11 @@ impl JobTool {
     /// Spindle speed in rpm. `None` when the file omits `speed`.
     pub fn speed(&self) -> Option<f64> {
         self.speed
+    }
+
+    /// Holder and head envelope. `None` when the file omits `assembly`.
+    pub fn assembly(&self) -> Option<&ToolAssembly> {
+        self.assembly.as_ref()
     }
 }
 
@@ -898,6 +1021,8 @@ pub struct JobFile {
     retract: f64,
     rotary: Option<RotarySetup>,
     five_axis: Option<FiveAxisSetup>,
+    fixtures: Vec<Fixture>,
+    collision: CollisionSettings,
 }
 
 impl JobFile {
@@ -957,6 +1082,21 @@ impl JobFile {
     pub fn five_axis(&self) -> Option<&FiveAxisSetup> {
         self.five_axis.as_ref()
     }
+
+    /// Fixtures in the part frame. Empty when the file omits `fixtures`.
+    pub fn fixtures(&self) -> &[Fixture] {
+        &self.fixtures
+    }
+
+    /// Collision sampling. Defaults apply when the file omits `collision`.
+    pub fn collision(&self) -> CollisionSettings {
+        self.collision
+    }
+
+    /// True when any mill tool carries an assembly envelope.
+    pub fn has_assembly(&self) -> bool {
+        self.tools.iter().any(|tool| tool.assembly.is_some())
+    }
 }
 
 struct Body {
@@ -969,6 +1109,8 @@ struct Body {
     retract: f64,
     rotary: Option<RotarySetup>,
     five_axis: Option<FiveAxisSetup>,
+    fixtures: Vec<Fixture>,
+    collision: CollisionSettings,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -986,6 +1128,8 @@ pub fn load(path: &Path) -> Result<JobFile, JobFileError> {
         retract: body.retract,
         rotary: body.rotary,
         five_axis: body.five_axis,
+        fixtures: body.fixtures,
+        collision: body.collision,
     })
 }
 
@@ -1020,9 +1164,15 @@ pub fn with_updated_hash(job: &JobFile, bytes: &[u8]) -> JobFile {
 /// The filesystem is not consulted, so a missing part still yields a path.
 #[must_use]
 pub fn source_path(job: &JobFile) -> PathBuf {
+    join_job_path(job, &job.source.path)
+}
+
+/// Job-file directory joined with a relative path. Same folding as [`source_path`].
+#[must_use]
+pub fn join_job_path(job: &JobFile, relative: &str) -> PathBuf {
     let joined = match job.path.parent() {
-        Some(dir) => dir.join(&job.source.path),
-        None => PathBuf::from(&job.source.path),
+        Some(dir) => dir.join(relative),
+        None => PathBuf::from(relative),
     };
     fold_dots(&joined)
 }
@@ -1050,8 +1200,12 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         None => return Err(JobFileError::invalid("missing format tag")),
     };
     check_format(tag)?;
-    check_keys(map, &["format", "source", "units", "tolerance", "heights", "tools", "operations", "rotary", "kinematics", "solution"], "job")
-        .map_err(from_cli)?;
+    check_keys(
+        map,
+        &["format", "source", "units", "tolerance", "heights", "tools", "operations", "rotary", "kinematics", "solution", "fixtures", "collision"],
+        "job",
+    )
+    .map_err(from_cli)?;
     let units = parse_units(require(map, "units").map_err(from_cli)?)?;
     let scale = units.mm_per_unit();
     let source = parse_source(require(map, "source").map_err(from_cli)?)?;
@@ -1103,8 +1257,10 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         }
     }
     check_mesh_source(&source, &operations, &tools)?;
+    let fixtures = parse_fixtures(optional(map, "fixtures"), scale)?;
+    let collision = parse_collision(optional(map, "collision"), scale)?;
     let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
-    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary, five_axis })
+    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary, five_axis, fixtures, collision })
 }
 
 /// An STL part only accepts `surface`, `rough`, `waterline` and `rotary_finish`. Each only accepts an STL part.
@@ -1311,17 +1467,19 @@ fn parse_tools(value: &Value, scale: f64) -> Result<Vec<JobTool>, JobFileError> 
 
 fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> {
     let map = object(value, "tool").map_err(from_cli)?;
-    check_keys(map, &["id", "diameter", "kerf", "shape", "speed"], "tool").map_err(from_cli)?;
+    check_keys(map, &["id", "diameter", "kerf", "shape", "speed", "assembly"], "tool").map_err(from_cli)?;
     let mut scaled = map.clone();
     scaled.remove("shape");
     scaled.remove("speed");
+    scaled.remove("assembly");
     scale_key(&mut scaled, "diameter", scale)?;
     scale_key(&mut scaled, "kerf", scale)?;
     let parsed = parse_tool(&Value::Object(scaled)).map_err(from_cli)?;
     parsed.path_tool().compensation_distance().map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
     let shape = parse_tool_shape(optional(map, "shape"), parsed.ir().diameter(), scale)?;
     let speed = parse_rpm(optional(map, "speed"))?;
-    Ok(JobTool { id: parsed.ir().id(), path_tool: parsed.path_tool(), ir: parsed.ir().clone(), shape, speed })
+    let assembly = parse_assembly(optional(map, "assembly"), parsed.ir().diameter(), scale)?;
+    Ok(JobTool { id: parsed.ir().id(), path_tool: parsed.path_tool(), ir: parsed.ir().clone(), shape, speed, assembly })
 }
 
 /// `"flat"`, `"ball"`, or `{"bull": corner_radius}`. The corner radius is a length in file units.
@@ -1353,6 +1511,152 @@ fn parse_tool_shape(value: Option<&Value>, diameter: Option<f64>, scale: f64) ->
         return Err(JobFileError::invalid("bull corner radius must be less than the tool radius"));
     }
     Ok(ToolShape::Bull { corner_radius: corner })
+}
+
+fn parse_assembly(value: Option<&Value>, diameter: Option<f64>, scale: f64) -> Result<Option<ToolAssembly>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(tool_diameter) = diameter else {
+        return Err(JobFileError::invalid("assembly is not valid on a kerf tool"));
+    };
+    let map = object(value, "assembly").map_err(from_cli)?;
+    check_keys(map, &["stickout", "flute_length", "shank_diameter", "holder", "head"], "assembly").map_err(from_cli)?;
+    let stickout = positive_length(require(map, "stickout").map_err(from_cli)?, scale, "stickout")?;
+    let flute_length = match optional(map, "flute_length") {
+        Some(value) => positive_length(value, scale, "flute_length")?,
+        None => stickout,
+    };
+    if flute_length > stickout {
+        return Err(JobFileError::invalid("flute_length must be at most stickout"));
+    }
+    let shank_diameter = match optional(map, "shank_diameter") {
+        Some(value) => cap_under(non_negative_length(value, scale, "shank_diameter")?, MAX_MM, "shank_diameter")?,
+        None => tool_diameter,
+    };
+    let holder_value = require(map, "holder").map_err(from_cli)?;
+    let holder = parse_holder_stack(holder_value, scale)?;
+    let head = match optional(map, "head") {
+        Some(value) => Some(parse_holder_segment(value, scale, "head")?),
+        None => None,
+    };
+    Ok(Some(ToolAssembly { stickout, flute_length, shank_diameter, holder, head }))
+}
+
+fn parse_holder_stack(value: &Value, scale: f64) -> Result<Vec<HolderSegment>, JobFileError> {
+    let list = array(value, "holder", MAX_HOLDER_SEGMENTS)?;
+    if list.is_empty() {
+        return Err(JobFileError::invalid("holder needs at least one segment"));
+    }
+    let mut holder = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        let segment = parse_holder_segment(item, scale, "holder").map_err(|err| at_index("holder", index, err))?;
+        holder.push(segment);
+    }
+    Ok(holder)
+}
+
+fn parse_holder_segment(value: &Value, scale: f64, what: &str) -> Result<HolderSegment, JobFileError> {
+    let map = object(value, what).map_err(from_cli)?;
+    check_keys(map, &["diameter", "length"], what).map_err(from_cli)?;
+    let diameter = positive_length(require(map, "diameter").map_err(from_cli)?, scale, &format!("{what} diameter"))?;
+    let length = positive_length(require(map, "length").map_err(from_cli)?, scale, &format!("{what} length"))?;
+    Ok(HolderSegment { diameter, length })
+}
+
+fn parse_fixtures(value: Option<&Value>, scale: f64) -> Result<Vec<Fixture>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let list = array(value, "fixtures", MAX_FIXTURES)?;
+    let mut fixtures = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        let fixture = parse_fixture(item, scale).map_err(|err| at_index("fixture", index, err))?;
+        if fixtures.iter().any(|existing: &Fixture| existing.name == fixture.name) {
+            return Err(JobFileError::invalid(format!("fixture name `{}` is repeated", fixture.name)));
+        }
+        fixtures.push(fixture);
+    }
+    Ok(fixtures)
+}
+
+fn parse_fixture(value: &Value, scale: f64) -> Result<Fixture, JobFileError> {
+    let map = object(value, "fixture").map_err(from_cli)?;
+    check_keys(map, &["name", "path", "hash", "box"], "fixture").map_err(from_cli)?;
+    let name = required_name(as_str(require(map, "name").map_err(from_cli)?, "fixture name").map_err(from_cli)?, "fixture name").map_err(from_cli)?;
+    let has_mesh = optional(map, "path").is_some() || optional(map, "hash").is_some();
+    let has_box = optional(map, "box").is_some();
+    if has_mesh && has_box {
+        return Err(JobFileError::invalid("fixture cannot have both a mesh and a box"));
+    }
+    let kind = if has_box {
+        parse_fixture_box(require(map, "box").map_err(from_cli)?, scale)?
+    } else if has_mesh {
+        parse_fixture_stl(map)?
+    } else {
+        return Err(JobFileError::invalid("fixture needs a mesh (path and hash) or a box"));
+    };
+    Ok(Fixture { name, kind })
+}
+
+fn parse_fixture_stl(map: &Map<String, Value>) -> Result<FixtureKind, JobFileError> {
+    let path_value = require(map, "path").map_err(from_cli)?;
+    let Some(path) = path_value.as_str() else {
+        return Err(JobFileError::invalid("fixture path must be a string"));
+    };
+    check_source_path(path)?;
+    if !path_is_stl(path) {
+        return Err(JobFileError::invalid("fixture path must be an STL file"));
+    }
+    let hash_text = as_str(require(map, "hash").map_err(from_cli)?, "fixture hash").map_err(from_cli)?;
+    Ok(FixtureKind::Stl { path: path.to_string(), hash: normalize_hash(hash_text)? })
+}
+
+fn parse_fixture_box(value: &Value, scale: f64) -> Result<FixtureKind, JobFileError> {
+    let map = object(value, "box").map_err(from_cli)?;
+    check_keys(map, &["min", "max"], "box").map_err(from_cli)?;
+    let min = parse_box_corner(require(map, "min").map_err(from_cli)?, scale, "box min")?;
+    let max = parse_box_corner(require(map, "max").map_err(from_cli)?, scale, "box max")?;
+    if max.x() < min.x() || max.y() < min.y() || max.z() < min.z() {
+        return Err(JobFileError::invalid("fixture box max must be at least min"));
+    }
+    Ok(FixtureKind::Box { min, max })
+}
+
+fn parse_box_corner(value: &Value, scale: f64, what: &str) -> Result<Vec3, JobFileError> {
+    let list = array(value, what, 3)?;
+    if list.len() != 3 {
+        return Err(JobFileError::invalid(format!("{what} must be exactly 3 numbers")));
+    }
+    let mut coords = [0.0; 3];
+    for (slot, item) in coords.iter_mut().zip(list.iter()) {
+        let scaled = scale_f64(item, scale, what)?;
+        *slot = finite_height(scaled, what)?;
+    }
+    Vec3::new(coords[0], coords[1], coords[2]).map_err(|err| JobFileError::Invalid { message: err.to_string() })
+}
+
+fn parse_collision(value: Option<&Value>, scale: f64) -> Result<CollisionSettings, JobFileError> {
+    let mut settings = CollisionSettings::default_values();
+    let Some(value) = value else {
+        return Ok(settings);
+    };
+    let map = object(value, "collision").map_err(from_cli)?;
+    check_keys(map, &["clearance", "sample_step", "max_angle_step_deg"], "collision").map_err(from_cli)?;
+    if let Some(value) = optional(map, "clearance") {
+        settings.clearance = cap_under(non_negative_length(value, scale, "collision clearance")?, MAX_MM, "collision clearance")?;
+    }
+    if let Some(value) = optional(map, "sample_step") {
+        settings.sample_step = positive_length(value, scale, "collision sample_step")?;
+    }
+    if let Some(value) = optional(map, "max_angle_step_deg") {
+        let degrees = as_f64(value, "max_angle_step_deg").map_err(from_cli)?;
+        if !(degrees > 0.0 && degrees <= 180.0) {
+            return Err(JobFileError::invalid("collision max_angle_step_deg must be in (0, 180]"));
+        }
+        settings.max_angle_step_deg = degrees;
+    }
+    Ok(settings)
 }
 
 fn parse_operations(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Vec<Operation>, JobFileError> {
@@ -5654,5 +5958,156 @@ mod tests {
         );
         let err = load(&write_job("axis-rough", &rough)).expect_err("rough");
         assert!(invalid_detail(&err).contains("tool_axis is only valid on a surface"), "{err}");
+    }
+
+    fn assembly_job(tools: &str, extra: &str) -> String {
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"part.stl","hash":"{EMPTY_HASH}"}},"units":"mm","tools":{tools},"operations":[{{"name":"dome","type":"surface","tool_id":1,"stepover":2,"feeds":{{"cut":100}}}}]{extra}}}"#
+        )
+    }
+
+    #[test]
+    fn parses_assembly_fixtures_and_collision() {
+        let tools = concat!(
+            r#"[{"id":1,"diameter":6,"shape":"ball","assembly":{"#,
+            r#""stickout":40,"flute_length":12,"shank_diameter":6,"#,
+            r#""holder":[{"diameter":16,"length":20},{"diameter":25,"length":10}],"#,
+            r#""head":{"diameter":50,"length":30}}}]"#
+        );
+        let extra = concat!(
+            r#","fixtures":[{"name":"vise","box":{"min":[30,-20,-5],"max":[50,20,25]}},{"name":"jaw","path":"jaw.stl","hash":"CBF29CE484222325"}],"#,
+            r#""collision":{"clearance":0.2,"sample_step":1.5,"max_angle_step_deg":2}"#
+        );
+        let job = load(&write_job("assembly-ok", &assembly_job(tools, extra))).expect("load");
+        let assembly = job.tool(1).expect("tool").assembly().expect("assembly");
+        near(assembly.stickout(), 40.0);
+        near(assembly.flute_length(), 12.0);
+        near(assembly.shank_diameter(), 6.0);
+        assert_eq!(assembly.holder().len(), 2);
+        near(assembly.holder()[0].diameter(), 16.0);
+        near(assembly.holder()[1].length(), 10.0);
+        near(assembly.head().expect("head").diameter(), 50.0);
+        assert_eq!(job.fixtures().len(), 2);
+        assert_eq!(job.fixtures()[0].name(), "vise");
+        match job.fixtures()[1].kind() {
+            FixtureKind::Stl { path, hash } => {
+                assert_eq!(path, "jaw.stl");
+                assert_eq!(hash, EMPTY_HASH);
+            }
+            other => panic!("{other:?}"),
+        }
+        near(job.collision().clearance(), 0.2);
+        near(job.collision().sample_step(), 1.5);
+        near(job.collision().max_angle_step_deg(), 2.0);
+        assert!(job.has_assembly());
+    }
+
+    #[test]
+    fn assembly_defaults_flute_and_shank_and_collision() {
+        let tools = r#"[{"id":1,"diameter":6,"assembly":{"stickout":25,"holder":[{"diameter":12,"length":8}]}}]"#;
+        let job = load(&write_job("assembly-defaults", &assembly_job(tools, ""))).expect("load");
+        let assembly = job.tool(1).expect("tool").assembly().expect("assembly");
+        near(assembly.flute_length(), 25.0);
+        near(assembly.shank_diameter(), 6.0);
+        assert!(assembly.head().is_none());
+        near(job.collision().clearance(), 0.0);
+        near(job.collision().sample_step(), 1.0);
+        near(job.collision().max_angle_step_deg(), 1.0);
+        assert!(job.fixtures().is_empty());
+    }
+
+    #[test]
+    fn rejects_assembly_fixture_and_collision_errors() {
+        let holder = r#"{"stickout":25,"holder":[{"diameter":12,"length":8}]}"#;
+        let cases = [
+            (
+                assembly_job(r#"[{"id":1,"kerf":1.2,"assembly":{"stickout":10,"holder":[{"diameter":12,"length":8}]}}]"#, ""),
+                "assembly is not valid on a kerf tool",
+            ),
+            (
+                assembly_job(r#"[{"id":1,"diameter":6,"assembly":{"stickout":10,"flute_length":12,"holder":[{"diameter":12,"length":8}]}}]"#, ""),
+                "flute_length must be at most stickout",
+            ),
+            (
+                assembly_job(r#"[{"id":1,"diameter":6,"assembly":{"stickout":0,"holder":[{"diameter":12,"length":8}]}}]"#, ""),
+                "stickout must be greater than 0",
+            ),
+            (
+                assembly_job(r#"[{"id":1,"diameter":6,"assembly":{"stickout":10,"shank_diameter":-1,"holder":[{"diameter":12,"length":8}]}}]"#, ""),
+                "shank_diameter must be at least 0",
+            ),
+            (assembly_job(r#"[{"id":1,"diameter":6,"assembly":{"stickout":10,"holder":[]}}]"#, ""), "holder needs at least one segment"),
+            (
+                assembly_job(r#"[{"id":1,"diameter":6,"assembly":{"stickout":10,"holder":[{"diameter":12,"length":8}],"foo":1}}]"#, ""),
+                "unknown assembly field `foo`",
+            ),
+            (assembly_job(&format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#), r#","foo":1"#), "unknown job field `foo`"),
+            (
+                assembly_job(
+                    &format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#),
+                    r#","fixtures":[{"name":"","box":{"min":[0,0,0],"max":[1,1,1]}}]"#,
+                ),
+                "fixture name is empty",
+            ),
+            (
+                assembly_job(
+                    &format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#),
+                    r#","fixtures":[{"name":"vise","box":{"min":[0,0,0],"max":[1,1,1]}},{"name":"vise","box":{"min":[2,2,2],"max":[3,3,3]}}]"#,
+                ),
+                "fixture name `vise` is repeated",
+            ),
+            (
+                assembly_job(&format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#), r#","fixtures":[{"name":"vise"}]"#),
+                "fixture needs a mesh (path and hash) or a box",
+            ),
+            (
+                assembly_job(
+                    &format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#),
+                    r#","fixtures":[{"name":"vise","path":"jaw.stl","hash":"cbf29ce484222325","box":{"min":[0,0,0],"max":[1,1,1]}}]"#,
+                ),
+                "fixture cannot have both a mesh and a box",
+            ),
+            (
+                assembly_job(
+                    &format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#),
+                    r#","fixtures":[{"name":"vise","path":"jaw.dxf","hash":"cbf29ce484222325"}]"#,
+                ),
+                "fixture path must be an STL file",
+            ),
+            (
+                assembly_job(
+                    &format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#),
+                    r#","fixtures":[{"name":"vise","box":{"min":[1,0,0],"max":[0,1,1]}}]"#,
+                ),
+                "fixture box max must be at least min",
+            ),
+            (
+                assembly_job(
+                    &format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#),
+                    r#","fixtures":[{"name":"vise","box":{"min":[0,0,0],"max":[1,1,1],"pad":1}}]"#,
+                ),
+                "unknown box field `pad`",
+            ),
+            (
+                assembly_job(&format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#), r#","collision":{"clearance":-0.1}"#),
+                "collision clearance must be at least 0",
+            ),
+            (
+                assembly_job(&format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#), r#","collision":{"sample_step":0}"#),
+                "collision sample_step must be greater than 0",
+            ),
+            (
+                assembly_job(&format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#), r#","collision":{"max_angle_step_deg":0}"#),
+                "collision max_angle_step_deg must be in (0, 180]",
+            ),
+            (
+                assembly_job(&format!(r#"[{{"id":1,"diameter":6,"assembly":{holder}}}]"#), r#","collision":{"foo":1}"#),
+                "unknown collision field `foo`",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("assembly-bad-{index}"), text)).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
     }
 }

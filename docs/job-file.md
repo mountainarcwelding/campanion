@@ -33,6 +33,8 @@ lengths are millimetres and feeds are millimetres per minute.
 | `tools` | yes | Array of tools. May be empty when `operations` is empty. |
 | `operations` | yes | Array of operations, in cut order. May be empty. |
 | `rotary` | no | Fourth-axis table for indexed 3+1, wrapping and rotary finishing. See below. |
+| `fixtures` | no | STL meshes or axis-aligned boxes in the part frame. See [Tool assembly and collisions](#tool-assembly-and-collisions). |
+| `collision` | no | Clearance and sampling for the assembly check. See [Tool assembly and collisions](#tool-assembly-and-collisions). |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
 
@@ -93,6 +95,9 @@ ball nose whose sphere radius is half the diameter. `{"bull": corner_radius}` is
 A shape other than flat is rejected when a profile, pocket, drill, engrave, face, chamfer or wrap uses
 that tool. Those operations keep the flat diameter offset and do not read `shape`. A surface, a
 rough, a waterline or a rotary finish reads `shape`.
+
+A diameter tool may set `assembly`: stickout, flute, shank, a holder stack and an optional head.
+A kerf tool with `assembly` is an error. See [Tool assembly and collisions](#tool-assembly-and-collisions).
 
 ## Operations
 
@@ -297,8 +302,9 @@ rejects the key.
 For a ball of radius `r` the 3-axis drop-cutter gives the tip `p` and the ball centre
 `c = p + r*Z`. Tilting the tool axis to any unit direction `a` with `a·Z > 0`, about that
 centre, keeps the same sphere. The tilted tip is `c - r*a` and the surface contact is unchanged.
-This is exact for the sphere. The shank and the holder are not checked; that waits for the
-collision stage. The posted output has not been proven on a machine.
+This is exact for the sphere. The shank, holder and head are checked when the tool has an
+`assembly`; see [Tool assembly and collisions](#tool-assembly-and-collisions). The posted output
+has not been proven on a machine.
 
 ```json
 "tool_axis": { "mode": "lead_tilt", "lead_deg": 10, "tilt_deg": 0, "max_tilt_deg": 60 }
@@ -340,7 +346,80 @@ sample. An operation without `tool_axis` is unchanged.
 
 `examples/dome_lead_tilt.job.json` finishes `examples/dome.stl` with a 6 mm ball, `lead_tilt` of
 10° lead and 0° tilt, `max_tilt_deg` 30, and `examples/table_table_bc.kin.json`. The tilt cap
-keeps the axis inside that file's B travel.
+keeps the axis inside that file's B travel. `examples/dome_holder.job.json` is that job plus a
+tool `assembly` and a box fixture (a vise jaw beside the dome) that the holder clears.
+
+### Tool assembly and collisions
+
+A mill tool may describe the metal above the cutter so `campanion run` can reject a path that
+drives the shank, the holder or the spindle head into the finished part or a fixture. In-process
+stock is not modelled: only the finished part mesh (an STL source) and the fixtures are obstacles.
+The check uses the sampled IR poses in the part frame. A non-TCP control interpolates the joints
+linearly, so between samples the real path can differ from this; the sample density is the bound.
+The posted output has not been proven on a machine.
+
+```json
+"assembly": {
+  "stickout": 50,
+  "flute_length": 15,
+  "shank_diameter": 6,
+  "holder": [{ "diameter": 16, "length": 20 }],
+  "head": { "diameter": 50, "length": 40 }
+}
+```
+
+Lengths are in `units`. Every value is finite and at most 1e6 mm after conversion. Unknown keys
+are an error. A kerf tool with `assembly` is an error.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `stickout` | yes | Tip to holder face, `L`. Greater than 0. |
+| `flute_length` | no | Cutter body from the tip, `F`. Default is `stickout`. In `(0, L]`. |
+| `shank_diameter` | no | Shank diameter `D`. Default is the tool diameter. At least 0. |
+| `holder` | yes | One or more `{ "diameter", "length" }` cylinders, stacked from the holder face toward the spindle. |
+| `head` | no | `{ "diameter", "length" }` stacked on the last holder segment. |
+
+The flute is the cutter from the tip to `F`. A ball is a sphere of radius `r` at the tip centre
+plus a cylinder from `r` to `F`. A flat or bull tool is a cylinder from 0 to `F`. The shank is a
+cylinder of radius `D/2` from `F` to `L`. Holder segments and the head are cylinders above `L`.
+Every body lies along the tool axis of the pose, in the part frame.
+
+The shank, holder and head must not touch the part. A rapid also must not let the flute touch the
+part. Feeds may let the flute touch the part; the gouge check owns that. No body may touch a
+fixture on any move. A body touches when its distance to a triangle or box is strictly less than
+`collision.clearance`. Contact at exactly the clearance is allowed (1e-9 mm slack).
+
+Top-level `fixtures` is an array of named obstacles in the part frame. Names are unique and
+non-empty. Each item is an STL mesh (`path` and `hash`, the same hash rule as the source) or a
+box `{ "min": [x, y, z], "max": [x, y, z] }`. STL paths follow the source path rules and must
+end in `.stl`.
+
+```json
+"fixtures": [
+  { "name": "vise", "box": { "min": [40, -20, -5], "max": [60, 20, 25] } },
+  { "name": "jaw", "path": "jaw.stl", "hash": "cbf29ce484222325" }
+]
+```
+
+Top-level `collision` is optional.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `clearance` | no | Keep-out around each body, in `units`. Default 0, at least 0. |
+| `sample_step` | no | Maximum tip travel between samples, in `units`. Default 1 mm, greater than 0. |
+| `max_angle_step_deg` | no | Maximum tool-axis turn between samples, in degrees. Default 1, in `(0, 180]`. Not scaled. |
+
+For each move from pose P0 to P1 the check samples `t` in `[0, 1]` so the tip moves at most
+`sample_step` and the axis turns at most `max_angle_step_deg`. It lerps the tip and slerps the
+axis, and includes both ends. Arcs and helices are sampled along the arc.
+
+The check runs after the gouge check, on every mill toolpath whose tool has an `assembly`. Tools
+without `assembly`, and jobs without fixtures and assembly, are unchanged. A hit fails `run`
+(exit 1, nothing written). The message names the operation, the toolpath index, the move index,
+the body (`shank`, `holder 1`, `head`, `flute (rapid)`, …), the obstacle (`part` or fixture
+`name`), and the part-frame point. Only the first collision per toolpath is reported.
+
+`operation `dome` toolpath 0 move 37: holder 1 hits fixture `vise` at (12.300, -4.000, 8.100)`
 
 ### Roughing
 
@@ -579,7 +658,7 @@ Hostile numbers and sizes fail the load instead of being passed on:
 - JSON file at most 32 MiB, UTF-8.
 - 256 tools, 1024 operations, 64 layers on one operation.
 - Names at most 256 bytes. Source path at most 4096 bytes.
-- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, grid, floor Z, top Z, wrap diameter and offsets, surface, rough and waterline stock, heights and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source.
+- Tool size, depth, step-down, chamfer width, tip diameter, tip clearance, bull corner radius, margin, sample step, grid, floor Z, top Z, wrap diameter and offsets, surface, rough and waterline stock, heights, assembly lengths, fixture box coordinates, collision clearance and sample step, and tolerances at most 1e6 mm (angular tolerance at most 1e6 rad). An STL part read by `run` is at most 32 MiB, the same cap as a text source. At most 64 fixtures and 32 holder segments.
 - Feeds at most 1e9 mm/min. Delays at most 1e6 s.
 - At most 1024 depth passes.
 

@@ -1,0 +1,64 @@
+{
+  "format": "campanion-job/1",
+  "source": {
+    "path": "dome.stl",
+    "hash": "63fcad5e5dca92dc"
+  },
+  "units": "mm",
+  "kinematics": "table_table_bc.kin.json",
+  "tools": [
+    {
+      "id": 1,
+      "diameter": 6.0,
+      "shape": "ball",
+      "speed": 12000,
+      "assembly": {
+        "stickout": 50,
+        "flute_length": 15,
+        "shank_diameter": 6,
+        "holder": [
+          { "diameter": 16, "length": 20 }
+        ],
+        "head": { "diameter": 50, "length": 40 }
+      }
+    }
+  ],
+  "operations": [
+    {
+      "name": "dome",
+      "type": "surface",
+      "tool_id": 1,
+      "stepover": 6.0,
+      "sample_step": 2.0,
+      "tool_axis": {
+        "mode": "lead_tilt",
+        "lead_deg": 10,
+        "tilt_deg": 0,
+        "max_tilt_deg": 30
+      },
+      "feeds": {
+        "cut": 1000.0,
+        "plunge": 300.0
+      }
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "vise",
+      "box": {
+        "min": [40, -20, -5],
+        "max": [60, 20, 25]
+      }
+    }
+  ],
+  "collision": {
+    "clearance": 0,
+    "sample_step": 2,
+    "max_angle_step_deg": 2
+  },
+  "tolerance": {
+    "linear": 0.001,
+    "angular": 0.001,
+    "chord": 0.05
+  }
+}
