@@ -1,6 +1,6 @@
 # campanion-post
 
-RS274/NGC posts. A post definition is JSON (`posts/linuxcnc.json` and the other built-ins). `post_program` writes a cutter-location program. `read_back` and `compare` check that text against the IR. `audit` replays a mill program and reports the modal state at each motion.
+RS274/NGC posts. A post definition is JSON (`posts/linuxcnc.json` and the other built-ins). `post_program` writes a cutter-location program. `read_back` and `compare` check that text against the IR. `audit` replays a mill program and reports the modal state at each motion. `audit_lathe` does the same for a lathe or mill-turn program.
 
 `decimal_point`, when true, keeps a decimal point on every dimensional word (`X` `Y` `Z`, `I` `J` `K`, `R`, rotary `A`/`B`, and lathe `X`/`Z`): a whole number is `52.` and zero is `0.`. Fanuc and Haas controls read a word written without a decimal point as least-input increments, so `X52` is 0.052 mm and `A90` is 0.09 degrees. Feed (`F`), spindle (`S`), dwell (`P`), line numbers, and tool and program numbers are left alone. LinuxCNC, Mach3, Grbl, and plasma omit the flag and read plain decimals.
 
@@ -19,6 +19,10 @@ RS274/NGC posts. A post definition is JSON (`posts/linuxcnc.json` and the other 
 A word these mill posts do not write is an error, so a typo in a template fails the replay. A `G2` or `G3` needs a known plane and a full centre: both in-plane letters (`I`/`J`, `I`/`K`, or `J`/`K`) or an `R`. A feed move needs a positive `F` already set. An inverse-time feed block must carry its own `F`. When line numbers are enabled, every numbered line follows the post's start and step, and each number stays at or below 1000000000. Each line must fit `max_line_length`. On a `decimal_point` post, dimensional words include a decimal point. A negative zero, scientific notation, and a word whose absolute value is above `1e9` are errors.
 
 Work offset stays unset when the text never selects `G54`–`G59`. Feed mode stays units per minute until `G93` or `G94`. `M2` and `M30` turn the spindle and coolant off. `M3` or `M4` with `S0` is a beam or torch that is off. `audit` reads mill posts only. A lathe or five-axis post is rejected, because diameter mode and the extra frame words are a different dialect.
+
+`audit_lathe` reads a lathe post. It tracks diameter or radius X (`G7`/`G8`, or the post's `diameter_mode` until one of those is written), constant surface speed (`G96`) and its cap (`G50 S` before `G96`, or `D` on the `G96` line), feed per minute, per revolution, or inverse time (`G93`/`G94`/`G95`/`G98`/`G99`), the turret tool and offset (`T` plus `M6`, or `T0101`), nose compensation when a `G40`/`G41`/`G42` is written, threading (`G32`/`G33` and the lead word), C-axis engage and disengage, the spindle brake, the live tool (`M133`/`M135` or `M3 $1`), face and cylinder interpolation (`G112`/`G113`, `G107`), Y-axis planes (`G17`/`G18`/`G19`), sub-spindle select (`G14`/`G15`), part transfer, the tailstock, the steady rest, the parts catcher, bar feed, and two-channel wait codes.
+
+End points are in the part frame. Diameter-mode X is halved, unless face interpolation says X is already Cartesian. `I` `J` `K` stay radius offsets. Arc sense is the program sense after undoing `arc_flip` and a mirrored Z. A `G53` or lathe `G28` line is not a part move, and neither is a bar-feed line or a cylinder `on` line that only sets the mapping. `G28 H0.` does not change modal C. Empty engage, disengage, and brake templates write nothing, so those flags stay off. A channel-start comment splits the wait list and does not reset the other modal state. Motion ends, arc sense, feeds, inverse time, thread leads, and C are checked against `read_back`. Posted G-code is unchanged: this is a test checker.
 
 ## Rotary axes
 

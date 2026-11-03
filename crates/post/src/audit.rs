@@ -7,8 +7,8 @@
 //! A word this checker does not know is an error, so a typo in a template fails here. Geometry
 //! is also checked against [`crate::read_back`] so the two readers stay aligned.
 //!
-//! Lathe and five-axis posts are rejected. Their extra words and diameter scaling are a different
-//! dialect. Work offset stays unset when the program never writes `G54`–`G59`. Feed mode stays
+//! Lathe and five-axis posts are rejected. Lathe and mill-turn text is replayed by
+//! [`crate::audit_lathe`]. Work offset stays unset when the program never writes `G54`–`G59`. Feed mode stays
 //! units per minute until `G93` or `G94`. `M2` and `M30` turn the spindle and coolant off.
 //! `M3` or `M4` with `S0` is running with the beam or torch off: [`SpindleState::cutting`] is false.
 
