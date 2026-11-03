@@ -12,6 +12,7 @@
 ### Added
 
 - Mill jobs may set `stock` (a box in the part frame) and `stock_model` (`cell`, `enabled`). When the model is on, `campanion run` replays the toolpaths through a Z-dexel of the remaining stock. A rapid that enters the stock, or a shank, holder or head that meets it, fails the run and nothing is written. After an STL program the run prints the leftover and the model-gouge count. A sphere and a finite cylinder are exact on each dexel; a straight cut with a constant axis also subtracts the exact swept cylinder. A rotating axis, an arc and the ball nose are sampled. Steep walls are only as sharp as the cell. This output has not been proven on a machine.
+- `audit` replays posted mill G-code and reports the modal state at each motion. Property tests check random programs on the mill posts (linuxcnc, grbl, mach3, fanuc, haas, plasma, grbl_laser). Posted G-code is unchanged.
 
 ## 0.9.2 — 2026-11-02
 

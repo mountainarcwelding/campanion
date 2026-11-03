@@ -803,6 +803,11 @@ impl PostDef {
         self.decimals.linear
     }
 
+    /// Digits after the decimal point on `F`.
+    pub fn feed_decimals(&self) -> u8 {
+        self.decimals.feed
+    }
+
     /// True when the spindle-on template substitutes `{speed}`.
     pub fn spindle_on_needs_speed(&self) -> bool {
         self.process.get("spindle").is_some_and(|words| words.on.iter().any(|line| line.contains("{speed}")))

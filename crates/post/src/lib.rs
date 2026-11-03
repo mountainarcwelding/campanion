@@ -6,7 +6,8 @@
 //! the same program and post always produce the same bytes.
 //!
 //! [`crate::read_back`] reads the dialect back into moves. [`crate::compare`] checks those moves
-//! against the program that was posted.
+//! against the program that was posted. [`audit`] replays a mill program and reports the modal
+//! state a control would keep at each motion.
 //!
 //! A post may declare a rotary axis. Poses that carry an angle are written in the machine frame.
 //! The feed rule for a move that changes the angle is in the crate README.
@@ -20,6 +21,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod audit;
 mod balance;
 mod compare;
 mod def;
@@ -31,6 +33,9 @@ mod read;
 mod rotary;
 mod write;
 
+pub use audit::{
+    ArcReplay, AuditReport, CoolantState, DistanceMode, FeedMode, LengthOffset, MotionMode, MotionState, SpindleState, UnitMode, WorkOffset, audit,
+};
 pub use balance::{ChannelSegment, channel_balance};
 pub use compare::compare;
 pub use read::{ReadMove, read_back};

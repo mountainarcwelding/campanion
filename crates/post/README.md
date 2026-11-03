@@ -1,6 +1,6 @@
 # campanion-post
 
-RS274/NGC posts. A post definition is JSON (`posts/linuxcnc.json` and the other built-ins). `post_program` writes a cutter-location program. `read_back` and `compare` check that text against the IR.
+RS274/NGC posts. A post definition is JSON (`posts/linuxcnc.json` and the other built-ins). `post_program` writes a cutter-location program. `read_back` and `compare` check that text against the IR. `audit` replays a mill program and reports the modal state at each motion.
 
 `decimal_point`, when true, keeps a decimal point on every dimensional word (`X` `Y` `Z`, `I` `J` `K`, `R`, rotary `A`/`B`, and lathe `X`/`Z`): a whole number is `52.` and zero is `0.`. Fanuc and Haas controls read a word written without a decimal point as least-input increments, so `X52` is 0.052 mm and `A90` is 0.09 degrees. Feed (`F`), spindle (`S`), dwell (`P`), line numbers, and tool and program numbers are left alone. LinuxCNC, Mach3, Grbl, and plasma omit the flag and read plain decimals.
 
@@ -11,6 +11,14 @@ RS274/NGC posts. A post definition is JSON (`posts/linuxcnc.json` and the other 
 `hold` is the mill default. A spindle process-on that repeats the speed already running writes nothing, so one `M3` stays in effect across rapids and later operations. The matching `M5` is the process-off after the retract above the stock.
 
 `per_cut` writes every process-on. When any process is still on and the next motion is a rapid (`G0`), the writer emits `thc.off` and that process's off lines before the rapid, then the on lines again before the next feed. Speed and power come from the process-on that is still in effect. A pierce dwell is written only when the IR already has a dwell at that cut. Plasma and `grbl_laser` set `per_cut`, so a torch or beam stays off through G0 travel even when the IR process is `spindle`.
+
+## Modal audit
+
+`audit` reads posted mill G-code and returns the modal state a control would keep at each motion block: motion mode (`G0`–`G3`), plane (`G17`–`G19`), distance (`G90`/`G91`), units (`G20`/`G21`), feed mode (`G93`/`G94`), the active `F`, work offset (`G54`–`G59`), the tool in the spindle (`T` and `M6`, or the post's tool-change comment), tool-length offset (`G43`/`G49`), spindle or beam (`M3`/`M4`/`M5`, including a laser `S` word), and coolant.
+
+A word these mill posts do not write is an error, so a typo in a template fails the replay. A `G2` or `G3` needs a known plane and a full centre: both in-plane letters (`I`/`J`, `I`/`K`, or `J`/`K`) or an `R`. A feed move needs a positive `F` already set. An inverse-time feed block must carry its own `F`. When line numbers are enabled, every numbered line follows the post's start and step, and each number stays at or below 1000000000. Each line must fit `max_line_length`. On a `decimal_point` post, dimensional words include a decimal point. A negative zero, scientific notation, and a word whose absolute value is above `1e9` are errors.
+
+Work offset stays unset when the text never selects `G54`–`G59`. Feed mode stays units per minute until `G93` or `G94`. `M2` and `M30` turn the spindle and coolant off. `M3` or `M4` with `S0` is a beam or torch that is off. `audit` reads mill posts only. A lathe or five-axis post is rejected, because diameter mode and the extra frame words are a different dialect.
 
 ## Rotary axes
 
