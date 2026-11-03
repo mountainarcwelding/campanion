@@ -1035,6 +1035,38 @@ fn grbl_laser_drops_z_and_scales_power() {
 }
 
 #[test]
+fn grbl_laser_rejects_an_arc_that_needs_z() {
+    let post = builtin("grbl_laser").expect("grbl_laser");
+    let zx = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(1.0, 0.0, 0.0),
+            plane: Plane::Zx,
+            center: Vec3::ZERO,
+            sense: ArcSense::Ccw,
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+    ]);
+    let err = post_program(&zx, &post, &options()).expect_err("zx");
+    assert!(err.to_string().contains("z_mode drop"), "{err}");
+    let xy = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 1.0), feed: None }),
+        ClBlock::Motion(ClMotion::Arc {
+            to: pose(1.0, 1.0, 1.0),
+            plane: Plane::Xy,
+            center: Vec3::new(0.0, 1.0, 1.0).expect("center"),
+            sense: ArcSense::Ccw,
+            feed: 100.0,
+            role: MoveRole::Cut,
+        }),
+    ]);
+    let text = post_program(&xy, &post, &options()).expect("xy");
+    assert!(text.contains("G3") || text.contains("G2"), "{text}");
+    assert_no_z_word(&text);
+}
+
+#[test]
 fn thc_lines_follow_the_pierce_dwell() {
     let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/plasma.json")).expect("json");
     raw["thc"] = serde_json::json!({"on": ["(THC ON)"], "off": ["(THC OFF)"]});

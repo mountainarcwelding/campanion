@@ -1287,6 +1287,10 @@ impl<'a> Writer<'a> {
         if self.turning.is_some() {
             self.leave_lathe_inverse()?;
         }
+        // Z is an in-plane axis on ZX and YZ. Omitting it posts a different curve.
+        if self.post.drop_z() && matches!(plane, Plane::Zx | Plane::Yz) {
+            return Err(unsupported("z_mode drop omits Z, so an arc in the ZX or YZ plane cannot be written"));
+        }
         let start = self.curve_start()?;
         if !self.post.planes {
             let fixed = self.plane.unwrap_or(Plane::Xy);
