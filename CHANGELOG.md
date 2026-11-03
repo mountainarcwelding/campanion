@@ -5,6 +5,7 @@
 ### Fixed
 
 - A positive feed that rounded to zero at the post's F precision was written as `F0` or `F0.0000`. The move is now rejected. Every built-in post that writes an `F` word was affected (mill, lathe, and five-axis).
+- A full circle after an arc of the same sense was treated as the rest of that arc, so a correct program failed `compare`. The full circle is kept as its own move.
 
 ## 0.9.2 — 2026-11-02
 

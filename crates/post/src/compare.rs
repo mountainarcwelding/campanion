@@ -628,8 +628,17 @@ fn consume_curve(
             // same-sense arc block that also ends there is this arc's last piece. A separate tiny
             // program arc there is still accepted by the collapsed-arc branch at the loop top.
             // Rotary sense is remapped per block; the next block's angle is not this one.
-            // A following full circle on the same circle is not this circle's tail.
-            let tail_still_open = acc < sweep + slack
+            // Equal in-plane endpoints are a full turn of their own. That block stays the next
+            // move unless this motion still has a full turn left.
+            let following_full_turn = moves.get(*cursor).is_some_and(|next| {
+                if !matches!(next, ReadMove::Arc { .. }) {
+                    return false;
+                }
+                let next_end = project(end_of(next), drop_z);
+                geom::in_plane_len(plane, point, next_end) <= 1e-9 && sweep - acc < std::f64::consts::TAU - 0.2
+            });
+            let tail_still_open = !following_full_turn
+                && acc < sweep + slack
                 && !rotary_curve
                 && (sweep < std::f64::consts::TAU - 0.2 || acc + 1e-3 < sweep)
                 && moves.get(*cursor).is_some_and(|next| match next {
@@ -975,6 +984,36 @@ mod tests {
             ClBlock::Motion(arc),
             ClBlock::Motion(ClMotion::Linear { to: tip(15.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
         ])
+    }
+
+    #[test]
+    fn full_circle_after_a_same_sense_arc_is_its_own_move() {
+        let quarter_end = tip(0.0, 10.0, 0.0);
+        let program = program_of(vec![
+            ClBlock::Motion(ClMotion::Rapid { to: tip(10.0, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: quarter_end,
+                plane: Plane::Xy,
+                center: Vec3::ZERO,
+                sense: ArcSense::Ccw,
+                feed: 80.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: quarter_end,
+                plane: Plane::Xy,
+                center: Vec3::new(-8.0, 10.0, 0.0).expect("center"),
+                sense: ArcSense::Ccw,
+                feed: 90.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(20.0, 10.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ]);
+        let post = linux();
+        let text = post_program(&program, &post, &options()).expect("post");
+        let moves = read_back(&text, &post).expect("read");
+        super::compare(&program, &moves, 1e-3, &post).expect("compare");
+        super::compare(&program, &moves, 0.05, &post).expect("loose compare");
     }
 
     #[test]
