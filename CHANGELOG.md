@@ -5,6 +5,7 @@
 ### Added
 
 - Mill jobs may set a tool `assembly` (stickout, flute, shank, holder stack, optional head) and job-level `fixtures` and `collision`. After the gouge check, `campanion run` tests the shank, holder and head — and the flute on a rapid — against the finished part mesh and the fixtures. The first hit names the operation, toolpath, move, body, obstacle and part-frame point. In-process stock is not modelled. The check samples the IR poses; a non-TCP control interpolates joints, so the real path can differ between samples. This output has not been proven on a machine.
+- Lathe jobs may set the same `assembly` on a live tool, measured along the live-tool axis, plus optional `chuck` and `sub_chuck` cylinders and the mill `collision` object. After the gouge check, `campanion lathe` tests the shank, holder and head — and the flute on a rapid — against the finished profile revolved about the spindle. No body may touch the chuck, and a holder may not touch a clamped steady rest. An insert holder is tested against the chuck and that steady rest, and the insert against the chuck, in the half-section. The first hit names the operation, toolpath, move, body, obstacle and point. The tailstock quill is not a solid in this check. In-process stock is not modelled. This output has not been proven on a machine.
 
 ## 0.9.1 — 2026-11-02
 

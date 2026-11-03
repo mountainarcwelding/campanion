@@ -36,6 +36,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 - `examples/rotary.job.json` finishes `examples/rotary.stl` with a 3 mm ball, zigzag. The mesh is a vase revolved about X. See [Rotary finishing](docs/job-file.md#rotary-finishing).
 - `examples/shaft.lathe.json` faces, roughs and finishes the stepped shaft in `examples/shaft.dxf`. See [Lathe jobs](docs/job-file.md#lathe-jobs).
 - `examples/millturn.lathe.json` indexes C for a front live drill and an OD live slot on that shaft (no Y, no interpolation).
+- `examples/millturn_holder.lathe.json` is that job plus a chuck and live-tool assemblies. The shank, holder and head are checked against the revolved profile and the chuck.
 - `examples/millturn_flat.lathe.json` mills one indexed flat on that shaft with the Y axis (Haas `G19`; no interpolation).
 - `examples/subspindle.lathe.json` faces and finishes a short bar on the main spindle, hands it to the sub, then faces and finishes the same half-profile on the sub (Haas `G55` `G14`, then `G15` `G54`).
 - `examples/millturn_face.lathe.json` mills a front-face pocket from a drawing (Haas `G112`); `live_mill` also wraps an OD profile with cylinder interpolation (`G107`).

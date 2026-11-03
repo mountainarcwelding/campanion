@@ -152,3 +152,52 @@ fn short_stickout_fails_naming_the_holder_and_the_move() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn millturn_holder_passes() -> Result<(), String> {
+    let root = workspace_root()?;
+    let ngc = temp_path("campanion-millturn-holder.ngc");
+    let output = campanion(&root, &["lathe", "examples/millturn_holder.lathe.json", "-o", &path_arg(&ngc)?])?;
+    let stderr = output_text(&output.stderr)?;
+    let stdout = output_text(&output.stdout)?;
+    if output.status.code() != Some(0) {
+        return Err(format!("lathe exit {:?} stdout {stdout} stderr {stderr}", output.status.code()));
+    }
+    if !ngc.is_file() {
+        return Err("millturn holder wrote no output".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn wide_holder_near_the_chuck_fails_and_writes_nothing() -> Result<(), String> {
+    let root = workspace_root()?;
+    let example = std::fs::read_to_string(root.join("examples/millturn_holder.lathe.json")).map_err(|err| err.to_string())?;
+    let wide = example
+        .replace(r#""from": -40"#, r#""from": -54"#)
+        .replace(r#""to": -50"#, r#""to": -55"#)
+        .replace(r#""stickout": 28"#, r#""stickout": 12"#)
+        .replace(r#""flute_length": 16"#, r#""flute_length": 8"#)
+        .replace(r#""diameter": 20"#, r#""diameter": 32"#);
+    let dir = temp_path("campanion-millturn-holder-wide");
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    std::fs::copy(root.join("examples/shaft.dxf"), dir.join("shaft.dxf")).map_err(|err| err.to_string())?;
+    let job = dir.join("millturn_holder.lathe.json");
+    std::fs::write(&job, wide).map_err(|err| err.to_string())?;
+    let ngc = dir.join("out.ngc");
+    let output = campanion(&dir, &["lathe", &path_arg(&job)?, "-o", &path_arg(&ngc)?])?;
+    let stderr = output_text(&output.stderr)?;
+    let stdout = output_text(&output.stdout)?;
+    if output.status.code() == Some(0) {
+        return Err(format!("wide holder was expected to fail; stdout {stdout} stderr {stderr}"));
+    }
+    if ngc.exists() {
+        return Err("wide holder wrote output".into());
+    }
+    for needle in ["holder 1", "chuck", "move ", "od_slot"] {
+        if !stderr.contains(needle) {
+            return Err(format!("error does not contain {needle}: {stderr}"));
+        }
+    }
+    Ok(())
+}

@@ -59,7 +59,7 @@ mod section;
 mod section_tests;
 
 pub use cycles::{DrillParams, GrooveParams, Infeed, PartParams, ThreadParams, centre_drill, groove, part_off, thread, thread_pass_depths};
-pub use gouge::{GougeKind, HolderGeom, InsertGeom, TurnGouge, check_turn_gouges};
+pub use gouge::{GougeKind, HolderGeom, InsertGeom, TurnGouge, check_turn_gouges, holder_corners};
 pub use ir::to_cl_path;
 pub use live::{
     FlatPath, FlatStep, LiveDrillParams, LiveFace, LiveFlatParams, LivePath, LiveSlotParams, LiveStation, LiveStep, MAX_LIVE_POSITIONS, live_drill,

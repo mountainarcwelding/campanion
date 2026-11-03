@@ -357,6 +357,10 @@ pub struct HolderSegment {
 }
 
 impl HolderSegment {
+    pub(crate) fn new(diameter: f64, length: f64) -> Self {
+        Self { diameter, length }
+    }
+
     pub fn diameter(self) -> f64 {
         self.diameter
     }
@@ -377,6 +381,10 @@ pub struct ToolAssembly {
 }
 
 impl ToolAssembly {
+    pub(crate) fn new(stickout: f64, flute_length: f64, shank_diameter: f64, holder: Vec<HolderSegment>, head: Option<HolderSegment>) -> Self {
+        Self { stickout, flute_length, shank_diameter, holder, head }
+    }
+
     /// Tip to holder face.
     pub fn stickout(&self) -> f64 {
         self.stickout
@@ -412,6 +420,10 @@ pub struct CollisionSettings {
 }
 
 impl CollisionSettings {
+    pub(crate) fn new(clearance: f64, sample_step: f64, max_angle_step_deg: f64) -> Self {
+        Self { clearance, sample_step, max_angle_step_deg }
+    }
+
     /// Default: clearance 0, sample step 1 mm, axis step 1°.
     pub fn default_values() -> Self {
         Self { clearance: 0.0, sample_step: DEFAULT_COLLISION_SAMPLE_MM, max_angle_step_deg: DEFAULT_COLLISION_ANGLE_DEG }

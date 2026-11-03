@@ -203,6 +203,13 @@ fn bump_samples(total: &mut usize, add: usize) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Poses along one IR move, including both ends. Arcs and helices follow the curve. The tip is
+/// lerped and the axis is slerped on a line. Rotary angles are lerped.
+pub(crate) fn poses_along(start: Pose, end: Pose, motion: &ClMotion, settings: CollisionSettings) -> Result<Vec<Pose>, CliError> {
+    let (_, _, arc) = motion_end(motion)?;
+    sample_move(start, end, arc, settings)
+}
+
 fn sample_move(start: Pose, end: Pose, arc: Option<ArcSample>, settings: CollisionSettings) -> Result<Vec<Pose>, CliError> {
     match arc {
         Some(arc) => sample_arc(start, end, arc, settings),

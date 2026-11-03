@@ -45,7 +45,9 @@
 //! `campanion_ir::verify` runs before anything is written. Issues are printed and the process
 //! exits 1. Face, rough and finish paths are checked against that spindle's finished profile for
 //! insert and holder gouges. A sub operation uses the sub profile. A gouge is printed and the
-//! process exits 1. Nothing is written in either case.
+//! process exits 1. Nothing is written in either case. When the job sets `chuck`, `sub_chuck`,
+//! or a live-tool `assembly`, those bodies are checked next. A hit is an error and nothing is
+//! written. Jobs without those keys are unchanged.
 //! `--post` writes that dialect instead of the test-sink NGC and compares the read-back
 //! at the job chord tolerance. A mismatch exits 1 and nothing is written. ZX arcs in the test
 //! sink are `G18`. The test sink does not write synchronised thread moves, so a job that threads
@@ -73,8 +75,11 @@ use serde_json::{Map, Value};
 
 use crate::error::CliError;
 use crate::job::{as_bool, as_f64, as_str, as_u32, check_keys, object, optional, optional_f64, read_text, require, required_name};
-use crate::jobfile::DEFAULT_JOB_CHORD_MM;
+use crate::jobfile::{CollisionSettings, DEFAULT_JOB_CHORD_MM, HolderSegment, ToolAssembly};
 use crate::live_mill::{MillFrame, MillInterp, MillProgram, MillSpec, MillStrategy, build as build_mill, load_contours, profile_side};
+
+#[path = "lathe_collision.rs"]
+mod lathe_collision;
 
 const FORMAT_TAG: &str = "campanion-lathe/1";
 const MAX_TOOLS: usize = 256;
@@ -86,7 +91,10 @@ const MAX_SPINDLE_RPM: f64 = 100_000.0;
 /// [`Tool::try_new`] rejects a cutter diameter above this.
 const MAX_TOOL_DIAMETER_MM: f64 = 1.0e6;
 /// Keys a live tool accepts. An insert field on the same object uses this sentence.
-const LIVE_TOOL_FIELDS: &str = "id, station, live, kind, diameter, point_angle_deg, max_rpm";
+const LIVE_TOOL_FIELDS: &str = "id, station, live, kind, diameter, point_angle_deg, max_rpm, assembly";
+/// Assembly lengths, chuck size and collision lengths share the mill cap.
+const MAX_MM: f64 = 1.0e6;
+const MAX_HOLDER_SEGMENTS: usize = 32;
 const HEAD: &str = "turret1";
 /// Second turret, added only when an operation uses channel 1 or a wait is present.
 const LOWER: &str = "lower";
@@ -129,6 +137,12 @@ struct LatheJob {
     steady_rest: Option<SteadyRestBlock>,
     /// Diameter and length the parts catcher will take. Absent when the job has no parts_catcher block.
     parts_catcher: Option<PartsCatcherBlock>,
+    /// Main chuck body and jaws, one cylinder. Absent when the job has no chuck block.
+    chuck: Option<ChuckBody>,
+    /// Sub-spindle chuck. Present only together with [`Self::sub`].
+    sub_chuck: Option<ChuckBody>,
+    /// Clearance and sample step for the assembly check. Defaults when the job omits `collision`.
+    collision: CollisionSettings,
     head: LatheHead,
     tools: Vec<LatheTool>,
     operations: Vec<Operation>,
@@ -214,6 +228,8 @@ enum ToolBody {
         kind: LiveKind,
         diameter: f64,
         max_rpm: Option<f64>,
+        /// Shank, holder and head along the live-tool axis. Absent when the tool omits `assembly`.
+        assembly: Option<ToolAssembly>,
     },
 }
 
@@ -459,6 +475,14 @@ struct TailstockBlock {
     diameter: f64,
     /// Extra gap around that cylinder, in job units. Default 1.
     clearance: f64,
+}
+
+/// Chuck body and jaws as one cylinder. The face sits at the bar end.
+struct ChuckBody {
+    /// Outer diameter, millimetres.
+    diameter: f64,
+    /// Length from the chuck face toward −Z, millimetres.
+    length: f64,
 }
 
 /// Jaw centre and the axial band the turret must stay clear of.
@@ -773,6 +797,7 @@ pub fn lathe(args: &[OsString]) -> Result<ExitCode, CliError> {
         }
         return Ok(ExitCode::from(1));
     }
+    lathe_collision::check(&job, &profile, sub_profile.as_ref(), doc.program())?;
     emit(&args, &job, &doc, post.as_ref())
 }
 
@@ -872,6 +897,9 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
             "tailstock",
             "steady_rest",
             "parts_catcher",
+            "chuck",
+            "sub_chuck",
+            "collision",
             "head",
             "tools",
             "operations",
@@ -910,6 +938,18 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
     if sub.is_some() && steady_rest.is_some() {
         return Err(CliError::invalid("\"steady_rest\" is not allowed with a \"sub\" block"));
     }
+    let chuck = match optional(map, "chuck") {
+        Some(value) => Some(parse_chuck(value, "chuck")?),
+        None => None,
+    };
+    let sub_chuck = match optional(map, "sub_chuck") {
+        Some(value) => Some(parse_chuck(value, "sub_chuck")?),
+        None => None,
+    };
+    if sub.is_none() && sub_chuck.is_some() {
+        return Err(CliError::invalid("sub_chuck needs a \"sub\" block"));
+    }
+    let collision = parse_lathe_collision(optional(map, "collision"))?;
     let head = parse_head(optional(map, "head"))?;
     let machine = match optional(map, "machine") {
         Some(value) => Some(crate::machine::parse_machine(value)?),
@@ -957,6 +997,9 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         tailstock,
         steady_rest,
         parts_catcher,
+        chuck,
+        sub_chuck,
+        collision,
         head,
         tools,
         operations,
@@ -965,6 +1008,50 @@ fn parse_job(text: &str) -> Result<LatheJob, CliError> {
         chord,
         clearance,
     })
+}
+
+fn parse_chuck(value: &Value, what: &str) -> Result<ChuckBody, CliError> {
+    let map = object(value, what)?;
+    check_keys(map, &["diameter", "length"], what)?;
+    let diameter = capped_positive(require(map, "diameter")?, &format!("{what} diameter"))?;
+    let length = capped_positive(require(map, "length")?, &format!("{what} length"))?;
+    Ok(ChuckBody { diameter, length })
+}
+
+/// Mill `collision` object. Absent uses clearance 0, a 1 mm sample step and a 1° axis step.
+fn parse_lathe_collision(value: Option<&Value>) -> Result<CollisionSettings, CliError> {
+    let Some(value) = value else {
+        return Ok(CollisionSettings::default_values());
+    };
+    let map = object(value, "collision")?;
+    check_keys(map, &["clearance", "sample_step", "max_angle_step_deg"], "collision")?;
+    let mut clearance = CollisionSettings::default_values().clearance();
+    let mut sample_step = CollisionSettings::default_values().sample_step();
+    let mut max_angle_step_deg = CollisionSettings::default_values().max_angle_step_deg();
+    if let Some(value) = optional(map, "clearance") {
+        clearance = capped_non_negative(value, "collision clearance")?;
+    }
+    if let Some(value) = optional(map, "sample_step") {
+        sample_step = capped_positive(value, "collision sample_step")?;
+    }
+    if let Some(value) = optional(map, "max_angle_step_deg") {
+        let degrees = as_f64(value, "collision max_angle_step_deg")?;
+        if !(degrees > 0.0 && degrees <= 180.0) {
+            return Err(CliError::invalid("collision max_angle_step_deg must be in (0, 180]"));
+        }
+        max_angle_step_deg = degrees;
+    }
+    Ok(CollisionSettings::new(clearance, sample_step, max_angle_step_deg))
+}
+
+fn capped_positive(value: &Value, what: &str) -> Result<f64, CliError> {
+    let number = positive(value, what)?;
+    if number > MAX_MM { Err(CliError::invalid(format!("{what} is larger than {MAX_MM} mm"))) } else { Ok(number) }
+}
+
+fn capped_non_negative(value: &Value, what: &str) -> Result<f64, CliError> {
+    let number = non_negative(value, what)?;
+    if number > MAX_MM { Err(CliError::invalid(format!("{what} is larger than {MAX_MM} mm"))) } else { Ok(number) }
 }
 
 fn parse_tailstock_block(value: &Value) -> Result<TailstockBlock, CliError> {
@@ -1355,7 +1442,7 @@ fn parse_live_tool(map: &Map<String, Value>) -> Result<LatheTool, CliError> {
     if INSERT_KEYS.iter().any(|key| map.contains_key(*key)) {
         return Err(CliError::invalid(format!("tool {id}: live tools take {LIVE_TOOL_FIELDS}")));
     }
-    check_keys(map, &["id", "station", "live", "kind", "diameter", "point_angle_deg", "max_rpm"], "tool")?;
+    check_keys(map, &["id", "station", "live", "kind", "diameter", "point_angle_deg", "max_rpm", "assembly"], "tool")?;
     let station = parse_station(map)?;
     let orientation = match as_str(require(map, "live")?, "live")? {
         "axial" => LiveOrientation::Axial,
@@ -1393,7 +1480,55 @@ fn parse_live_tool(map: &Map<String, Value>) -> Result<LatheTool, CliError> {
         }
         None => None,
     };
-    Ok(LatheTool { id, station, body: ToolBody::Live { orientation, kind, diameter, max_rpm } })
+    let assembly = match optional(map, "assembly") {
+        Some(value) => Some(parse_live_assembly(value, diameter)?),
+        None => None,
+    };
+    Ok(LatheTool { id, station, body: ToolBody::Live { orientation, kind, diameter, max_rpm, assembly } })
+}
+
+/// Live-tool envelope. Lengths are millimetres along the tool axis, away from the part.
+fn parse_live_assembly(value: &Value, tool_diameter: f64) -> Result<ToolAssembly, CliError> {
+    let map = object(value, "assembly")?;
+    check_keys(map, &["stickout", "flute_length", "shank_diameter", "holder", "head"], "assembly")?;
+    let stickout = capped_positive(require(map, "stickout")?, "stickout")?;
+    let flute_length = match optional(map, "flute_length") {
+        Some(value) => capped_positive(value, "flute_length")?,
+        None => stickout,
+    };
+    if flute_length > stickout {
+        return Err(CliError::invalid("flute_length must be at most stickout"));
+    }
+    let shank_diameter = match optional(map, "shank_diameter") {
+        Some(value) => capped_non_negative(value, "shank_diameter")?,
+        None => tool_diameter,
+    };
+    let holder = parse_assembly_holder(require(map, "holder")?)?;
+    let head = match optional(map, "head") {
+        Some(value) => Some(parse_stack_segment(value, "head")?),
+        None => None,
+    };
+    Ok(ToolAssembly::new(stickout, flute_length, shank_diameter, holder, head))
+}
+
+fn parse_assembly_holder(value: &Value) -> Result<Vec<HolderSegment>, CliError> {
+    let list = array(value, "holder", MAX_HOLDER_SEGMENTS)?;
+    if list.is_empty() {
+        return Err(CliError::invalid("holder needs at least one segment"));
+    }
+    let mut holder = Vec::with_capacity(list.len());
+    for item in list {
+        holder.push(parse_stack_segment(item, "holder")?);
+    }
+    Ok(holder)
+}
+
+fn parse_stack_segment(value: &Value, what: &str) -> Result<HolderSegment, CliError> {
+    let map = object(value, what)?;
+    check_keys(map, &["diameter", "length"], what)?;
+    let diameter = capped_positive(require(map, "diameter")?, &format!("{what} diameter"))?;
+    let length = capped_positive(require(map, "length")?, &format!("{what} length"))?;
+    Ok(HolderSegment::new(diameter, length))
 }
 
 fn parse_holder(value: &Value) -> Result<HolderGeom, CliError> {
@@ -2873,6 +3008,12 @@ fn require_insert<'a>(job: &'a LatheJob, operation: &Operation) -> Result<(&'a I
     match &tool.body {
         ToolBody::Insert { insert, tip, nose_radius, holder } => Ok((insert, *tip, *nose_radius, holder.as_ref())),
         ToolBody::Live { .. } => Err(CliError::run(format!("operation {}: tool {} is a live tool", operation.name(), tool.id))),
+    }
+}
+
+fn stock_length(stock: &Stock) -> f64 {
+    match stock {
+        Stock::Bar { length, .. } | Stock::Tube { length, .. } => *length,
     }
 }
 
@@ -4566,5 +4707,182 @@ mod tests {
         let small = unwrap_ok(super::parse_job(&machine_shell(3_000.0, r#""machine": { "model": "haas_st20y" },"#, "", TURN_TOOL, FACE_OP)), "small");
         let (doc, _) = unwrap_ok(super::build_document(Path::new("job.lathe.json"), &small, &cylinder(15.0, 30.0), None), "inside travel");
         assert_eq!(doc.program().toolpaths().len(), 1);
+    }
+
+    const FACE_ONLY: &str = r#"{ "name": "face", "type": "face", "tool_id": 1, "step_z": 0.5, "feed": 100, "speed": { "rpm": 1000 } }"#;
+    const INSERT_TOOL: &str =
+        r#"{ "id": 1, "station": 1, "shape": "c80", "nose_radius": 0.4, "orientation_deg": 45, "hand": "right", "tip": "centre" }"#;
+
+    fn shell(extra: &str, tools: &str, operations: &str) -> String {
+        format!(
+            r#"{{
+            "format": "campanion-lathe/1",
+            "source": {{ "path": "shaft.dxf" }},
+            "units": "mm",
+            "stock": {{ "kind": "bar", "diameter": 40, "length": 40, "front_allowance": 1 }},
+            "spindle": {{ "max_rpm": 3000 }},
+            {extra}
+            "tools": [{tools}],
+            "operations": [{operations}],
+            "clearance": 2
+        }}"#
+        )
+    }
+
+    fn assert_has(err: &str, needle: &str) {
+        assert!(err.contains(needle), "{err} missing {needle}");
+    }
+
+    #[test]
+    fn chuck_assembly_and_collision_reject_each_schema_error_and_store_valid_values() {
+        let face = shell("", INSERT_TOOL, FACE_ONLY);
+        let plain = unwrap_ok(super::parse_job(&face), "plain");
+        assert!(plain.chuck.is_none() && plain.sub_chuck.is_none());
+        assert!(plain.collision.clearance().abs() < 1e-12);
+        assert!((plain.collision.sample_step() - 1.0).abs() < 1e-12);
+        assert!(matches!(plain.tools[0].body, super::ToolBody::Insert { holder: None, .. }));
+
+        let chuck = unwrap_ok(super::parse_job(&shell(r#""chuck": { "diameter": 80, "length": 40 },"#, INSERT_TOOL, FACE_ONLY)), "chuck");
+        let body = chuck.chuck.expect("chuck");
+        assert!((body.diameter - 80.0).abs() < 1e-12 && (body.length - 40.0).abs() < 1e-12);
+
+        let sub =
+            r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" }, "back_allowance": 0.5 }, "sub_chuck": { "diameter": 30, "length": 12 },"#;
+        let sub_job = unwrap_ok(super::parse_job(&shell(sub, INSERT_TOOL, FACE_ONLY)), "sub chuck");
+        let sub_body = sub_job.sub_chuck.expect("sub chuck");
+        assert!((sub_body.diameter - 30.0).abs() < 1e-12 && (sub_body.length - 12.0).abs() < 1e-12);
+
+        let collision = r#""collision": { "clearance": 0.2, "sample_step": 0.5, "max_angle_step_deg": 2 },"#;
+        let sampled = unwrap_ok(super::parse_job(&shell(collision, INSERT_TOOL, FACE_ONLY)), "collision");
+        assert!((sampled.collision.clearance() - 0.2).abs() < 1e-12);
+        assert!((sampled.collision.sample_step() - 0.5).abs() < 1e-12);
+        assert!((sampled.collision.max_angle_step_deg() - 2.0).abs() < 1e-12);
+
+        let live = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6, "assembly": { "stickout": 40, "flute_length": 18, "shank_diameter": 5, "holder": [{ "diameter": 16, "length": 20 }], "head": { "diameter": 40, "length": 10 } } }"#;
+        let tools = format!("{INSERT_TOOL}, {live}");
+        let armed = unwrap_ok(super::parse_job(&shell("", &tools, FACE_ONLY)), "assembly");
+        let super::ToolBody::Live { assembly: Some(assembly), .. } = &armed.tools[1].body else {
+            panic!("live assembly missing");
+        };
+        assert!((assembly.stickout() - 40.0).abs() < 1e-12);
+        assert!((assembly.flute_length() - 18.0).abs() < 1e-12);
+        assert!((assembly.shank_diameter() - 5.0).abs() < 1e-12);
+        assert_eq!(assembly.holder().len(), 1);
+        assert!((assembly.holder()[0].diameter() - 16.0).abs() < 1e-12);
+        assert!((assembly.head().expect("head").length() - 10.0).abs() < 1e-12);
+
+        assert_has(
+            &parse_err(&shell(r#""chuck": { "diameter": 80, "length": 40, "jaws": 3 },"#, INSERT_TOOL, FACE_ONLY)),
+            "unknown chuck field `jaws`",
+        );
+        assert_has(&parse_err(&shell(r#""chuck": { "diameter": 0, "length": 40 },"#, INSERT_TOOL, FACE_ONLY)), "chuck diameter must be positive");
+        assert_has(&parse_err(&shell(r#""chuck": { "diameter": -2, "length": 40 },"#, INSERT_TOOL, FACE_ONLY)), "chuck diameter must be positive");
+        assert_has(
+            &parse_err(&shell(r#""chuck": { "diameter": "wide", "length": 40 },"#, INSERT_TOOL, FACE_ONLY)),
+            "chuck diameter must be a number",
+        );
+        assert_has(&parse_err(&shell(r#""chuck": { "length": 40 },"#, INSERT_TOOL, FACE_ONLY)), "missing `diameter`");
+        assert_has(&parse_err(&shell(r#""chuck": { "diameter": 80, "length": 0 },"#, INSERT_TOOL, FACE_ONLY)), "chuck length must be positive");
+        assert_has(
+            &parse_err(&shell(r#""chuck": { "diameter": 1000001, "length": 40 },"#, INSERT_TOOL, FACE_ONLY)),
+            "chuck diameter is larger than 1000000 mm",
+        );
+        assert_has(
+            &parse_err(&shell(r#""chuck": { "diameter": 80, "length": 1000001 },"#, INSERT_TOOL, FACE_ONLY)),
+            "chuck length is larger than 1000000 mm",
+        );
+        assert_has(
+            &parse_err(&shell(r#""sub_chuck": { "diameter": 30, "length": 12 },"#, INSERT_TOOL, FACE_ONLY)),
+            "sub_chuck needs a \"sub\" block",
+        );
+        assert_has(
+            &parse_err(&shell(
+                r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } }, "sub_chuck": { "diameter": 30, "length": 12, "extra": 1 },"#,
+                INSERT_TOOL,
+                FACE_ONLY,
+            )),
+            "unknown sub_chuck field `extra`",
+        );
+        assert_has(
+            &parse_err(&shell(
+                r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } }, "sub_chuck": { "diameter": 0, "length": 12 },"#,
+                INSERT_TOOL,
+                FACE_ONLY,
+            )),
+            "sub_chuck diameter must be positive",
+        );
+        assert_has(
+            &parse_err(&shell(
+                r#""sub": { "max_rpm": 2000, "source": { "path": "shaft.dxf" } }, "sub_chuck": { "diameter": 30, "length": 1000001 },"#,
+                INSERT_TOOL,
+                FACE_ONLY,
+            )),
+            "sub_chuck length is larger than 1000000 mm",
+        );
+        assert_has(
+            &parse_err(&shell(r#""collision": { "clearance": 0, "sample_step": 1, "nope": 1 },"#, INSERT_TOOL, FACE_ONLY)),
+            "unknown collision field `nope`",
+        );
+        assert_has(&parse_err(&shell(r#""collision": { "sample_step": 0 },"#, INSERT_TOOL, FACE_ONLY)), "collision sample_step must be positive");
+        assert_has(&parse_err(&shell(r#""collision": { "sample_step": -1 },"#, INSERT_TOOL, FACE_ONLY)), "collision sample_step must be positive");
+        assert_has(&parse_err(&shell(r#""collision": { "clearance": -0.1 },"#, INSERT_TOOL, FACE_ONLY)), "collision clearance must be >= 0");
+        assert_has(
+            &parse_err(&shell(r#""collision": { "clearance": 1000001 },"#, INSERT_TOOL, FACE_ONLY)),
+            "collision clearance is larger than 1000000 mm",
+        );
+        assert_has(
+            &parse_err(&shell(r#""collision": { "max_angle_step_deg": 0 },"#, INSERT_TOOL, FACE_ONLY)),
+            "collision max_angle_step_deg must be in (0, 180]",
+        );
+        assert_has(
+            &parse_err(&shell(r#""collision": { "max_angle_step_deg": 180.1 },"#, INSERT_TOOL, FACE_ONLY)),
+            "collision max_angle_step_deg must be in (0, 180]",
+        );
+        assert_has(
+            &parse_err(&shell(r#""collision": { "max_angle_step_deg": -5 },"#, INSERT_TOOL, FACE_ONLY)),
+            "collision max_angle_step_deg must be in (0, 180]",
+        );
+        assert_has(&parse_err(&shell(r#""fixtures": [],"#, INSERT_TOOL, FACE_ONLY)), "unknown job field `fixtures`");
+
+        let broken = |assembly: &str| {
+            let tool = format!(r#"{{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6, "assembly": {assembly} }}"#);
+            parse_err(&shell("", &tool, FACE_ONLY))
+        };
+        assert_has(
+            &broken(r#"{ "stickout": 10, "flute_length": 12, "holder": [{ "diameter": 16, "length": 5 }] }"#),
+            "flute_length must be at most stickout",
+        );
+        assert_has(&broken(r#"{ "stickout": 0, "holder": [{ "diameter": 16, "length": 5 }] }"#), "stickout must be positive");
+        assert_has(&broken(r#"{ "stickout": 1000001, "holder": [{ "diameter": 16, "length": 5 }] }"#), "stickout is larger than 1000000 mm");
+        assert_has(&broken(r#"{ "stickout": 20, "flute_length": 0, "holder": [{ "diameter": 16, "length": 5 }] }"#), "flute_length must be positive");
+        assert_has(
+            &broken(r#"{ "stickout": 20, "shank_diameter": -1, "holder": [{ "diameter": 16, "length": 5 }] }"#),
+            "shank_diameter must be >= 0",
+        );
+        assert_has(
+            &broken(r#"{ "stickout": 20, "shank_diameter": 1000001, "holder": [{ "diameter": 16, "length": 5 }] }"#),
+            "shank_diameter is larger than 1000000 mm",
+        );
+        assert_has(&broken(r#"{ "stickout": 20, "holder": [] }"#), "holder needs at least one segment");
+        assert_has(&broken(r#"{ "stickout": 20, "holder": [{ "diameter": 16, "length": 5 }], "nope": 1 }"#), "unknown assembly field `nope`");
+        assert_has(&broken(r#"{ "stickout": 20, "holder": [{ "diameter": 0, "length": 5 }] }"#), "holder diameter must be positive");
+        assert_has(&broken(r#"{ "stickout": 20, "holder": [{ "diameter": 16, "length": 5, "taper": 1 }] }"#), "unknown holder field `taper`");
+        assert_has(
+            &broken(r#"{ "stickout": 20, "holder": [{ "diameter": 16, "length": 5 }], "head": { "diameter": 40, "length": 0 } }"#),
+            "head length must be positive",
+        );
+        assert_has(
+            &broken(r#"{ "stickout": 20, "holder": [{ "diameter": 16, "length": 5 }], "head": { "diameter": 40, "length": 10, "mass": 1 } }"#),
+            "unknown head field `mass`",
+        );
+        let many = (0..33).map(|_| r#"{"diameter":10,"length":5}"#).collect::<Vec<_>>().join(",");
+        assert_has(&broken(&format!(r#"{{ "stickout": 20, "holder": [{many}] }}"#)), "too many holder: 33 > 32");
+
+        let with_assembly = INSERT_TOOL.replace('}', r#", "assembly": { "stickout": 20, "holder": [{ "diameter": 16, "length": 5 }] } }"#);
+        assert_has(&parse_err(&shell("", &with_assembly, FACE_ONLY)), "unknown tool field `assembly`");
+        let both = r#"{ "id": 2, "station": 2, "live": "axial", "kind": "drill", "diameter": 6, "shape": "c80", "assembly": { "stickout": 20, "holder": [{ "diameter": 16, "length": 5 }] } }"#;
+        let mixed = parse_err(&shell("", both, FACE_ONLY));
+        assert_has(&mixed, "tool 2: live tools take");
+        assert_has(&mixed, "assembly");
     }
 }

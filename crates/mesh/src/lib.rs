@@ -6,6 +6,7 @@
 //! [`rotary_lines`] turns the mesh about an A or B axis and samples tip radii above that axis.
 //! [`cylinder_triangle`], [`sphere_triangle`] and [`cylinder_aabb`] are the collision primitives
 //! used to test a mill tool assembly against the part and the fixtures.
+//! [`RevolvedSolid`] is the signed distance to a lathe section revolved about the spindle.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -13,6 +14,7 @@ mod collide;
 mod dropcutter;
 mod gouge;
 mod raster;
+mod revolve;
 mod rotary;
 mod scallop;
 mod stl;
@@ -23,6 +25,7 @@ pub use collide::{CollisionHit, CollisionIndex, Cylinder, Sphere, TOUCH_SLACK, c
 pub use dropcutter::{Cutter, DropCutter, closest_point_on_triangle, drop_cutter_triangle};
 pub use gouge::{Gouge, check_gouges};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};
+pub use revolve::{RevolvedSolid, aabb_polygon_distance, convex_polygon_distance};
 pub use rotary::{RotaryLine, RotaryLineAxis, rotary_lines};
 pub use scallop::scallop_stepover;
 pub use stl::{parse_stl, write_stl_binary};

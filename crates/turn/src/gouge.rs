@@ -141,6 +141,23 @@ pub struct HolderGeom {
     pub length: f64,
 }
 
+/// Corners of the holder rectangle, starting at the insert back.
+///
+/// Order is near-left, near-right, far-right, far-left in `(Z, radius)`. The rectangle is the
+/// same one [`check_turn_gouges`] samples. `None` is not used: an invalid insert or holder is
+/// [`TurnError::InvalidInput`].
+pub fn holder_corners(insert: &InsertGeom, holder: &HolderGeom, nose_centre: (f64, f64)) -> Result<[(f64, f64); 4]> {
+    validate_insert(insert)?;
+    validate_holder(holder)?;
+    let shape = insert_shape(insert, nose_centre)?;
+    let half = holder.width * 0.5;
+    let near_left = add(shape.back, scale(shape.perp, half));
+    let near_right = add(shape.back, scale(shape.perp, -half));
+    let far_left = add(near_left, scale(shape.axis, holder.length));
+    let far_right = add(near_right, scale(shape.axis, holder.length));
+    Ok([near_left, near_right, far_right, far_left])
+}
+
 /// Which part of the tool entered the solid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GougeKind {
