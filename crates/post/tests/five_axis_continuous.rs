@@ -380,6 +380,51 @@ fn rotary_only_without_rotary_block_is_an_error() {
     assert!(text.contains("G93") && text.contains("G1"), "{text}");
 }
 
+/// Two poses inside the cone, with a large commanded spin between them. `solve_path` holds the
+/// primary. Subdivision must follow that solved axis. Chasing the requested axis splits the 3 mm
+/// move until the post refuses it as a rotary-only feed.
+#[test]
+fn continuous_move_inside_the_singular_cone_posts() {
+    let kin = kinematics(TABLE_TABLE_AC);
+    let axis_at = |tilt: f64, spin: f64| kin.forward(&Joints { xyz: Vec3::ZERO, angles: [tilt, spin] }, 0.0).expect("forward").axis;
+    let start_axis = axis_at(0.4, 10.0);
+    let end_axis = axis_at(0.45, 100.0);
+    assert!(axis_deg(start_axis, Vec3::Z) < CONE_DEG, "start left the cone");
+    assert!(axis_deg(end_axis, Vec3::Z) < CONE_DEG, "end left the cone");
+    let blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(5.0, 2.0, 12.0).expect("tip"), start_axis), feed: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 2.0, 12.0).expect("tip"), end_axis), feed: FEED, role: MoveRole::Cut }),
+    ];
+    let program = program_of(setup_of(TABLE_TABLE_AC), blocks.clone());
+    let tcp = tcp_program_of(setup_of(TABLE_TABLE_AC), blocks);
+    for id in POST_IDS.into_iter().chain(TCP_POST_IDS) {
+        let post = builtin(id).expect(id);
+        let input = if TCP_POST_IDS.contains(&id) { &tcp } else { &program };
+        let text = post_program(input, &post, &options()).unwrap_or_else(|err| panic!("{id}: {err}"));
+        let moves: Vec<_> = read_back(&text, &post)
+            .unwrap_or_else(|err| panic!("{id}: {err}"))
+            .into_iter()
+            .filter(|motion| matches!(motion, ReadMove::Rapid { .. } | ReadMove::Linear { .. }))
+            .collect();
+        assert!(moves.len() < 8, "{id} split the cone move into {} blocks\n{text}", moves.len());
+        let mut primary = Vec::new();
+        for motion in &moves {
+            let five = match motion {
+                ReadMove::Rapid { five, .. } | ReadMove::Linear { five, .. } => five,
+                _ => continue,
+            };
+            if let Some(angle) = five[2] {
+                primary.push(angle);
+            }
+        }
+        assert!(primary.len() >= 2, "{id} posted no C word\n{text}");
+        let held = primary[0];
+        for angle in &primary {
+            assert!((angle - held).abs() < 0.05, "{id} primary moved from {held} to {angle}\n{text}");
+        }
+    }
+}
+
 const B_HEAD_JSON: &str = r#"{
   "name": "b_head",
   "rotaries": [{

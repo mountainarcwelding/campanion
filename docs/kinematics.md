@@ -69,7 +69,7 @@ The closest solution is the branch already in use. A solution that differs by mo
 
 `subdivide_path` takes the setup, the toolpath name, the poses, the joint solution, a chord tolerance in millimetres and an axis tolerance in degrees. Both tolerances are finite and positive. Poses and joints are the same length.
 
-It inserts samples between neighbouring poses. Each inserted sample is linear in every joint, angles included, and the inserted pose is the forward pose of those joints. It repeats until, on every segment, the tip at the joint midpoint lies within the chord tolerance of the straight midpoint of the two poses, and the tool axis lies within the axis tolerance of the slerp of the two axes. A segment whose joints do not change is kept as it is, so a path of constant joints inserts nothing.
+It inserts samples between neighbouring poses. Each inserted sample is linear in every joint, angles included, and the inserted pose is the forward pose of those joints. It repeats until, on every segment, the tip at the joint midpoint lies within the chord tolerance of the straight midpoint of the two poses, and the tool axis lies within the axis tolerance of the slerp of the forward axes of the two endpoint joints. The requested pose axis is not the one that is measured. Inside the singular cone that axis can differ from the solved joints by up to the cone angle, and the machine cuts the forward axis. A segment whose joints do not change is kept as it is, so a path of constant joints inserts nothing.
 
 More than 10000 inserted poses is an error: `toolpath `{name}` inserts more than 10000 poses`.
 

@@ -1140,8 +1140,10 @@ pub fn solve_path(setup: &FiveAxisSetup, poses: &[ToolPose], start: Option<Joint
 ///
 /// A segment is fine when the tip at the joint midpoint lies within `chord_tol_mm` of the
 /// straight midpoint of the two poses, and the tool axis lies within `axis_tol_deg` of the
-/// slerp of the two axes. Both tolerances must be finite and positive. A segment whose joints
-/// do not change is kept as it is, so a path of constant joints inserts nothing.
+/// slerp of the forward axes of the two endpoint joints. The requested pose axis is not used.
+/// Inside the singular cone it can differ from the solved joints by up to the cone angle, and
+/// the machine cuts the forward axis. Both tolerances must be finite and positive. A segment
+/// whose joints do not change is kept as it is, so a path of constant joints inserts nothing.
 ///
 /// More than [`MAX_INSERTED_POSES`] inserted poses is
 /// `toolpath `{toolpath}` inserts more than 10000 poses`.
@@ -1233,9 +1235,13 @@ impl Subdiv<'_> {
         if joints_unchanged(left_joints, right_joints) {
             return Ok(true);
         }
+        let left_axis = self.kin.forward(&left_joints, PATH_TOOL_LENGTH)?.axis;
+        let right_axis = self.kin.forward(&right_joints, PATH_TOOL_LENGTH)?.axis;
         let mid = self.kin.forward(&lerp_joints(left_joints, right_joints, 0.5), PATH_TOOL_LENGTH)?;
         let tip_gap = gap_vec(mid.tip, lerp_vec(left_pose.tip, right_pose.tip, 0.5));
-        let axis_gap = angle_between_deg(mid.axis, slerp_axis(left_pose.axis, right_pose.axis, 0.5));
+        // The pose axis is the request. Inside the singular cone the solved joints do not achieve
+        // it, and chasing that request splits the segment without bound.
+        let axis_gap = angle_between_deg(mid.axis, slerp_axis(left_axis, right_axis, 0.5));
         Ok(tip_gap <= self.chord_tol_mm && axis_gap <= self.axis_tol_deg)
     }
 }
