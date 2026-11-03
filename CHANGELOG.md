@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.9.3 — 2026-11-03
+
+Code-generation hardening and in-process stock. A modal replay checker and property tests now cover every built-in post (mill, plasma, laser, Grbl, lathe and mill-turn, five-axis with and without TCP, and 3+1 rotary). The audit found five bugs, fixed below: three in posted output and two in the `compare` checker. Mill jobs may model the in-process stock as a Z-dexel and check rapids and the tool assembly against it, with removal rate and engagement per move. This output has not been proven on a machine.
+
 ### Fixed
 
 - A continuous move inside the singular cone was refused on `linuxcnc_5ax` and `haas_umc` (`toolpath {i} move {j}: rotary-only move needs a feed`). Subdivision compared the joint midpoint with the requested tool axis, which that cone does not achieve, and split the move until a block was too small to feed. The midpoint is now compared with the forward axes of the solved joints. TCP posts already measured the forward axis.
