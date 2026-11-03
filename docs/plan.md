@@ -411,3 +411,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   output. Next: 5G–5H (collision checks, machine sim) for v0.9.2.
 - 2026-11-02: 5H draws link solids from a kinematics `model` in the viewer and highlights
   collisions from the posted joints. The sketch is boxes and cylinders, not machine CAD.
+- 2026-11-02: v0.9.2 is stages 5G–5H (mill and mill-turn tool-assembly collision checks against
+  the part, fixtures and chuck; machine simulation in the viewer). In-process stock is not modelled.

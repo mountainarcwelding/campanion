@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.9.2 — 2026-11-02
+
+Collision checks and machine simulation (five-axis stages 5G–5H). This completes the staged continuous five-axis plan (5A–5H). The checks cover the tool assembly against the finished part, fixtures and work-holding; in-process stock is not modelled. This output has not been proven on a machine.
+
 ### Added
 
 - Mill jobs may set a tool `assembly` (stickout, flute, shank, holder stack, optional head) and job-level `fixtures` and `collision`. After the gouge check, `campanion run` tests the shank, holder and head — and the flute on a rapid — against the finished part mesh and the fixtures. The first hit names the operation, toolpath, move, body, obstacle and part-frame point. In-process stock is not modelled. The check samples the IR poses; a non-TCP control interpolates joints, so the real path can differ between samples. This output has not been proven on a machine.
