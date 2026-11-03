@@ -318,7 +318,9 @@ name = "campanion-view"
 version = "0.9.1"
 dependencies = [
  "campanion-ir",
+ "campanion-mesh",
  "eframe",
+ "proptest",
 ]
 
 [[package]]

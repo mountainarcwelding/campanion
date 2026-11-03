@@ -1,6 +1,6 @@
 //! Forward kinematics of the illustrative joint files.
 
-use super::{Carrier, Choice, IrError, Joints, Kinematics, ToolPose, Vec3};
+use super::{Carrier, Choice, IrError, Joints, Kinematics, LinkSolid, MAX_MODEL_LINKS, Rigid, ToolPose, Vec3};
 
 const TABLE_TABLE_AC: &str = include_str!("../kinematics/table_table_ac.json");
 const TABLE_TABLE_BC: &str = include_str!("../kinematics/table_table_bc.json");
@@ -585,5 +585,221 @@ proptest::proptest! {
         proptest::prop_assert!((len - 1.0).abs() <= 1e-9);
         proptest::prop_assert!(pose.tip.x().is_finite() && pose.tip.y().is_finite() && pose.tip.z().is_finite());
         proptest::prop_assert!(pose.axis.x().is_finite() && pose.axis.y().is_finite() && pose.axis.z().is_finite());
+    }
+}
+
+fn demo_with_links(links: &str) -> String {
+    format!(
+        r#"{{"name":"demo","spindle_axis":{{"x":0.0,"y":0.0,"z":1.0}},"rotaries":[{{"letter":"B","carrier":"table","axis":{{"x":0.0,"y":1.0,"z":0.0}},"pivot":{{"x":0.0,"y":0.0,"z":0.0}}}}],"model":{{"links":[{links}]}}}}"#
+    )
+}
+
+fn box_link(name: &str, carrier: &str, min: [f64; 3], max: [f64; 3]) -> String {
+    format!(
+        r#"{{"name":"{name}","carrier":"{carrier}","solid":{{"box":{{"min":{{"x":{},"y":{},"z":{}}},"max":{{"x":{},"y":{},"z":{}}}}}}}}}"#,
+        min[0], min[1], min[2], max[0], max[1], max[2]
+    )
+}
+
+fn cylinder_link(name: &str, carrier: &str, radius: f64, length: f64, axis: &str) -> String {
+    format!(
+        r#"{{"name":"{name}","carrier":"{carrier}","solid":{{"cylinder":{{"base":{{"x":0.0,"y":0.0,"z":0.0}},"axis":{axis},"radius":{radius},"length":{length}}}}}}}"#
+    )
+}
+
+fn expect_model_error(links: &str, message: &str) {
+    let err = Kinematics::from_json(&demo_with_links(links)).expect_err(message);
+    assert_eq!(err, invalid(message), "{links}");
+}
+
+fn rigid_gap(left: Rigid, right: Rigid) -> f64 {
+    gap(left.origin(), right.origin())
+        .max(gap(left.axis_x(), right.axis_x()))
+        .max(gap(left.axis_y(), right.axis_y()))
+        .max(gap(left.axis_z(), right.axis_z()))
+}
+
+#[test]
+fn a_kinematics_file_without_a_model_omits_the_key() {
+    for text in [TABLE_TABLE_AC, TABLE_TABLE_BC, HEAD_TABLE_BC, HEAD_HEAD_AC] {
+        let kin = load(text);
+        assert!(kin.model.is_none());
+        let json = serde_json::to_string(&kin).expect("json");
+        assert!(!json.contains("\"model\""), "{json}");
+        let again = Kinematics::from_json(&json).expect("reload");
+        assert_eq!(again, kin);
+    }
+}
+
+#[test]
+fn table_table_bc_model_example_loads() {
+    let kin = load(include_str!("../../../examples/table_table_bc_model.kin.json"));
+    let model = kin.model.expect("model");
+    let names: Vec<&str> = model.links.iter().map(|link| link.name.as_str()).collect();
+    assert_eq!(names, ["disc", "trunnion", "spindle"]);
+    assert_eq!(model.links[0].carrier, "C");
+    assert_eq!(model.links[1].carrier, "B");
+    assert_eq!(model.links[2].carrier, "head");
+}
+
+#[test]
+fn an_empty_link_list_is_a_model() {
+    let kin = load(&demo_with_links(""));
+    let model = kin.model.expect("model");
+    assert!(model.links.is_empty());
+}
+
+#[test]
+fn link_coordinate_must_be_finite() {
+    let mut kin = load(&demo_with_links(&box_link("table", "table", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])));
+    let model = kin.model.as_mut().expect("model");
+    let link = model.links.first_mut().expect("link");
+    link.solid = LinkSolid::Box { min: Vec3::from_xyz(f64::INFINITY, 0.0, 0.0), max: Vec3::from_xyz(1.0, 1.0, 1.0) };
+    let err = kin.check().expect_err("finite");
+    assert_eq!(err, invalid("kinematics `demo`: link `table` coordinate must be finite"));
+}
+
+#[test]
+fn link_box_size_must_be_positive() {
+    expect_model_error(&box_link("table", "table", [0.0, 0.0, 0.0], [0.0, 1.0, 1.0]), "kinematics `demo`: link `table` box size must be positive");
+    expect_model_error(&box_link("table", "table", [1.0, 0.0, 0.0], [0.0, 1.0, 1.0]), "kinematics `demo`: link `table` box size must be positive");
+}
+
+#[test]
+fn link_cylinder_radius_must_be_positive() {
+    let axis = r#"{"x":0.0,"y":0.0,"z":1.0}"#;
+    expect_model_error(&cylinder_link("disc", "table", 0.0, 10.0, axis), "kinematics `demo`: link `disc` cylinder radius must be positive");
+    expect_model_error(&cylinder_link("disc", "table", -1.0, 10.0, axis), "kinematics `demo`: link `disc` cylinder radius must be positive");
+}
+
+#[test]
+fn link_cylinder_radius_must_be_finite() {
+    let mut kin = load(&demo_with_links(&cylinder_link("disc", "table", 4.0, 10.0, r#"{"x":0.0,"y":0.0,"z":1.0}"#)));
+    let model = kin.model.as_mut().expect("model");
+    let link = model.links.first_mut().expect("link");
+    let LinkSolid::Cylinder { radius, .. } = &mut link.solid else {
+        panic!("cylinder");
+    };
+    *radius = f64::NAN;
+    let err = kin.check().expect_err("finite radius");
+    assert_eq!(err, invalid("kinematics `demo`: link `disc` cylinder radius must be finite"));
+}
+
+#[test]
+fn link_cylinder_length_must_be_positive() {
+    let axis = r#"{"x":0.0,"y":0.0,"z":1.0}"#;
+    expect_model_error(&cylinder_link("disc", "table", 4.0, 0.0, axis), "kinematics `demo`: link `disc` cylinder length must be positive");
+}
+
+#[test]
+fn link_cylinder_axis_must_be_non_zero() {
+    expect_model_error(
+        &cylinder_link("disc", "table", 4.0, 10.0, r#"{"x":0.0,"y":0.0,"z":0.0}"#),
+        "kinematics `demo`: link `disc` cylinder axis is zero",
+    );
+}
+
+#[test]
+fn link_names_are_unique() {
+    let links =
+        format!("{},{}", box_link("table", "table", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]), box_link("table", "base", [2.0, 0.0, 0.0], [3.0, 1.0, 1.0]));
+    expect_model_error(&links, "kinematics `demo`: link `table` is listed twice");
+}
+
+#[test]
+fn link_count_is_at_most_64() {
+    let mut links = Vec::new();
+    for index in 0..=MAX_MODEL_LINKS {
+        links.push(box_link(&format!("link{index}"), "base", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
+    }
+    expect_model_error(&links.join(","), "kinematics `demo`: more than 64 links");
+    links.pop();
+    let kin = load(&demo_with_links(&links.join(",")));
+    assert_eq!(kin.model.expect("model").links.len(), MAX_MODEL_LINKS);
+}
+
+#[test]
+fn link_carrier_word_must_be_known() {
+    expect_model_error(
+        &box_link("table", "spindle", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        "kinematics `demo`: link `table` carrier `spindle` is unknown",
+    );
+    expect_model_error(&box_link("table", "a", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]), "kinematics `demo`: link `table` carrier `a` is unknown");
+}
+
+#[test]
+fn link_carrier_letter_must_be_a_rotary_on_this_machine() {
+    expect_model_error(&box_link("disc", "D", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]), "kinematics `demo`: link `disc` carrier D is not a rotary");
+    expect_model_error(&box_link("disc", "A", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]), "kinematics `demo`: link `disc` carrier A is not a rotary");
+    let kin = load(&demo_with_links(&box_link("trunnion", "B", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])));
+    assert_eq!(kin.model.expect("model").links[0].carrier, "B");
+}
+
+#[test]
+fn link_name_must_be_non_empty() {
+    expect_model_error(&box_link("", "table", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]), "kinematics `demo`: link name is empty");
+}
+
+#[test]
+fn model_unknown_keys_are_rejected() {
+    let base = r#"{"name":"demo","spindle_axis":{"x":0.0,"y":0.0,"z":1.0},"rotaries":[{"letter":"B","carrier":"table","axis":{"x":0.0,"y":1.0,"z":0.0},"pivot":{"x":0.0,"y":0.0,"z":0.0}}]"#;
+    let cases = [
+        format!(r#"{base},"model":{{"links":[],"note":1}}}}"#),
+        format!(
+            r#"{base},"model":{{"links":[{{"name":"table","carrier":"table","note":1,"solid":{{"box":{{"min":{{"x":0.0,"y":0.0,"z":0.0}},"max":{{"x":1.0,"y":1.0,"z":1.0}}}}}}}}]}}}}"#
+        ),
+        format!(
+            r#"{base},"model":{{"links":[{{"name":"table","carrier":"table","solid":{{"box":{{"min":{{"x":0.0,"y":0.0,"z":0.0}},"max":{{"x":1.0,"y":1.0,"z":1.0}},"pad":0.0}}}}}}]}}}}"#
+        ),
+    ];
+    for text in cases {
+        let err = Kinematics::from_json(&text).expect_err("unknown");
+        assert!(matches!(err, IrError::Json(_)), "{err} from {text}");
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 64,
+        max_shrink_iters: 64,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x7AB1_E001),
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    #[test]
+    fn table_link_matches_the_inverse_table_chain(
+        x in -200.0f64..200.0,
+        y in -200.0f64..200.0,
+        z in -200.0f64..200.0,
+        px in -80.0f64..80.0,
+        py in -80.0f64..80.0,
+        pz in -80.0f64..80.0,
+        b_deg in -35.0f64..=120.0,
+        c_deg in -180.0f64..180.0,
+    ) {
+        let kin = load(TABLE_TABLE_BC);
+        let angles = [b_deg, c_deg];
+        let at = joints(pt(x, y, z), angles);
+        let part = pt(px, py, pz);
+        let on_table = kin.link_in_part(&at, "table").expect("table in the part");
+        let stayed = on_table.map_point(part);
+        proptest::prop_assert!(gap(stayed, part) <= 1e-8, "a table link moved in the part frame");
+
+        let world = kin.link_world(&at, "table").expect("table in the machine");
+        let machine = world.map_point(part);
+        let pose = kin.forward(&joints(machine, angles), 0.0).expect("forward");
+        proptest::prop_assert!(
+            gap(pose.tip, part) <= 1e-6,
+            "table point {:?} mapped to machine {:?} came back as {:?}",
+            part,
+            machine,
+            pose.tip
+        );
+
+        let on_c = kin.link_world(&at, "C").expect("C");
+        proptest::prop_assert!(rigid_gap(world, on_c) <= 1e-9, "C is the inner table joint");
+        let on_b = kin.link_world(&at, "B").expect("B");
+        let prefix = kin.link_world(&joints(pt(x, y, z), [b_deg, 0.0]), "table").expect("outer only");
+        proptest::prop_assert!(rigid_gap(on_b, prefix) <= 1e-9, "B is the outer table joint");
     }
 }

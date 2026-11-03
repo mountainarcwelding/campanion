@@ -25,11 +25,21 @@ pub struct Tool {
     /// Kerf width, millimetres. Set for a process that has no rotating cutter.
     #[serde(default)]
     kerf: Option<f64>,
+    /// Holder and head envelope. Absent on a tool that does not name one, so older files stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assembly: Option<ToolAssembly>,
 }
 
 impl Tool {
     pub fn try_new(id: u32, name: Option<String>, diameter: Option<f64>, kerf: Option<f64>) -> Result<Self> {
-        let tool = Self { id, name, diameter, kerf };
+        let tool = Self { id, name, diameter, kerf, assembly: None };
+        tool.check()?;
+        Ok(tool)
+    }
+
+    /// Store a tool assembly and re-validate. A kerf tool cannot carry one.
+    pub fn with_assembly(self, assembly: ToolAssembly) -> Result<Self> {
+        let tool = Self { assembly: Some(assembly), ..self };
         tool.check()?;
         Ok(tool)
     }
@@ -50,6 +60,11 @@ impl Tool {
         self.kerf
     }
 
+    /// Holder stack, when this tool names one.
+    pub fn assembly(&self) -> Option<&ToolAssembly> {
+        self.assembly.as_ref()
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
         optional_name(&self.name, "tool name")?;
         if let Some(diameter) = self.diameter {
@@ -57,6 +72,128 @@ impl Tool {
         }
         if let Some(kerf) = self.kerf {
             check_cutter(kerf, "kerf width")?;
+        }
+        if let Some(assembly) = &self.assembly {
+            if self.kerf.is_some() || self.diameter.is_none() {
+                return Err(check::invalid("assembly is not valid on a kerf tool"));
+            }
+            assembly.check()?;
+        }
+        Ok(())
+    }
+}
+
+/// Most holder segments, including the optional head, accepted on one tool.
+pub const MAX_HOLDER_SEGMENTS: usize = 32;
+
+/// One cylinder in a holder stack. Diameter and length are millimetres.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssemblySegment {
+    diameter: f64,
+    length: f64,
+}
+
+impl AssemblySegment {
+    pub fn try_new(diameter: f64, length: f64) -> Result<Self> {
+        let segment = Self { diameter, length };
+        segment.check("holder")?;
+        Ok(segment)
+    }
+
+    pub fn diameter(self) -> f64 {
+        self.diameter
+    }
+
+    pub fn length(self) -> f64 {
+        self.length
+    }
+
+    fn check(self, what: &str) -> Result<()> {
+        check_cutter(self.diameter, &format!("{what} diameter"))?;
+        check_cutter(self.length, &format!("{what} length"))?;
+        Ok(())
+    }
+}
+
+/// Mill tool envelope from the tip toward the spindle. Lengths are millimetres.
+///
+/// `flute_length` and `shank_diameter` are omitted from JSON when absent. A reader then uses
+/// `stickout` for the flute and the tool diameter for the shank.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolAssembly {
+    stickout: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flute_length: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shank_diameter: Option<f64>,
+    holder: Vec<AssemblySegment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head: Option<AssemblySegment>,
+}
+
+impl ToolAssembly {
+    /// `holder` needs at least one segment and at most [`MAX_HOLDER_SEGMENTS`].
+    pub fn try_new(
+        stickout: f64,
+        flute_length: Option<f64>,
+        shank_diameter: Option<f64>,
+        holder: Vec<AssemblySegment>,
+        head: Option<AssemblySegment>,
+    ) -> Result<Self> {
+        let assembly = Self { stickout, flute_length, shank_diameter, holder, head };
+        assembly.check()?;
+        Ok(assembly)
+    }
+
+    pub fn stickout(&self) -> f64 {
+        self.stickout
+    }
+
+    /// Flute length, or [`Self::stickout`] when the file omitted it.
+    pub fn flute_length(&self) -> f64 {
+        self.flute_length.unwrap_or(self.stickout)
+    }
+
+    /// Shank diameter, or `tool_diameter` when the file omitted it.
+    pub fn shank_diameter(&self, tool_diameter: f64) -> f64 {
+        self.shank_diameter.unwrap_or(tool_diameter)
+    }
+
+    pub fn holder(&self) -> &[AssemblySegment] {
+        &self.holder
+    }
+
+    pub fn head(&self) -> Option<AssemblySegment> {
+        self.head
+    }
+
+    fn check(&self) -> Result<()> {
+        check_cutter(self.stickout, "stickout")?;
+        if let Some(flute) = self.flute_length {
+            check_cutter(flute, "flute_length")?;
+            if flute > self.stickout {
+                return Err(check::invalid("flute_length must be at most stickout"));
+            }
+        }
+        if let Some(shank) = self.shank_diameter {
+            let shank = non_negative(shank, "shank_diameter")?;
+            if shank > check::MAX_CUTTER_MM {
+                return Err(check::invalid(format!("shank_diameter is larger than {} mm", check::MAX_CUTTER_MM)));
+            }
+        }
+        if self.holder.is_empty() {
+            return Err(check::invalid("holder needs at least one segment"));
+        }
+        if self.holder.len() > MAX_HOLDER_SEGMENTS {
+            return Err(check::invalid(format!("more than {MAX_HOLDER_SEGMENTS} holder segments")));
+        }
+        for segment in &self.holder {
+            segment.check("holder")?;
+        }
+        if let Some(head) = self.head {
+            head.check("head")?;
         }
         Ok(())
     }

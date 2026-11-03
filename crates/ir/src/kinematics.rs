@@ -29,12 +29,17 @@
 //! secondary rotary take the tilt. [`subdivide_path`] then inserts joint-space samples so the
 //! chord and the tool axis stay inside tolerance.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::check::{self, finite, required_name};
+use crate::check::{self, finite, positive, required_name};
 use crate::geom::Vec3;
 use crate::rotary::RotaryLimits;
+
+/// Most solids a machine model may name.
+pub const MAX_MODEL_LINKS: usize = 64;
 
 /// Which slide carries a rotary joint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -81,6 +86,112 @@ pub struct Kinematics {
     /// Tool axis at zero head angles. Defaults to +Z. Normalised on load.
     #[serde(default = "default_spindle_axis")]
     pub spindle_axis: Vec3,
+    /// Optional link solids. Absent on a kinematics file that only names joints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<MachineModel>,
+}
+
+/// Boxes and cylinders that move with the machine. Coordinates are in each link's home frame
+/// (every joint at zero). This is a sketch of the links, not a CAD model of a machine.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineModel {
+    /// At most [`MAX_MODEL_LINKS`] solids. Names are unique.
+    pub links: Vec<MachineLink>,
+}
+
+/// One solid and the joint that carries it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineLink {
+    /// Non-empty name, unique in the model. Quoted in collision text.
+    pub name: String,
+    /// `base`, `table`, `head`, or a rotary letter (`A`, `B` or `C`) on this machine.
+    pub carrier: String,
+    /// Solid in the link home frame.
+    pub solid: LinkSolid,
+}
+
+/// A box or a finite cylinder. The cylinder axis is normalised on load.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub enum LinkSolid {
+    /// Axis-aligned box. `min` is strictly less than `max` on every axis.
+    #[serde(rename = "box")]
+    Box { min: Vec3, max: Vec3 },
+    /// Finite cylinder. `base` is one cap centre. `axis` points toward the other cap.
+    #[serde(rename = "cylinder")]
+    Cylinder { base: Vec3, axis: Vec3, radius: f64, length: f64 },
+}
+
+/// A rigid placement: `point` maps to `origin + x * axis_x + y * axis_y + z * axis_z`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rigid {
+    origin: Vec3,
+    axis_x: Vec3,
+    axis_y: Vec3,
+    axis_z: Vec3,
+}
+
+impl Rigid {
+    /// Identity. The home frame and the parent frame coincide.
+    pub fn identity() -> Self {
+        Self { origin: Vec3::ZERO, axis_x: Vec3::X, axis_y: Vec3::Y, axis_z: Vec3::Z }
+    }
+
+    /// Build a placement from an origin and three axes. The caller supplies the basis.
+    pub fn from_axes(origin: Vec3, axis_x: Vec3, axis_y: Vec3, axis_z: Vec3) -> Self {
+        Self { origin, axis_x, axis_y, axis_z }
+    }
+
+    pub fn origin(self) -> Vec3 {
+        self.origin
+    }
+
+    pub fn axis_x(self) -> Vec3 {
+        self.axis_x
+    }
+
+    pub fn axis_y(self) -> Vec3 {
+        self.axis_y
+    }
+
+    pub fn axis_z(self) -> Vec3 {
+        self.axis_z
+    }
+
+    /// Map a point written in this frame into the parent frame.
+    pub fn map_point(self, point: Vec3) -> Vec3 {
+        add(self.origin, self.map_direction(point))
+    }
+
+    /// Map a free vector written in this frame into the parent frame.
+    pub fn map_direction(self, direction: Vec3) -> Vec3 {
+        add(add(scale(self.axis_x, direction.x()), scale(self.axis_y, direction.y())), scale(self.axis_z, direction.z()))
+    }
+
+    /// Inverse placement. Orthonormal axes invert by transpose.
+    pub fn inverse(self) -> Self {
+        let axis_x = Vec3::from_xyz(self.axis_x.x(), self.axis_y.x(), self.axis_z.x());
+        let axis_y = Vec3::from_xyz(self.axis_x.y(), self.axis_y.y(), self.axis_z.y());
+        let axis_z = Vec3::from_xyz(self.axis_x.z(), self.axis_y.z(), self.axis_z.z());
+        let origin = Vec3::from_xyz(
+            -(self.axis_x.x() * self.origin.x() + self.axis_x.y() * self.origin.y() + self.axis_x.z() * self.origin.z()),
+            -(self.axis_y.x() * self.origin.x() + self.axis_y.y() * self.origin.y() + self.axis_y.z() * self.origin.z()),
+            -(self.axis_z.x() * self.origin.x() + self.axis_z.y() * self.origin.y() + self.axis_z.z() * self.origin.z()),
+        );
+        Self { origin, axis_x, axis_y, axis_z }
+    }
+
+    /// Apply `inner` first, then `self`.
+    pub fn compose(self, inner: Self) -> Self {
+        Self {
+            origin: self.map_point(inner.origin),
+            axis_x: self.map_direction(inner.axis_x),
+            axis_y: self.map_direction(inner.axis_y),
+            axis_z: self.map_direction(inner.axis_z),
+        }
+    }
 }
 
 /// A joint solution. `angles[i]` belongs to `rotaries[i]`, in degrees. The unused slot is 0.
@@ -198,7 +309,137 @@ impl Kinematics {
             &format!("kinematics `{}`: spindle axis", self.name),
             &format!("kinematics `{}`: spindle axis is zero", self.name),
         )?;
+        self.check_model()?;
         Ok(())
+    }
+
+    /// Placement of a link home frame in the machine frame.
+    ///
+    /// `carrier` is `base`, `table`, `head`, or a rotary letter on this machine. Home coordinates
+    /// are written at all joints zero. `base` does not move. A rotary letter moves with that
+    /// joint and every rotary that carries it, in the same order [`Self::forward`] uses. `table`
+    /// is the full table chain and does not translate with XYZ: the linear axes move the head.
+    /// `head` is the full head chain, then the gauge position `joints.xyz`.
+    pub fn link_world(&self, joints: &Joints, carrier: &str) -> Result<Rigid> {
+        self.prepare_joints(joints)?;
+        match self.carrier_kind(carrier)? {
+            LinkKind::Base => Ok(Rigid::identity()),
+            LinkKind::Table => Ok(rigid_from_spins(&self.chain(joints, Carrier::Table)?)),
+            LinkKind::Head => Ok(translate_rigid(rigid_from_spins(&self.chain(joints, Carrier::Head)?), joints.xyz)),
+            LinkKind::Rotary(letter) => {
+                let (which, spins) = self.spins_through(joints, letter)?;
+                let rigid = rigid_from_spins(&spins);
+                if which == Carrier::Head { Ok(translate_rigid(rigid, joints.xyz)) } else { Ok(rigid) }
+            }
+        }
+    }
+
+    /// Placement of a link home frame in the part frame.
+    ///
+    /// The part rides on the table, so this is the inverse of the full table chain applied to
+    /// [`Self::link_world`]. A `table` link stays fixed on the part. The preview draws in this frame.
+    pub fn link_in_part(&self, joints: &Joints, carrier: &str) -> Result<Rigid> {
+        let world = self.link_world(joints, carrier)?;
+        let table = self.link_world(joints, "table")?;
+        Ok(table.inverse().compose(world))
+    }
+
+    fn prepare_joints(&self, joints: &Joints) -> Result<()> {
+        self.check()?;
+        joints.xyz.check("joint position")?;
+        for (index, _) in self.rotaries.iter().enumerate() {
+            finite(angle_at(joints.angles, index), "joint angle")?;
+        }
+        Ok(())
+    }
+
+    fn check_model(&self) -> Result<()> {
+        let Some(model) = &self.model else {
+            return Ok(());
+        };
+        if model.links.len() > MAX_MODEL_LINKS {
+            return Err(check::invalid(format!("kinematics `{}`: more than {MAX_MODEL_LINKS} links", self.name)));
+        }
+        let mut names = BTreeSet::new();
+        for link in &model.links {
+            required_name(&link.name, &format!("kinematics `{}`: link name", self.name))?;
+            if !names.insert(link.name.as_str()) {
+                return Err(check::invalid(format!("kinematics `{}`: link `{}` is listed twice", self.name, link.name)));
+            }
+            if self.carrier_kind(&link.carrier).is_err() {
+                return Err(self.carrier_error(&link.name, &link.carrier));
+            }
+            self.check_solid(&link.name, link.solid)?;
+        }
+        Ok(())
+    }
+
+    fn carrier_error(&self, link: &str, carrier: &str) -> crate::IrError {
+        match carrier_letter(carrier) {
+            Some(letter) => check::invalid(format!("kinematics `{}`: link `{link}` carrier {letter} is not a rotary", self.name)),
+            None => check::invalid(format!("kinematics `{}`: link `{link}` carrier `{carrier}` is unknown", self.name)),
+        }
+    }
+
+    fn carrier_kind(&self, carrier: &str) -> Result<LinkKind> {
+        match carrier {
+            "base" => Ok(LinkKind::Base),
+            "table" => Ok(LinkKind::Table),
+            "head" => Ok(LinkKind::Head),
+            other => match carrier_letter(other) {
+                Some(letter) if self.rotaries.iter().any(|joint| joint.letter == letter) => Ok(LinkKind::Rotary(letter)),
+                Some(letter) => Err(check::invalid(format!("kinematics `{}`: carrier {letter} is not a rotary", self.name))),
+                None => Err(check::invalid(format!("kinematics `{}`: carrier `{other}` is unknown", self.name))),
+            },
+        }
+    }
+
+    fn check_solid(&self, link: &str, solid: LinkSolid) -> Result<()> {
+        match solid {
+            LinkSolid::Box { min, max } => {
+                let what = format!("kinematics `{}`: link `{link}` coordinate", self.name);
+                min.check(&what)?;
+                max.check(&what)?;
+                if max.x() > min.x() && max.y() > min.y() && max.z() > min.z() {
+                    Ok(())
+                } else {
+                    Err(check::invalid(format!("kinematics `{}`: link `{link}` box size must be positive", self.name)))
+                }
+            }
+            LinkSolid::Cylinder { base, axis, radius, length } => {
+                let what = format!("kinematics `{}`: link `{link}` coordinate", self.name);
+                base.check(&what)?;
+                axis.check(&what)?;
+                positive(radius, &format!("kinematics `{}`: link `{link}` cylinder radius", self.name))?;
+                positive(length, &format!("kinematics `{}`: link `{link}` cylinder length", self.name))?;
+                if unit_direction(axis).is_none() {
+                    return Err(check::invalid(format!("kinematics `{}`: link `{link}` cylinder axis is zero", self.name)));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn spins_through(&self, joints: &Joints, letter: char) -> Result<(Carrier, Vec<Spin>)> {
+        let which = self
+            .rotaries
+            .iter()
+            .find(|joint| joint.letter == letter)
+            .map(|joint| joint.carrier)
+            .ok_or_else(|| check::invalid(format!("kinematics `{}`: carrier {letter} is not a rotary", self.name)))?;
+        let mut chain = Vec::new();
+        for (index, joint) in self.rotaries.iter().enumerate() {
+            if joint.carrier != which {
+                continue;
+            }
+            let axis = unit_direction(joint.axis)
+                .ok_or_else(|| check::invalid(format!("kinematics `{}`: rotary {} axis is zero", self.name, joint.letter)))?;
+            chain.push(Spin { axis, pivot: joint.pivot, angle_deg: angle_at(joints.angles, index) });
+            if joint.letter == letter {
+                break;
+            }
+        }
+        Ok((which, chain))
     }
 
     /// Tool tip and axis in the part frame.
@@ -319,6 +560,15 @@ impl Kinematics {
         if let Some(axis) = unit_direction(self.spindle_axis) {
             self.spindle_axis = axis;
         }
+        if let Some(model) = &mut self.model {
+            for link in &mut model.links {
+                if let LinkSolid::Cylinder { axis, .. } = &mut link.solid
+                    && let Some(unit) = unit_direction(*axis)
+                {
+                    *axis = unit;
+                }
+            }
+        }
     }
 
     fn chain(&self, joints: &Joints, carrier: Carrier) -> Result<Vec<Spin>> {
@@ -419,6 +669,36 @@ impl Kinematics {
             return Err(tool_axis_error(target, "not reachable"));
         }
         Ok(solutions)
+    }
+}
+
+/// Which frame carries a model link.
+enum LinkKind {
+    Base,
+    Table,
+    Head,
+    Rotary(char),
+}
+
+/// A single uppercase letter, when `carrier` is exactly that letter.
+fn carrier_letter(carrier: &str) -> Option<char> {
+    let mut chars = carrier.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), None) if letter.is_ascii_uppercase() => Some(letter),
+        _ => None,
+    }
+}
+
+fn translate_rigid(rigid: Rigid, shift: Vec3) -> Rigid {
+    Rigid { origin: add(rigid.origin, shift), axis_x: rigid.axis_x, axis_y: rigid.axis_y, axis_z: rigid.axis_z }
+}
+
+fn rigid_from_spins(chain: &[Spin]) -> Rigid {
+    Rigid {
+        origin: map_point(chain, Vec3::ZERO),
+        axis_x: map_direction(chain, Vec3::X),
+        axis_y: map_direction(chain, Vec3::Y),
+        axis_z: map_direction(chain, Vec3::Z),
     }
 }
 

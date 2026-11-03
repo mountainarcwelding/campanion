@@ -21,7 +21,10 @@ mod stl;
 mod waterline;
 mod zlevel;
 
-pub use collide::{CollisionHit, CollisionIndex, Cylinder, Sphere, TOUCH_SLACK, collides, cylinder_aabb, cylinder_triangle, sphere_triangle};
+pub use collide::{
+    CollisionHit, CollisionIndex, Cylinder, Obb, Sphere, TOUCH_SLACK, collides, cylinder_aabb, cylinder_cylinder, cylinder_obb, cylinder_triangle,
+    obb_obb, sphere_aabb, sphere_cylinder, sphere_obb, sphere_triangle,
+};
 pub use dropcutter::{Cutter, DropCutter, closest_point_on_triangle, drop_cutter_triangle};
 pub use gouge::{Gouge, check_gouges};
 pub use raster::{RasterAngle, RasterParams, parallel_finish};

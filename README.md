@@ -146,6 +146,10 @@ Wheel zooms at the cursor, drag pans, F or double-click fits. Space plays or pau
 the playback speed and position. A rotary program draws its A or B axis across the toolpath and
 lists the index angles (`Index: 0°, 90°`) or the continuous angle range. `--angle` colours cuts by
 that angle instead of height (A toggles it); a program with no rotary axis ignores the option.
+`--machine` draws a five-axis kinematic sketch: boxes and cylinders from the kinematics `model`,
+not a CAD model of the machine. A program that includes a model shows the sketch on open. M
+toggles it. The scrub uses the posted joint values. A colliding solid turns red, and the status
+line shows the joints and the first hit. The posted output has not been proven on a machine.
 A turning program is an XZ half-section: radius upward, Z to the right. The view fills the removed
 material, outlines the stock in grey, and fills the finished section in steel blue, then draws the
 spindle centre line and the toolpath. It stays in that flat view, so the isometric control and the

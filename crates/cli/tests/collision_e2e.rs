@@ -102,6 +102,10 @@ fn dome_holder_passes_and_posts() -> Result<(), String> {
     if stderr.contains("changed") {
         return Err(format!("source hash did not match: {stderr}"));
     }
+    let ir = std::fs::read_to_string(&ir_path).map_err(|err| format!("read ir: {err}"))?;
+    if !ir.contains("\"assembly\"") || !ir.contains("\"fixtures\"") || !ir.contains("vise") {
+        return Err("IR omitted the tool assembly or the vise fixture".to_string());
+    }
     let posts = [("linuxcnc_5ax", "dome_holder.linuxcnc_5ax.nc"), ("haas_umc_tcpc", "dome_holder.haas_umc_tcpc.nc")];
     for (post, golden) in posts {
         let ngc = temp_path(&format!("campanion-dome-holder-{post}.nc"));

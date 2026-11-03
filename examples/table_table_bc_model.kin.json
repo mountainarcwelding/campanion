@@ -1,0 +1,55 @@
+{
+  "name": "table_table_bc",
+  "spindle_axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+  "rotaries": [
+    {
+      "letter": "B",
+      "carrier": "table",
+      "axis": { "x": 0.0, "y": 1.0, "z": 0.0 },
+      "pivot": { "x": 0.0, "y": 0.0, "z": 0.0 },
+      "limits": { "min_deg": -35.0, "max_deg": 120.0 }
+    },
+    {
+      "letter": "C",
+      "carrier": "table",
+      "axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+      "pivot": { "x": 60.0, "y": 0.0, "z": 30.0 }
+    }
+  ],
+  "model": {
+    "links": [
+      {
+        "name": "disc",
+        "carrier": "C",
+        "solid": {
+          "cylinder": {
+            "base": { "x": 60.0, "y": 0.0, "z": 8.0 },
+            "axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+            "radius": 36.0,
+            "length": 18.0
+          }
+        }
+      },
+      {
+        "name": "trunnion",
+        "carrier": "B",
+        "solid": {
+          "box": {
+            "min": { "x": -18.0, "y": -70.0, "z": -18.0 },
+            "max": { "x": 18.0, "y": 70.0, "z": 18.0 }
+          }
+        }
+      },
+      {
+        "name": "spindle",
+        "carrier": "head",
+        "solid": {
+          "box": {
+            "min": { "x": -40.0, "y": -40.0, "z": 80.0 },
+            "max": { "x": 40.0, "y": 40.0, "z": 180.0 }
+          }
+        }
+      }
+    ]
+  }
+}

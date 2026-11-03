@@ -101,6 +101,45 @@ Unknown fields are rejected. `spindle_axis` is optional and defaults to +Z `(0, 
 | `rotaries[].axis` | yes | Direction of the axis. Right-hand rotation. Not zero. |
 | `rotaries[].pivot` | yes | A point on the axis line, in the frame described above. |
 | `rotaries[].limits` | no | `{ "min_deg", "max_deg" }`, inclusive, `min_deg < max_deg`. Omitted means unlimited. |
+| `model` | no | Link solids for the viewer. Omitted, the file is joints only. |
+
+### Machine model
+
+`model` is a sketch of the links as boxes and cylinders. It is not a CAD model of a machine. Coordinates are millimetres in each link's home frame, the frame at every joint zero. A vector is `{ "x", "y", "z" }`, the same shape as a pivot. Unknown keys are rejected. Without `model`, a kinematics file is unchanged.
+
+```json
+"model": {
+  "links": [
+    {
+      "name": "disc",
+      "carrier": "C",
+      "solid": {
+        "cylinder": {
+          "base": { "x": 60.0, "y": 0.0, "z": 8.0 },
+          "axis": { "x": 0.0, "y": 0.0, "z": 1.0 },
+          "radius": 36.0,
+          "length": 18.0
+        }
+      }
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `links` | yes | At most 64 solids. Names are unique and non-empty. An empty list is valid. |
+| `links[].name` | yes | Quoted in validation and collision text. |
+| `links[].carrier` | yes | `base`, `table`, `head`, or a rotary letter on this machine (`A`, `B` or `C`). |
+| `links[].solid` | yes | `{ "box": { "min", "max" } }` or `{ "cylinder": { "base", "axis", "radius", "length" } }`. |
+
+A box needs `max` strictly greater than `min` on every axis. A cylinder needs a positive radius, a positive length and a non-zero axis. The axis is normalised on load. `base` is one cap centre; `axis` points toward the other cap.
+
+`base` does not move. A link whose carrier is rotary letter L moves with that joint and every rotary that carries it, in the same order `forward` uses. `table` is the full table chain and does not translate with XYZ: the linear axes move the head. `head` is the full head chain, then the gauge position. A head-side rotary letter translates with XYZ as well.
+
+`campanion view --machine` (or `campanion-view --machine`) draws the solids as wireframe in the plan and isometric views. A program whose kinematics include `model` shows the sketch on open. M toggles it. The scrub uses the posted joint values from `solve_path` and `subdivide_path`, the same samples a continuous post writes. Colliding solids are drawn in red. The status line shows X Y Z, each rotary letter in degrees to three decimal places, and the first collision. The posted output has not been proven on a machine.
+
+`examples/table_table_bc_model.kin.json` is `examples/table_table_bc.kin.json` plus a C-axis disc, a B-axis trunnion and a head box above the spindle. The numbers are an example, not a measured machine.
 
 ### Example
 

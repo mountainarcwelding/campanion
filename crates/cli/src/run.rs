@@ -117,7 +117,8 @@ use std::process::ExitCode;
 use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{
-    ClBlock, ClPath, CompensationMode, Document, Event, Import, ProcessKind, ProcessParams, Program, RotarySetup, Vec3, hold_spindle,
+    AssemblySegment, ClBlock, ClPath, CompensationMode, Document, Event, Fixture, Import, ProcessKind, ProcessParams, Program, RotarySetup, Tool,
+    ToolAssembly, Vec3, hold_spindle,
 };
 use campanion_mesh::Mesh;
 use campanion_path::{
@@ -569,7 +570,7 @@ fn finish_program(job: &JobFile, groups: Vec<IndexedOp>, stock_corners: Option<&
 
 /// Shared tail of [`finish_program`]. `rotary` stays `None` for a three-axis or five-axis job.
 fn finish_paths(job: &JobFile, paths: Vec<ClPath>, rotary: Option<RotarySetup>) -> Result<Document, CliError> {
-    let tools = job.tools().iter().map(|tool| tool.ir().clone()).collect();
+    let tools = ir_tools(job)?;
     if paths.len() > MAX_TOOLPATHS {
         return Err(CliError::invalid(format!("too many toolpaths: {} > {MAX_TOOLPATHS}", paths.len())));
     }
@@ -578,8 +579,54 @@ fn finish_paths(job: &JobFile, paths: Vec<ClPath>, rotary: Option<RotarySetup>) 
     if let Some(setup) = job.five_axis() {
         program = program.with_five_axis(setup.clone())?;
     }
+    let fixtures = ir_fixtures(job)?;
+    if !fixtures.is_empty() {
+        program = program.with_fixtures(fixtures)?;
+    }
     let program = hold_spindle(program)?;
     Ok(Document::new(program)?)
+}
+
+/// Copy each job tool into the IR, including an assembly when the job has one.
+fn ir_tools(job: &JobFile) -> Result<Vec<Tool>, CliError> {
+    let mut tools = Vec::new();
+    for tool in job.tools() {
+        let mut ir = tool.ir().clone();
+        if let Some(assembly) = tool.assembly() {
+            ir = ir.with_assembly(ir_assembly(assembly)?).map_err(|err| CliError::invalid(err.to_string()))?;
+        }
+        tools.push(ir);
+    }
+    Ok(tools)
+}
+
+fn ir_assembly(assembly: &jobfile::ToolAssembly) -> Result<ToolAssembly, CliError> {
+    let mut holder = Vec::new();
+    for segment in assembly.holder() {
+        holder.push(AssemblySegment::try_new(segment.diameter(), segment.length()).map_err(|err| CliError::invalid(err.to_string()))?);
+    }
+    let head = match assembly.head() {
+        Some(segment) => Some(AssemblySegment::try_new(segment.diameter(), segment.length()).map_err(|err| CliError::invalid(err.to_string()))?),
+        None => None,
+    };
+    ToolAssembly::try_new(assembly.stickout(), Some(assembly.flute_length()), Some(assembly.shank_diameter()), holder, head)
+        .map_err(|err| CliError::invalid(err.to_string()))
+}
+
+fn ir_fixtures(job: &JobFile) -> Result<Vec<Fixture>, CliError> {
+    let mut fixtures = Vec::new();
+    for fixture in job.fixtures() {
+        let ir = match fixture.kind() {
+            jobfile::FixtureKind::Box { min, max } => {
+                Fixture::new_box(fixture.name(), *min, *max).map_err(|err| CliError::invalid(err.to_string()))?
+            }
+            jobfile::FixtureKind::Stl { path, hash } => {
+                Fixture::new_stl(fixture.name(), path.clone(), hash.clone()).map_err(|err| CliError::invalid(err.to_string()))?
+            }
+        };
+        fixtures.push(ir);
+    }
+    Ok(fixtures)
 }
 
 /// Index safe height. A wrap cylinder's radius joins the stock swept radius. With no wrap the

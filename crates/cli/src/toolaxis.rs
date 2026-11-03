@@ -715,6 +715,7 @@ mod tests {
             name: "c_only".to_string(),
             rotaries: vec![RotaryJoint { letter: 'C', carrier: Carrier::Table, axis: IrVec::Z, pivot: IrVec::ZERO, limits: None }],
             spindle_axis: IrVec::Z,
+            model: None,
         };
         let setup = FiveAxisSetup { kinematics: kin, policy: SolutionPolicy::Nearest };
         let tip = IrVec::new(1.0, 2.0, 3.0).expect("tip");

@@ -409,3 +409,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
 - 2026-11-02: v0.9.1 is stages 5E–5F (TCP posts `haas_umc_tcpc` and `linuxcnc_5ax_tcp`,
   surface tool-axis strategies), plus the reindex fix (#124) to 0.9.0 continuous-then-indexed
   output. Next: 5G–5H (collision checks, machine sim) for v0.9.2.
+- 2026-11-02: 5H draws link solids from a kinematics `model` in the viewer and highlights
+  collisions from the posted joints. The sketch is boxes and cylinders, not machine CAD.

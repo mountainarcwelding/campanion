@@ -1,10 +1,12 @@
 //! Plan-view window for a CAMpanion IR file.
 //!
-//! `campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]` loads a program and draws its
+//! `campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine]` loads a program and draws its
 //! toolpath. Distances are millimetres. The window fits the path; the wheel zooms, drag pans, and
 //! F or a double-click fits again. `--iso` opens the isometric view. `--angle` colours cuts by
 //! rotary angle instead of height; a program with no rotary axis ignores it. A toggles that
-//! colouring. A rotary setup also draws its axis and lists index angles or the angle range.
+//! colouring. `--machine` draws the kinematic sketch when the program has five-axis joints; a
+//! program whose kinematics include a `model` shows that sketch on open. M toggles it. The solids
+//! are boxes and cylinders, not machine CAD. A rotary setup also draws its axis and lists index angles or the angle range.
 //! A turning program is an XZ half-section (radius up, Z right): removed material, stock outline,
 //! finished section, then the spindle line and the toolpath. `--iso` is ignored for that view.
 
@@ -17,8 +19,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use campanion_view::{
-    LathePreview, Playback, Projection, RotaryPreview, Scene, SpindleLane, Stroke, StrokeKind, TimelineStep, View, angle_color, angle_legend,
-    find_system_font, height_color, load_scene, project, projected_bounds, timeline_at, timeline_text, tool_position, visible,
+    LathePreview, MachineSim, Playback, Projection, RotaryPreview, Scene, SimSample, SpindleLane, Stroke, StrokeKind, TimelineStep, View,
+    angle_color, angle_legend, find_system_font, height_color, load_scene, project, projected_bounds, timeline_at, timeline_text, tool_position,
+    visible,
 };
 use eframe::egui;
 
@@ -66,13 +69,25 @@ fn sync_band() -> egui::Color32 {
 }
 /// Work-coordinate mark for the sub housing on the half-section.
 const SUB_TICK: egui::Color32 = egui::Color32::from_rgb(255, 196, 60);
+/// Machine base link. Grey, distinct from the grid.
+const MACHINE_BASE: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
+/// Table-side link.
+const MACHINE_TABLE: egui::Color32 = egui::Color32::from_rgb(40, 170, 110);
+/// Head-side link.
+const MACHINE_HEAD: egui::Color32 = egui::Color32::from_rgb(70, 130, 220);
+/// A link carried by one rotary letter.
+const MACHINE_ROTARY: egui::Color32 = egui::Color32::from_rgb(230, 170, 40);
+/// Tool-assembly body. Distinct from the cut colour and from a collision.
+const MACHINE_TOOL: egui::Color32 = egui::Color32::from_rgb(180, 140, 255);
+/// A solid named by a collision at this sample.
+const MACHINE_HIT: egui::Color32 = egui::Color32::from_rgb(220, 48, 48);
 
 fn main() -> ExitCode {
     match try_main() {
         Ok(()) => ExitCode::SUCCESS,
         Err(AppError::Usage(message)) => {
             eprintln!("campanion-view: {message}");
-            eprintln!("usage: campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]");
+            eprintln!("usage: campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine]");
             ExitCode::from(2)
         }
         Err(AppError::Run(message)) => {
@@ -87,10 +102,12 @@ fn try_main() -> Result<(), AppError> {
     match parse_args(&args)? {
         Command::Help => write_stdout(&help_text()),
         Command::Version => write_stdout(&version_text()),
-        Command::Preview { path, arc_tol, iso, angle } => {
+        Command::Preview { path, arc_tol, iso, angle, machine } => {
             let json = read_ir(&path)?;
             let scene = load_scene(&json, arc_tol).map_err(|err| AppError::run(format!("{}: {err}", path.display())))?;
-            open_preview(preview_title(&path), scene, iso, angle)
+            let sim = MachineSim::from_json(&json, arc_tol).map_err(|err| AppError::run(format!("{}: {err}", path.display())))?;
+            let show_machine = sim.as_ref().is_some_and(|sim| machine || sim.has_model());
+            open_preview(preview_title(&path), scene, iso, angle, sim, show_machine)
         }
     }
 }
@@ -98,7 +115,7 @@ fn try_main() -> Result<(), AppError> {
 enum Command {
     Help,
     Version,
-    Preview { path: PathBuf, arc_tol: f64, iso: bool, angle: bool },
+    Preview { path: PathBuf, arc_tol: f64, iso: bool, angle: bool, machine: bool },
 }
 
 #[derive(Debug)]
@@ -123,7 +140,7 @@ fn help_text() -> String {
 campanion-view {version}
 
 Usage:
-  campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]
+  campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine]
   campanion-view --help
   campanion-view --version
 
@@ -132,6 +149,8 @@ Distances are millimetres. Scroll zooms at the cursor, drag pans, and F or a
 double-click fits the path in the window. Space toggles playback.
 A rotary program draws its A or B axis and shows index angles or the angle range.
 A turning program is an XZ half-section (radius up, Z right). --iso is ignored then.
+A five-axis program can draw a kinematic sketch: boxes and cylinders on the
+links, not a CAD model of the machine. The scrub uses the posted joint values.
 
 --arc-tol MM
         Maximum chord error when drawing arcs, in millimetres (default 0.01).
@@ -140,6 +159,9 @@ A turning program is an XZ half-section (radius up, Z right). --iso is ignored t
 --angle
         Colour cutting moves by rotary angle instead of height.
         Ignored when the program has no rotary axis. A toggles this in the window.
+--machine
+        Draw the machine sketch and the joint values. A program whose kinematics
+        include a model does this on open. M toggles it. Ignored without five-axis kinematics.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -164,6 +186,7 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
     let mut arc_tol = DEFAULT_ARC_TOL_MM;
     let mut iso = false;
     let mut angle = false;
+    let mut machine = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         if arg.as_os_str() == "--iso" {
@@ -173,6 +196,11 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
         }
         if arg.as_os_str() == "--angle" {
             angle = true;
+            index += 1;
+            continue;
+        }
+        if arg.as_os_str() == "--machine" {
+            machine = true;
             index += 1;
             continue;
         }
@@ -206,7 +234,7 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
     let Some(path) = path else {
         return Err(AppError::usage("missing IR json file"));
     };
-    Ok(Command::Preview { path, arc_tol, iso, angle })
+    Ok(Command::Preview { path, arc_tol, iso, angle, machine })
 }
 
 fn is_help(arg: &OsString) -> bool {
@@ -272,7 +300,7 @@ fn preview_title(path: &Path) -> String {
     format!("CAMpanion preview — {name}")
 }
 
-fn open_preview(title: String, scene: Scene, iso: bool, angle: bool) -> Result<(), AppError> {
+fn open_preview(title: String, scene: Scene, iso: bool, angle: bool, machine: Option<MachineSim>, show_machine: bool) -> Result<(), AppError> {
     let native_options =
         eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_title(title), ..Default::default() };
     eframe::run_native(
@@ -283,7 +311,7 @@ fn open_preview(title: String, scene: Scene, iso: bool, angle: bool) -> Result<(
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let has_font = install_font(&cc.egui_ctx);
             let projection = if iso { Projection::Iso } else { Projection::Top };
-            Ok(Box::new(ViewerApp::new(scene, has_font, projection, angle)))
+            Ok(Box::new(ViewerApp::new(scene, has_font, projection, angle, machine, show_machine)))
         }),
     )
     .map_err(|err| AppError::run(err.to_string()))
@@ -329,10 +357,14 @@ struct ViewerApp {
     toolpaths: usize,
     cut_length: f64,
     rapid_length: f64,
+    /// Posted-joint sketch. `None` when the program has no five-axis kinematics.
+    machine: Option<MachineSim>,
+    /// Draw the sketch. M and the Machine checkbox share this flag.
+    show_machine: bool,
 }
 
 impl ViewerApp {
-    fn new(scene: Scene, has_font: bool, projection: Projection, angle_colours: bool) -> Self {
+    fn new(scene: Scene, has_font: bool, projection: Projection, angle_colours: bool, machine: Option<MachineSim>, show_machine: bool) -> Self {
         let (cut_length, rapid_length) = path_lengths(&scene);
         let toolpaths = scene.names.len();
         let playback = Playback::new(scene.total_length);
@@ -343,6 +375,7 @@ impl ViewerApp {
         // A program with no rotary axis ignores the flag, so the window stays on height colours.
         // A turning program has no rotary legend either.
         let angle_colours = angle_colours && scene.rotary.is_some() && !lathe;
+        let show_machine = show_machine && machine.is_some();
         Self {
             scene,
             playback,
@@ -357,6 +390,8 @@ impl ViewerApp {
             toolpaths,
             cut_length,
             rapid_length,
+            machine,
+            show_machine,
         }
     }
 
@@ -410,6 +445,12 @@ impl ViewerApp {
                 if self.scene.rotary.is_some() && self.scene.lathe.is_none() {
                     ui.checkbox(&mut self.angle_colours, "Angle colours");
                 }
+                if self.machine.is_some() {
+                    let machine = ui.checkbox(&mut self.show_machine, "Machine");
+                    if machine.changed() {
+                        self.fitted = false;
+                    }
+                }
                 ui.label(self.status_text());
             });
             if !self.scene.timeline.is_empty() {
@@ -424,6 +465,15 @@ impl ViewerApp {
         if let Some(overlay) = self.scene.rotary.as_ref().and_then(RotaryPreview::overlay) {
             text.push_str("   ");
             text.push_str(&overlay);
+        }
+        if self.show_machine
+            && let Some(sim) = &self.machine
+        {
+            let suffix = sim.sample(self.playback.position).status_suffix();
+            if !suffix.is_empty() {
+                text.push_str("   ");
+                text.push_str(&suffix);
+            }
         }
         text
     }
@@ -456,9 +506,19 @@ impl ViewerApp {
         if width <= 1.0 || height <= 1.0 {
             return;
         }
-        let bounds = projected_bounds(&self.scene, self.projection).unwrap_or(([0.0, 0.0], [0.0, 0.0]));
+        let path_bounds = projected_bounds(&self.scene, self.projection);
+        let machine_bounds = self.machine_sample().and_then(|sample| sample.projected_bounds(self.projection));
+        let bounds = union_projected(path_bounds, machine_bounds).unwrap_or(([0.0, 0.0], [0.0, 0.0]));
         self.view = View::fit(bounds, width, height, FIT_MARGIN_PX);
         self.fitted = true;
+    }
+
+    /// Sketch at the scrub position. `None` when the machine is hidden or absent.
+    fn machine_sample(&self) -> Option<SimSample> {
+        if !self.show_machine {
+            return None;
+        }
+        self.machine.as_ref().map(|sim| sim.sample(self.playback.position))
     }
 
     fn zoom_at_cursor(&mut self, response: &egui::Response, rect: egui::Rect, input: &FrameInput) {
@@ -507,6 +567,9 @@ impl ViewerApp {
                 projection,
             );
         }
+        if let Some(sample) = self.machine_sample() {
+            draw_machine(painter, &self.view, rect, &sample, projection);
+        }
         draw_pierces(painter, &self.scene, shown.len(), &self.view, rect, projection);
         draw_tool(painter, &self.scene, &shown, self.playback.position, &self.view, rect, projection);
         if self.has_font && self.show_order {
@@ -530,6 +593,10 @@ impl eframe::App for ViewerApp {
         if input.angle && self.scene.rotary.is_some() {
             self.angle_colours = !self.angle_colours;
         }
+        if input.machine && self.machine.is_some() {
+            self.show_machine = !self.show_machine;
+            self.fitted = false;
+        }
         let total = finite_total(self.scene.total_length);
         self.playback.step(f64::from(input.dt), total);
         self.top_bar(ui);
@@ -547,6 +614,7 @@ struct FrameInput {
     space: bool,
     fit: bool,
     angle: bool,
+    machine: bool,
 }
 
 fn read_input(ui: &egui::Ui) -> FrameInput {
@@ -557,6 +625,7 @@ fn read_input(ui: &egui::Ui) -> FrameInput {
         space: input.consume_key(egui::Modifiers::NONE, egui::Key::Space),
         fit: input.key_pressed(egui::Key::F),
         angle: input.consume_key(egui::Modifiers::NONE, egui::Key::A),
+        machine: input.consume_key(egui::Modifiers::NONE, egui::Key::M),
     })
 }
 
@@ -1064,6 +1133,40 @@ fn draw_labels(painter: &egui::Painter, scene: &Scene, view: &View, rect: egui::
     }
 }
 
+fn draw_machine(painter: &egui::Painter, view: &View, rect: egui::Rect, sample: &SimSample, projection: Projection) {
+    let stroke_width = 1.25;
+    for solid in &sample.solids {
+        let color = carrier_color(solid.carrier.as_deref(), solid.colliding);
+        let stroke = egui::Stroke::new(stroke_width, color);
+        for edge in &solid.edges {
+            draw_segment(painter, view, rect, [edge[0][0], edge[0][1]], edge[0][2], [edge[1][0], edge[1][1]], edge[1][2], projection, stroke);
+        }
+    }
+}
+
+fn carrier_color(carrier: Option<&str>, colliding: bool) -> egui::Color32 {
+    if colliding {
+        return MACHINE_HIT;
+    }
+    match carrier {
+        Some("base") => MACHINE_BASE,
+        Some("table") => MACHINE_TABLE,
+        Some("head") => MACHINE_HEAD,
+        Some(letter) if letter.len() == 1 && letter.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) => MACHINE_ROTARY,
+        _ => MACHINE_TOOL,
+    }
+}
+
+fn union_projected(left: Option<([f64; 2], [f64; 2])>, right: Option<([f64; 2], [f64; 2])>) -> Option<([f64; 2], [f64; 2])> {
+    match (left, right) {
+        (Some((a_min, a_max)), Some((b_min, b_max))) => {
+            Some(([a_min[0].min(b_min[0]), a_min[1].min(b_min[1])], [a_max[0].max(b_max[0]), a_max[1].max(b_max[1])]))
+        }
+        (Some(bounds), None) | (None, Some(bounds)) => Some(bounds),
+        (None, None) => None,
+    }
+}
+
 fn draw_floor_segment(
     painter: &egui::Painter,
     view: &View,
@@ -1220,7 +1323,9 @@ mod tests {
     #[test]
     fn help_documents_iso_and_keeps_arc_tol() {
         let help = help_text();
-        assert!(help.contains("campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle]"), "{help}");
+        assert!(help.contains("campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine]"), "{help}");
+        assert!(help.contains("--machine"), "{help}");
+        assert!(help.contains("M toggles"), "{help}");
         assert!(help.contains("--arc-tol MM"), "{help}");
         assert!(help.contains("Maximum chord error when drawing arcs"), "{help}");
         assert!(help.contains("--iso"), "{help}");
@@ -1244,11 +1349,18 @@ mod tests {
         assert_eq!(path, std::path::PathBuf::from("part.json"));
 
         let plain = parse_args(&[OsString::from("--iso"), OsString::from("part.json")]).expect("parse");
-        let Command::Preview { angle, iso, .. } = plain else {
+        let Command::Preview { angle, iso, machine, .. } = plain else {
             panic!("expected a preview command");
         };
         assert!(!angle);
         assert!(iso);
+        assert!(!machine);
+
+        let with_machine = parse_args(&[OsString::from("part.json"), OsString::from("--machine")]).expect("parse");
+        let Command::Preview { machine, .. } = with_machine else {
+            panic!("expected a preview command");
+        };
+        assert!(machine);
     }
 
     fn empty_scene(names: Vec<String>, rotary: Option<campanion_view::RotaryPreview>) -> campanion_view::Scene {
@@ -1270,9 +1382,12 @@ mod tests {
     fn indexed_overlay_is_listed_and_a_plain_program_ignores_angle_colours() {
         use campanion_view::{RotaryPreview, RotarySpan};
 
-        let plain = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true);
+        let plain = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true, None, false);
         assert!(!plain.angle_colours, "a program with no rotary axis ignores --angle");
         assert_eq!(plain.status_text(), "1 toolpath   cut 0.0 mm   rapid 0.0 mm");
+        let forced = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true, None, true);
+        assert!(!forced.show_machine, "a program with no simulation ignores the machine flag");
+        assert_eq!(forced.status_text(), plain.status_text());
 
         let indexed = empty_scene(
             vec!["face0".into(), "face90".into()],
@@ -1283,7 +1398,7 @@ mod tests {
                 span: Some(RotarySpan::Indexed(vec![0.0, 90.0])),
             }),
         );
-        let indexed = super::ViewerApp::new(indexed, false, super::Projection::Top, true);
+        let indexed = super::ViewerApp::new(indexed, false, super::Projection::Top, true, None, false);
         assert!(indexed.angle_colours);
         assert_eq!(indexed.status_text(), "2 toolpaths   cut 0.0 mm   rapid 0.0 mm   Index: 0°, 90°");
 
@@ -1296,7 +1411,7 @@ mod tests {
                 span: Some(RotarySpan::Continuous { min_deg: 0.0, max_deg: 360.0 }),
             }),
         );
-        let continuous = super::ViewerApp::new(continuous, false, super::Projection::Top, false);
+        let continuous = super::ViewerApp::new(continuous, false, super::Projection::Top, false, None, false);
         assert!(!continuous.angle_colours);
         assert_eq!(continuous.status_text(), "1 toolpath   cut 0.0 mm   rapid 0.0 mm   Angle: 0°..360°");
     }
@@ -1316,7 +1431,7 @@ mod tests {
             removed: Vec::new(),
             axis: ([-10.0, 0.0], [0.0, 0.0]),
         });
-        let app = super::ViewerApp::new(scene, false, super::Projection::Iso, true);
+        let app = super::ViewerApp::new(scene, false, super::Projection::Iso, true, None, false);
         assert_eq!(app.projection, super::Projection::Top, "a lathe scene has no isometric view");
         assert!(!app.height_colours, "a lathe scene has no height view");
         assert!(!app.angle_colours, "a lathe scene hides the rotary legend");

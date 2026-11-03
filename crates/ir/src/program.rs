@@ -62,6 +62,102 @@ impl SyncPoint {
     }
 }
 
+/// Most fixtures stored on one program.
+pub const MAX_FIXTURES: usize = 64;
+
+/// Axis-aligned box in the part frame. `min` is not above `max` on any axis.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureBox {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl FixtureBox {
+    pub fn min(self) -> Vec3 {
+        self.min
+    }
+
+    pub fn max(self) -> Vec3 {
+        self.max
+    }
+}
+
+/// Named obstacle in the part frame. An STL fixture is a path and a hash, not the mesh bytes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Fixture {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
+    #[serde(default, rename = "box", skip_serializing_if = "Option::is_none")]
+    bounds: Option<FixtureBox>,
+}
+
+impl Fixture {
+    /// Solid box. `max` is at least `min` on every axis.
+    pub fn new_box(name: impl Into<String>, min: Vec3, max: Vec3) -> Result<Self> {
+        let fixture = Self { name: name.into(), path: None, hash: None, bounds: Some(FixtureBox { min, max }) };
+        fixture.check()?;
+        Ok(fixture)
+    }
+
+    /// STL reference. The mesh is not stored. `path` ends in `.stl`.
+    pub fn new_stl(name: impl Into<String>, path: impl Into<String>, hash: impl Into<String>) -> Result<Self> {
+        let fixture = Self { name: name.into(), path: Some(path.into()), hash: Some(hash.into()), bounds: None };
+        fixture.check()?;
+        Ok(fixture)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Box corners, when this fixture is a box.
+    pub fn bounds(&self) -> Option<FixtureBox> {
+        self.bounds
+    }
+
+    /// Path and hash, when this fixture is an STL reference.
+    pub fn stl(&self) -> Option<(&str, &str)> {
+        match (&self.path, &self.hash) {
+            (Some(path), Some(hash)) => Some((path.as_str(), hash.as_str())),
+            _ => None,
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        check::required_name(&self.name, "fixture name")?;
+        match (&self.bounds, &self.path, &self.hash) {
+            (Some(bounds), None, None) => {
+                let what_min = "fixture box min";
+                let what_max = "fixture box max";
+                bounds.min.check(what_min)?;
+                bounds.max.check(what_max)?;
+                if bounds.max.x() < bounds.min.x() || bounds.max.y() < bounds.min.y() || bounds.max.z() < bounds.min.z() {
+                    return Err(check::invalid("fixture box max must be at least min"));
+                }
+                Ok(())
+            }
+            (None, Some(path), Some(hash)) => {
+                check::text_len(path, check::MAX_TEXT, "fixture path")?;
+                if path.is_empty() {
+                    return Err(check::invalid("fixture path is empty"));
+                }
+                if !path.to_ascii_lowercase().ends_with(".stl") {
+                    return Err(check::invalid("fixture path must be an STL file"));
+                }
+                check::required_name(hash, "fixture hash")?;
+                Ok(())
+            }
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(check::invalid("fixture cannot have both a mesh and a box")),
+            _ => Err(check::invalid("fixture needs a mesh (path and hash) or a box")),
+        }
+    }
+}
+
 /// Largest tool-axis change, in degrees, allowed on one feed of a continuous toolpath.
 pub const DEFAULT_MAX_AXIS_STEP_DEG: f64 = 5.0;
 
@@ -92,6 +188,9 @@ pub struct Program {
     /// Five-axis kinematics. Absent on a 3-axis or rotary-table program.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     five_axis: Option<FiveAxisSetup>,
+    /// Part-frame obstacles. Omitted when empty, so a program without fixtures is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fixtures: Vec<Fixture>,
     /// Largest tool-axis change, in degrees, on one feed of a continuous toolpath.
     ///
     /// The value is in `(0, 90]`. The default is 5. Omitted on disk when it is the default,
@@ -112,6 +211,7 @@ impl Default for Program {
             rotary: None,
             turning: None,
             five_axis: None,
+            fixtures: Vec::new(),
             max_axis_step_deg: DEFAULT_MAX_AXIS_STEP_DEG,
         }
     }
@@ -137,6 +237,7 @@ impl Program {
             rotary,
             turning: None,
             five_axis: None,
+            fixtures: Vec::new(),
             max_axis_step_deg: DEFAULT_MAX_AXIS_STEP_DEG,
         };
         // A thread move, and a pose angle that a later [`Self::with_turning`] reads as C, are legal
@@ -232,6 +333,18 @@ impl Program {
         Ok(program)
     }
 
+    /// Part-frame obstacles. Empty when the program names none.
+    pub fn fixtures(&self) -> &[Fixture] {
+        &self.fixtures
+    }
+
+    /// Replace the fixture list and re-validate.
+    pub fn with_fixtures(self, fixtures: Vec<Fixture>) -> Result<Self> {
+        let program = Self { fixtures, ..self };
+        program.check()?;
+        Ok(program)
+    }
+
     /// Store five-axis kinematics and re-validate.
     ///
     /// A program that already has a rotary setup is rejected: the two setups name different machines.
@@ -264,6 +377,7 @@ impl Program {
         check_max_axis_step(self.max_axis_step_deg)?;
         optional_name(&self.name, "program name")?;
         check_tools(&self.tools)?;
+        check_fixtures(&self.fixtures)?;
         if let Some(machine) = &self.machine {
             machine.check()?;
         }
@@ -325,6 +439,20 @@ impl Program {
         }
         Ok(())
     }
+}
+
+fn check_fixtures(fixtures: &[Fixture]) -> Result<()> {
+    if fixtures.len() > MAX_FIXTURES {
+        return Err(check::invalid(format!("more than {MAX_FIXTURES} fixtures")));
+    }
+    let mut names = BTreeSet::new();
+    for fixture in fixtures {
+        fixture.check()?;
+        if !names.insert(fixture.name()) {
+            return Err(check::invalid(format!("fixture `{}` is listed twice", fixture.name())));
+        }
+    }
+    Ok(())
 }
 
 fn check_tools(tools: &[Tool]) -> Result<()> {

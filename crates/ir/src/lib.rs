@@ -97,13 +97,14 @@ mod wrap;
 pub use convert::Import;
 pub use geom::{ArcSense, Plane, Pose, Vec3};
 pub use kinematics::{
-    Carrier, Choice, DEFAULT_SINGULAR_CONE_DEG, FiveAxisSetup, Joints, Kinematics, RotaryJoint, SolutionPolicy, ToolPose, solve_path, subdivide_path,
+    Carrier, Choice, DEFAULT_SINGULAR_CONE_DEG, FiveAxisSetup, Joints, Kinematics, LinkSolid, MAX_MODEL_LINKS, MachineLink, MachineModel, Rigid,
+    RotaryJoint, SolutionPolicy, ToolPose, solve_path, subdivide_path,
 };
 pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
 pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};
-pub use process::{CoolantMode, Event, LiveDirection, ParamValue, ProcessKind, ProcessParams, Tool};
-pub use program::{DEFAULT_MAX_AXIS_STEP_DEG, Document, Program, SyncPoint};
+pub use process::{AssemblySegment, CoolantMode, Event, LiveDirection, ParamValue, ProcessKind, ProcessParams, Tool, ToolAssembly};
+pub use program::{DEFAULT_MAX_AXIS_STEP_DEG, Document, Fixture, FixtureBox, Program, SyncPoint};
 pub use rotary::{
     RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, index_angle_for_axis, machine_to_part, part_to_machine, rotate_point, rotate_vector,
     unwrap_angle,

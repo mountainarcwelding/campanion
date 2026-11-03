@@ -413,6 +413,10 @@ For each move from pose P0 to P1 the check samples `t` in `[0, 1]` so the tip mo
 `sample_step` and the axis turns at most `max_angle_step_deg`. It lerps the tip and slerps the
 axis, and includes both ends. Arcs and helices are sampled along the arc.
 
+`campanion run` copies `assembly` onto the IR tool and `fixtures` onto the program when the job
+has them. Both are omitted from the IR when absent, so a job without them keeps the same IR
+bytes. An STL fixture is stored as its path and hash, not as triangles.
+
 The check runs after the gouge check, on every mill toolpath whose tool has an `assembly`. Tools
 without `assembly`, and jobs without fixtures and assembly, are unchanged. A hit fails `run`
 (exit 1, nothing written). The message names the operation, the toolpath index, the move index,
@@ -630,6 +634,8 @@ Load failures:
 - `operation `<name>`: ` followed by the kinematics error when that pose is not reachable
 
 `examples/tilted.job.json` profiles `examples/sample.dxf` flat, profiles it again on a 30° plane, and drills a side plane. A post with no `five_axis` block still rejects a tilted tool axis with `post `<id>` has no tilted-plane output`.
+
+The kinematics file may also carry a `model` of boxes and cylinders on `base`, `table`, `head` or a rotary letter. The format is in [kinematics.md](kinematics.md#machine-model). `campanion view --machine` draws that sketch from the posted joints and highlights a collision in red. M toggles the sketch. The solids are not a CAD model of the machine, and the posted output has not been proven on a machine. `examples/table_table_bc_model.kin.json` is one such sketch.
 
 A post with `five_axis` writes indexed 3+2. Before the first move of a toolpath whose tool axis changed, when the work frame is off, and before the first toolpath of a five-axis program, it retracts, indexes the rotaries, and turns the frame on. `mode` `work` writes the part tip rotated about the origin by the table angles (the control applies the rotary centres). `mode` `machine` writes the gauge point from the kinematics inverse with tool length 0. The first move after an index is a rapid in X and Y, then a rapid in Z. At the end the frame is cancelled, the tool retracts, and the rotaries return to zero. `haas_umc` is work mode (G254/G255). `linuxcnc_5ax` is machine mode. The kinematics file has to match the machine; this output has not been proven on a machine.
 

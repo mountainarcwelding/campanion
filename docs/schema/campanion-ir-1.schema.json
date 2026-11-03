@@ -15,6 +15,25 @@
         }
       ]
     },
+    "AssemblySegment": {
+      "additionalProperties": false,
+      "description": "One cylinder in a holder stack. Diameter and length are millimetres.",
+      "properties": {
+        "diameter": {
+          "format": "double",
+          "type": "number"
+        },
+        "length": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "diameter",
+        "length"
+      ],
+      "type": "object"
+    },
     "Axis": {
       "additionalProperties": false,
       "description": "One joint.",
@@ -1411,6 +1430,58 @@
       ],
       "type": "object"
     },
+    "Fixture": {
+      "additionalProperties": false,
+      "description": "Named obstacle in the part frame. An STL fixture is a path and a hash, not the mesh bytes.",
+      "properties": {
+        "box": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FixtureBox"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "FixtureBox": {
+      "additionalProperties": false,
+      "description": "Axis-aligned box in the part frame. `min` is not above `max` on any axis.",
+      "properties": {
+        "max": {
+          "$ref": "#/$defs/Vec3"
+        },
+        "min": {
+          "$ref": "#/$defs/Vec3"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": "object"
+    },
     "Hand": {
       "description": "Which way the cutting edge faces along the spindle.",
       "oneOf": [
@@ -1605,6 +1676,17 @@
       "additionalProperties": false,
       "description": "One or two rotary joints and the spindle direction at zero head angles.",
       "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MachineModel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional link solids. Absent on a kinematics file that only names joints."
+        },
         "name": {
           "description": "Non-empty name. It is quoted in validation errors.",
           "type": "string"
@@ -1631,6 +1713,73 @@
         "rotaries"
       ],
       "type": "object"
+    },
+    "LinkSolid": {
+      "description": "A box or a finite cylinder. The cylinder axis is normalised on load.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Axis-aligned box. `min` is strictly less than `max` on every axis.",
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "$ref": "#/$defs/Vec3"
+                },
+                "min": {
+                  "$ref": "#/$defs/Vec3"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Finite cylinder. `base` is one cap centre. `axis` points toward the other cap.",
+          "properties": {
+            "cylinder": {
+              "additionalProperties": false,
+              "properties": {
+                "axis": {
+                  "$ref": "#/$defs/Vec3"
+                },
+                "base": {
+                  "$ref": "#/$defs/Vec3"
+                },
+                "length": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "radius": {
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "base",
+                "axis",
+                "radius",
+                "length"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "cylinder"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "LiveDirection": {
       "description": "Direction of a live (driven) tool.",
@@ -1667,6 +1816,47 @@
       "required": [
         "axes",
         "channels"
+      ],
+      "type": "object"
+    },
+    "MachineLink": {
+      "additionalProperties": false,
+      "description": "One solid and the joint that carries it.",
+      "properties": {
+        "carrier": {
+          "description": "`base`, `table`, `head`, or a rotary letter (`A`, `B` or `C`) on this machine.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Non-empty name, unique in the model. Quoted in collision text.",
+          "type": "string"
+        },
+        "solid": {
+          "$ref": "#/$defs/LinkSolid",
+          "description": "Solid in the link home frame."
+        }
+      },
+      "required": [
+        "name",
+        "carrier",
+        "solid"
+      ],
+      "type": "object"
+    },
+    "MachineModel": {
+      "additionalProperties": false,
+      "description": "Boxes and cylinders that move with the machine. Coordinates are in each link's home frame\n(every joint at zero). This is a sketch of the links, not a CAD model of a machine.",
+      "properties": {
+        "links": {
+          "description": "At most [`MAX_MODEL_LINKS`] solids. Names are unique.",
+          "items": {
+            "$ref": "#/$defs/MachineLink"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "links"
       ],
       "type": "object"
     },
@@ -1920,6 +2110,13 @@
             }
           ],
           "description": "Five-axis kinematics. Absent on a 3-axis or rotary-table program."
+        },
+        "fixtures": {
+          "description": "Part-frame obstacles. Omitted when empty, so a program without fixtures is unchanged.",
+          "items": {
+            "$ref": "#/$defs/Fixture"
+          },
+          "type": "array"
         },
         "machine": {
           "anyOf": [
@@ -2253,6 +2450,17 @@
       "additionalProperties": false,
       "description": "A cutter or a kerf-only process.",
       "properties": {
+        "assembly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolAssembly"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Holder and head envelope. Absent on a tool that does not name one, so older files stay unchanged."
+        },
         "diameter": {
           "default": null,
           "description": "Rotating tool diameter, millimetres.",
@@ -2286,6 +2494,51 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "ToolAssembly": {
+      "additionalProperties": false,
+      "description": "Mill tool envelope from the tip toward the spindle. Lengths are millimetres.\n\n`flute_length` and `shank_diameter` are omitted from JSON when absent. A reader then uses\n`stickout` for the flute and the tool diameter for the shank.",
+      "properties": {
+        "flute_length": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssemblySegment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "holder": {
+          "items": {
+            "$ref": "#/$defs/AssemblySegment"
+          },
+          "type": "array"
+        },
+        "shank_diameter": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "stickout": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "stickout",
+        "holder"
       ],
       "type": "object"
     },

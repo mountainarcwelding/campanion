@@ -785,6 +785,268 @@ fn bounds_of(mesh: &Mesh, indices: &[usize]) -> Result<Aabb> {
     bounds.ok_or_else(|| invalid("empty collision index"))
 }
 
+/// An oriented box. `axes` are unit vectors and `half` is the extent along each one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Obb {
+    pub center: Vec3,
+    pub axes: [Vec3; 3],
+    pub half: [f64; 3],
+}
+
+impl Obb {
+    /// Axis-aligned box written as an oriented box.
+    pub fn from_aabb(bounds: Aabb) -> Self {
+        let min = bounds.min();
+        let max = bounds.max();
+        Self {
+            center: Vec3::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5),
+            axes: [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)],
+            half: [(max.x - min.x) * 0.5, (max.y - min.y) * 0.5, (max.z - min.z) * 0.5],
+        }
+    }
+
+    /// `None` when a coordinate is not finite or a half-extent is negative.
+    pub fn try_new(center: Vec3, axes: [Vec3; 3], half: [f64; 3]) -> Option<Self> {
+        if !finite_vec(center) || axes.iter().any(|axis| !finite_vec(*axis)) || half.iter().any(|extent| !extent.is_finite() || *extent < 0.0) {
+            return None;
+        }
+        Some(Self { center, axes, half })
+    }
+
+    fn radius_along(self, axis: Vec3) -> f64 {
+        self.half[0] * self.axes[0].dot(axis).abs() + self.half[1] * self.axes[1].dot(axis).abs() + self.half[2] * self.axes[2].dot(axis).abs()
+    }
+}
+
+/// Signed distance from the solid sphere to the solid axis-aligned box.
+pub fn sphere_aabb(sphere: Sphere, bounds: Aabb) -> Option<CollisionHit> {
+    if sphere.radius < 0.0 || !sphere.radius.is_finite() || !finite_vec(sphere.center) {
+        return None;
+    }
+    let mut best = None;
+    for triangle in bounds.face_triangles() {
+        consider(&mut best, sphere_triangle(sphere, triangle));
+    }
+    if bounds.contains(sphere.center) {
+        consider(&mut best, Some(CollisionHit { point: sphere.center, distance: -sphere.radius }));
+    }
+    best
+}
+
+/// Signed distance from the solid sphere to an oriented box.
+pub fn sphere_obb(sphere: Sphere, obb: Obb) -> Option<CollisionHit> {
+    let local = into_obb(obb, sphere.center);
+    let local_sphere = Sphere { center: local, radius: sphere.radius };
+    let bounds = aabb_of_obb(obb);
+    let hit = sphere_aabb(local_sphere, bounds)?;
+    Some(CollisionHit { point: from_obb(obb, hit.point), distance: hit.distance })
+}
+
+/// Signed distance from the solid cylinder to an oriented box.
+pub fn cylinder_obb(cylinder: Cylinder, obb: Obb) -> Option<CollisionHit> {
+    let local = Cylinder { a: into_obb(obb, cylinder.a), b: into_obb(obb, cylinder.b), radius: cylinder.radius };
+    let hit = cylinder_aabb(local, aabb_of_obb(obb))?;
+    Some(CollisionHit { point: from_obb(obb, hit.point), distance: hit.distance })
+}
+
+/// Signed distance between two oriented boxes.
+///
+/// The separating axes are the three face normals of each box and the nine cross products of
+/// those normals. A near-zero cross product is skipped. The witness is the projection of the
+/// first centre onto the plane that bisects the overlap along the extreme axis.
+pub fn obb_obb(a: Obb, b: Obb) -> Option<CollisionHit> {
+    if !obb_finite(a) || !obb_finite(b) {
+        return None;
+    }
+    let sep = b.center.sub(a.center);
+    let mut best_gap = f64::NEG_INFINITY;
+    let mut best_axis = Vec3::new(1.0, 0.0, 0.0);
+    let mut saw = false;
+    for axis in obb_axes(a, b) {
+        let Some(normal) = axis.normalized() else {
+            continue;
+        };
+        let signed = sep.dot(normal);
+        let direction = if signed < 0.0 { normal.scale(-1.0) } else { normal };
+        let distance = signed.abs();
+        let gap = distance - a.radius_along(direction) - b.radius_along(direction);
+        if !gap.is_finite() {
+            return None;
+        }
+        if gap > best_gap {
+            best_gap = gap;
+            best_axis = direction;
+            saw = true;
+        }
+    }
+    if !saw || !best_gap.is_finite() {
+        return None;
+    }
+    let point = obb_witness(a, b, best_axis, best_gap);
+    if finite_vec(point) { Some(CollisionHit { point, distance: best_gap }) } else { None }
+}
+
+/// Signed distance from the solid sphere to the solid cylinder.
+pub fn sphere_cylinder(sphere: Sphere, cylinder: Cylinder) -> Option<CollisionHit> {
+    if sphere.radius < 0.0 || !sphere.radius.is_finite() || !finite_vec(sphere.center) {
+        return None;
+    }
+    let radial = point_to_cylinder(sphere.center, cylinder)?;
+    let distance = radial - sphere.radius;
+    if !distance.is_finite() {
+        return None;
+    }
+    Some(CollisionHit { point: sphere.center, distance })
+}
+
+/// Signed distance between two finite cylinders.
+///
+/// Side-to-side contact whose closest points lie in the interior of both axes is exact. A gap
+/// at least as large as the two radii separates the cylinders. An axis point inside the other
+/// solid is a hit. Otherwise an inscribed tessellation is tested, and a negative distance from
+/// that is a hit. A remaining overlap of the surrounding capsules is reported as distance 0,
+/// which is contact and not a hit.
+pub fn cylinder_cylinder(a: Cylinder, b: Cylinder) -> Option<CollisionHit> {
+    if a.radius < 0.0 || b.radius < 0.0 || !a.radius.is_finite() || !b.radius.is_finite() {
+        return None;
+    }
+    let (dir_a, len_a) = a.direction()?;
+    let (dir_b, len_b) = b.direction()?;
+    let (dist, pa, pb) = segment_segment(a.a, a.b, b.a, b.b);
+    if !dist.is_finite() || !finite_vec(pa) || !finite_vec(pb) {
+        return None;
+    }
+    let gap = dist - a.radius - b.radius;
+    let ta = if len_a > 0.0 { pa.sub(a.a).dot(dir_a) } else { 0.0 };
+    let tb = if len_b > 0.0 { pb.sub(b.a).dot(dir_b) } else { 0.0 };
+    let interior_a = len_a > 0.0 && ta > 1e-9 && ta < len_a - 1e-9;
+    let interior_b = len_b > 0.0 && tb > 1e-9 && tb < len_b - 1e-9;
+    if gap >= 0.0 {
+        return Some(CollisionHit { point: pa, distance: gap });
+    }
+    if interior_a && interior_b {
+        return Some(CollisionHit { point: pa, distance: gap });
+    }
+    if let Some(hit) = axis_inside(a, b) {
+        return Some(hit);
+    }
+    if let Some(hit) = axis_inside(b, a) {
+        return Some(hit);
+    }
+    if let Some(hit) = inscribed_cylinder_hit(a, b)
+        && hit.distance < 0.0
+    {
+        return Some(hit);
+    }
+    Some(CollisionHit { point: pa, distance: 0.0 })
+}
+
+fn obb_finite(obb: Obb) -> bool {
+    finite_vec(obb.center) && obb.axes.iter().all(|axis| finite_vec(*axis)) && obb.half.iter().all(|extent| extent.is_finite() && *extent >= 0.0)
+}
+
+fn aabb_of_obb(obb: Obb) -> Aabb {
+    Aabb::from_corners(Vec3::new(-obb.half[0], -obb.half[1], -obb.half[2]), Vec3::new(obb.half[0], obb.half[1], obb.half[2]))
+}
+
+fn into_obb(obb: Obb, point: Vec3) -> Vec3 {
+    let delta = point.sub(obb.center);
+    Vec3::new(delta.dot(obb.axes[0]), delta.dot(obb.axes[1]), delta.dot(obb.axes[2]))
+}
+
+fn from_obb(obb: Obb, point: Vec3) -> Vec3 {
+    obb.center.add(obb.axes[0].scale(point.x)).add(obb.axes[1].scale(point.y)).add(obb.axes[2].scale(point.z))
+}
+
+fn obb_axes(a: Obb, b: Obb) -> [Vec3; 15] {
+    let mut axes = [Vec3::new(0.0, 0.0, 0.0); 15];
+    axes[0] = a.axes[0];
+    axes[1] = a.axes[1];
+    axes[2] = a.axes[2];
+    axes[3] = b.axes[0];
+    axes[4] = b.axes[1];
+    axes[5] = b.axes[2];
+    let mut slot = 6;
+    for left in a.axes {
+        for right in b.axes {
+            axes[slot] = left.cross(right);
+            slot += 1;
+        }
+    }
+    axes
+}
+
+fn obb_witness(a: Obb, b: Obb, axis: Vec3, gap: f64) -> Vec3 {
+    let ra = a.radius_along(axis);
+    let rb = b.radius_along(axis);
+    let distance = b.center.sub(a.center).dot(axis);
+    if gap >= 0.0 {
+        return a.center.add(axis.scale(ra));
+    }
+    let lo = (-ra).max(distance - rb);
+    let hi = ra.min(distance + rb);
+    a.center.add(axis.scale((lo + hi) * 0.5))
+}
+
+fn axis_inside(probe: Cylinder, solid: Cylinder) -> Option<CollisionHit> {
+    let (dir, len) = probe.direction()?;
+    let steps = 8;
+    let mut best = None;
+    for index in 0..=steps {
+        let t = if steps == 0 { 0.0 } else { usize_f64(index) / usize_f64(steps) };
+        let point = probe.a.add(dir.scale(len * t));
+        let Some(distance) = point_to_cylinder(point, solid) else {
+            continue;
+        };
+        if distance < 0.0 {
+            consider(&mut best, Some(CollisionHit { point, distance }));
+        }
+    }
+    best
+}
+
+fn inscribed_cylinder_hit(a: Cylinder, b: Cylinder) -> Option<CollisionHit> {
+    let mut best = None;
+    for triangle in cylinder_shell(a, 24) {
+        consider(&mut best, cylinder_triangle(b, triangle));
+    }
+    best
+}
+
+fn usize_f64(value: usize) -> f64 {
+    u32::try_from(value).map_or(0.0, f64::from)
+}
+
+fn cylinder_shell(cylinder: Cylinder, sides: usize) -> Vec<Triangle> {
+    let Some((dir, len)) = cylinder.direction() else {
+        return Vec::new();
+    };
+    let Some((u, v)) = perp_basis(dir) else {
+        return Vec::new();
+    };
+    let sides = sides.max(3);
+    let mut ring_a = Vec::with_capacity(sides);
+    let mut ring_b = Vec::with_capacity(sides);
+    for index in 0..sides {
+        let angle = usize_f64(index) * std::f64::consts::TAU / usize_f64(sides);
+        let offset = u.scale(cylinder.radius * angle.cos()).add(v.scale(cylinder.radius * angle.sin()));
+        ring_a.push(cylinder.a.add(offset));
+        ring_b.push(cylinder.b.add(dir.scale(len)).add(offset));
+    }
+    let mut triangles = Vec::with_capacity(sides * 4);
+    for index in 0..sides {
+        let next = (index + 1) % sides;
+        let (Some(a0), Some(a1), Some(b0), Some(b1)) = (ring_a.get(index), ring_a.get(next), ring_b.get(index), ring_b.get(next)) else {
+            continue;
+        };
+        triangles.push(Triangle { a: *a0, b: *a1, c: *b1 });
+        triangles.push(Triangle { a: *a0, b: *b1, c: *b0 });
+        triangles.push(Triangle { a: cylinder.a, b: *a0, c: *a1 });
+        triangles.push(Triangle { a: cylinder.b, b: *b1, c: *b0 });
+    }
+    triangles
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,6 +1464,45 @@ mod tests {
             };
             let hit = index.query_cylinder(hit_cyl, 0.0).expect("hit query");
             prop_assert!(hit.is_some(), "grown holder should reach the known triangle at offset {offset}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 48,
+            max_shrink_iters: 64,
+            rng_seed: proptest::test_runner::RngSeed::Fixed(0x0BB0_0B01),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn boxes_overlap_when_interiors_meet_and_a_gap_or_a_touch_does_not(
+            hx in 0.5f64..20.0,
+            hy in 0.5f64..20.0,
+            hz in 0.5f64..20.0,
+            ox in 0.5f64..20.0,
+            oy in 0.5f64..20.0,
+            oz in 0.5f64..20.0,
+            margin in 0.5f64..8.0,
+        ) {
+            let left = Obb::from_aabb(Aabb::from_corners(Vec3::new(-hx, -hy, -hz), Vec3::new(hx, hy, hz)));
+            let overlap = Obb::from_aabb(Aabb::from_corners(Vec3::new(-ox, -oy, -oz), Vec3::new(ox, oy, oz)));
+            let hit = obb_obb(left, overlap).expect("overlap");
+            prop_assert!(hit.distance < -1e-6, "overlap distance {}", hit.distance);
+            prop_assert!(collides(hit.distance, 0.0));
+
+            let gap_box = Obb::from_aabb(Aabb::from_corners(
+                Vec3::new(hx + margin, -oy, -oz),
+                Vec3::new(hx + margin + 2.0 * ox, oy, oz),
+            ));
+            let gap = obb_obb(left, gap_box).expect("gap");
+            prop_assert!((gap.distance - margin).abs() <= 1e-6, "gap {} != {margin}", gap.distance);
+            prop_assert!(!collides(gap.distance, 0.0));
+
+            let touch_box = Obb::from_aabb(Aabb::from_corners(Vec3::new(hx, -oy, -oz), Vec3::new(hx + 2.0 * ox, oy, oz)));
+            let touch = obb_obb(left, touch_box).expect("touch");
+            prop_assert!(touch.distance.abs() <= 1e-6, "touch distance {}", touch.distance);
+            prop_assert!(!collides(touch.distance, 0.0));
         }
     }
 }

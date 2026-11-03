@@ -91,6 +91,7 @@ verify  Verify an IR JSON file and print a report. The status is 1 when the repo
         Tolerance is the job-file default chord tolerance, 0.01 mm. Samples are min(0.25, tolerance*10) mm apart.
         A gouge names the operation, the position and the depth. XY arcs are sampled; other arcs are rejected.
 view    Open the toolpath preview (the campanion-view program) for an IR JSON file.
+        --machine draws boxes and cylinders from the kinematics model. M toggles that sketch.
 schema  Print the JSON Schema for campanion-ir/1.
 
 --job FILE

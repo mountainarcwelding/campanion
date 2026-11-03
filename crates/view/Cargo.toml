@@ -17,4 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 campanion-ir.workspace = true
+campanion-mesh.workspace = true
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "x11", "wayland"] }
+
+[dev-dependencies]
+proptest = { version = "1.12", default-features = false, features = ["std"] }

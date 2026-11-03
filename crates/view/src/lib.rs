@@ -20,10 +20,18 @@
 //! band across both lanes while sync is on. A cursor marks the playhead, and the label is
 //! [`timeline_text`] for the step in force. A sub move in work coordinates also draws a short tick
 //! at that Z on the half-section.
+//!
+//! A five-axis program can also carry a machine sketch. [`MachineSim`] replays the posted joints
+//! and returns link and tool wireframes in the part frame, plus any collision at that sample.
+//! The window draws those edges. The solids are boxes and cylinders, not a CAD model of a machine.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAxisKind, RotarySetup, SpindleSpeed, TurningSetup};
+
+mod sim;
+
+pub use sim::{MachineSim, SimHit, SimSample, SimSolid, tessellate_box, tessellate_cylinder};
 
 /// Motions whose XY travel is at or below this (millimetres) are vertical feeds.
 ///
