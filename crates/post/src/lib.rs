@@ -9,6 +9,8 @@
 //! against the program that was posted. [`audit`] replays a mill program and reports the modal
 //! state a control would keep at each motion. [`audit_lathe`] does the same for a lathe or
 //! mill-turn program.
+//! state a control would keep at each motion. [`audit_five`] replays a five-axis post: work frame,
+//! TCP, tool length, inverse time, rotary words, and `G53` retracts.
 //!
 //! A post may declare a rotary axis. Poses that carry an angle are written in the machine frame.
 //! The feed rule for a move that changes the angle is in the crate README.
@@ -23,6 +25,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod audit;
+mod audit_5ax;
 mod audit_lathe;
 mod balance;
 mod compare;
@@ -38,6 +41,7 @@ mod write;
 pub use audit::{
     ArcReplay, AuditReport, CoolantState, DistanceMode, FeedMode, LengthOffset, MotionMode, MotionState, SpindleState, UnitMode, WorkOffset, audit,
 };
+pub use audit_5ax::{FiveAudit, FiveIndex, FiveMotion, FiveRetract, audit_five};
 pub use audit_lathe::{ChannelAudit, HousingMove, InterpFrame, LatheAudit, LatheFeedMode, LatheMotion, NoseComp, XMode, audit_lathe};
 pub use balance::{ChannelSegment, channel_balance};
 pub use compare::compare;

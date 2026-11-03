@@ -7,8 +7,9 @@
 //! A word this checker does not know is an error, so a typo in a template fails here. Geometry
 //! is also checked against [`crate::read_back`] so the two readers stay aligned.
 //!
-//! Lathe and five-axis posts are rejected. Lathe and mill-turn text is replayed by
-//! [`crate::audit_lathe`]. Work offset stays unset when the program never writes `G54`–`G59`. Feed mode stays
+//! Lathe posts are rejected; lathe and mill-turn text is replayed by [`crate::audit_lathe`].
+//! Five-axis posts are replayed by [`crate::audit_five`]. Work offset
+//! stays unset when the program never writes `G54`–`G59`. Feed mode stays
 //! units per minute until `G93` or `G94`. `M2` and `M30` turn the spindle and coolant off.
 //! `M3` or `M4` with `S0` is running with the beam or torch off: [`SpindleState::cutting`] is false.
 
@@ -121,7 +122,7 @@ impl SpindleState {
         self.on && self.speed > 0.0
     }
 
-    fn off() -> Self {
+    pub(crate) fn off() -> Self {
         Self { on: false, clockwise: true, speed: 0.0 }
     }
 }
@@ -199,13 +200,18 @@ pub struct AuditReport {
 
 /// Replay `text` as the control named by `post` would read it.
 ///
-/// Mill posts only. Unknown letters, unknown `G` and `M` codes, a `G2`/`G3` without a plane and
-/// a full centre or radius, a feed move before a positive `F`, and an inverse-time feed block
-/// with no `F` on that block are errors. Line-number sequence, line length, Fanuc/Haas decimal
-/// points, negative zero, and word magnitudes above `1e9` are checked as the text is read.
+/// Mill and five-axis posts. A lathe post is rejected. Unknown letters, unknown `G` and `M`
+/// codes, a `G2`/`G3` without a plane and a full centre or radius, a feed move before a positive
+/// `F`, and an inverse-time feed block with no `F` on that block are errors. Line-number
+/// sequence, line length, Fanuc/Haas decimal points, negative zero, and word magnitudes above
+/// `1e9` are checked as the text is read. Five-axis text is replayed by [`crate::audit_five`]
+/// and returned as the same mill report, with `A` in [`MotionState::rotary`].
 pub fn audit(text: &str, post: &PostDef) -> Result<AuditReport> {
-    if post.is_lathe() || post.has_five_axis() {
+    if post.is_lathe() {
         return Err(invalid("audit reads mill posts"));
+    }
+    if post.has_five_axis() {
+        return crate::audit_5ax::audit_as_mill(text, post);
     }
     if text.len() > 64 * 1024 * 1024 {
         return Err(invalid("g-code is too large"));
