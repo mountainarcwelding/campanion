@@ -733,6 +733,88 @@ stderr, including when a later gouge check blocks the file:
 
 `L` and `M` are millimetres to three decimal places. `G` is an integer.
 
+When the model is on, each operation also prints its peak removal rate and peak engagement.
+A drawing prints only these lines. An STL job prints the leftover line first.
+
+`stock: operation `NAME` peak MRR R mm^3/min, peak engagement E deg`
+
+`R` is mm³/min to three decimal places. `E` is degrees to one decimal place. The name is the
+toolpath name, in first-seen order. Two toolpaths that share a name share one line, and the
+peaks are the higher of the two.
+
+`--stock-report FILE.csv` writes one row per feed move. Rapids are omitted. A kerf tool has no
+flute, so its feed row is zeros. Without the flag, no CSV is written and the NGC path is
+unchanged. The file is written when the replay succeeds, including when a later verify error
+blocks the NGC. A rapid into stock still writes nothing.
+
+```text
+operation,toolpath,move,volume,mrr,engagement_deg,axial_doc
+```
+
+| Column | Meaning |
+| --- | --- |
+| `operation` | Toolpath name. A comma or quote in the name is quoted. |
+| `toolpath` | 0-based toolpath index. |
+| `move` | 0-based motion index in that toolpath. Rapids occupy an index and have no row. |
+| `volume` | mm³ removed on that move, the union of the dexel intervals the flute took. |
+| `mrr` | mm³/min. Volume divided by the move time at the IR feed (mm/min). A thread has a lead and no mm/min feed, so its rate is 0. A move shorter than 0.000001 mm is 0. |
+| `engagement_deg` | Arc of the cutter circumference in contact, in degrees. Estimated from the dexels around the tool at the flute's lowest active level. The row keeps the larger of the start, the middle and the end, read before the cut. |
+| `axial_doc` | Longest Z overlap of the flute with solid stock, in millimetres, from those same three poses. |
+
+A slot through solid stock engages 180 degrees. A straight cut along an existing wall at radial
+stepover `s` engages `acos(1 - 2s/D)` degrees, where `D` is the diameter. A plunge, with no XY
+feed, uses the whole circle.
+
+`--stock-out FILE.json` writes the final stock as `campanion-stock/1`. Lengths are millimetres.
+
+```json
+{
+  "format": "campanion-stock/1",
+  "origin": [-23, -23],
+  "cell": 2.0,
+  "nx": 23,
+  "ny": 23,
+  "length": 1400.0,
+  "top": [10.0, null],
+  "multi": [4],
+  "snapshots": [{ "position": 0.0, "top": [10.0, 10.0], "multi": [] }]
+}
+```
+
+`origin` is the minimum corner of cell `(0, 0)`. `top` is row-major (`iy * nx + ix`); `null` is an
+empty column. `multi` lists columns with more than one solid interval, so a viewer can mark an
+undercut the single top Z hides. `length` is tool travel, the same axis as the preview scrub.
+The top-level `top` is the stock at `length`. Unknown keys are an error. Heights use the shortest
+round-trip decimal.
+
+`--stock-snapshots N` (`N` at least 1) also stores a map at travel 0, before any motion, and a map
+after every Nth motion. Rapids count, and a toolpath with no tool still advances the travel so the
+scrub stays aligned. The flag requires `--stock-out`. Without it, `snapshots` is empty and the
+viewer shows the final map for the whole scrub.
+
+Straight moves use the 3-D tip distance, so they match the scrub. An XY arc or helix uses its arc
+length (`radius` times the sweep, with the height in the hypotenuse). The preview shortens that
+arc by less than one chord, so a snapshot can sit slightly ahead of the playhead on an arc. The
+first motion of the program only places the cursor and adds no travel, matching the preview.
+
+`--stock-report`, `--stock-out` and `-o` / `--ir` must be different files. The flags are an error
+when the stock model is off.
+
+`campanion view IR.json --stock FILE.json` (the same flag on `campanion-view`) draws that map.
+Plan view shades the top by height. A flat map uses one colour. Iso draws each solid cell as a
+wireframe. A cell in `multi` is outlined in orange, and its iso wire is orange. The surface is
+drawn over the grid and under the toolpath. S toggles it, and the fit includes it while it is
+shown. When snapshots exist, the scrub picks the latest one at or before the playhead and does
+not show a later frame early. A turning program does not draw this map. Loading, the snapshot
+choice, the colours and the triangles are library code; the window only paints. The viewer
+refuses a stock file larger than 64 MiB.
+
+A dexel centre can sit about one cell off a wall, and a circumference sample falls in one cell.
+The engagement of a side cut is within the change in `acos(1 - 2s/D)` when `s` moves by about one
+cell, plus about `cell / radius` radians. The removal rate of a straight slot, once the start is
+open, is within about one cell of width (`cell * depth * feed`). Steep walls stay only as sharp
+as the cell. This output has not been proven on a machine.
+
 `examples/dome_stock.job.json` roughs and finishes `examples/dome.stl` with an explicit stock box
 and a 2 mm cell.
 

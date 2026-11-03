@@ -11,10 +11,15 @@
 //! subtracts the whole flute only at those samples. A kerf tool has no flute, so it is skipped.
 //! Without an assembly the flute length is the tool diameter.
 //!
-//! The finished-part and fixture checks are unchanged. This output has not been proven on a machine.
+//! The finished-part and fixture checks are unchanged.
+//!
+//! Each feed also records the volume removed, the removal rate at the IR feed, the radial
+//! engagement and the axial depth. `--stock-report` writes one CSV row per feed. `--stock-out`
+//! writes the final height map, and `--stock-snapshots` keeps earlier maps on the same travel
+//! axis as the preview. This output has not been proven on a machine.
 
-use campanion_ir::{ClBlock, ClMotion, Pose, Program};
-use campanion_mesh::{Flute, LeftoverReport, Mesh, MeshError, StockHit, StockModel, Vec3 as MeshVec, default_stock_cell};
+use campanion_ir::{ArcSense, ClBlock, ClMotion, Plane, Pose, Program};
+use campanion_mesh::{Flute, LeftoverReport, Mesh, MeshError, StockFile, StockHit, StockModel, StockSnapshot, Vec3 as MeshVec, default_stock_cell};
 
 use crate::collision::poses_along;
 use crate::error::CliError;
@@ -25,11 +30,39 @@ use crate::jobfile::{JobFile, JobTool, OperationKind, StockBounds, ToolAssembly,
 /// Shallower overlaps are the dexel quantisation (one cell) and the analytic boundary.
 pub(crate) const RAPID_DEPTH_MM: f64 = 1.0e-3;
 
+/// What to collect besides the leftover summary and the per-operation peaks.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StockWant {
+    /// One CSV row per feed move.
+    pub csv: bool,
+    /// Final height map. Snapshots are stored only when [`Self::snapshot_every`] is set.
+    pub file: bool,
+    /// A map after every this many motions, plus the uncut map at travel 0. `None` keeps only the final grid.
+    pub snapshot_every: Option<usize>,
+}
+
+/// Highest removal rate and engagement seen on one operation name.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StockPeak {
+    /// Toolpath name. Empty when the IR omits it.
+    pub name: String,
+    /// Peak material-removal rate, mm³/min.
+    pub peak_mrr: f64,
+    /// Peak radial engagement, degrees.
+    pub peak_engagement: f64,
+}
+
 /// Result of a stock replay. `None` from [`check_job`] means the model was off.
 #[derive(Debug)]
 pub(crate) struct StockCheck {
     /// Set for an STL part. A drawing has no mesh to measure leftover against.
     pub leftover: Option<LeftoverReport>,
+    /// One entry per operation name, in first-seen order.
+    pub peaks: Vec<StockPeak>,
+    /// CSV text when [`StockWant::csv`] was set.
+    pub csv: Option<String>,
+    /// Height map when [`StockWant::file`] was set.
+    pub file: Option<StockFile>,
 }
 
 struct Labeled {
@@ -44,42 +77,106 @@ struct Labeled {
 /// `implicit` is the drawing stock box, used only when the file enables the model and omits
 /// `stock`. An STL part derives its box from the mesh instead: mesh bounds, with the top grown
 /// by the largest rough or waterline margin.
+#[cfg(test)]
 pub(crate) fn check_job(
     job: &JobFile,
     part: Option<&Mesh>,
     program: &Program,
     implicit: Option<(MeshVec, MeshVec)>,
 ) -> Result<Option<StockCheck>, CliError> {
-    let Some(model) = replay_model(job, part, program, implicit)? else {
+    check_job_with(job, part, program, implicit, StockWant { csv: false, file: false, snapshot_every: None })
+}
+
+/// Replay like [`check_job`], and also collect the report, the height map, or both.
+pub(crate) fn check_job_with(
+    job: &JobFile,
+    part: Option<&Mesh>,
+    program: &Program,
+    implicit: Option<(MeshVec, MeshVec)>,
+    want: StockWant,
+) -> Result<Option<StockCheck>, CliError> {
+    let Some(replay) = replay(job, part, program, implicit, want)? else {
         return Ok(None);
     };
-    let cell = model.cell();
-    let leftover = part.map(|mesh| model.compare_mesh(mesh, job.tolerance().chord() + cell));
-    Ok(Some(StockCheck { leftover }))
+    let cell = replay.model.cell();
+    let leftover = part.map(|mesh| replay.model.compare_mesh(mesh, job.tolerance().chord() + cell));
+    let file = if want.file { Some(StockFile { grid: replay.model.stock_grid(), length: replay.length, snapshots: replay.snapshots }) } else { None };
+    let csv = if want.csv { Some(write_csv(&replay.rows)) } else { None };
+    Ok(Some(StockCheck { leftover, peaks: replay.peaks, csv, file }))
 }
 
 /// Build the stock and subtract every feed. `None` when the model is off.
+#[cfg(test)]
 fn replay_model(job: &JobFile, part: Option<&Mesh>, program: &Program, implicit: Option<(MeshVec, MeshVec)>) -> Result<Option<StockModel>, CliError> {
+    Ok(replay(job, part, program, implicit, StockWant { csv: false, file: false, snapshot_every: None })?.map(|out| out.model))
+}
+
+struct Replay {
+    model: StockModel,
+    rows: Vec<FeedRow>,
+    peaks: Vec<StockPeak>,
+    length: f64,
+    snapshots: Vec<StockSnapshot>,
+}
+
+struct FeedRow {
+    operation: String,
+    toolpath: usize,
+    move_index: usize,
+    volume: f64,
+    mrr: f64,
+    engagement_deg: f64,
+    axial_doc: f64,
+}
+
+struct Travel {
+    tip: Option<MeshVec>,
+    length: f64,
+    motions: usize,
+}
+
+fn replay(
+    job: &JobFile,
+    part: Option<&Mesh>,
+    program: &Program,
+    implicit: Option<(MeshVec, MeshVec)>,
+    want: StockWant,
+) -> Result<Option<Replay>, CliError> {
     if !job.stock_model_enabled() {
         return Ok(None);
     }
     let (min, max) = stock_box(job, part, implicit)?;
     let cell = job.stock_model().cell().unwrap_or_else(|| default_stock_cell(smallest_radius(job)));
     let mut model = StockModel::from_box(min, max, cell).map_err(stock_err)?;
-    for (path_index, path) in program.toolpaths().iter().enumerate() {
-        let Some(tool_id) = path.tool_id() else {
-            continue;
-        };
-        let Some(tool) = job.tool(tool_id) else {
-            continue;
-        };
-        replay_path(&mut model, job, path.name().unwrap_or(""), path_index, tool, path.blocks())?;
+    let mut rows = Vec::new();
+    let mut peaks: Vec<StockPeak> = Vec::new();
+    let mut travel = Travel { tip: None, length: 0.0, motions: 0 };
+    let mut snapshots = Vec::new();
+    if want.snapshot_every.is_some() {
+        snapshots.push(snapshot_of(&model, 0.0));
     }
-    Ok(Some(model))
+    for (path_index, path) in program.toolpaths().iter().enumerate() {
+        let name = path.name().unwrap_or("");
+        let tool = path.tool_id().and_then(|id| job.tool(id));
+        replay_path(&mut model, &mut rows, &mut peaks, &mut travel, &mut snapshots, job, name, path_index, tool, path.blocks(), want)?;
+    }
+    Ok(Some(Replay { model, rows, peaks, length: travel.length, snapshots }))
 }
 
-fn replay_path(model: &mut StockModel, job: &JobFile, op_name: &str, path_index: usize, tool: &JobTool, blocks: &[ClBlock]) -> Result<(), CliError> {
-    let flute = flute_of(tool);
+fn replay_path(
+    model: &mut StockModel,
+    rows: &mut Vec<FeedRow>,
+    peaks: &mut Vec<StockPeak>,
+    travel: &mut Travel,
+    snapshots: &mut Vec<StockSnapshot>,
+    job: &JobFile,
+    op_name: &str,
+    path_index: usize,
+    tool: Option<&JobTool>,
+    blocks: &[ClBlock],
+    want: StockWant,
+) -> Result<(), CliError> {
+    let flute = tool.and_then(flute_of);
     let settings = job.collision();
     let mut cursor: Option<Pose> = None;
     let mut move_index = 0usize;
@@ -90,44 +187,245 @@ fn replay_path(model: &mut StockModel, job: &JobFile, op_name: &str, path_index:
         let end = motion_pose(motion);
         let start = cursor.unwrap_or(end);
         let rapid = matches!(motion, ClMotion::Rapid { .. });
-        let poses = poses_along(start, end, motion, settings)?;
-        if rapid
-            && let Some(flute) = flute
-            && let Some(hit) = flute_hit(model, &poses, flute)?
-        {
-            return Err(CliError::run(format_rapid(op_name, path_index, move_index, hit)));
-        }
-        if let Some(assembly) = tool.assembly()
-            && let Some((label, hit)) = assembly_hit(model, &poses, assembly, settings.clearance())?
-        {
-            return Err(CliError::run(format_holder(op_name, path_index, move_index, &label, hit)));
-        }
-        if !rapid && let Some(flute) = flute {
-            subtract_feed(model, start, end, motion, flute, &poses)?;
+        if let Some(tool) = tool {
+            let poses = poses_along(start, end, motion, settings)?;
+            if rapid
+                && let Some(flute) = flute
+                && let Some(hit) = flute_hit(model, &poses, flute)?
+            {
+                return Err(CliError::run(format_rapid(op_name, path_index, move_index, hit)));
+            }
+            if let Some(assembly) = tool.assembly()
+                && let Some((label, hit)) = assembly_hit(model, &poses, assembly, settings.clearance())?
+            {
+                return Err(CliError::run(format_holder(op_name, path_index, move_index, &label, hit)));
+            }
+            if !rapid {
+                let (volume, measure) = if let Some(flute) = flute {
+                    let measure = measure_move(model, start, end, flute)?;
+                    let volume = subtract_feed(model, start, end, motion, flute, &poses)?;
+                    (volume, measure)
+                } else {
+                    (0.0, campanion_mesh::CutMeasure { engagement_deg: 0.0, axial_doc: 0.0 })
+                };
+                let length = move_length(start, end, motion)?;
+                let rate = removal_rate(volume, feed_mm_per_min(motion), length);
+                note_peak(peaks, op_name, rate, measure.engagement_deg);
+                if want.csv {
+                    rows.push(FeedRow {
+                        operation: op_name.to_string(),
+                        toolpath: path_index,
+                        move_index,
+                        volume,
+                        mrr: rate,
+                        engagement_deg: measure.engagement_deg,
+                        axial_doc: measure.axial_doc,
+                    });
+                }
+            }
         }
         cursor = Some(end);
+        advance_travel(travel, end, motion)?;
+        if let Some(every) = want.snapshot_every
+            && every > 0
+            && travel.motions.is_multiple_of(every)
+        {
+            snapshots.push(snapshot_of(model, travel.length));
+        }
         move_index += 1;
     }
     Ok(())
 }
 
-fn subtract_feed(model: &mut StockModel, start: Pose, end: Pose, motion: &ClMotion, flute: Flute, poses: &[Pose]) -> Result<(), CliError> {
+/// Engagement and axial depth at the start, the middle and the end, before the cut.
+fn measure_move(model: &StockModel, start: Pose, end: Pose, flute: Flute) -> Result<campanion_mesh::CutMeasure, CliError> {
+    let (tip0, axis0) = tip_axis(start)?;
+    let (tip1, axis1) = tip_axis(end)?;
+    let feed = tip1.sub(tip0);
+    let mut engagement_deg = 0.0_f64;
+    let mut axial_doc = 0.0_f64;
+    for t in [0.0, 0.5, 1.0] {
+        let tip = lerp_mesh(tip0, tip1, t);
+        let axis = lerp_mesh(axis0, axis1, t);
+        let sample = model.measure_flute(tip, axis, flute, feed);
+        engagement_deg = engagement_deg.max(sample.engagement_deg);
+        axial_doc = axial_doc.max(sample.axial_doc);
+    }
+    Ok(campanion_mesh::CutMeasure { engagement_deg, axial_doc })
+}
+
+fn subtract_feed(model: &mut StockModel, start: Pose, end: Pose, motion: &ClMotion, flute: Flute, poses: &[Pose]) -> Result<f64, CliError> {
     let (tip0, axis0) = tip_axis(start)?;
     let (tip1, axis1) = tip_axis(end)?;
     let straight = matches!(motion, ClMotion::Linear { .. } | ClMotion::Thread { .. });
+    let mut volume = 0.0;
     if straight && axis0.dot(axis1) >= 1.0 - 1e-8 {
-        model.subtract_flute_translation(tip0, tip1, axis0, flute).map_err(stock_err)?;
+        volume += model.subtract_flute_translation(tip0, tip1, axis0, flute).map_err(stock_err)?;
         for pose in poses {
             let (tip, axis) = tip_axis(*pose)?;
-            model.subtract_flute_nose(tip, axis, flute).map_err(stock_err)?;
+            volume += model.subtract_flute_nose(tip, axis, flute).map_err(stock_err)?;
         }
     } else {
         for pose in poses {
             let (tip, axis) = tip_axis(*pose)?;
-            model.subtract_flute(tip, axis, flute).map_err(stock_err)?;
+            volume += model.subtract_flute(tip, axis, flute).map_err(stock_err)?;
         }
     }
+    Ok(if volume.is_finite() { volume } else { 0.0 })
+}
+
+fn removal_rate(volume: f64, feed: f64, length: f64) -> f64 {
+    if length > 1e-9 && feed > 0.0 && volume.is_finite() {
+        let rate = volume * feed / length;
+        if rate.is_finite() { rate } else { 0.0 }
+    } else {
+        0.0
+    }
+}
+
+fn feed_mm_per_min(motion: &ClMotion) -> f64 {
+    match motion {
+        ClMotion::Linear { feed, .. } | ClMotion::Arc { feed, .. } | ClMotion::Helix { feed, .. } => {
+            if feed.is_finite() && *feed > 0.0 {
+                *feed
+            } else {
+                0.0
+            }
+        }
+        ClMotion::Rapid { .. } | ClMotion::Thread { .. } => 0.0,
+    }
+}
+
+fn note_peak(peaks: &mut Vec<StockPeak>, name: &str, mrr: f64, engagement: f64) {
+    if let Some(peak) = peaks.iter_mut().find(|peak| peak.name == name) {
+        peak.peak_mrr = peak.peak_mrr.max(mrr);
+        peak.peak_engagement = peak.peak_engagement.max(engagement);
+    } else {
+        peaks.push(StockPeak { name: name.to_string(), peak_mrr: mrr, peak_engagement: engagement });
+    }
+}
+
+fn snapshot_of(model: &StockModel, position: f64) -> StockSnapshot {
+    let grid = model.stock_grid();
+    StockSnapshot { position, top: grid.top, multi: grid.multi }
+}
+
+/// Program-wide travel, matching the preview: the first motion only places the cursor.
+fn advance_travel(travel: &mut Travel, end: Pose, motion: &ClMotion) -> Result<(), CliError> {
+    let (tip, _) = tip_axis(end)?;
+    if let Some(start) = travel.tip {
+        let step = motion_length(start, tip, motion)?;
+        if step.is_finite() && step > 0.0 {
+            travel.length += step;
+        }
+    }
+    travel.tip = Some(tip);
+    travel.motions += 1;
     Ok(())
+}
+
+/// Length of the stroke the preview draws for this motion.
+///
+/// A straight move is the 3-D tip distance. An XY arc or helix is the analytic arc length
+/// (`radius * sweep`, with the height in the hypotenuse). The preview shortens that arc by less
+/// than one chord. Any other plane is the tip distance.
+fn motion_length(start: MeshVec, end: MeshVec, motion: &ClMotion) -> Result<f64, CliError> {
+    let length = match motion {
+        ClMotion::Arc { plane: Plane::Xy, center, sense, .. } => xy_arc_length(start, end, center, matches!(sense, ArcSense::Ccw), None),
+        ClMotion::Helix { plane: Plane::Xy, center, sense, sweep, .. } => {
+            xy_arc_length(start, end, center, matches!(sense, ArcSense::Ccw), Some(*sweep))
+        }
+        _ => tip_distance(start, end),
+    };
+    Ok(if length.is_finite() { length } else { 0.0 })
+}
+
+/// Geometric length used for the removal rate. A zero-length placement stays zero.
+fn move_length(start: Pose, end: Pose, motion: &ClMotion) -> Result<f64, CliError> {
+    let (tip0, _) = tip_axis(start)?;
+    let (tip1, _) = tip_axis(end)?;
+    motion_length(tip0, tip1, motion)
+}
+
+fn tip_distance(start: MeshVec, end: MeshVec) -> f64 {
+    let length = end.sub(start).length();
+    if length.is_finite() { length } else { 0.0 }
+}
+
+fn xy_arc_length(start: MeshVec, end: MeshVec, center: &campanion_ir::Vec3, ccw: bool, sweep: Option<f64>) -> f64 {
+    let sx = start.x - center.x();
+    let sy = start.y - center.y();
+    let ex = end.x - center.x();
+    let ey = end.y - center.y();
+    let r0 = sx.hypot(sy);
+    let r1 = ex.hypot(ey);
+    if !r0.is_finite() || !r1.is_finite() || r0 <= 1e-12 {
+        return tip_distance(start, end);
+    }
+    let radius = (r0 + r1) * 0.5;
+    let sweep = match sweep {
+        Some(sweep) if sweep.is_finite() && sweep > 0.0 => sweep,
+        _ => match one_turn_sweep(sx, sy, ex, ey, r0, ccw) {
+            Some(sweep) => sweep,
+            None => return tip_distance(start, end),
+        },
+    };
+    let length = (radius * sweep).hypot(end.z - start.z);
+    if length.is_finite() { length } else { tip_distance(start, end) }
+}
+
+/// Sweep of one XY arc, at most one full turn. A closed chord is a full turn.
+fn one_turn_sweep(sx: f64, sy: f64, ex: f64, ey: f64, radius: f64, ccw: bool) -> Option<f64> {
+    let a0 = sy.atan2(sx);
+    let a1 = ey.atan2(ex);
+    if !a0.is_finite() || !a1.is_finite() {
+        return None;
+    }
+    let chord = (ex - sx).hypot(ey - sy);
+    let closure = 1e-9_f64.max(radius * 1e-9);
+    let ccw_delta = (a1 - a0).rem_euclid(std::f64::consts::TAU);
+    let sweep = if chord <= closure {
+        std::f64::consts::TAU
+    } else if ccw {
+        if ccw_delta <= 1e-15 { std::f64::consts::TAU } else { ccw_delta }
+    } else {
+        let cw = std::f64::consts::TAU - ccw_delta;
+        if cw <= 1e-15 { std::f64::consts::TAU } else { cw }
+    };
+    if sweep.is_finite() && sweep > 0.0 { Some(sweep) } else { None }
+}
+
+fn lerp_mesh(start: MeshVec, end: MeshVec, t: f64) -> MeshVec {
+    start.add(end.sub(start).scale(t))
+}
+
+fn write_csv(rows: &[FeedRow]) -> String {
+    let mut out = String::from("operation,toolpath,move,volume,mrr,engagement_deg,axial_doc\n");
+    for row in rows {
+        out.push_str(&csv_field(&row.operation));
+        out.push(',');
+        out.push_str(&row.toolpath.to_string());
+        out.push(',');
+        out.push_str(&row.move_index.to_string());
+        out.push(',');
+        out.push_str(&csv_num(row.volume));
+        out.push(',');
+        out.push_str(&csv_num(row.mrr));
+        out.push(',');
+        out.push_str(&csv_num(row.engagement_deg));
+        out.push(',');
+        out.push_str(&csv_num(row.axial_doc));
+        out.push('\n');
+    }
+    out
+}
+
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\n', '\r']) { format!("\"{}\"", text.replace('"', "\"\"")) } else { text.to_string() }
+}
+
+fn csv_num(value: f64) -> String {
+    if value.is_finite() { format!("{value}") } else { "0".to_string() }
 }
 
 fn flute_hit(model: &StockModel, poses: &[Pose], flute: Flute) -> Result<Option<StockHit>, CliError> {
@@ -291,10 +589,19 @@ mod tests {
     }
 
     fn program_of(name: &str, blocks: Vec<ClBlock>) -> Program {
+        program_paths(&[(name, blocks)])
+    }
+
+    fn program_paths(paths: &[(&str, Vec<ClBlock>)]) -> Program {
         let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
-        let path = ClPath::try_new(Some(name.into()), Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let built = paths
+            .iter()
+            .map(|(name, blocks)| {
+                ClPath::try_new(Some((*name).into()), Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks.clone()).expect("path")
+            })
+            .collect();
         let tool = Tool::try_new(1, None, Some(6.0), None).expect("tool");
-        Program::try_new(None, vec![tool], None, vec![path], Vec::new(), Vec::new(), None).expect("program")
+        Program::try_new(None, vec![tool], None, built, Vec::new(), Vec::new(), None).expect("program")
     }
 
     fn load_job(name: &str, text: &str) -> JobFile {
@@ -351,6 +658,46 @@ mod tests {
         let err = check_job(&job, None, &program_of("cut", blocks), None).expect_err("holder");
         let text = err.to_string();
         assert!(text.contains("operation `cut` toolpath 0 move 1: holder 1 hits stock at ("), "{text}");
+    }
+
+    #[test]
+    fn the_report_has_one_row_per_feed_move_and_the_map_round_trips() {
+        let job = stock_job(r#","stock_model":{"cell":1}"#);
+        let cut = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: pose(2.0, 2.0, 30.0), feed: None }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(2.0, 2.0, 6.0), feed: 120.0, role: MoveRole::Plunge }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(8.0, 2.0, 6.0), feed: 200.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Rapid { to: pose(8.0, 2.0, 30.0), feed: None }),
+        ];
+        let again = vec![
+            ClBlock::Motion(ClMotion::Rapid { to: pose(8.0, 6.0, 30.0), feed: None }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(8.0, 6.0, 6.0), feed: 80.0, role: MoveRole::Cut }),
+        ];
+        let program = program_paths(&[("cut", cut), ("finish", again)]);
+        let want = StockWant { csv: true, file: true, snapshot_every: Some(2) };
+        let check = ok(check_job_with(&job, None, &program, None, want)).expect("on");
+        let csv = check.csv.expect("csv");
+        let lines: Vec<&str> = csv.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines[0], "operation,toolpath,move,volume,mrr,engagement_deg,axial_doc");
+        let data = &lines[1..];
+        assert_eq!(data.len(), 3, "one row per feed, rapids omitted: {csv}");
+        assert!(data[0].starts_with("cut,0,1,"), "{csv}");
+        assert!(data[1].starts_with("cut,0,2,"), "{csv}");
+        assert!(data[2].starts_with("finish,1,1,"), "{csv}");
+        assert!(check.peaks.iter().any(|peak| peak.name == "cut" && peak.peak_mrr > 0.0), "{:?}", check.peaks);
+        assert!(check.peaks.iter().any(|peak| peak.name == "finish"), "{:?}", check.peaks);
+        let file = check.file.expect("map");
+        let parsed = campanion_mesh::StockFile::from_json(&file.to_json().expect("json")).expect("parse");
+        assert_eq!(parsed.grid.nx, file.grid.nx);
+        assert_eq!(parsed.grid.ny, file.grid.ny);
+        assert_eq!(parsed.snapshots.len(), file.snapshots.len());
+        assert!(parsed.snapshots.len() >= 2, "uncut frame plus later frames");
+        let mut previous = -1.0_f64;
+        for frame in &parsed.snapshots {
+            assert!(frame.position + 1e-9 >= previous, "snapshot positions increase");
+            previous = frame.position;
+        }
+        assert!(parsed.length + 1e-9 >= previous);
     }
 
     #[test]

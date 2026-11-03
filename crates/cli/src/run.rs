@@ -49,7 +49,10 @@
 //! Rotary and tilted programs are checked in the planning frame instead.
 //! When the in-process stock model is on, toolpaths are replayed through the Z-dexel before that
 //! verify. A rapid or a holder that meets the remaining stock fails the run and nothing is written.
-//! An STL job then prints the leftover summary on stderr.
+//! An STL job then prints the leftover summary on stderr. Every operation also prints its peak
+//! removal rate and peak engagement. `--stock-report` writes one CSV row per feed move, and
+//! `--stock-out` writes the height map. Those files are written when the replay succeeds, even
+//! if a later verify error blocks the NGC.
 //!
 //! `--post` writes that dialect instead of the test-sink NGC. The text is read back and compared
 //! at the job chord tolerance. A mismatch exits 1 and nothing is written. Without `--post` the
@@ -155,6 +158,9 @@ struct RunArgs {
     ir: Option<PathBuf>,
     post: Option<PathBuf>,
     up_axis: step::UpAxis,
+    stock_report: Option<PathBuf>,
+    stock_out: Option<PathBuf>,
+    stock_snapshots: Option<usize>,
 }
 
 struct Cut<'a> {
@@ -181,7 +187,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         let doc = build_surface(&job, &mesh)?;
         let gouges = crate::gouge::check_job(&job, &mesh, doc.program())?;
         crate::collision::check_job(&job, Some(&mesh), doc.program())?;
-        apply_stock(&job, Some(&mesh), doc.program(), None)?;
+        apply_stock(&job, Some(&mesh), doc.program(), None, &args)?;
         return emit_program(&args, &job, doc, &gouges, post.as_ref());
     }
     let text = read_text(&source)?;
@@ -218,7 +224,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
     let doc = build(&job, &drawing)?;
     crate::collision::check_job(&job, None, doc.program())?;
     let implicit = if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(&job, &drawing)?) } else { None };
-    apply_stock(&job, None, doc.program(), implicit)?;
+    apply_stock(&job, None, doc.program(), implicit, &args)?;
     emit_program(&args, &job, doc, &[], post.as_ref())
 }
 
@@ -231,18 +237,40 @@ fn apply_stock(
     part: Option<&Mesh>,
     program: &Program,
     implicit: Option<(campanion_mesh::Vec3, campanion_mesh::Vec3)>,
+    args: &RunArgs,
 ) -> Result<(), CliError> {
-    let Some(check) = crate::stock::check_job(job, part, program, implicit)? else {
+    let asked = args.stock_report.is_some() || args.stock_out.is_some() || args.stock_snapshots.is_some();
+    if asked && !job.stock_model_enabled() {
+        return Err(CliError::run("stock model is off; --stock-report and --stock-out need it"));
+    }
+    let want = crate::stock::StockWant { csv: args.stock_report.is_some(), file: args.stock_out.is_some(), snapshot_every: args.stock_snapshots };
+    let Some(check) = crate::stock::check_job_with(job, part, program, implicit, want)? else {
         return Ok(());
     };
+    let mut err_out = io::stderr().lock();
     if let Some(report) = check.leftover {
-        let mut err_out = io::stderr().lock();
         writeln!(
             err_out,
             "stock: max leftover {:.3} mm, mean leftover {:.3} mm, model gouges {}",
             report.max_leftover, report.mean_leftover, report.model_gouges
         )?;
-        err_out.flush()?;
+    }
+    for peak in &check.peaks {
+        writeln!(
+            err_out,
+            "stock: operation `{}` peak MRR {:.3} mm^3/min, peak engagement {:.1} deg",
+            peak.name, peak.peak_mrr, peak.peak_engagement
+        )?;
+    }
+    err_out.flush()?;
+    if let Some(path) = &args.stock_report {
+        let csv = check.csv.unwrap_or_default();
+        write_output(path, &csv)?;
+    }
+    if let Some(path) = &args.stock_out {
+        let file = check.file.ok_or_else(|| CliError::run("stock: missing height map"))?;
+        let json = file.to_json().map_err(|err| CliError::run(format!("stock: {err}")))?;
+        write_output(path, &json)?;
     }
     Ok(())
 }
@@ -378,6 +406,9 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     let mut ir: Option<&OsStr> = None;
     let mut post: Option<&OsStr> = None;
     let mut up_axis: Option<step::UpAxis> = None;
+    let mut stock_report: Option<&OsStr> = None;
+    let mut stock_out: Option<&OsStr> = None;
+    let mut stock_snapshots: Option<usize> = None;
     let mut index = 0;
     while index < args.len() {
         let Some(arg) = args.get(index) else {
@@ -425,6 +456,29 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
                 return Err(CliError::usage(format!("{flag} is already set")));
             }
             *slot = Some(value.as_os_str());
+        } else if arg.as_os_str() == "--stock-report" || arg.as_os_str() == "--stock-out" {
+            let flag = if arg.as_os_str() == "--stock-report" { "--stock-report" } else { "--stock-out" };
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage(format!("{flag} needs a file")));
+            };
+            index += 1;
+            if value.is_empty() {
+                return Err(CliError::usage(format!("{flag} needs a file")));
+            }
+            let slot = if flag == "--stock-report" { &mut stock_report } else { &mut stock_out };
+            if slot.is_some() {
+                return Err(CliError::usage(format!("{flag} is already set")));
+            }
+            *slot = Some(value.as_os_str());
+        } else if arg.as_os_str() == "--stock-snapshots" {
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage("--stock-snapshots needs a positive integer"));
+            };
+            index += 1;
+            if stock_snapshots.is_some() {
+                return Err(CliError::usage("--stock-snapshots is already set"));
+            }
+            stock_snapshots = Some(parse_snapshot_every(value)?);
         } else if starts_with_dash(arg) {
             return Err(CliError::usage("unknown argument"));
         } else if job.is_some() || arg.is_empty() {
@@ -442,13 +496,50 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     if ir.is_some_and(|path| path == output) {
         return Err(CliError::usage("-o and --ir must be different files"));
     }
+    if stock_snapshots.is_some() && stock_out.is_none() {
+        return Err(CliError::usage("--stock-snapshots needs --stock-out"));
+    }
+    let output_path = PathBuf::from(output);
+    let ir_path = ir.map(PathBuf::from);
+    let report_path = stock_report.map(PathBuf::from);
+    let stock_path = stock_out.map(PathBuf::from);
+    distinct_pair("-o", Some(&output_path), "--stock-report", report_path.as_deref())?;
+    distinct_pair("-o", Some(&output_path), "--stock-out", stock_path.as_deref())?;
+    distinct_pair("--ir", ir_path.as_deref(), "--stock-report", report_path.as_deref())?;
+    distinct_pair("--ir", ir_path.as_deref(), "--stock-out", stock_path.as_deref())?;
+    distinct_pair("--stock-report", report_path.as_deref(), "--stock-out", stock_path.as_deref())?;
     Ok(RunArgs {
         job: PathBuf::from(job),
-        output: PathBuf::from(output),
-        ir: ir.map(PathBuf::from),
+        output: output_path,
+        ir: ir_path,
         post: post.map(PathBuf::from),
         up_axis: up_axis.unwrap_or(step::UpAxis::Z),
+        stock_report: report_path,
+        stock_out: stock_path,
+        stock_snapshots,
     })
+}
+
+fn parse_snapshot_every(value: &OsStr) -> Result<usize, CliError> {
+    let Some(text) = value.to_str() else {
+        return Err(CliError::usage("--stock-snapshots needs a positive integer"));
+    };
+    let Ok(count) = text.parse::<usize>() else {
+        return Err(CliError::usage("--stock-snapshots needs a positive integer"));
+    };
+    if count == 0 {
+        return Err(CliError::usage("--stock-snapshots needs a positive integer"));
+    }
+    Ok(count)
+}
+
+fn distinct_pair(left_name: &str, left: Option<&Path>, right_name: &str, right: Option<&Path>) -> Result<(), CliError> {
+    if let (Some(left), Some(right)) = (left, right)
+        && left == right
+    {
+        return Err(CliError::usage(format!("{left_name} and {right_name} must be different files")));
+    }
+    Ok(())
 }
 
 fn starts_with_dash(arg: &OsStr) -> bool {

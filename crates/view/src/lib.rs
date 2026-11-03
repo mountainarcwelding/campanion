@@ -24,14 +24,20 @@
 //! A five-axis program can also carry a machine sketch. [`MachineSim`] replays the posted joints
 //! and returns link and tool wireframes in the part frame, plus any collision at that sample.
 //! The window draws those edges. The solids are boxes and cylinders, not a CAD model of a machine.
+//!
+//! A mill preview can also carry an in-process stock height map ([`StockMovie`]). Plan view shades
+//! the top by height. Isometric view draws the same top as a wireframe. When the file has
+//! snapshots, [`StockMovie::frame_index`] picks the last one at or before the playback position.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAxisKind, RotarySetup, SpindleSpeed, TurningSetup};
 
 mod sim;
+mod stock;
 
 pub use sim::{MachineSim, SimHit, SimSample, SimSolid, tessellate_box, tessellate_cylinder};
+pub use stock::{StockDraw, StockLine, StockMovie, StockTri, StockViewKind, stock_bounds, tessellate_stock};
 
 /// Motions whose XY travel is at or below this (millimetres) are vertical feeds.
 ///

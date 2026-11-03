@@ -20,6 +20,7 @@ mod rotary;
 mod scallop;
 mod stl;
 mod stock;
+mod stock_map;
 mod waterline;
 mod zlevel;
 
@@ -35,9 +36,10 @@ pub use rotary::{RotaryLine, RotaryLineAxis, rotary_lines};
 pub use scallop::scallop_stepover;
 pub use stl::{parse_stl, write_stl_binary};
 pub use stock::{
-    Flute, LeftoverReport, MAX_COLUMN_INTERVALS, MAX_STOCK_CELLS, STOCK_CELL_MAX_MM, STOCK_CELL_MIN_MM, StockHit, StockModel, ZInterval,
+    CutMeasure, Flute, LeftoverReport, MAX_COLUMN_INTERVALS, MAX_STOCK_CELLS, STOCK_CELL_MAX_MM, STOCK_CELL_MIN_MM, StockHit, StockModel, ZInterval,
     default_stock_cell, ray_cylinder_interval, ray_sphere_interval, ray_swept_cylinder_interval,
 };
+pub use stock_map::{STOCK_FORMAT, StockFile, StockGrid, StockSnapshot};
 pub use waterline::{WaterlineLevel, WaterlineParams, waterline};
 pub use zlevel::{ZLevel, ZLevelParams, zlevel_rough};
 

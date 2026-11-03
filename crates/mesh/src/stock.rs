@@ -27,7 +27,12 @@
 //!
 //! The removed volume of a call is the union of the Z lengths cut from the columns, times the cell
 //! area. Overlapping bodies in one call are not counted twice.
+//!
+//! [`StockModel::measure_flute`] estimates the radial engagement and the axial depth from the
+//! dexels the flute meets, before a subtraction. The angle is the share of the leading half of
+//! the cutter circumference that still lies in solid stock at the flute's lowest active Z.
 
+use crate::stock_map::StockGrid;
 use crate::{Aabb, MAX_TRIANGLES, Mesh, Result, Triangle, Vec3, invalid};
 
 /// Most XY cells in one stock model.
@@ -90,6 +95,24 @@ pub enum Flute {
     Flat { radius: f64, length: f64 },
     /// Inner cylinder, outer cylinder above the corner, and a torus of minor radius `corner`.
     Bull { radius: f64, corner: f64, length: f64 },
+}
+
+/// Radial engagement and axial depth of one flute pose, read from the dexels before a cut.
+///
+/// `engagement_deg` is the arc of the cutter circumference in contact, in degrees. It is the
+/// share of the leading half (the side facing the XY feed) that still holds stock at the lowest
+/// Z the flute meets, times 180. A plunge, with no XY feed, uses the whole circle and 360. A
+/// slot through solid stock is 180. A straight bite of radial depth `s` into an existing wall is
+/// `acos(1 - 2s/D)`, where `D` is the diameter.
+///
+/// The sample sits on the circumference and the wall sits on a dexel, so both are about one cell
+/// off. `axial_doc` is the longest Z overlap of the flute with solid stock, in millimetres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CutMeasure {
+    /// Contact arc, degrees.
+    pub engagement_deg: f64,
+    /// Axial depth of cut, millimetres.
+    pub axial_doc: f64,
 }
 
 /// Default cell: `smallest_radius / 4`, clamped to [[`STOCK_CELL_MIN_MM`], [`STOCK_CELL_MAX_MM`]].
@@ -256,6 +279,55 @@ impl StockModel {
     #[must_use]
     pub fn height_map(&self) -> Vec<Option<f64>> {
         self.columns.iter().map(|spans| spans.last().map(|span| span.hi)).collect()
+    }
+
+    /// Height map plus the columns that hold more than one interval.
+    #[must_use]
+    pub fn stock_grid(&self) -> StockGrid {
+        let mut top = Vec::with_capacity(self.columns.len());
+        let mut multi = Vec::new();
+        for (index, column) in self.columns.iter().enumerate() {
+            top.push(column.last().filter(|span| span.hi.is_finite()).map(|span| span.hi));
+            if column.len() > 1 {
+                multi.push(index);
+            }
+        }
+        StockGrid { origin: [self.origin_x, self.origin_y], cell: self.cell, nx: self.nx, ny: self.ny, top, multi }
+    }
+
+    /// Engagement and axial depth of the flute at one pose, from the stock still there.
+    ///
+    /// `feed` is the tool-tip displacement of the move, in millimetres. A zero XY feed is a
+    /// plunge. A flute that misses the stock measures zero.
+    #[must_use]
+    pub fn measure_flute(&self, tip: Vec3, axis: Vec3, flute: Flute, feed: Vec3) -> CutMeasure {
+        let none = CutMeasure { engagement_deg: 0.0, axial_doc: 0.0 };
+        if check_flute(flute).is_err() || !finite_vec(tip) || !finite_vec(feed) {
+            return none;
+        }
+        let Some(axis) = axis.normalized() else {
+            return none;
+        };
+        let Some(stats) = self.flute_contact(tip, axis, flute) else {
+            return none;
+        };
+        if !(stats.axial > 1e-9) || !(stats.radius > 1e-9) {
+            return CutMeasure { engagement_deg: 0.0, axial_doc: stats.axial.max(0.0) };
+        }
+        let engagement = self.contact_angle(stats, feed);
+        CutMeasure { engagement_deg: engagement, axial_doc: stats.axial }
+    }
+
+    /// True when the column that contains `(x, y)` is solid at `z`.
+    #[must_use]
+    pub fn covers(&self, x: f64, y: f64, z: f64) -> bool {
+        let Some(ix) = self.containing(self.origin_x, x, self.nx) else {
+            return false;
+        };
+        let Some(iy) = self.containing(self.origin_y, y, self.ny) else {
+            return false;
+        };
+        self.column(ix, iy).is_some_and(|spans| spans.iter().any(|span| span.lo <= z && z <= span.hi))
     }
 
     /// Two triangles on the top of every solid interval, in the cell square, normal +Z.
@@ -559,6 +631,85 @@ impl StockModel {
         best
     }
 
+    fn flute_contact(&self, tip: Vec3, axis: Vec3, flute: Flute) -> Option<FluteContact> {
+        let bounds = flute_bounds(tip, axis, flute);
+        let (ix0, ix1, iy0, iy1) = self.cell_span(bounds.min().x, bounds.max().x, bounds.min().y, bounds.max().y);
+        let mut axial = 0.0_f64;
+        let mut lowest: Option<f64> = None;
+        for iy in iy0..=iy1 {
+            for ix in ix0..=ix1 {
+                let Some(solid) = self.column(ix, iy) else {
+                    continue;
+                };
+                if solid.is_empty() {
+                    continue;
+                }
+                let cut = flute_z_intervals(self.center_x(ix), self.center_y(iy), tip, axis, flute);
+                let (length, low) = overlap_stats(solid, &cut);
+                if length > axial {
+                    axial = length;
+                }
+                if let Some(low) = low {
+                    lowest = Some(lowest.map_or(low, |current| current.min(low)));
+                }
+            }
+        }
+        let floor = lowest?;
+        // The overlap starts on the floor, and that plane is still solid. Sit just above it so
+        // the circumference sample sees the wall, not the floor. Stay inside the overlap.
+        let lift = (axial * 0.25).clamp(1e-9, 1e-4);
+        let z = floor + lift;
+        let radius = section_radius(tip, axis, flute, z);
+        let center = pierce_xy(tip, axis, z)?;
+        Some(FluteContact { center, radius, z, axial })
+    }
+
+    /// Share of the circumference, on the leading side of `feed`, whose dexel is still solid.
+    fn contact_angle(&self, stats: FluteContact, feed: Vec3) -> f64 {
+        let radius = stats.radius;
+        let around = std::f64::consts::TAU * radius / self.cell;
+        let samples = if around.is_finite() { (around.ceil() as usize).clamp(72, 720) } else { 72 };
+        let horizontal = feed.x.hypot(feed.y);
+        let plunge = !(horizontal > 1e-6);
+        let mut engaged = 0usize;
+        let mut considered = 0usize;
+        let steps = samples as f64;
+        for index in 0..samples {
+            let theta = std::f64::consts::TAU * index as f64 / steps;
+            let dx = theta.cos();
+            let dy = theta.sin();
+            if !plunge && dx * feed.x + dy * feed.y < 0.0 {
+                continue;
+            }
+            considered += 1;
+            let x = stats.center[0] + radius * dx;
+            let y = stats.center[1] + radius * dy;
+            if self.covers(x, y, stats.z) {
+                engaged += 1;
+            }
+        }
+        if considered == 0 {
+            return 0.0;
+        }
+        let span = if plunge { 360.0 } else { 180.0 };
+        engaged as f64 / considered as f64 * span
+    }
+
+    fn containing(&self, origin: f64, coord: f64, count: usize) -> Option<usize> {
+        if !coord.is_finite() || count == 0 || !self.cell.is_finite() || self.cell <= 0.0 {
+            return None;
+        }
+        let raw = ((coord - origin) / self.cell).floor();
+        if !raw.is_finite() {
+            return None;
+        }
+        if raw >= 0.0 && (raw as usize) < count {
+            return Some(raw as usize);
+        }
+        let far = origin + count as f64 * self.cell;
+        if (coord - far).abs() <= self.cell * 1e-9 { Some(count - 1) } else { None }
+    }
+
     fn index(&self, ix: usize, iy: usize) -> usize {
         iy * self.nx + ix
     }
@@ -675,6 +826,126 @@ fn flute_sphere(tip: Vec3, axis: Vec3, flute: Flute) -> Option<(Vec3, f64)> {
         Flute::Ball { radius, .. } if radius > 0.0 => Some((tip.add(axis.scale(radius)), radius)),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+struct FluteContact {
+    center: [f64; 2],
+    radius: f64,
+    z: f64,
+    axial: f64,
+}
+
+fn flute_bounds(tip: Vec3, axis: Vec3, flute: Flute) -> Aabb {
+    let mut bounds = Aabb::from_corners(tip, tip);
+    for (a, b, radius) in flute_cylinders(tip, axis, flute) {
+        bounds = bounds.union(Aabb::from_corners(a, b).expand(radius));
+    }
+    if let Some((center, radius)) = flute_sphere(tip, axis, flute) {
+        bounds = bounds.union(Aabb::from_corners(center, center).expand(radius));
+    }
+    if let Some(torus) = flute_torus(tip, axis, flute) {
+        let reach = torus.major + torus.minor;
+        bounds = bounds.union(Aabb::from_corners(torus.center, torus.center).expand(reach));
+    }
+    bounds
+}
+
+fn flute_z_intervals(x: f64, y: f64, tip: Vec3, axis: Vec3, flute: Flute) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    for (a, b, radius) in flute_cylinders(tip, axis, flute) {
+        if let Some(interval) = ray_cylinder_interval(x, y, a, b, radius) {
+            spans.push(interval);
+        }
+    }
+    if let Some((center, radius)) = flute_sphere(tip, axis, flute)
+        && let Some(interval) = ray_sphere_interval(x, y, center, radius)
+    {
+        spans.push(interval);
+    }
+    if let Some(torus) = flute_torus(tip, axis, flute) {
+        spans.extend(torus_intervals(x, y, &torus));
+    }
+    merge_spans(&mut spans);
+    spans
+}
+
+fn overlap_stats(solid: &[ZInterval], cut: &[(f64, f64)]) -> (f64, Option<f64>) {
+    let mut total = 0.0;
+    let mut lowest: Option<f64> = None;
+    for (lo, hi) in cut {
+        for span in solid {
+            let a = span.lo.max(*lo);
+            let b = span.hi.min(*hi);
+            if b > a {
+                total += b - a;
+                lowest = Some(lowest.map_or(a, |current| current.min(a)));
+            }
+        }
+    }
+    (total, lowest)
+}
+
+fn pierce_xy(tip: Vec3, axis: Vec3, z: f64) -> Option<[f64; 2]> {
+    if axis.z.abs() < 1e-8 {
+        return Some([tip.x, tip.y]);
+    }
+    let t = (z - tip.z) / axis.z;
+    if !t.is_finite() {
+        return None;
+    }
+    let point = tip.add(axis.scale(t));
+    if point.x.is_finite() && point.y.is_finite() { Some([point.x, point.y]) } else { None }
+}
+
+/// Horizontal section radius of the flute at world `z`. A vertical flat is the tool radius.
+fn section_radius(tip: Vec3, axis: Vec3, flute: Flute, z: f64) -> f64 {
+    let mut best = 0.0_f64;
+    for (a, b, radius) in flute_cylinders(tip, axis, flute) {
+        best = best.max(cylinder_section_radius(a, b, radius, z));
+    }
+    if let Some((center, radius)) = flute_sphere(tip, axis, flute) {
+        let dz = z - center.z;
+        let radial = radius * radius - dz * dz;
+        if radial > 0.0 {
+            best = best.max(radial.sqrt());
+        }
+    }
+    if let Some(torus) = flute_torus(tip, axis, flute) {
+        best = best.max(torus_section_radius(&torus, z));
+    }
+    if best.is_finite() { best } else { 0.0 }
+}
+
+fn cylinder_section_radius(a: Vec3, b: Vec3, radius: f64, z: f64) -> f64 {
+    let axis = b.sub(a);
+    let length = axis.length();
+    if !length.is_finite() || length <= 1e-15 || !radius.is_finite() || radius <= 0.0 {
+        return 0.0;
+    }
+    let u = axis.scale(1.0 / length);
+    if u.z.abs() >= 0.999 {
+        let z0 = a.z.min(b.z);
+        let z1 = a.z.max(b.z);
+        if z >= z0 - 1e-9 && z <= z1 + 1e-9 { radius } else { 0.0 }
+    } else {
+        let lean = (1.0 - u.z * u.z).sqrt();
+        let z0 = a.z.min(b.z) - radius * lean;
+        let z1 = a.z.max(b.z) + radius * lean;
+        if z >= z0 && z <= z1 { radius } else { 0.0 }
+    }
+}
+
+fn torus_section_radius(torus: &Torus, z: f64) -> f64 {
+    if torus.axis.z.abs() < 0.999 {
+        return torus.major + torus.minor;
+    }
+    let dz = z - torus.center.z;
+    if dz.abs() > torus.minor {
+        return 0.0;
+    }
+    let tube = torus.minor * torus.minor - dz * dz;
+    if tube > 0.0 { torus.major + tube.sqrt() } else { torus.major }
 }
 
 fn flute_torus(tip: Vec3, axis: Vec3, flute: Flute) -> Option<Torus> {
@@ -1569,6 +1840,144 @@ mod tests {
             right.subtract_sphere(second, 3.0).expect("b");
             right.subtract_sphere(first, 2.5).expect("a");
             assert_same_stock(&left, &right);
+        }
+    }
+
+    fn flat(radius: f64) -> Flute {
+        Flute::Flat { radius, length: 30.0 }
+    }
+
+    fn ideal_engagement_deg(step: f64, diameter: f64) -> f64 {
+        let u = (1.0 - 2.0 * step / diameter).clamp(-1.0, 1.0);
+        u.acos().to_degrees()
+    }
+
+    /// One cell of wall error, doubled because the sample and the wall each sit on a dexel,
+    /// plus the angle one cell subtends at the cutter radius.
+    fn engagement_tol(step: f64, diameter: f64, cell: f64) -> f64 {
+        let radius = diameter * 0.5;
+        let low = (step - cell).max(diameter * 0.02);
+        let high = (step + cell).min(diameter * 0.98);
+        let spread = (ideal_engagement_deg(high, diameter) - ideal_engagement_deg(low, diameter)).abs();
+        let angular = (cell / radius).atan().to_degrees();
+        spread * 2.0 + angular + 2.0
+    }
+
+    #[test]
+    fn a_slot_in_solid_stock_engages_half_the_cutter() {
+        let cell = 0.5;
+        let mut model = StockModel::from_box(Vec3::new(-15.0, -15.0, 0.0), Vec3::new(40.0, 15.0, 8.0), cell).expect("box");
+        let radius = 4.0;
+        let depth = 2.0;
+        let axis = Vec3::new(0.0, 0.0, 1.0);
+        let tip = Vec3::new(10.0, 0.0, 8.0 - depth);
+        let feed = Vec3::new(20.0, 0.0, 0.0);
+        let measured = model.measure_flute(tip, axis, flat(radius), feed);
+        near(measured.engagement_deg, 180.0, 1.0);
+        near(measured.axial_doc, depth, 1e-6);
+        // A plunge opens the start. The straight cut then removes a slot of width D.
+        let start = Vec3::new(2.0, 0.0, tip.z);
+        let end = Vec3::new(32.0, 0.0, tip.z);
+        model.subtract_flute(start, axis, flat(radius)).expect("plunge");
+        let volume = model.subtract_flute_translation(start, end, axis, flat(radius)).expect("slot");
+        let length = 30.0;
+        let feed_rate = 120.0;
+        let mrr = volume * feed_rate / length;
+        let ideal = (radius * 2.0) * depth * feed_rate;
+        let bound = cell * depth * feed_rate;
+        assert!((mrr - ideal).abs() <= bound, "mrr {mrr} ideal {ideal} bound {bound} volume {volume}");
+    }
+
+    #[test]
+    fn a_sphere_splits_a_column_and_the_height_map_round_trips() {
+        let mut model = StockModel::from_box(Vec3::new(0.0, 0.0, 0.0), Vec3::new(6.0, 4.0, 10.0), 1.0).expect("box");
+        model.subtract_sphere(Vec3::new(2.5, 1.5, 5.0), 2.0).expect("sphere");
+        let grid = model.stock_grid();
+        assert!(!grid.multi.is_empty(), "the sphere should leave an undercut");
+        let file = crate::StockFile {
+            grid: grid.clone(),
+            length: 12.5,
+            snapshots: vec![crate::StockSnapshot { position: 0.0, top: grid.top.clone(), multi: Vec::new() }],
+        };
+        let text = file.to_json().expect("json");
+        let back = crate::StockFile::from_json(&text).expect("parse");
+        assert_eq!(back.grid.nx, grid.nx);
+        assert_eq!(back.grid.ny, grid.ny);
+        assert!((back.grid.cell - grid.cell).abs() < 1e-12);
+        assert!((back.length - 12.5).abs() < 1e-12);
+        assert_eq!(back.grid.multi, grid.multi);
+        assert_eq!(back.snapshots.len(), 1);
+        for (left, right) in back.grid.top.iter().zip(grid.top.iter()) {
+            match (left, right) {
+                (None, None) => {}
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-9, "{a} {b}"),
+                pair => panic!("top mismatch {pair:?}"),
+            }
+        }
+    }
+
+    fn metric_config() -> ProptestConfig {
+        ProptestConfig { cases: 8, max_shrink_iters: 20, rng_seed: proptest::test_runner::RngSeed::Fixed(0x00C0_232B), ..ProptestConfig::default() }
+    }
+
+    fn shoulder_angle(step: f64, side: f64, feed_sign: f64, cell: f64) -> (f64, f64) {
+        let diameter = 8.0;
+        let radius = diameter * 0.5;
+        let depth = 2.0;
+        let y_min = -diameter * 1.5;
+        let y_max = diameter * 2.5;
+        let mut model = StockModel::from_box(Vec3::new(-4.0, y_min, 0.0), Vec3::new(48.0, y_max, depth + 3.0), cell).expect("box");
+        let flute = flat(radius);
+        let axis = Vec3::new(0.0, 0.0, 1.0);
+        let tip_z = depth + 3.0 - depth;
+        let start = Vec3::new(0.0, 0.0, tip_z);
+        let end = Vec3::new(40.0, 0.0, tip_z);
+        model.subtract_flute(start, axis, flute).expect("plunge");
+        model.subtract_flute_translation(start, end, axis, flute).expect("slot");
+        let s0 = Vec3::new(4.0, side * step, tip_z);
+        let s1 = Vec3::new(36.0, side * step, tip_z);
+        let mid = s0.lerp(s1, 0.5);
+        let measured = model.measure_flute(mid, axis, flute, Vec3::new(feed_sign, 0.0, 0.0));
+        (measured.engagement_deg, measured.axial_doc)
+    }
+
+    proptest! {
+        #![proptest_config(metric_config())]
+        #[test]
+        fn a_side_cut_matches_the_stepover_angle(
+            step in 1.6..7.2_f64,
+            side in proptest::prop_oneof![Just(1.0_f64), Just(-1.0)],
+            feed_sign in proptest::prop_oneof![Just(1.0_f64), Just(-1.0)],
+        ) {
+            let cell = 0.5;
+            let diameter = 8.0;
+            let (angle, axial) = shoulder_angle(step, side, feed_sign, cell);
+            let ideal = ideal_engagement_deg(step, diameter);
+            let tol = engagement_tol(step, diameter, cell);
+            prop_assert!((angle - ideal).abs() <= tol, "angle {angle} ideal {ideal} tol {tol} step {step}");
+            prop_assert!((axial - 2.0).abs() < 1e-6, "axial {axial}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(metric_config())]
+        #[test]
+        fn straight_cut_mrr_is_width_times_depth_times_feed(depth in 1.0..3.5_f64, feed in 40.0..240.0_f64, length in 24.0..40.0_f64) {
+            let cell = 0.5;
+            let diameter = 8.0;
+            let radius = diameter * 0.5;
+            let top = depth + 4.0;
+            let mut model = StockModel::from_box(Vec3::new(-6.0, -12.0, 0.0), Vec3::new(length + 10.0, 12.0, top), cell).expect("box");
+            let flute = flat(radius);
+            let axis = Vec3::new(0.0, 0.0, 1.0);
+            let start = Vec3::new(2.0, 0.0, top - depth);
+            let end = Vec3::new(2.0 + length, 0.0, top - depth);
+            model.subtract_flute(start, axis, flute).expect("plunge");
+            let volume = model.subtract_flute_translation(start, end, axis, flute).expect("cut");
+            let mrr = volume * feed / length;
+            let ideal = diameter * depth * feed;
+            let bound = cell * depth * feed;
+            prop_assert!((mrr - ideal).abs() <= bound, "mrr {mrr} ideal {ideal} bound {bound} volume {volume}");
         }
     }
 }

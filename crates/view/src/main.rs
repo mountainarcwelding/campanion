@@ -1,14 +1,17 @@
 //! Plan-view window for a CAMpanion IR file.
 //!
-//! `campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine]` loads a program and draws its
-//! toolpath. Distances are millimetres. The window fits the path; the wheel zooms, drag pans, and
-//! F or a double-click fits again. `--iso` opens the isometric view. `--angle` colours cuts by
-//! rotary angle instead of height; a program with no rotary axis ignores it. A toggles that
-//! colouring. `--machine` draws the kinematic sketch when the program has five-axis joints; a
-//! program whose kinematics include a `model` shows that sketch on open. M toggles it. The solids
-//! are boxes and cylinders, not machine CAD. A rotary setup also draws its axis and lists index angles or the angle range.
+//! `campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine] [--stock FILE.json]` loads a
+//! program and draws its toolpath. Distances are millimetres. The window fits the path; the wheel
+//! zooms, drag pans, and F or a double-click fits again. `--iso` opens the isometric view.
+//! `--angle` colours cuts by rotary angle instead of height; a program with no rotary axis ignores
+//! it. A toggles that colouring. `--machine` draws the kinematic sketch when the program has
+//! five-axis joints; a program whose kinematics include a `model` shows that sketch on open. M
+//! toggles it. The solids are boxes and cylinders, not machine CAD. `--stock` draws the height map
+//! from `campanion run --stock-out`. The scrub picks the latest snapshot at or before the playhead.
+//! S toggles that surface. A rotary setup also draws its axis and lists index angles or the angle range.
 //! A turning program is an XZ half-section (radius up, Z right): removed material, stock outline,
-//! finished section, then the spindle line and the toolpath. `--iso` is ignored for that view.
+//! finished section, then the spindle line and the toolpath. `--iso` is ignored for that view, and
+//! the mill height map is not drawn on it.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -19,14 +22,15 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use campanion_view::{
-    LathePreview, MachineSim, Playback, Projection, RotaryPreview, Scene, SimSample, SpindleLane, Stroke, StrokeKind, TimelineStep, View,
-    angle_color, angle_legend, find_system_font, height_color, load_scene, project, projected_bounds, timeline_at, timeline_text, tool_position,
-    visible,
+    LathePreview, MachineSim, Playback, Projection, RotaryPreview, Scene, SimSample, SpindleLane, StockDraw, StockMovie, StockViewKind, Stroke,
+    StrokeKind, TimelineStep, View, angle_color, angle_legend, find_system_font, height_color, load_scene, project, projected_bounds, stock_bounds,
+    tessellate_stock, timeline_at, timeline_text, tool_position, visible,
 };
 use eframe::egui;
 
 const DEFAULT_ARC_TOL_MM: f64 = 0.01;
 const MAX_JSON_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_STOCK_BYTES: u64 = 64 * 1024 * 1024;
 const FIT_MARGIN_PX: f64 = 40.0;
 const GRID_MM: f64 = 10.0;
 const GRID_MIN_PX: f64 = 8.0;
@@ -87,7 +91,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(AppError::Usage(message)) => {
             eprintln!("campanion-view: {message}");
-            eprintln!("usage: campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine]");
+            eprintln!("usage: campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine] [--stock FILE.json]");
             ExitCode::from(2)
         }
         Err(AppError::Run(message)) => {
@@ -102,12 +106,16 @@ fn try_main() -> Result<(), AppError> {
     match parse_args(&args)? {
         Command::Help => write_stdout(&help_text()),
         Command::Version => write_stdout(&version_text()),
-        Command::Preview { path, arc_tol, iso, angle, machine } => {
+        Command::Preview { path, arc_tol, iso, angle, machine, stock } => {
             let json = read_ir(&path)?;
             let scene = load_scene(&json, arc_tol).map_err(|err| AppError::run(format!("{}: {err}", path.display())))?;
             let sim = MachineSim::from_json(&json, arc_tol).map_err(|err| AppError::run(format!("{}: {err}", path.display())))?;
             let show_machine = sim.as_ref().is_some_and(|sim| machine || sim.has_model());
-            open_preview(preview_title(&path), scene, iso, angle, sim, show_machine)
+            let stock = match &stock {
+                Some(path) => Some(load_stock(path)?),
+                None => None,
+            };
+            open_preview(preview_title(&path), scene, iso, angle, sim, show_machine, stock)
         }
     }
 }
@@ -115,7 +123,7 @@ fn try_main() -> Result<(), AppError> {
 enum Command {
     Help,
     Version,
-    Preview { path: PathBuf, arc_tol: f64, iso: bool, angle: bool, machine: bool },
+    Preview { path: PathBuf, arc_tol: f64, iso: bool, angle: bool, machine: bool, stock: Option<PathBuf> },
 }
 
 #[derive(Debug)]
@@ -140,7 +148,7 @@ fn help_text() -> String {
 campanion-view {version}
 
 Usage:
-  campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine]
+  campanion-view <ir.json> [--arc-tol MM] [--iso] [--angle] [--machine] [--stock FILE.json]
   campanion-view --help
   campanion-view --version
 
@@ -151,6 +159,10 @@ A rotary program draws its A or B axis and shows index angles or the angle range
 A turning program is an XZ half-section (radius up, Z right). --iso is ignored then.
 A five-axis program can draw a kinematic sketch: boxes and cylinders on the
 links, not a CAD model of the machine. The scrub uses the posted joint values.
+--stock draws the height map written by campanion run --stock-out. Plan view shades
+the top by height. Iso draws the cell wireframe. S toggles it. When the file has
+snapshots, the scrub shows the latest one at or before the playhead. A turning
+program does not draw this map.
 
 --arc-tol MM
         Maximum chord error when drawing arcs, in millimetres (default 0.01).
@@ -162,6 +174,8 @@ links, not a CAD model of the machine. The scrub uses the posted joint values.
 --machine
         Draw the machine sketch and the joint values. A program whose kinematics
         include a model does this on open. M toggles it. Ignored without five-axis kinematics.
+--stock FILE.json
+        Draw the in-process stock height map. S toggles it. Ignored for a turning program.
 ",
         version = env!("CARGO_PKG_VERSION"),
     )
@@ -187,6 +201,7 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
     let mut iso = false;
     let mut angle = false;
     let mut machine = false;
+    let mut stock: Option<PathBuf> = None;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         if arg.as_os_str() == "--iso" {
@@ -201,6 +216,33 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
         }
         if arg.as_os_str() == "--machine" {
             machine = true;
+            index += 1;
+            continue;
+        }
+        if arg.as_os_str() == "--stock" {
+            let Some(value) = args.get(index + 1) else {
+                return Err(AppError::usage("--stock needs a file"));
+            };
+            if value.is_empty() {
+                return Err(AppError::usage("--stock needs a file"));
+            }
+            if stock.is_some() {
+                return Err(AppError::usage("--stock is already set"));
+            }
+            stock = Some(PathBuf::from(value));
+            index += 2;
+            continue;
+        }
+        if let Some(text) = arg.to_str()
+            && let Some(value) = text.strip_prefix("--stock=")
+        {
+            if value.is_empty() {
+                return Err(AppError::usage("--stock needs a file"));
+            }
+            if stock.is_some() {
+                return Err(AppError::usage("--stock is already set"));
+            }
+            stock = Some(PathBuf::from(value));
             index += 1;
             continue;
         }
@@ -234,7 +276,7 @@ fn parse_args(args: &[OsString]) -> Result<Command, AppError> {
     let Some(path) = path else {
         return Err(AppError::usage("missing IR json file"));
     };
-    Ok(Command::Preview { path, arc_tol, iso, angle, machine })
+    Ok(Command::Preview { path, arc_tol, iso, angle, machine, stock })
 }
 
 fn is_help(arg: &OsString) -> bool {
@@ -265,24 +307,33 @@ fn parse_arc_tol_text(text: &str) -> Result<f64, AppError> {
 }
 
 fn read_ir(path: &Path) -> Result<String, AppError> {
+    read_capped(path, MAX_JSON_BYTES)
+}
+
+fn load_stock(path: &Path) -> Result<StockMovie, AppError> {
+    let json = read_capped(path, MAX_STOCK_BYTES)?;
+    StockMovie::load(&json).map_err(|err| AppError::run(format!("{}: {err}", path.display())))
+}
+
+fn read_capped(path: &Path, limit: u64) -> Result<String, AppError> {
     if let Ok(meta) = std::fs::metadata(path)
         && meta.is_file()
-        && meta.len() > MAX_JSON_BYTES
+        && meta.len() > limit
     {
-        return Err(too_large(path));
+        return Err(too_large(path, limit));
     }
     let file = std::fs::File::open(path).map_err(|err| AppError::run(format!("{}: {err}", path.display())))?;
-    let mut file = file.take(MAX_JSON_BYTES + 1);
+    let mut file = file.take(limit + 1);
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(|err| AppError::run(format!("{}: {err}", path.display())))?;
-    if bytes.len() as u64 > MAX_JSON_BYTES {
-        return Err(too_large(path));
+    if bytes.len() as u64 > limit {
+        return Err(too_large(path, limit));
     }
     String::from_utf8(bytes).map_err(|_| AppError::run(format!("{} is not valid UTF-8", path.display())))
 }
 
-fn too_large(path: &Path) -> AppError {
-    AppError::run(format!("{} is larger than {MAX_JSON_BYTES} bytes", path.display()))
+fn too_large(path: &Path, limit: u64) -> AppError {
+    AppError::run(format!("{} is larger than {limit} bytes", path.display()))
 }
 
 fn write_stdout(text: &str) -> Result<(), AppError> {
@@ -300,7 +351,15 @@ fn preview_title(path: &Path) -> String {
     format!("CAMpanion preview — {name}")
 }
 
-fn open_preview(title: String, scene: Scene, iso: bool, angle: bool, machine: Option<MachineSim>, show_machine: bool) -> Result<(), AppError> {
+fn open_preview(
+    title: String,
+    scene: Scene,
+    iso: bool,
+    angle: bool,
+    machine: Option<MachineSim>,
+    show_machine: bool,
+    stock: Option<StockMovie>,
+) -> Result<(), AppError> {
     let native_options =
         eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_title(title), ..Default::default() };
     eframe::run_native(
@@ -311,7 +370,7 @@ fn open_preview(title: String, scene: Scene, iso: bool, angle: bool, machine: Op
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let has_font = install_font(&cc.egui_ctx);
             let projection = if iso { Projection::Iso } else { Projection::Top };
-            Ok(Box::new(ViewerApp::new(scene, has_font, projection, angle, machine, show_machine)))
+            Ok(Box::new(ViewerApp::new(scene, has_font, projection, angle, machine, show_machine, stock)))
         }),
     )
     .map_err(|err| AppError::run(err.to_string()))
@@ -361,10 +420,30 @@ struct ViewerApp {
     machine: Option<MachineSim>,
     /// Draw the sketch. M and the Machine checkbox share this flag.
     show_machine: bool,
+    /// Height map from `--stock`. `None` when the flag was omitted.
+    stock: Option<StockMovie>,
+    /// Draw the height map. S and the Stock checkbox share this flag.
+    show_stock: bool,
+    /// Last tessellation, so a scrub that stays on one frame does not rebuild it.
+    stock_cache: Option<StockCache>,
+}
+
+struct StockCache {
+    index: usize,
+    iso: bool,
+    draw: StockDraw,
 }
 
 impl ViewerApp {
-    fn new(scene: Scene, has_font: bool, projection: Projection, angle_colours: bool, machine: Option<MachineSim>, show_machine: bool) -> Self {
+    fn new(
+        scene: Scene,
+        has_font: bool,
+        projection: Projection,
+        angle_colours: bool,
+        machine: Option<MachineSim>,
+        show_machine: bool,
+        stock: Option<StockMovie>,
+    ) -> Self {
         let (cut_length, rapid_length) = path_lengths(&scene);
         let toolpaths = scene.names.len();
         let playback = Playback::new(scene.total_length);
@@ -376,6 +455,7 @@ impl ViewerApp {
         // A turning program has no rotary legend either.
         let angle_colours = angle_colours && scene.rotary.is_some() && !lathe;
         let show_machine = show_machine && machine.is_some();
+        let show_stock = stock.is_some() && !lathe;
         Self {
             scene,
             playback,
@@ -392,6 +472,9 @@ impl ViewerApp {
             rapid_length,
             machine,
             show_machine,
+            stock,
+            show_stock,
+            stock_cache: None,
         }
     }
 
@@ -448,6 +531,12 @@ impl ViewerApp {
                 if self.machine.is_some() {
                     let machine = ui.checkbox(&mut self.show_machine, "Machine");
                     if machine.changed() {
+                        self.fitted = false;
+                    }
+                }
+                if self.stock.is_some() && self.scene.lathe.is_none() {
+                    let stock = ui.checkbox(&mut self.show_stock, "Stock");
+                    if stock.changed() {
                         self.fitted = false;
                     }
                 }
@@ -508,9 +597,42 @@ impl ViewerApp {
         }
         let path_bounds = projected_bounds(&self.scene, self.projection);
         let machine_bounds = self.machine_sample().and_then(|sample| sample.projected_bounds(self.projection));
-        let bounds = union_projected(path_bounds, machine_bounds).unwrap_or(([0.0, 0.0], [0.0, 0.0]));
+        let stock_bounds = self.stock_fit_bounds();
+        let bounds = union_projected(union_projected(path_bounds, machine_bounds), stock_bounds).unwrap_or(([0.0, 0.0], [0.0, 0.0]));
         self.view = View::fit(bounds, width, height, FIT_MARGIN_PX);
         self.fitted = true;
+    }
+
+    /// Latest snapshot at or before the playhead, in the current projection.
+    fn prepare_stock(&mut self) {
+        if self.stock.is_none() || !self.show_stock || self.scene.lathe.is_some() {
+            return;
+        }
+        let position = self.playback.position;
+        let iso = self.projection == Projection::Iso;
+        let Some(index) = self.stock.as_ref().and_then(|movie| movie.frame_index(position)) else {
+            self.stock_cache = None;
+            return;
+        };
+        if self.stock_cache.as_ref().is_some_and(|cache| cache.index == index && cache.iso == iso) {
+            return;
+        }
+        let kind = if iso { StockViewKind::Iso } else { StockViewKind::Plan };
+        let Some(draw) = self.stock.as_ref().and_then(|movie| movie.grid(index)).map(|grid| tessellate_stock(grid, kind)) else {
+            self.stock_cache = None;
+            return;
+        };
+        self.stock_cache = Some(StockCache { index, iso, draw });
+    }
+
+    /// Projected bounds of the stock frame under the playhead.
+    fn stock_fit_bounds(&self) -> Option<([f64; 2], [f64; 2])> {
+        if !self.show_stock || self.scene.lathe.is_some() {
+            return None;
+        }
+        let movie = self.stock.as_ref()?;
+        let index = movie.frame_index(self.playback.position)?;
+        stock_bounds(movie.grid(index)?, self.projection)
     }
 
     /// Sketch at the scrub position. `None` when the machine is hidden or absent.
@@ -538,12 +660,20 @@ impl ViewerApp {
         self.view.zoom_at(factor, screen, width, height);
     }
 
-    fn paint(&self, painter: &mut egui::Painter, rect: egui::Rect) {
+    fn paint(&mut self, painter: &mut egui::Painter, rect: egui::Rect) {
         painter.set_clip_rect(rect);
         painter.rect_filled(rect, 0.0, BACKGROUND);
         let projection = self.projection;
         draw_grid(painter, &self.view, rect, projection);
         draw_axes(painter, &self.view, rect, projection);
+        self.prepare_stock();
+        let stock_view = View { center: self.view.center, scale: self.view.scale };
+        if self.show_stock
+            && self.scene.lathe.is_none()
+            && let Some(cache) = &self.stock_cache
+        {
+            paint_stock(painter, &stock_view, rect, &cache.draw, projection);
+        }
         if let Some(lathe) = &self.scene.lathe {
             draw_lathe(painter, &self.view, rect, lathe, self.has_font);
             draw_sub_tick(painter, &self.view, rect, &self.scene, self.playback.position, self.has_font);
@@ -597,6 +727,10 @@ impl eframe::App for ViewerApp {
             self.show_machine = !self.show_machine;
             self.fitted = false;
         }
+        if input.stock && self.stock.is_some() && self.scene.lathe.is_none() {
+            self.show_stock = !self.show_stock;
+            self.fitted = false;
+        }
         let total = finite_total(self.scene.total_length);
         self.playback.step(f64::from(input.dt), total);
         self.top_bar(ui);
@@ -615,6 +749,7 @@ struct FrameInput {
     fit: bool,
     angle: bool,
     machine: bool,
+    stock: bool,
 }
 
 fn read_input(ui: &egui::Ui) -> FrameInput {
@@ -626,6 +761,7 @@ fn read_input(ui: &egui::Ui) -> FrameInput {
         fit: input.key_pressed(egui::Key::F),
         angle: input.consume_key(egui::Modifiers::NONE, egui::Key::A),
         machine: input.consume_key(egui::Modifiers::NONE, egui::Key::M),
+        stock: input.consume_key(egui::Modifiers::NONE, egui::Key::S),
     })
 }
 
@@ -657,6 +793,38 @@ fn clamp_playback(playback: &mut Playback, total: f64, speed_max: f64) {
         playback.speed = 1.0;
     } else if playback.speed > speed_max {
         playback.speed = speed_max;
+    }
+}
+
+fn paint_stock(painter: &mut egui::Painter, view: &View, rect: egui::Rect, draw: &StockDraw, projection: Projection) {
+    for tri in &draw.triangles {
+        let mut screen = Vec::with_capacity(3);
+        for point in &tri.pts {
+            let Some(pos) = to_screen_pos(view, rect, [point[0], point[1]], point[2], projection) else {
+                screen.clear();
+                break;
+            };
+            screen.push(pos);
+        }
+        if screen.len() == 3 {
+            let [red, green, blue] = tri.color;
+            let fill = egui::Color32::from_rgb(red, green, blue);
+            let _ = painter.add(egui::Shape::convex_polygon(screen, fill, egui::Stroke::new(0.0, egui::Color32::TRANSPARENT)));
+        }
+    }
+    for line in &draw.lines {
+        let [red, green, blue] = line.color;
+        draw_segment(
+            painter,
+            view,
+            rect,
+            [line.a[0], line.a[1]],
+            line.a[2],
+            [line.b[0], line.b[1]],
+            line.b[2],
+            projection,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(red, green, blue)),
+        );
     }
 }
 
@@ -1382,10 +1550,10 @@ mod tests {
     fn indexed_overlay_is_listed_and_a_plain_program_ignores_angle_colours() {
         use campanion_view::{RotaryPreview, RotarySpan};
 
-        let plain = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true, None, false);
+        let plain = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true, None, false, None);
         assert!(!plain.angle_colours, "a program with no rotary axis ignores --angle");
         assert_eq!(plain.status_text(), "1 toolpath   cut 0.0 mm   rapid 0.0 mm");
-        let forced = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true, None, true);
+        let forced = super::ViewerApp::new(empty_scene(vec!["only".into()], None), false, super::Projection::Top, true, None, true, None);
         assert!(!forced.show_machine, "a program with no simulation ignores the machine flag");
         assert_eq!(forced.status_text(), plain.status_text());
 
@@ -1398,7 +1566,7 @@ mod tests {
                 span: Some(RotarySpan::Indexed(vec![0.0, 90.0])),
             }),
         );
-        let indexed = super::ViewerApp::new(indexed, false, super::Projection::Top, true, None, false);
+        let indexed = super::ViewerApp::new(indexed, false, super::Projection::Top, true, None, false, None);
         assert!(indexed.angle_colours);
         assert_eq!(indexed.status_text(), "2 toolpaths   cut 0.0 mm   rapid 0.0 mm   Index: 0°, 90°");
 
@@ -1411,7 +1579,7 @@ mod tests {
                 span: Some(RotarySpan::Continuous { min_deg: 0.0, max_deg: 360.0 }),
             }),
         );
-        let continuous = super::ViewerApp::new(continuous, false, super::Projection::Top, false, None, false);
+        let continuous = super::ViewerApp::new(continuous, false, super::Projection::Top, false, None, false, None);
         assert!(!continuous.angle_colours);
         assert_eq!(continuous.status_text(), "1 toolpath   cut 0.0 mm   rapid 0.0 mm   Angle: 0°..360°");
     }
@@ -1431,7 +1599,7 @@ mod tests {
             removed: Vec::new(),
             axis: ([-10.0, 0.0], [0.0, 0.0]),
         });
-        let app = super::ViewerApp::new(scene, false, super::Projection::Iso, true, None, false);
+        let app = super::ViewerApp::new(scene, false, super::Projection::Iso, true, None, false, None);
         assert_eq!(app.projection, super::Projection::Top, "a lathe scene has no isometric view");
         assert!(!app.height_colours, "a lathe scene has no height view");
         assert!(!app.angle_colours, "a lathe scene hides the rotary legend");

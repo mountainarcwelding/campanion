@@ -49,7 +49,7 @@ const HELP: &str = "\
 Usage:
   campanion ir [--job FILE]
   campanion ngc [--job FILE]
-  campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]
+  campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto] [--stock-report FILE.csv] [--stock-out FILE.json] [--stock-snapshots N]
   campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]
   campanion post IR.json --post ID|FILE.json [-o OUT]
   campanion posts
@@ -69,6 +69,13 @@ run     Import the DXF, SVG, STEP or STL (by extension) named by a campanion-job
         --up-axis is z, y or auto (default z) for a STEP source. auto is opt-in and trusts the
         exporter header and turns Y up onto Z. A non-STEP source ignores the flag.
         A changed source hash is a warning on stderr. The job file is not rewritten.
+        When the stock model is on, each operation prints its peak removal rate and peak
+        engagement on stderr. --stock-report FILE.csv writes one row per feed move
+        (operation, toolpath, move, volume, mrr, engagement_deg, axial_doc).
+        --stock-out FILE.json writes the final height map. --stock-snapshots N (N >= 1)
+        also stores a map at the start and after every Nth motion; it needs --stock-out.
+        Those files are written when the replay succeeds. They must differ from -o and --ir.
+        The flags are an error when the stock model is off. See docs/job-file.md.
         Verify errors are printed and the status is 1. Warnings stay on stderr.
         An STL job checks each cutting move against the mesh with that operation's cutter.
         A gouge is a verify error and the status is 1.
@@ -92,6 +99,7 @@ verify  Verify an IR JSON file and print a report. The status is 1 when the repo
         Tolerance is the job-file default chord tolerance, 0.01 mm. Samples are min(0.25, tolerance*10) mm apart.
         A gouge names the operation, the position and the depth. XY arcs are sampled; other arcs are rejected.
 view    Open the toolpath preview (the campanion-view program) for an IR JSON file.
+        --stock FILE.json draws the height map from --stock-out. S toggles that surface.
         --machine draws boxes and cylinders from the kinematics model. M toggles that sketch.
 schema  Print the JSON Schema for campanion-ir/1.
 
