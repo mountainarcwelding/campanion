@@ -642,9 +642,18 @@ fn consume_curve(
                 && !rotary_curve
                 && (sweep < std::f64::consts::TAU - 0.2 || acc + 1e-3 < sweep)
                 && moves.get(*cursor).is_some_and(|next| match next {
-                    ReadMove::Arc { sense: got, .. } if *got == sense => {
+                    ReadMove::Arc { sense: got, center: got_center, radius, .. } if *got == sense => {
                         let next_end = project(end_of(next), drop_z);
-                        on_curve(next_end, start, end, center, plane, sense, sweep, tol) && geom::dist3(next_end, end) <= tol
+                        let got_center = project(*got_center, drop_z);
+                        // A short move that merely ends near this arc is the next motion.
+                        // The tail is another block of this same circle. R-word centre error
+                        // follows the output quantum, not a loose chord tolerance.
+                        let quantum = 10_f64.powi(-i32::from(check.post.linear_decimals()));
+                        let centre_tol =
+                            if radius.is_some() { radius_centre_limit(point, next_end, center, plane, quantum) } else { tol.max(quantum) };
+                        centre_ok(got_center, center, plane, radius.is_some(), centre_tol)
+                            && on_curve(next_end, start, end, center, plane, sense, sweep, tol)
+                            && geom::dist3(next_end, end) <= tol
                     }
                     _ => false,
                 });
@@ -1014,6 +1023,38 @@ mod tests {
         let moves = read_back(&text, &post).expect("read");
         super::compare(&program, &moves, 1e-3, &post).expect("compare");
         super::compare(&program, &moves, 0.05, &post).expect("loose compare");
+    }
+
+    #[test]
+    fn short_arc_after_another_arc_is_its_own_move() {
+        let sweep = 0.03_f64;
+        let end = tip(-sweep.sin(), 9.0 + sweep.cos(), 0.0);
+        let program = program_of(vec![
+            ClBlock::Motion(ClMotion::Rapid { to: tip(10.0, 0.0, 0.0), feed: None }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: tip(0.0, 10.0, 0.0),
+                plane: Plane::Xy,
+                center: Vec3::ZERO,
+                sense: ArcSense::Ccw,
+                feed: 100.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Arc {
+                to: end,
+                plane: Plane::Xy,
+                center: Vec3::new(0.0, 9.0, 0.0).expect("center"),
+                sense: ArcSense::Ccw,
+                feed: 80.0,
+                role: MoveRole::Cut,
+            }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(10.0, 10.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ]);
+        for id in ["linuxcnc", "fanuc"] {
+            let post = builtin(id).expect(id);
+            let text = post_program(&program, &post, &options()).expect("post");
+            let moves = read_back(&text, &post).expect("read");
+            super::compare(&program, &moves, 0.05, &post).unwrap_or_else(|err| panic!("{id}: {err}\n{text}"));
+        }
     }
 
     #[test]
