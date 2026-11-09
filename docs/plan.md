@@ -315,7 +315,7 @@ fix, then H1–H4 in patch releases from v0.8.3, then 11–13 in the release aft
 ### M12: Additive and non-planar slicing
 See the additive entry under Later; it becomes M12 after M11.
 
-Proposed order for further processes: docs/processes-plan.md (draft, not yet approved).
+Proposed order for further processes: docs/processes-plan.md (approved 2026-11-03).
 
 ### Later (each its own milestone when we get there)
 - **2.5D extras:** thread milling, adaptive clearing.
