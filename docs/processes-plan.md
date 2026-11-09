@@ -1,8 +1,7 @@
 # Further processes
 
-Proposal, awaiting approval (2026-11-02). This is a planning document only. It does not schedule
-implementation. `docs/plan.md` still stands, including M12 after M11, until the maintainer
-accepts the decisions at the end.
+Approved 2026-11-03. The order and the ten decisions below are accepted. Router gaps are next.
+`docs/plan.md` still stands; M12 planar and non-planar FFF are steps 8 and 9 of this plan.
 
 This is the work that follows mill, lathe, mill-turn and five-axis milling. Router jobs are
 already in scope. They are listed first because that gantry path is unfinished.
@@ -369,7 +368,7 @@ reused piece already has a golden.
 
 ## Decisions needed
 
-The maintainer approves or rejects each item. Until that happens, this file is a proposal.
+Accepted 2026-11-03. The items below are the decisions that apply to this plan.
 
 1. **Order.** Accept the eleven steps above. M12 planar FFF is step 8 and non-planar FFF is
    step 9. `docs/plan.md` currently starts M12 immediately after M11.
