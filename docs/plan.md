@@ -417,3 +417,5 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   the part, fixtures and chuck; machine simulation in the viewer). In-process stock is not modelled.
 - 2026-11-03: v0.9.3 is the code-generation audit (modal replay and property tests on every post,
   five fixes) and the in-process Z-dexel stock with rapid, holder and removal-rate checks.
+- 2026-11-09: v0.10.0 is router gaps (cutter sense, onion-skin, deterministic sheet packer,
+  linuxcnc_router with G38.2 probe and vacuum/dust). Processes plan approved; laser raster is next.

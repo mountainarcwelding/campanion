@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.10.0 — 2026-11-09
+
+Router gaps from the processes plan: cutter sense on diameter tools, onion-skin depth passes, a deterministic sheet packer with nesting checks, and a LinuxCNC router dialect with a cited probe cycle and vacuum/dust auxiliaries. This output has not been proven on a machine.
+
 ### Added
 
 - A diameter tool may set `cutter_sense` (`upcut`, `downcut`, or `compression`) and, with compression, `upcut_length` (millimetres at the tip). Omitted, compensation stays the flat diameter offset. Sense is stored on the job and the IR for later checks; it does not change the 2D offset. Posted G-code is unchanged when the field is omitted. This output has not been proven on a machine.
