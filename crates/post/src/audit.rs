@@ -12,6 +12,9 @@
 //! stays unset when the program never writes `G54`–`G59`. Feed mode stays
 //! units per minute until `G93` or `G94`. `M2` and `M30` turn the spindle and coolant off.
 //! `M3` or `M4` with `S0` is running with the beam or torch off: [`SpindleState::cutting`] is false.
+//! A post with `probe` treats its `G38.2` or `G38.3` as a non-motion: position and motion mode
+//! stay put, and `F` on that block updates the modal feed. A post with `digital_out` accepts
+//! `M64` and `M65` when `P` is `vacuum_pin` or `dust_pin`. Other posts still reject those words.
 
 use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 
@@ -202,7 +205,9 @@ pub struct AuditReport {
 ///
 /// Mill and five-axis posts. A lathe post is rejected. Unknown letters, unknown `G` and `M`
 /// codes, a `G2`/`G3` without a plane and a full centre or radius, a feed move before a positive
-/// `F`, and an inverse-time feed block with no `F` on that block are errors. Line-number
+/// `F`, and an inverse-time feed block with no `F` on that block are errors. A straight-probe
+/// block (`G38.2` or `G38.3` on a post that sets `probe`) is not a motion. `M64` and `M65` are
+/// accepted only when the post sets `digital_out` and `P` is one of its pins. Line-number
 /// sequence, line length, Fanuc/Haas decimal points, negative zero, and word magnitudes above
 /// `1e9` are checked as the text is read. Five-axis text is replayed by [`crate::audit_five`]
 /// and returned as the same mill report, with `A` in [`MotionState::rotary`].
@@ -255,6 +260,24 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    fn is_probe_word(&self, word: &Word) -> bool {
+        self.post.probe_number().is_some_and(|code| (word.value - code).abs() < 1e-6)
+    }
+
+    fn is_immediate_digital(&self, word: &Word) -> bool {
+        if self.post.digital_out.is_none() {
+            return false;
+        }
+        if !(word.value.is_finite() && (0.0..=999.0).contains(&word.value)) {
+            return false;
+        }
+        let rounded = word.value.round();
+        if (word.value - rounded).abs() > 1e-6 {
+            return false;
+        }
+        matches!(rounded as u16, 64 | 65)
+    }
+
     fn new(post: &'a PostDef) -> Self {
         let next_number = post.line_numbers.enabled.then_some(u64::from(post.line_numbers.start));
         Self {
@@ -373,15 +396,24 @@ impl<'a> Parser<'a> {
         let mut feed_on_block = false;
         let mut saw_rotary = false;
         let mut saw_s = false;
-        let mut saw_p = false;
+        let mut p_value: Option<f64> = None;
+        let mut probe_words = 0u32;
+        let mut digital = false;
         let mut block_feed: Option<FeedMode> = None;
         let axes = axis_letters(self.post);
 
         for word in words {
             match word.letter {
+                'G' if self.is_probe_word(word) => probe_words += 1,
                 'G' => {
                     let code = g_or_m(line_no, word, 'G')?;
                     self.apply_g(line_no, code, &mut saw_dwell, &mut want_length, &mut block_motion, &mut block_plane, &mut block_feed)?;
+                }
+                'M' if self.is_immediate_digital(word) => {
+                    if digital {
+                        return Err(fail(line_no, "duplicate digital output"));
+                    }
+                    digital = true;
                 }
                 'M' => {
                     let code = g_or_m(line_no, word, 'M')?;
@@ -418,13 +450,13 @@ impl<'a> Parser<'a> {
                     h_word = Some(whole_word(line_no, word, 'H')?);
                 }
                 'P' => {
-                    if saw_p {
+                    if p_value.is_some() {
                         return Err(fail(line_no, "duplicate P word"));
                     }
                     if !(word.value.is_finite() && word.value >= 0.0) {
                         return Err(fail(line_no, "P word must be >= 0"));
                     }
-                    saw_p = true;
+                    p_value = Some(word.value);
                 }
                 'I' => set_unique(line_no, &mut i, word)?,
                 'J' => set_unique(line_no, &mut j, word)?,
@@ -442,6 +474,27 @@ impl<'a> Parser<'a> {
                 letter if Some(letter) == axes[2] => set_unique(line_no, &mut z, word)?,
                 letter => return Err(fail(line_no, format!("unexpected word {letter}"))),
             }
+        }
+
+        if digital {
+            let Some(pin) = p_value else {
+                return Err(fail(line_no, "digital output needs a P word"));
+            };
+            if !self.post.digital_pin(pin) {
+                return Err(fail(line_no, "digital output P is not a declared pin"));
+            }
+        }
+        if probe_words > 0 {
+            if probe_words > 1 || block_motion.is_some() || saw_dwell || i.is_some() || j.is_some() || k.is_some() || r.is_some() || saw_rotary {
+                return Err(fail(line_no, "probe cannot share a block with another motion"));
+            }
+            if x.is_none() && y.is_none() && z.is_none() {
+                return Err(fail(line_no, "probe needs an axis word"));
+            }
+            if !feed_on_block {
+                return Err(fail(line_no, "probe needs a feed"));
+            }
+            return Ok(());
         }
 
         if want_length {
@@ -1057,7 +1110,7 @@ mod tests {
         let path = ClPath::try_new(Some("outer".into()), Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
         let program = Program::try_new(Some("plate".into()), vec![tool], None, vec![path], Vec::new(), Vec::new(), None).expect("program");
         let options = PostOptions { arc_tolerance: 0.05 };
-        for id in ["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"] {
+        for id in ["linuxcnc", "linuxcnc_router", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"] {
             let post = builtin(id).expect(id);
             let text = post_program(&program, &post, &options).unwrap_or_else(|err| panic!("{id}: {err}"));
             assert!(!text.contains("-0"), "{id}: {text}");
@@ -1069,5 +1122,63 @@ mod tests {
             assert!(report.motions.iter().all(|state| state.work.is_none()), "{id}");
             assert!(!report.spindle.on, "{id}");
         }
+    }
+
+    #[test]
+    fn linuxcnc_router_probe_and_auxiliaries_replay() {
+        let post = builtin("linuxcnc_router").expect("router");
+        let toward = Pose::new(Vec3::new(1.0, 2.0, -10.0).expect("tip"), Vec3::Z).expect("pose");
+        let approach = Pose::new(Vec3::new(0.0, 0.0, 5.0).expect("tip"), Vec3::Z).expect("pose");
+        let cut = Pose::new(Vec3::new(10.0, 0.0, 5.0).expect("tip"), Vec3::Z).expect("pose");
+        let spindle = ProcessParams::new().speed(Some(12_000.0)).expect("speed");
+        let blocks = vec![
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("dust".into()), params: ProcessParams::new() }),
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("vacuum".into()), params: ProcessParams::new() }),
+            ClBlock::Event(Event::Probe { toward: Some(toward), feed: Some(100.0) }),
+            ClBlock::Motion(ClMotion::Rapid { to: approach, feed: None }),
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: spindle }),
+            ClBlock::Motion(ClMotion::Linear { to: cut, feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
+            ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("vacuum".into()) }),
+            ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("dust".into()) }),
+        ];
+        let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
+        let path = ClPath::try_new(Some("outer".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
+        let program = Program::try_new(Some("plate".into()), Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
+        let text = crate::post_program(&program, &post, &crate::PostOptions { arc_tolerance: 0.05 }).expect("post");
+        let at = |token: &str| {
+            text.lines().position(|line| line.split_whitespace().any(|word| word == token)).unwrap_or_else(|| panic!("{token} missing\n{text}"))
+        };
+        let dust_on = at("P1");
+        let vacuum_on = text.lines().position(|line| line.split_whitespace().any(|word| word == "M64") && line.contains("P0")).expect("vacuum on");
+        let probe = at("G38.2");
+        let rapid = at("G0");
+        let spindle_on = at("M3");
+        let cut_at = at("G1");
+        let spindle_off = at("M5");
+        let vacuum_off = text.lines().position(|line| line.split_whitespace().any(|word| word == "M65") && line.contains("P0")).expect("vacuum off");
+        let dust_off = text.lines().position(|line| line.split_whitespace().any(|word| word == "M65") && line.contains("P1")).expect("dust off");
+        assert!(dust_on < vacuum_on && vacuum_on < probe && probe < rapid && rapid < spindle_on && spindle_on < cut_at, "{text}");
+        assert!(cut_at < spindle_off && spindle_off < vacuum_off && vacuum_off < dust_off, "{text}");
+        let probe_line = text.lines().nth(probe).expect("probe line");
+        assert!(
+            probe_line.split_whitespace().any(|word| word == "X1.0000")
+                && probe_line.split_whitespace().any(|word| word == "Y2.0000")
+                && probe_line.split_whitespace().any(|word| word == "Z-10.0000")
+                && probe_line.split_whitespace().any(|word| word == "F100.0000"),
+            "{probe_line}"
+        );
+        let cut_line = text.lines().nth(cut_at).expect("cut line");
+        assert!(cut_line.split_whitespace().all(|word| !word.starts_with('F')), "{cut_line}");
+        let report = audit(&text, &post).unwrap_or_else(|err| panic!("{err}\n{text}"));
+        assert_eq!(report.motions.len(), 2, "{text}");
+        assert_eq!(report.motions[0].mode, super::MotionMode::Rapid);
+        assert!(!report.motions[0].spindle.on);
+        assert_eq!(report.motions[1].mode, super::MotionMode::Linear);
+        assert!(report.motions[1].spindle.on);
+        assert!((report.motions[1].feed.expect("feed") - 100.0).abs() < 1e-6);
+        assert!(!report.spindle.on);
+        let moves = crate::read_back(&text, &post).expect("read");
+        crate::compare(&program, &moves, 1e-3, &post).expect("compare");
     }
 }

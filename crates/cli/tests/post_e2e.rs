@@ -154,6 +154,7 @@ fn posts_lists_every_builtin() -> Result<(), String> {
     if ids
         != [
             "linuxcnc",
+            "linuxcnc_router",
             "linuxcnc_5ax",
             "linuxcnc_5ax_tcp",
             "grbl",

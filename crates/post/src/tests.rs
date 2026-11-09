@@ -135,6 +135,7 @@ fn builtins_load_and_match_ids() {
         builtin_ids(),
         &[
             "linuxcnc",
+            "linuxcnc_router",
             "linuxcnc_5ax",
             "linuxcnc_5ax_tcp",
             "grbl",
@@ -161,6 +162,7 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").max_line_length(), Some(256));
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").rotary_axes(), vec![RotaryAxisKind::A]);
     assert!(builtin("grbl").expect("grbl").rotary_axes().is_empty());
+    assert!(builtin("linuxcnc_router").expect("linuxcnc_router").rotary_axes().is_empty());
     assert_eq!(builtin("mach3").expect("mach3").rotary_axes(), vec![RotaryAxisKind::A]);
     assert_eq!(builtin("fanuc").expect("fanuc").rotary_axes(), vec![RotaryAxisKind::A]);
     assert_eq!(builtin("haas").expect("haas").rotary_axes(), vec![RotaryAxisKind::A]);
@@ -200,7 +202,9 @@ fn builtins_load_and_match_ids() {
     for id in ["fanuc", "haas", "haas_umc", "haas_umc_tcpc", "fanuc_lathe", "haas_lathe", "generic_lathe_2ch"] {
         assert!(builtin(id).expect(id).decimal_point, "{id}");
     }
-    for id in ["linuxcnc", "linuxcnc_5ax", "linuxcnc_5ax_tcp", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"] {
+    for id in
+        ["linuxcnc", "linuxcnc_router", "linuxcnc_5ax", "linuxcnc_5ax_tcp", "grbl", "mach3", "plasma", "grbl_laser", "linuxcnc_lathe", "grbl_lathe"]
+    {
         assert!(!builtin(id).expect(id).decimal_point, "{id}");
     }
     assert!(builtin("centroid").is_none());
@@ -1640,9 +1644,137 @@ fn a_positive_feed_that_rounds_to_zero_is_rejected() {
         ClBlock::Motion(ClMotion::Linear { to: pose(1.0, 0.0, 1.0), feed: 0.00004, role: MoveRole::Cut }),
     ];
     let program = program(blocks);
-    for id in ["linuxcnc", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"] {
+    for id in ["linuxcnc", "linuxcnc_router", "grbl", "mach3", "fanuc", "haas", "plasma", "grbl_laser"] {
         let post = builtin(id).expect(id);
         let err = post_program(&program, &post, &options()).expect_err(id);
         assert!(err.to_string().contains("feed rounds to zero"), "{id}: {err}");
     }
+}
+
+fn router() -> crate::PostDef {
+    builtin("linuxcnc_router").expect("linuxcnc_router")
+}
+
+fn router_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("../posts/linuxcnc_router.json")).expect("json")
+}
+
+fn probe_cut() -> Program {
+    let toward = pose(1.0, 2.0, -10.0);
+    let spindle = ProcessParams::new().speed(Some(12_000.0)).expect("speed");
+    program(vec![
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("vacuum".into()), params: ProcessParams::new() }),
+        ClBlock::Event(Event::Probe { toward: Some(toward), feed: Some(80.0) }),
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 5.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: spindle }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 5.0), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("vacuum".into()) }),
+    ])
+}
+
+fn word_line<'a>(text: &'a str, token: &str) -> &'a str {
+    text.lines().find(|line| line.split_whitespace().any(|word| word == token)).unwrap_or_else(|| panic!("{token} missing\n{text}"))
+}
+
+#[test]
+fn linuxcnc_router_probe_writes_g38_2_and_restates_motion() {
+    let post = router();
+    let program = probe_cut();
+    let text = post_program(&program, &post, &options()).expect("post");
+    let probe = word_line(&text, "G38.2");
+    for word in ["X1.0000", "Y2.0000", "Z-10.0000", "F80.0000"] {
+        assert!(probe.split_whitespace().any(|token| token == word), "{probe}");
+    }
+    assert!(!text.contains("(probe)"), "{text}");
+    let rapid = word_line(&text, "G0");
+    let cut = word_line(&text, "G1");
+    assert!(text.find(probe).unwrap() < text.find(rapid).unwrap() && text.find(rapid).unwrap() < text.find(cut).unwrap(), "{text}");
+    assert!(cut.split_whitespace().all(|word| !word.starts_with('F')), "{cut}");
+    assert!(word_line(&text, "M64").split_whitespace().any(|word| word == "P0"), "{text}");
+    assert!(word_line(&text, "M65").split_whitespace().any(|word| word == "P0"), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+}
+
+#[test]
+fn linuxcnc_router_probe_requires_a_pose_and_a_feed() {
+    let post = router();
+    let missing_pose = program(vec![ClBlock::Event(Event::Probe { toward: None, feed: Some(40.0) })]);
+    let err = post_program(&missing_pose, &post, &options()).expect_err("pose");
+    assert!(err.to_string().contains("probe needs a contact pose"), "{err}");
+    let missing_both = program(vec![ClBlock::Event(Event::Probe { toward: None, feed: None })]);
+    let err = post_program(&missing_both, &post, &options()).expect_err("both");
+    assert!(err.to_string().contains("probe needs a contact pose"), "{err}");
+    let missing_feed = program(vec![ClBlock::Event(Event::Probe { toward: Some(pose(0.0, 0.0, -1.0)), feed: None })]);
+    let err = post_program(&missing_feed, &post, &options()).expect_err("feed");
+    assert!(err.to_string().contains("probe needs a feed"), "{err}");
+}
+
+#[test]
+fn linuxcnc_still_comments_a_probe_and_falls_back_to_other() {
+    let post = linux();
+    let params = ProcessParams::new().speed(Some(1000.0)).expect("speed");
+    let program = program(vec![
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("vacuum".into()), params }),
+        ClBlock::Event(Event::Probe { toward: Some(pose(1.0, 2.0, -3.0)), feed: Some(50.0) }),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("vacuum".into()) }),
+    ]);
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(text.contains("(probe)"), "{text}");
+    assert!(!text.contains("G38"), "{text}");
+    assert!(!text.contains("M64"), "{text}");
+    assert!(text.split_whitespace().any(|word| word == "M3"), "{text}");
+    assert!(text.split_whitespace().any(|word| word == "S1000"), "{text}");
+}
+
+#[test]
+fn linuxcnc_router_refuses_an_unknown_auxiliary() {
+    let program = program(vec![ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("waterjet".into()), params: ProcessParams::new() })]);
+    let err = post_program(&program, &router(), &options()).expect_err("waterjet");
+    let text = err.to_string();
+    assert!(text.contains("post `linuxcnc_router` does not accept auxiliary `waterjet`"), "{text}");
+    assert!(text.contains("accepted: vacuum, dust"), "{text}");
+}
+
+#[test]
+fn linuxcnc_router_pin_numbers_and_g38_3_are_post_data() {
+    let mut raw = router_json();
+    raw["digital_out"] = serde_json::json!({});
+    let defaults = load_post(&raw.to_string()).expect("defaults");
+    let open = program(vec![
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("vacuum".into()), params: ProcessParams::new() }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("dust".into()), params: ProcessParams::new() }),
+    ]);
+    let text = post_program(&open, &defaults, &options()).expect("defaults");
+    assert!(word_line(&text, "M64").split_whitespace().any(|word| word == "P0"), "{text}");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "M64") && line.split_whitespace().any(|word| word == "P1")), "{text}");
+    assert!(
+        text.lines().filter(|line| line.split_whitespace().any(|word| word == "M65") && line.split_whitespace().any(|word| word == "P0")).count()
+            == 1,
+        "{text}"
+    );
+
+    raw["digital_out"] = serde_json::json!({ "vacuum_pin": 4, "dust_pin": 7 });
+    raw["probe"]["code"] = serde_json::json!("G38.3");
+    let post = load_post(&raw.to_string()).expect("override");
+    let program = program(vec![
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("vacuum".into()), params: ProcessParams::new() }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("dust".into()), params: ProcessParams::new() }),
+        ClBlock::Event(Event::Probe { toward: Some(pose(0.0, 0.0, -2.0)), feed: Some(30.0) }),
+    ]);
+    let text = post_program(&program, &post, &options()).expect("override");
+    assert!(text.split_whitespace().any(|word| word == "G38.3"), "{text}");
+    assert!(!text.split_whitespace().any(|word| word == "G38.2"), "{text}");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "M64") && line.split_whitespace().any(|word| word == "P4")), "{text}");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "M64") && line.split_whitespace().any(|word| word == "P7")), "{text}");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "M65") && line.split_whitespace().any(|word| word == "P4")), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+
+    raw["probe"]["code"] = serde_json::json!("G38.4");
+    let err = load_post(&raw.to_string()).expect_err("g38.4");
+    assert!(err.to_string().contains("probe.code"), "{err}");
+    raw["probe"]["code"] = serde_json::json!("G38.2");
+    raw["digital_out"]["vacuum_pin"] = serde_json::json!(1000);
+    let err = load_post(&raw.to_string()).expect_err("pin");
+    assert!(err.to_string().contains("digital_out.vacuum_pin"), "{err}");
 }

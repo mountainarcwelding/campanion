@@ -2010,11 +2010,7 @@ impl<'a> Writer<'a> {
                 if missing {
                     self.comment(&format!("power missing, using S{power}"))?;
                 }
-                self.templates(
-                    "process.on",
-                    &lines,
-                    &[("speed", speed.as_str()), ("power", power.as_str()), ("program_name", ""), ("date-free!", "")],
-                )
+                self.emit_process("process.on", key, &lines, &speed, &power)
             }
             Event::ProcessOff { process } => {
                 let key = process_key(process);
@@ -2032,11 +2028,7 @@ impl<'a> Writer<'a> {
                 let power = active.as_ref().map(|on| on.power.clone()).unwrap_or_else(|| "0".to_string());
                 self.thc_before_off()?;
                 self.note_off(process);
-                self.templates(
-                    "process.off",
-                    &lines,
-                    &[("speed", speed.as_str()), ("power", power.as_str()), ("program_name", ""), ("date-free!", "")],
-                )
+                self.emit_process("process.off", key, &lines, &speed, &power)
             }
             Event::Dwell { seconds } => {
                 self.note_pierce_dwell();
@@ -2050,7 +2042,7 @@ impl<'a> Writer<'a> {
             }
             Event::Coolant { mode } => self.coolant(*mode),
             Event::Comment { text } => self.comment(text),
-            Event::Probe { .. } => self.comment("probe"),
+            Event::Probe { toward, feed } => self.write_probe(toward.as_ref(), *feed),
             Event::Custom { name, .. } => self.comment(&format!("custom {}", sanitize(name))),
             Event::Sync { id } => {
                 if self.multi_channel {
@@ -2173,15 +2165,57 @@ impl<'a> Writer<'a> {
 
     fn process_words(&self, process: &ProcessKind) -> Result<&ProcessWords> {
         let key = process_key(process);
+        if let ProcessKind::Other(name) = process
+            && let Some(allowed) = &self.post.auxiliaries
+        {
+            if !allowed.iter().any(|item| item == name) {
+                let list = allowed.join(", ");
+                let id = self.post.id();
+                return Err(invalid(format!("post `{id}` does not accept auxiliary `{name}`; accepted: {list}")));
+            }
+            return self.post.process.get(key).ok_or_else(|| invalid(format!("process.{key} has no template")));
+        }
         if let Some(words) = self.post.process.get(key) {
             return Ok(words);
         }
-        if matches!(process, ProcessKind::Other(_))
+        if self.post.auxiliaries.is_none()
+            && matches!(process, ProcessKind::Other(_))
             && let Some(words) = self.post.process.get("other")
         {
             return Ok(words);
         }
         Err(invalid(format!("process.{key} has no template")))
+    }
+
+    /// `G38.2` is motion group 1 on LinuxCNC, so the next block must restate `G0` or `G1`.
+    /// The contact is not a part move: position stays where it was, and `F` becomes modal.
+    fn write_probe(&mut self, toward: Option<&Pose>, feed: Option<f64>) -> Result<()> {
+        let Some(code) = self.post.probe.as_ref().map(|probe| probe.code.clone()) else {
+            return self.comment("probe");
+        };
+        let Some(pose) = toward else {
+            return Err(invalid("probe needs a contact pose"));
+        };
+        let Some(feed) = feed else {
+            return Err(invalid("probe needs a feed"));
+        };
+        let mut words = vec![code];
+        let tip = pose.tip();
+        self.push_axes(&mut words, [tip.x(), tip.y(), tip.z()])?;
+        self.push_feed(&mut words, Some(feed), true)?;
+        self.linear = None;
+        self.emit_words(&words)
+    }
+
+    fn pin_text(&self, key: &str) -> String {
+        let Some(out) = &self.post.digital_out else {
+            return String::new();
+        };
+        match key {
+            "vacuum" => out.vacuum_pin.to_string(),
+            "dust" => out.dust_pin.to_string(),
+            _ => String::new(),
+        }
     }
 
     fn note_on(&mut self, process: &ProcessKind, speed: &str, power: &str) {
@@ -2215,7 +2249,7 @@ impl<'a> Writer<'a> {
         let active = std::mem::take(&mut self.on);
         for item in &active {
             let lines = self.lines_for_key(&item.key, false)?;
-            self.emit_process("process.off", &lines, &item.speed, &item.power)?;
+            self.emit_process("process.off", &item.key, &lines, &item.speed, &item.power)?;
         }
         self.suspended.extend(active);
         Ok(())
@@ -2229,7 +2263,7 @@ impl<'a> Writer<'a> {
         let active = std::mem::take(&mut self.suspended);
         for item in active {
             let lines = self.lines_for_key(&item.key, true)?;
-            self.emit_process("process.on", &lines, &item.speed, &item.power)?;
+            self.emit_process("process.on", &item.key, &lines, &item.speed, &item.power)?;
             self.last_speed.clone_from(&item.speed);
             self.last_power.clone_from(&item.power);
             self.on.push(item);
@@ -2239,14 +2273,24 @@ impl<'a> Writer<'a> {
     }
 
     fn lines_for_key(&self, key: &str, on: bool) -> Result<Vec<String>> {
-        let Some(words) = self.post.process.get(key).or_else(|| self.post.process.get("other")) else {
+        let Some(words) = self.words_for_key(key) else {
             return Err(invalid(format!("process.{key} has no template")));
         };
         Ok(if on { words.on.clone() } else { words.off.clone() })
     }
 
-    fn emit_process(&mut self, field_name: &str, lines: &[String], speed: &str, power: &str) -> Result<()> {
-        self.templates(field_name, lines, &[("speed", speed), ("power", power), ("program_name", ""), ("date-free!", "")])
+    /// A post that lists `auxiliaries` does not fall back to `process.other`.
+    fn words_for_key(&self, key: &str) -> Option<&ProcessWords> {
+        if self.post.auxiliaries.is_some() {
+            self.post.process.get(key)
+        } else {
+            self.post.process.get(key).or_else(|| self.post.process.get("other"))
+        }
+    }
+
+    fn emit_process(&mut self, field_name: &str, key: &str, lines: &[String], speed: &str, power: &str) -> Result<()> {
+        let pin = self.pin_text(key);
+        self.templates(field_name, lines, &[("speed", speed), ("power", power), ("pin", pin.as_str()), ("program_name", ""), ("date-free!", "")])
     }
 
     fn arm_thc(&mut self) {
@@ -3069,15 +3113,11 @@ impl<'a> Writer<'a> {
                 self.templates("lathe.spindle_off", &lines, &[("date-free!", "")])?;
                 continue;
             }
-            let Some(words) = self.post.process.get(&active.key).or_else(|| self.post.process.get("other")) else {
+            let Some(words) = self.words_for_key(&active.key) else {
                 return Err(invalid(format!("process.{} has no template", active.key)));
             };
             let off = words.off.clone();
-            self.templates(
-                "process.off",
-                &off,
-                &[("speed", active.speed.as_str()), ("power", active.power.as_str()), ("program_name", ""), ("date-free!", "")],
-            )?;
+            self.emit_process("process.off", &active.key, &off, &active.speed, &active.power)?;
         }
         Ok(())
     }

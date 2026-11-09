@@ -1,0 +1,45 @@
+{
+  "id": "linuxcnc_router",
+  "name": "LinuxCNC router",
+  "description": "Millimetre RS274 dialect for a LinuxCNC gantry router. Absolute moves, cutter compensation cancelled, IJK arcs and helices, path blend G64 P0.01. No rotary axis: a gantry is XYZ, and a program with an A or B angle is rejected. A Probe event with a contact pose and a feed is G38.2 toward that pose (LinuxCNC straight probe; G38.2 alarms if the probe does not trip; https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g38). A Probe with no contact pose or no feed is refused. Named Other processes vacuum and dust are immediate digital outputs M64 Pn and M65 Pn (https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65). digital_out.vacuum_pin defaults to 0 and digital_out.dust_pin defaults to 1. Any other Other name is refused. Not proven on a machine.",
+  "units": "mm",
+  "line_numbers": { "enabled": true, "start": 10, "step": 10, "prefix": "N" },
+  "decimals": { "linear": 4, "feed": 4, "dwell": 3 },
+  "trailing_zeros": true,
+  "header": [
+    "({program_name})",
+    "G21",
+    "G90",
+    "G17",
+    "G40",
+    "G49",
+    "G64 P0.01"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": { "mode": "ijk", "max_sweep_deg": 360, "helix": true },
+  "planes": true,
+  "dwell": { "word": "P", "unit": "s" },
+  "process": {
+    "spindle": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "torch": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "laser": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "extruder": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
+    "vacuum": { "on": ["M64 P{pin}"], "off": ["M65 P{pin}"] },
+    "dust": { "on": ["M64 P{pin}"], "off": ["M65 P{pin}"] }
+  },
+  "auxiliaries": ["vacuum", "dust"],
+  "digital_out": { "vacuum_pin": 0, "dust_pin": 1 },
+  "probe": { "code": "G38.2" },
+  "tool_change": ["T{tool} M6"],
+  "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
+  "comments": { "style": "paren" },
+  "program_end": ["M2"],
+  "max_line_length": 256,
+  "axis_letters": "XYZ",
+  "references": [
+    "https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g38",
+    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65"
+  ]
+}

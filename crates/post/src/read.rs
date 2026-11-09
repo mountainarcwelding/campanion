@@ -6,6 +6,8 @@
 //! inverse-time codes (`G93` / `G94` on LinuxCNC). Those stay modal the way `X` `Y` `Z` do.
 //! A post with `five_axis` also accepts A, B and C as modal joint words, G93/G94 from
 //! `five_axis.continuous`, the on/off templates (G254/G255 on Haas), and G53 as a machine retract.
+//! When the post has `probe`, its `G38.2` or `G38.3` is not a move: the axis words are the contact
+//! target and are not stored, and `F` on that block updates the modal feed.
 //!
 //! A lathe post returns part-frame positions. In diameter mode each X word is divided by two.
 //! Y is 0, except while face or cylinder interpolation (from the post's `face_interp` /
@@ -204,6 +206,10 @@ pub fn read_back(text: &str, post: &PostDef) -> Result<Vec<ReadMove>> {
 }
 
 impl<'a> Parser<'a> {
+    fn is_probe_code(&self, value: f64) -> bool {
+        self.post.probe_number().is_some_and(|code| (value - code).abs() < 1e-6)
+    }
+
     fn interpret(&mut self, words: Vec<(char, f64)>, raw: &str) -> Result<Option<ReadMove>> {
         self.note_sub_line(raw);
         if let Some((letter, value)) = words.first().copied()
@@ -220,8 +226,10 @@ impl<'a> Parser<'a> {
         let mut g_codes = Vec::new();
         let mut saw_m = false;
         let mut saw_t = false;
+        let mut probe_count = 0u32;
         for (letter, value) in &words {
             match *letter {
+                'G' if self.is_probe_code(*value) => probe_count += 1,
                 'G' => g_codes.push(g_number(*value)?),
                 'M' => saw_m = true,
                 'T' => saw_t = true,
@@ -333,6 +341,23 @@ impl<'a> Parser<'a> {
         }
         if motions > 1 || planes > 1 {
             return Err(invalid("line has conflicting G codes"));
+        }
+        if probe_count > 0 {
+            if probe_count > 1 || motions > 0 || !g_codes.is_empty() {
+                return Err(invalid("probe cannot share a block with another motion"));
+            }
+            let has_axis = axes.iter().any(|letter| words.iter().any(|(word, _)| word == letter));
+            if !has_axis {
+                return Err(invalid("probe needs an axis word"));
+            }
+            let Some(feed) = f else {
+                return Err(invalid("probe needs a feed"));
+            };
+            if !(feed.is_finite() && feed > 0.0) {
+                return Err(invalid("feed must be positive"));
+            }
+            self.feed = Some(feed);
+            return Ok(None);
         }
         // U and W are incremental lathe axes. Fanuc home is `G28 U0 W0`. Any other use would
         // move in a frame this parser does not track.

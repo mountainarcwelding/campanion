@@ -81,6 +81,7 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 | id | name | Rotary | description |
 | --- | --- | --- | --- |
 | `linuxcnc` | LinuxCNC | A, inverse time | Millimetre RS274 dialect for LinuxCNC. Absolute moves, cutter compensation cancelled, IJK arcs and helices. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |
+| `linuxcnc_router` | LinuxCNC router | - | Millimetre LinuxCNC gantry router. G38.2 tool-length probe, vacuum and dust as M64/M65. No rotary axis. |
 | `grbl` | Grbl | - | Millimetre dialect for Grbl. Absolute moves, IJK arcs and helices, no line numbers, tool changes as comments. No rotary axis. |
 | `mach3` | Mach3 | A, degrees per minute | Millimetre dialect for Mach3. Incremental IJK arcs and helices, dwell P in seconds, no line numbers. A axis with degrees-per-minute feed when the angle changes. |
 | `fanuc` | Fanuc | A, inverse time | Millimetre Fanuc mill dialect. Program O0001, sequence numbers, R arcs, helices as lines, dwell P in milliseconds. A axis with inverse-time feed (G93, cancelled by G94) when the angle changes. |

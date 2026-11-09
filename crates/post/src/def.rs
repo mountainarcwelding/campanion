@@ -21,6 +21,13 @@
 //! invent one. Plasma and the Grbl laser post set `per_cut`, so a torch or beam mapped from any
 //! process, including `spindle`, is off during G0 travel.
 //!
+//! `probe` is optional. `code` is `G38.2` or `G38.3`. A Probe event with a contact pose and a
+//! feed writes that code, the tip, and `F`. Without `probe`, the event stays a comment. A missing
+//! pose or feed is an error when `probe` is set. `auxiliaries`, when set, lists the Other names
+//! the post accepts; any other name is an error, and there is no `process.other` fallback. When
+//! `auxiliaries` is omitted, Other still uses `process.other`. `digital_out` supplies `{pin}` for
+//! the `vacuum` and `dust` templates. `vacuum_pin` defaults to 0 and `dust_pin` defaults to 1.
+//!
 //! `rotary` is optional. Without it, a program that carries a rotary angle is rejected. `axes`
 //! lists `a`, `b`, or both. The A/B word uses the dimensional formatter with `decimals`
 //! (degrees). `decimal_point` keeps a point on that word and on `X` `Y` `Z` `I` `J` `K` `R`
@@ -41,7 +48,7 @@
 //! `c_feed` is `per_minute` or `inverse_time`. Cylinder `on` lines may use `{radius}` and
 //! `{diameter}`. `references` cites the codes and is never written to the program.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use campanion_ir::RotaryAxisKind;
 use serde::Deserialize;
@@ -53,6 +60,7 @@ const MAX_LINES: usize = 64;
 const MAX_TEMPLATE_CHARS: usize = 400;
 const HEADER_KEYS: &[&str] = &["program_name", "program_number", "date-free!"];
 const PROCESS_KEYS: &[&str] = &["program_name", "date-free!", "speed", "power"];
+const AUX_PROCESS_KEYS: &[&str] = &["program_name", "date-free!", "speed", "power", "pin"];
 const TOOL_KEYS: &[&str] = &["program_name", "date-free!", "tool"];
 const LATHE_BARE: &[&str] = &["date-free!"];
 const LATHE_CSS: &[&str] = &["surface", "max_rpm", "date-free!"];
@@ -119,6 +127,15 @@ pub struct PostDef {
     #[serde(default = "default_process_cycle")]
     pub(crate) process_cycle: String,
     pub(crate) process: BTreeMap<String, ProcessWords>,
+    /// Other names this post accepts. Absent keeps the `process.other` fallback.
+    #[serde(default)]
+    pub(crate) auxiliaries: Option<Vec<String>>,
+    /// Pins substituted for `{pin}` on the `vacuum` and `dust` templates.
+    #[serde(default)]
+    pub(crate) digital_out: Option<DigitalOut>,
+    /// Straight-probe code. Absent leaves a Probe event as a comment.
+    #[serde(default)]
+    pub(crate) probe: Option<ProbeOutput>,
     /// Torch-height control. `on` follows the pierce dwell. `off` precedes process off.
     #[serde(default)]
     pub(crate) thc: Option<ThcWords>,
@@ -181,6 +198,33 @@ pub(crate) struct Dwell {
 pub(crate) struct ProcessWords {
     pub(crate) on: Vec<String>,
     pub(crate) off: Vec<String>,
+}
+
+/// Straight probe. `code` is `G38.2` or `G38.3`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProbeOutput {
+    pub(crate) code: String,
+}
+
+/// Immediate digital-output pins for `vacuum` and `dust`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DigitalOut {
+    /// `P` number on the vacuum `M64` / `M65` lines. Default 0.
+    #[serde(default = "default_vacuum_pin")]
+    pub(crate) vacuum_pin: u32,
+    /// `P` number on the dust `M64` / `M65` lines. Default 1.
+    #[serde(default = "default_dust_pin")]
+    pub(crate) dust_pin: u32,
+}
+
+fn default_vacuum_pin() -> u32 {
+    0
+}
+
+fn default_dust_pin() -> u32 {
+    1
 }
 
 /// Whether positioning rapids along Z are written.
@@ -717,7 +761,14 @@ impl PostDef {
         if !matches!(self.process_cycle.as_str(), "hold" | "per_cut") {
             return Err(field("process_cycle", "must be hold or per_cut"));
         }
-        check_process(&self.process)?;
+        if let Some(out) = &self.digital_out {
+            check_digital_out(out)?;
+        }
+        if let Some(probe) = &mut self.probe {
+            check_probe(probe)?;
+        }
+        check_process(&self)?;
+        check_auxiliaries(&self)?;
         if let Some(thc) = &self.thc {
             check_templates("thc.on", &thc.on, PROCESS_KEYS)?;
             check_templates("thc.off", &thc.off, PROCESS_KEYS)?;
@@ -828,6 +879,31 @@ impl PostDef {
     /// True when every running process turns off before a rapid and on again before the next feed.
     pub(crate) fn cycles_per_cut(&self) -> bool {
         self.process_cycle == "per_cut"
+    }
+
+    /// Numeric `G38.2` or `G38.3` when this post writes a straight probe.
+    pub(crate) fn probe_number(&self) -> Option<f64> {
+        match self.probe.as_ref().map(|probe| probe.code.as_str()) {
+            Some("G38.2") => Some(38.2),
+            Some("G38.3") => Some(38.3),
+            _ => None,
+        }
+    }
+
+    /// True when `value` is `vacuum_pin` or `dust_pin`.
+    pub(crate) fn digital_pin(&self, value: f64) -> bool {
+        let Some(out) = &self.digital_out else {
+            return false;
+        };
+        if !(value.is_finite() && value >= 0.0) {
+            return false;
+        }
+        let rounded = value.round();
+        if (value - rounded).abs() > 1e-6 || rounded > f64::from(u32::MAX) {
+            return false;
+        }
+        let pin = rounded as u32;
+        pin == out.vacuum_pin || pin == out.dust_pin
     }
 }
 
@@ -1244,15 +1320,55 @@ fn check_dwell_word(word: &str, axes: &str, prefix: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_process(map: &BTreeMap<String, ProcessWords>) -> Result<()> {
-    if map.len() > 32 {
+fn check_process(post: &PostDef) -> Result<()> {
+    if post.process.len() > 32 {
         return Err(field("process", "too many entries"));
     }
-    for (key, words) in map {
+    for (key, words) in &post.process {
         check_token("process", key, 64).map_err(|_| field("process", format!("invalid key `{key}`")))?;
-        check_templates(&format!("process.{key}.on"), &words.on, PROCESS_KEYS)?;
-        check_templates(&format!("process.{key}.off"), &words.off, PROCESS_KEYS)?;
+        let allowed = if post.digital_out.is_some() && matches!(key.as_str(), "vacuum" | "dust") { AUX_PROCESS_KEYS } else { PROCESS_KEYS };
+        check_templates(&format!("process.{key}.on"), &words.on, allowed)?;
+        check_templates(&format!("process.{key}.off"), &words.off, allowed)?;
     }
+    Ok(())
+}
+
+fn check_auxiliaries(post: &PostDef) -> Result<()> {
+    let Some(names) = &post.auxiliaries else {
+        return Ok(());
+    };
+    if names.len() > 32 {
+        return Err(field("auxiliaries", "at most 32 names"));
+    }
+    let mut seen = BTreeSet::new();
+    for name in names {
+        check_token("auxiliaries", name, 64).map_err(|_| field("auxiliaries", format!("invalid name `{name}`")))?;
+        if !seen.insert(name.as_str()) {
+            return Err(field("auxiliaries", format!("duplicate `{name}`")));
+        }
+        if !post.process.contains_key(name) {
+            return Err(field("auxiliaries", format!("`{name}` has no process template")));
+        }
+    }
+    Ok(())
+}
+
+fn check_digital_out(out: &DigitalOut) -> Result<()> {
+    check_pin("digital_out.vacuum_pin", out.vacuum_pin)?;
+    check_pin("digital_out.dust_pin", out.dust_pin)?;
+    Ok(())
+}
+
+fn check_pin(field_name: &str, pin: u32) -> Result<()> {
+    if pin > 999 { Err(field(field_name, "must be 0..=999")) } else { Ok(()) }
+}
+
+fn check_probe(probe: &mut ProbeOutput) -> Result<()> {
+    let code = probe.code.trim().to_ascii_uppercase();
+    if code != "G38.2" && code != "G38.3" {
+        return Err(field("probe.code", "must be G38.2 or G38.3"));
+    }
+    probe.code = code;
     Ok(())
 }
 

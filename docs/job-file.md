@@ -196,6 +196,13 @@ spindle operation (a diameter tool) has no speed, `run` fails with
 nothing. A kerf (torch) operation does not need a speed. Without `--post`, the test-sink NGC
 does not require one.
 
+Vacuum, dust collection, and a tool-length probe are not job operations. A mill job still posts
+spindle, torch, laser, extruder, or knife. `linuxcnc_router` writes IR `Other` processes named
+`vacuum` and `dust` as immediate digital outputs (`M64` / `M65`), and an IR `Probe` event that
+has a contact pose and a feed as `G38.2`. Pin numbers are post parameters (`digital_out`,
+defaults 0 and 1). A mill job posted with that dialect still uses the spindle templates. This
+output has not been proven on a machine.
+
 Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
 removes that remaining stock.
 

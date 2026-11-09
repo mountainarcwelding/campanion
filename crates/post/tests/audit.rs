@@ -47,6 +47,16 @@ const MILLS: &[Mill] = &[
         decimal_point: false,
         length: LengthKind::Cancelled,
     },
+    Mill {
+        id: "linuxcnc_router",
+        per_cut: false,
+        laser: false,
+        drop_z: false,
+        rapid_z: true,
+        numbered: true,
+        decimal_point: false,
+        length: LengthKind::Cancelled,
+    },
     Mill { id: "grbl", per_cut: false, laser: false, drop_z: false, rapid_z: true, numbered: false, decimal_point: false, length: LengthKind::Unset },
     Mill {
         id: "mach3",

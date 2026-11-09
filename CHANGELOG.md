@@ -6,6 +6,7 @@
 
 - A diameter tool may set `cutter_sense` (`upcut`, `downcut`, or `compression`) and, with compression, `upcut_length` (millimetres at the tip). Omitted, compensation stays the flat diameter offset. Sense is stored on the job and the IR for later checks; it does not change the 2D offset. Posted G-code is unchanged when the field is omitted. This output has not been proven on a machine.
 - A profile, pocket, face, engrave, drill, wrap or live mill may set `onion_skin`, a positive length strictly less than `depth`. Earlier depth passes stop that far short of the floor. The last pass cuts the skin with the same entry as the other passes. Omitting the field leaves the depth plan unchanged. `campanion run` checks that no earlier pass enters the skin and that the last pass reaches the floor. This output has not been proven on a machine.
+- `linuxcnc_router` is a millimetre LinuxCNC gantry post: the same RS274 motion as `linuxcnc`, with no rotary axis. A Probe event with a contact pose and a feed is `G38.2` (LinuxCNC straight probe; <https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g38>). `vacuum` and `dust` are immediate digital outputs `M64`/`M65` (<https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65>); pin numbers default to 0 and 1. Any other Other name is refused. Existing posts still fall back to `process.other`. This output has not been proven on a machine.
 
 ## 0.9.3 — 2026-11-03
 

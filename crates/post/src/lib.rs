@@ -52,6 +52,7 @@ pub use def::{ChannelsOutput, PostDef, load_post};
 pub use error::{PostError, Result};
 
 const LINUXCNC_JSON: &str = include_str!("../posts/linuxcnc.json");
+const LINUXCNC_ROUTER_JSON: &str = include_str!("../posts/linuxcnc_router.json");
 const LINUXCNC_5AX_JSON: &str = include_str!("../posts/linuxcnc_5ax.json");
 const LINUXCNC_5AX_TCP_JSON: &str = include_str!("../posts/linuxcnc_5ax_tcp.json");
 const GRBL_JSON: &str = include_str!("../posts/grbl.json");
@@ -72,6 +73,7 @@ const GENERIC_LATHE_2CH_JSON: &str = include_str!("../posts/generic_lathe_2ch.js
 pub fn builtin_ids() -> &'static [&'static str] {
     &[
         "linuxcnc",
+        "linuxcnc_router",
         "linuxcnc_5ax",
         "linuxcnc_5ax_tcp",
         "grbl",
@@ -94,6 +96,7 @@ pub fn builtin_ids() -> &'static [&'static str] {
 pub fn builtin(id: &str) -> Option<PostDef> {
     let json = match id {
         "linuxcnc" => LINUXCNC_JSON,
+        "linuxcnc_router" => LINUXCNC_ROUTER_JSON,
         "linuxcnc_5ax" => LINUXCNC_5AX_JSON,
         "linuxcnc_5ax_tcp" => LINUXCNC_5AX_TCP_JSON,
         "grbl" => GRBL_JSON,
