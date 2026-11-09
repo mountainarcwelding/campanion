@@ -121,6 +121,10 @@
 //! A diameter tool may set `cutter_sense`: `"upcut"`, `"downcut"`, or `"compression"`.
 //! `"compression"` requires `upcut_length`, a positive length in `units` at the tip. Omitted,
 //! compensation stays the flat diameter offset. Sense does not change that offset.
+//! Optional `sheet` is the router sheet in the XY plane, origin at (0, 0), size `width` by
+//! `height`. Optional `nest` packs rectangles on that sheet: a gap, a margin, clamp keep-outs,
+//! and parts. A part is an explicit width and height, the contours of named operations, or the
+//! bounds of a DXF or SVG. Absent `sheet` and `nest`, a job is unchanged. See `docs/job-file.md`.
 
 use std::fmt;
 use std::fs::File;
@@ -181,6 +185,8 @@ const MAX_OPERATIONS: usize = 1_024;
 const MAX_LAYERS: usize = 64;
 const MAX_SOURCE_PATH: usize = 4_096;
 const MAX_FIXTURES: usize = 64;
+const MAX_NEST_PARTS: usize = 256;
+const MAX_KEEP_OUTS: usize = 64;
 const MAX_HOLDER_SEGMENTS: usize = 32;
 const DEFAULT_COLLISION_SAMPLE_MM: f64 = 1.0;
 const DEFAULT_COLLISION_ANGLE_DEG: f64 = 1.0;
@@ -458,6 +464,140 @@ impl StockModelOptions {
     /// Explicit on/off flag. `None` follows whether `stock` is set.
     pub fn enabled(self) -> Option<bool> {
         self.enabled
+    }
+}
+
+/// Router sheet in the XY plane, millimetres. The origin is (0, 0). The sheet is `[0, width]` by `[0, height]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sheet {
+    width: f64,
+    height: f64,
+}
+
+impl Sheet {
+    /// Sheet size along X, millimetres.
+    pub fn width(self) -> f64 {
+        self.width
+    }
+
+    /// Sheet size along Y, millimetres.
+    pub fn height(self) -> f64 {
+        self.height
+    }
+}
+
+/// How a nest part's rectangle is measured. The packer uses the axis-aligned bounds, not the contour.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NestPartGeom {
+    /// Rectangle `[0, width]` by `[0, height]` in the part frame. Nothing is cut for this part.
+    Rectangle {
+        /// Width along X before rotation, millimetres.
+        width: f64,
+        /// Height along Y before rotation, millimetres.
+        height: f64,
+    },
+    /// Union of these operations' layer contours on the job drawing. Those operations are moved onto the sheet.
+    Operations {
+        /// Operation names, in file order.
+        names: Vec<String>,
+    },
+    /// Bounds of a DXF or SVG. `layers` is `None` for every layer. This part reserves space and is not cut.
+    Source {
+        /// Path relative to the job file.
+        path: String,
+        /// FNV-1a 64 of the drawing bytes.
+        hash: String,
+        /// Layers to measure. `None` measures every contour.
+        layers: Option<Vec<String>>,
+    },
+}
+
+/// One rectangle on the sheet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NestPart {
+    name: String,
+    geom: NestPartGeom,
+    /// Degrees. 90 tries 0° and 90°. 0 and 180 try 0° only.
+    rotation_step_deg: f64,
+}
+
+impl NestPart {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn geom(&self) -> &NestPartGeom {
+        &self.geom
+    }
+
+    /// File value. The packer turns it into [`crate::nest::rotation_angles`].
+    pub fn rotation_step_deg(&self) -> f64 {
+        self.rotation_step_deg
+    }
+}
+
+/// Clamp rectangle in the sheet frame, millimetres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NestKeepOut {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+impl NestKeepOut {
+    pub fn min_x(self) -> f64 {
+        self.min_x
+    }
+
+    pub fn min_y(self) -> f64 {
+        self.min_y
+    }
+
+    pub fn max_x(self) -> f64 {
+        self.max_x
+    }
+
+    pub fn max_y(self) -> f64 {
+        self.max_y
+    }
+}
+
+/// Part spacing and clamp rectangles for one sheet.
+///
+/// Lengths are millimetres. `tool_radius` is `None` when the file omits it; the run then uses
+/// half the largest tool diameter or kerf.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Nest {
+    gap: f64,
+    margin: f64,
+    tool_radius: Option<f64>,
+    keep_out: Vec<NestKeepOut>,
+    parts: Vec<NestPart>,
+}
+
+impl Nest {
+    /// Minimum space between part rectangles, millimetres.
+    pub fn gap(&self) -> f64 {
+        self.gap
+    }
+
+    /// Inset from the sheet edge, millimetres.
+    pub fn margin(&self) -> f64 {
+        self.margin
+    }
+
+    /// Explicit cutter radius for keep-out clearance. `None` selects the largest tool.
+    pub fn tool_radius(&self) -> Option<f64> {
+        self.tool_radius
+    }
+
+    pub fn keep_outs(&self) -> &[NestKeepOut] {
+        &self.keep_out
+    }
+
+    pub fn parts(&self) -> &[NestPart] {
+        &self.parts
     }
 }
 
@@ -1110,6 +1250,8 @@ pub struct JobFile {
     collision: CollisionSettings,
     stock: Option<StockBounds>,
     stock_model: StockModelOptions,
+    sheet: Option<Sheet>,
+    nest: Option<Nest>,
 }
 
 impl JobFile {
@@ -1201,6 +1343,16 @@ impl JobFile {
     pub fn has_assembly(&self) -> bool {
         self.tools.iter().any(|tool| tool.assembly.is_some())
     }
+
+    /// Router sheet. `None` when the file omits `sheet`.
+    pub fn sheet(&self) -> Option<Sheet> {
+        self.sheet
+    }
+
+    /// Nesting setup. `None` when the file omits `nest`. Present only together with [`Self::sheet`].
+    pub fn nest(&self) -> Option<&Nest> {
+        self.nest.as_ref()
+    }
 }
 
 struct Body {
@@ -1217,6 +1369,8 @@ struct Body {
     collision: CollisionSettings,
     stock: Option<StockBounds>,
     stock_model: StockModelOptions,
+    sheet: Option<Sheet>,
+    nest: Option<Nest>,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -1238,6 +1392,8 @@ pub fn load(path: &Path) -> Result<JobFile, JobFileError> {
         collision: body.collision,
         stock: body.stock,
         stock_model: body.stock_model,
+        sheet: body.sheet,
+        nest: body.nest,
     })
 }
 
@@ -1325,6 +1481,8 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
             "collision",
             "stock",
             "stock_model",
+            "sheet",
+            "nest",
         ],
         "job",
     )
@@ -1384,8 +1542,38 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     let collision = parse_collision(optional(map, "collision"), scale)?;
     let stock = parse_stock(optional(map, "stock"), scale)?;
     let stock_model = parse_stock_model(optional(map, "stock_model"), scale)?;
+    let sheet = parse_sheet(optional(map, "sheet"), scale)?;
+    let nest = parse_nest(optional(map, "nest"), scale, &operations)?;
+    if nest.is_some() && sheet.is_none() {
+        return Err(JobFileError::invalid("nest needs a sheet"));
+    }
+    if nest.is_some() && rotary.is_some() {
+        return Err(JobFileError::invalid("nest cannot be combined with rotary"));
+    }
+    if nest.is_some() && kinematics.is_some() {
+        return Err(JobFileError::invalid("nest cannot be combined with kinematics"));
+    }
+    if nest.is_some() && source.is_stl() {
+        return Err(JobFileError::invalid("nest is not valid on an STL source"));
+    }
     let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
-    Ok(Body { source, units, tolerance, tools, operations, clearance, retract, rotary, five_axis, fixtures, collision, stock, stock_model })
+    Ok(Body {
+        source,
+        units,
+        tolerance,
+        tools,
+        operations,
+        clearance,
+        retract,
+        rotary,
+        five_axis,
+        fixtures,
+        collision,
+        stock,
+        stock_model,
+        sheet,
+        nest,
+    })
 }
 
 /// An STL part only accepts `surface`, `rough`, `waterline` and `rotary_finish`. Each only accepts an STL part.
@@ -1868,6 +2056,177 @@ fn parse_stock_model(value: Option<&Value>, scale: f64) -> Result<StockModelOpti
         None => None,
     };
     Ok(StockModelOptions { cell, enabled })
+}
+
+fn parse_sheet(value: Option<&Value>, scale: f64) -> Result<Option<Sheet>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let map = object(value, "sheet").map_err(from_cli)?;
+    check_keys(map, &["width", "height"], "sheet").map_err(from_cli)?;
+    let width = positive_length(require(map, "width").map_err(from_cli)?, scale, "sheet width")?;
+    let height = positive_length(require(map, "height").map_err(from_cli)?, scale, "sheet height")?;
+    Ok(Some(Sheet { width, height }))
+}
+
+fn parse_nest(value: Option<&Value>, scale: f64, operations: &[Operation]) -> Result<Option<Nest>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let map = object(value, "nest").map_err(from_cli)?;
+    check_keys(map, &["gap", "margin", "tool_radius", "keep_out", "parts"], "nest").map_err(from_cli)?;
+    let gap = match optional(map, "gap") {
+        Some(value) => cap_under(non_negative_length(value, scale, "nest gap")?, MAX_MM, "nest gap")?,
+        None => 0.0,
+    };
+    let margin = match optional(map, "margin") {
+        Some(value) => cap_under(non_negative_length(value, scale, "nest margin")?, MAX_MM, "nest margin")?,
+        None => 0.0,
+    };
+    let tool_radius = match optional(map, "tool_radius") {
+        Some(value) => Some(cap_under(non_negative_length(value, scale, "nest tool_radius")?, MAX_MM, "nest tool_radius")?),
+        None => None,
+    };
+    let keep_out = parse_keep_outs(optional(map, "keep_out"), scale)?;
+    let parts = parse_nest_parts(optional(map, "parts"), scale, operations)?;
+    Ok(Some(Nest { gap, margin, tool_radius, keep_out, parts }))
+}
+
+fn parse_keep_outs(value: Option<&Value>, scale: f64) -> Result<Vec<NestKeepOut>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let list = array(value, "keep_out", MAX_KEEP_OUTS)?;
+    let mut keep_out = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        let rect = parse_keep_out(item, scale).map_err(|err| at_index("keep-out", index, err))?;
+        keep_out.push(rect);
+    }
+    Ok(keep_out)
+}
+
+fn parse_keep_out(value: &Value, scale: f64) -> Result<NestKeepOut, JobFileError> {
+    let map = object(value, "keep-out").map_err(from_cli)?;
+    check_keys(map, &["min", "max"], "keep-out").map_err(from_cli)?;
+    let (min_x, min_y) = parse_xy(require(map, "min").map_err(from_cli)?, scale, "keep-out min")?;
+    let (max_x, max_y) = parse_xy(require(map, "max").map_err(from_cli)?, scale, "keep-out max")?;
+    if !(max_x > min_x && max_y > min_y) {
+        return Err(JobFileError::invalid("keep-out max must be greater than min"));
+    }
+    Ok(NestKeepOut { min_x, min_y, max_x, max_y })
+}
+
+fn parse_xy(value: &Value, scale: f64, what: &str) -> Result<(f64, f64), JobFileError> {
+    let list = array(value, what, 2)?;
+    if list.len() != 2 {
+        return Err(JobFileError::invalid(format!("{what} must be exactly 2 numbers")));
+    }
+    let Some(x_value) = list.first() else {
+        return Err(JobFileError::invalid(format!("{what} must be exactly 2 numbers")));
+    };
+    let Some(y_value) = list.get(1) else {
+        return Err(JobFileError::invalid(format!("{what} must be exactly 2 numbers")));
+    };
+    let x = finite_height(scale_f64(x_value, scale, what)?, what)?;
+    let y = finite_height(scale_f64(y_value, scale, what)?, what)?;
+    Ok((x, y))
+}
+
+fn parse_nest_parts(value: Option<&Value>, scale: f64, operations: &[Operation]) -> Result<Vec<NestPart>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let list = array(value, "nest parts", MAX_NEST_PARTS)?;
+    let mut parts = Vec::with_capacity(list.len());
+    let mut used_operations: Vec<String> = Vec::new();
+    for (index, item) in list.iter().enumerate() {
+        let part = parse_nest_part(item, scale, operations, &mut used_operations).map_err(|err| at_index("nest part", index, err))?;
+        if parts.iter().any(|existing: &NestPart| existing.name == part.name) {
+            return Err(JobFileError::invalid(format!("nest part name `{}` is repeated", part.name)));
+        }
+        parts.push(part);
+    }
+    Ok(parts)
+}
+
+fn parse_nest_part(value: &Value, scale: f64, operations: &[Operation], used_operations: &mut Vec<String>) -> Result<NestPart, JobFileError> {
+    let map = object(value, "nest part").map_err(from_cli)?;
+    check_keys(map, &["name", "source", "hash", "layers", "operations", "width", "height", "rotation_step_deg"], "nest part").map_err(from_cli)?;
+    let name =
+        required_name(as_str(require(map, "name").map_err(from_cli)?, "nest part name").map_err(from_cli)?, "nest part name").map_err(from_cli)?;
+    let rotation_step_deg = parse_rotation_step(optional(map, "rotation_step_deg"))?;
+    let has_size = map.contains_key("width") || map.contains_key("height");
+    let has_operations = map.contains_key("operations");
+    let has_source = map.contains_key("source") || map.contains_key("hash");
+    let modes = usize::from(has_size) + usize::from(has_operations) + usize::from(has_source);
+    if modes != 1 {
+        return Err(JobFileError::invalid(format!("nest part `{name}` needs a source, operations, or width and height")));
+    }
+    if map.contains_key("layers") && !has_source {
+        return Err(JobFileError::invalid(format!("nest part `{name}`: layers need a source")));
+    }
+    let geom = if has_size {
+        let width = positive_length(require(map, "width").map_err(from_cli)?, scale, "nest part width")?;
+        let height = positive_length(require(map, "height").map_err(from_cli)?, scale, "nest part height")?;
+        NestPartGeom::Rectangle { width, height }
+    } else if has_operations {
+        let names = parse_name_list(require(map, "operations").map_err(from_cli)?, "operations")?;
+        for op_name in &names {
+            let Some(operation) = operations.iter().find(|operation| operation.name() == op_name) else {
+                return Err(JobFileError::invalid(format!("nest part `{name}`: unknown operation `{op_name}`")));
+            };
+            if is_mesh_op(operation.kind()) {
+                return Err(JobFileError::invalid(format!("nest part `{name}`: operation `{op_name}` has no layer geometry")));
+            }
+            if used_operations.iter().any(|existing| existing == op_name) {
+                return Err(JobFileError::invalid(format!("nest part `{name}`: operation `{op_name}` is already nested")));
+            }
+            used_operations.push(op_name.clone());
+        }
+        NestPartGeom::Operations { names }
+    } else {
+        let path_value = require(map, "source").map_err(from_cli)?;
+        let Some(path) = path_value.as_str() else {
+            return Err(JobFileError::invalid(format!("nest part `{name}`: source must be a string")));
+        };
+        check_source_path(path)?;
+        let hash_text = as_str(require(map, "hash").map_err(from_cli)?, "nest part hash").map_err(from_cli)?;
+        let layers = match optional(map, "layers") {
+            Some(value) => Some(parse_name_list(value, "layers")?),
+            None => None,
+        };
+        NestPartGeom::Source { path: path.to_string(), hash: normalize_hash(hash_text)?, layers }
+    };
+    Ok(NestPart { name, geom, rotation_step_deg })
+}
+
+fn parse_rotation_step(value: Option<&Value>) -> Result<f64, JobFileError> {
+    let Some(value) = value else {
+        return Ok(90.0);
+    };
+    let degrees = as_f64(value, "rotation_step_deg").map_err(from_cli)?;
+    if degrees == 0.0 || degrees == 90.0 || degrees == 180.0 {
+        Ok(degrees)
+    } else {
+        Err(JobFileError::invalid("rotation_step_deg must be 0, 90 or 180"))
+    }
+}
+
+fn parse_name_list(value: &Value, what: &str) -> Result<Vec<String>, JobFileError> {
+    let list = array(value, what, MAX_LAYERS)?;
+    if list.is_empty() {
+        return Err(JobFileError::invalid(format!("{what} must not be empty")));
+    }
+    let mut names = Vec::with_capacity(list.len());
+    for item in list {
+        let text = as_str(item, what).map_err(from_cli)?;
+        let name = required_name(text, what).map_err(from_cli)?;
+        if names.iter().any(|existing| existing == &name) {
+            return Err(JobFileError::invalid(format!("{what} `{name}` is repeated")));
+        }
+        names.push(name);
+    }
+    Ok(names)
 }
 
 fn parse_operations(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Vec<Operation>, JobFileError> {
@@ -6731,5 +7090,153 @@ mod tests {
             let err = load(&write_job(&format!("onion-bad-{index}"), text)).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
+    }
+
+    fn nest_job(units: &str, extra: &str) -> String {
+        format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"{units}","tools":[{{"id":1,"diameter":6}}],"operations":[{{"name":"mark","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{{"cut":1}}}}]{extra}}}"#
+        )
+    }
+
+    #[test]
+    fn sheet_and_nest_round_trip() {
+        let nest = r#"{"gap":0.1,"margin":0.2,"tool_radius":0.05,"keep_out":[{"min":[1,0],"max":[2,1]}],"parts":[{"name":"pad","width":0.5,"height":0.25},{"name":"mark","operations":["mark"],"rotation_step_deg":0}]}"#;
+        let job = load(&write_job("nest-inch", &nest_job("inch", &format!(r#","sheet":{{"width":1,"height":2}},"nest":{nest}"#)))).expect("load");
+        let sheet = job.sheet().expect("sheet");
+        near(sheet.width(), 25.4);
+        near(sheet.height(), 50.8);
+        let nest = job.nest().expect("nest");
+        near(nest.gap(), 2.54);
+        near(nest.margin(), 5.08);
+        near(nest.tool_radius().expect("radius"), 1.27);
+        let clamp = nest.keep_outs()[0];
+        near(clamp.min_x(), 25.4);
+        near(clamp.min_y(), 0.0);
+        near(clamp.max_x(), 50.8);
+        near(clamp.max_y(), 25.4);
+        assert_eq!(nest.parts()[0].name(), "pad");
+        match nest.parts()[0].geom() {
+            NestPartGeom::Rectangle { width, height } => {
+                near(*width, 12.7);
+                near(*height, 6.35);
+            }
+            other => panic!("{other:?}"),
+        }
+        near(nest.parts()[0].rotation_step_deg(), 90.0);
+        assert_eq!(nest.parts()[1].name(), "mark");
+        match nest.parts()[1].geom() {
+            NestPartGeom::Operations { names } => assert_eq!(names.as_slice(), ["mark".to_string()]),
+            other => panic!("{other:?}"),
+        }
+        near(nest.parts()[1].rotation_step_deg(), 0.0);
+
+        let defaults = nest_job(
+            "mm",
+            r#","sheet":{"width":40,"height":20},"nest":{"parts":[{"name":"src","source":"other.dxf","hash":"ABCDEF0123456789","layers":["L"]}]}"#,
+        );
+        let job = load(&write_job("nest-defaults", &defaults)).expect("defaults");
+        let nest = job.nest().expect("nest");
+        near(nest.gap(), 0.0);
+        near(nest.margin(), 0.0);
+        assert!(nest.tool_radius().is_none());
+        assert!(nest.keep_outs().is_empty());
+        match &nest.parts()[0].geom() {
+            NestPartGeom::Source { path, hash, layers } => {
+                assert_eq!(path, "other.dxf");
+                assert_eq!(hash, "abcdef0123456789");
+                assert_eq!(layers.as_deref(), Some(["L".to_string()].as_slice()));
+            }
+            other => panic!("{other:?}"),
+        }
+        near(nest.parts()[0].rotation_step_deg(), 90.0);
+
+        let sheet_only = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"mm","tools":[],"operations":[],"sheet":{{"width":10,"height":20}}}}"#
+        );
+        let job = load(&write_job("sheet-only", &sheet_only)).expect("sheet");
+        near(job.sheet().expect("sheet").width(), 10.0);
+        near(job.sheet().expect("sheet").height(), 20.0);
+        assert!(job.nest().is_none());
+    }
+
+    #[test]
+    fn sheet_and_nest_errors_name_the_failure() {
+        let cases = [
+            (nest_job("mm", r#","sheet":{"width":10,"height":10,"pad":1}"#), "unknown sheet field `pad`"),
+            (nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"gap":0,"pad":1}"#), "unknown nest field `pad`"),
+            (
+                nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","width":1,"height":1,"pad":1}]}"#),
+                "unknown nest part field `pad`",
+            ),
+            (
+                nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"keep_out":[{"min":[0,0],"max":[1,1],"pad":1}]}"#),
+                "unknown keep-out field `pad`",
+            ),
+            (nest_job("mm", r#","nest":{"parts":[{"name":"a","width":1,"height":1}]}"#), "nest needs a sheet"),
+            (
+                nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","width":1,"height":1,"rotation_step_deg":45}]}"#),
+                "rotation_step_deg must be 0, 90 or 180",
+            ),
+            (nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"gap":-1}"#), "nest gap must be at least 0"),
+            (nest_job("mm", r#","sheet":{"width":0,"height":10}"#), "sheet width must be greater than 0"),
+            (
+                nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"keep_out":[{"min":[1,0],"max":[1,1]}]}"#),
+                "keep-out max must be greater than min",
+            ),
+            (nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"tool_radius":-1}"#), "nest tool_radius must be at least 0"),
+            (
+                nest_job(
+                    "mm",
+                    r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","width":1,"height":1},{"name":"a","width":1,"height":1}]}"#,
+                ),
+                "nest part name `a` is repeated",
+            ),
+            (
+                nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","operations":["missing"]}]}"#),
+                "unknown operation `missing`",
+            ),
+            (
+                nest_job(
+                    "mm",
+                    r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","operations":["mark"]},{"name":"b","operations":["mark"]}]}"#,
+                ),
+                "operation `mark` is already nested",
+            ),
+            (nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","width":1}]}"#), "missing `height`"),
+            (
+                nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","width":1,"height":1,"layers":["L"]}]}"#),
+                "layers need a source",
+            ),
+            (
+                nest_job("mm", r#","sheet":{"width":10,"height":10},"nest":{"parts":[{"name":"a","width":1,"height":1,"operations":["mark"]}]}"#),
+                "needs a source, operations, or width and height",
+            ),
+            (
+                format!(
+                    r#"{{"format":"campanion-job/1","source":{{"path":"plate.dxf","hash":"{EMPTY_HASH}"}},"units":"mm","rotary":{{"axis":"a","center":[0,0,0],"direction":"positive"}},"tools":[{{"id":1,"diameter":6}}],"operations":[{{"name":"mark","type":"engrave","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"feeds":{{"cut":1}}}}],"sheet":{{"width":40,"height":40}},"nest":{{"parts":[{{"name":"a","operations":["mark"]}}]}}}}"#
+                ),
+                "nest cannot be combined with rotary",
+            ),
+            (
+                format!(
+                    r#"{{"format":"campanion-job/1","source":{{"path":"dome.stl","hash":"{EMPTY_HASH}"}},"units":"mm","tools":[{{"id":1,"diameter":6}}],"operations":[{{"name":"cap","type":"surface","tool_id":1,"stepover":2,"feeds":{{"cut":1}}}}],"sheet":{{"width":40,"height":40}},"nest":{{"parts":[{{"name":"a","width":10,"height":10}}]}}}}"#
+                ),
+                "nest is not valid on an STL source",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("nest-bad-{index}"), text)).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
+
+        let kin = example_kinematics();
+        let text = nest_job(
+            "mm",
+            r#","kinematics":"table_table_bc.kin.json","sheet":{"width":40,"height":40},"nest":{"parts":[{"name":"a","width":10,"height":10}]}"#,
+        );
+        let path = write_job("nest-kin", &text);
+        write_beside(&path, "table_table_bc.kin.json", &kin);
+        let err = load(&path).expect_err("kinematics");
+        assert!(invalid_detail(&err).contains("nest cannot be combined with kinematics"), "{err}");
     }
 }

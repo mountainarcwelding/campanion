@@ -35,6 +35,8 @@ lengths are millimetres and feeds are millimetres per minute.
 | `rotary` | no | Fourth-axis table for indexed 3+1, wrapping and rotary finishing. See below. |
 | `fixtures` | no | STL meshes or axis-aligned boxes in the part frame. See [Tool assembly and collisions](#tool-assembly-and-collisions). |
 | `collision` | no | Clearance and sampling for the assembly check. See [Tool assembly and collisions](#tool-assembly-and-collisions). |
+| `sheet` | no | Router sheet in the XY plane. See [Sheet nesting](#sheet-nesting). |
+| `nest` | no | Part gap, margin, clamp keep-outs and the parts to pack. Needs `sheet`. See [Sheet nesting](#sheet-nesting). |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
 
@@ -576,6 +578,68 @@ A delay of zero adds no dwell when a path is later timed. The toggles are the tw
 
 The loader stores delays, toggles and heights on the same process-parameter object the profile
 job builds, so both files share one mapping.
+
+## Sheet nesting
+
+`sheet` and `nest` pack rectangles onto a router sheet before `campanion run` builds toolpaths. There is no `campanion nest` command. A job that omits both is unchanged. `sheet` alone is stored and does not move any path. `nest` without `sheet` is an error (`nest needs a sheet`).
+
+This packs axis-aligned bounds. It makes no claim of optimal yield. A contour packer can follow. Until then, parts must not overlap those rectangles once each is expanded by `gap / 2`, and each rectangle must clear every keep-out by the tool radius plus the gap.
+
+```json
+"sheet": { "width": 50, "height": 30 },
+"nest": {
+  "gap": 4,
+  "margin": 0,
+  "tool_radius": 3,
+  "keep_out": [ { "min": [0, 0], "max": [10, 30] } ],
+  "parts": [
+    { "name": "left", "operations": ["left"] },
+    { "name": "right", "operations": ["right"], "rotation_step_deg": 90 }
+  ]
+}
+```
+
+The origin is `(0, 0)`. The sheet is `[0, width]` by `[0, height]` in the XY plane. `width` and `height` are lengths in `units` and must be greater than 0. After `load` they are millimetres.
+
+`gap` is the space between part rectangles. It defaults to 0. `margin` is the inset from the sheet edge. It defaults to 0. `tool_radius` is optional. When it is omitted the run uses half the largest tool diameter, or half the kerf, and 0 when the job has no tool. Lengths are in `units`. `gap`, `margin` and `tool_radius` must be at least 0 and at most 1e6 mm. Angles are not scaled.
+
+`keep_out` is a list of clamp rectangles in the sheet frame. Each object is `min` and `max`, two numbers `[x, y]`. `max` must be greater than `min` on both axes. Coordinates are finite and within ±1e6 mm. At most 64 keep-outs. An omitted list is empty.
+
+`parts` is the list to place, in input order, at most 256. An omitted list places nothing. Each part has a `name` and exactly one of these:
+
+- `operations`: names of existing operations that are not mesh operations (`surface`, `rough`, `waterline`, `rotary_finish`). The rectangle is the union of those operations' layer contours on the job drawing. Each operation name is used by at most one part. Those operations are moved onto the sheet.
+- `source` and `hash`, with optional `layers`: bounds of a DXF or SVG. `hash` is the same FNV-1a 64 as a job source. `layers` limits the contours; omitted, every contour counts. A path equal to the job source uses the drawing already imported. Any other path must be DXF or SVG (`.step`, `.stp` and `.stl` are rejected; anything else is read as DXF). A hash mismatch is a warning. This part reserves space and does not move a toolpath.
+- `width` and `height`: a rectangle `[0, width]` by `[0, height]` in the part frame. Both are required. This part reserves space and does not move a toolpath.
+
+`layers` is valid only with `source`. A part that mixes these modes, or that sets none of them, fails with `nest part NAME needs a source, operations, or width and height`.
+
+`rotation_step_deg` is `0`, `90` or `180`. The default is `90`. A step of 90 tries 0° and then 90°. A step of 0 or 180 tries 0° only, because a rectangle's axis-aligned bounds repeat every 180°. Any other value is `rotation_step_deg must be 0, 90 or 180`.
+
+Parts are placed in input order. For each part the candidate corners are the margin, the far edge of each part already placed plus `gap`, and the far edge of each keep-out plus `tool_radius + gap`. That set is the exact bottom-left candidates for these rectangles. A uniform grid of `max(1 mm, gap)` is not used: a part whose size is not a multiple of that step can fit and still miss every grid point (two 10.2 mm parts on a 20.4 mm sheet). The first feasible pose wins. Order is ascending Y, then ascending X, then ascending rotation index. The same input produces the same placements.
+
+A fit that is short by at most 1e-6 mm counts as touching. Clearance, measured between the rectangles:
+
+- Each placed rectangle lies inside the sheet inset by `margin`. The tool radius is not added to that inset. Set `margin` at least as large as the tool radius when the cutter must stay on the sheet.
+- Two parts clear each other by at least `gap` along X or along Y. The tool radius is not added again. Put it in `gap` when two cuts face each other.
+- Each part clears each keep-out by at least `tool_radius + gap` along X or along Y.
+
+A part that does not fit fails with `nest: part NAME does not fit on the sheet (W x H mm)`. A rectangle outside the inset, a pair closer than `gap`, or a part closer than `tool_radius + gap` to a keep-out fails the run. Nothing is written.
+
+The IR stays a list of ordinary toolpaths. A placement is a rigid transform applied while the paths are built: rotate the part about its drawing bounds centre, counter-clockwise, then translate so the rotated bounds' minimum corner is the placement. Right angles swap coordinates exactly. Operations named by a part share that transform, so a profile, pocket or face sees the placed geometry. An operation that no part names stays in drawing coordinates. `examples/nest.job.json` engraves two 20 mm squares from `examples/nest.dxf` onto a 50 by 30 mm sheet with a 4 mm gap. They land at `(0, 0)` and `(24, 0)`.
+
+`nest` cannot be combined with `rotary`, with `kinematics`, or with an STL source. A STEP face is a drawing and can be nested.
+
+An explicit `stock` box is left where the file puts it. Nested paths are in the sheet frame. When the stock model is on and `stock` is omitted, the implicit box is still the unplaced drawing bounds. Put `stock` in the sheet frame when that check should match the placed paths.
+
+Placements are printed on stderr, one line per part:
+
+```
+nest: `left` at (0, 0) mm, 20 x 20 mm, rotation 0 deg
+```
+
+`--nest-out FILE.json` writes the same placements after the program is accepted. The file must differ from `-o`, `--ir`, `--stock-report` and `--stock-out`. The flag without `sheet` and `nest` is an error. The JSON tag is `campanion-nest/1`. Fields are `format`, `sheet` (`width`, `height`), `gap`, `margin`, `tool_radius`, `keep_out` and `placements`. Each placement has `name`, `x`, `y`, `rotation_deg`, `width` and `height`, in millimetres and degrees. Unknown keys on `sheet`, `nest`, a part or a keep-out are rejected.
+
+This output has not been proven on a machine.
 
 ## Indexed 3+1
 

@@ -18,6 +18,7 @@ mod job;
 mod lathe;
 mod live_mill;
 mod machine;
+mod nest;
 mod plane;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
@@ -49,7 +50,7 @@ const HELP: &str = "\
 Usage:
   campanion ir [--job FILE]
   campanion ngc [--job FILE]
-  campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto] [--stock-report FILE.csv] [--stock-out FILE.json] [--stock-snapshots N]
+  campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto] [--stock-report FILE.csv] [--stock-out FILE.json] [--stock-snapshots N] [--nest-out FILE.json]
   campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]
   campanion post IR.json --post ID|FILE.json [-o OUT]
   campanion posts
@@ -76,6 +77,11 @@ run     Import the DXF, SVG, STEP or STL (by extension) named by a campanion-job
         also stores a map at the start and after every Nth motion; it needs --stock-out.
         Those files are written when the replay succeeds. They must differ from -o and --ir.
         The flags are an error when the stock model is off. See docs/job-file.md.
+        When the job sets sheet and nest, each part is packed on the sheet before the toolpaths
+        are built. Placements are printed on stderr. --nest-out FILE.json writes them after the
+        program is accepted. That file must differ from -o, --ir and the stock outputs.
+        A part that does not fit, or that fails a clearance check, exits 1 and nothing is written.
+        See docs/job-file.md.
         Verify errors are printed and the status is 1. Warnings stay on stderr.
         An STL job checks each cutting move against the mesh with that operation's cutter.
         A gouge is a verify error and the status is 1.

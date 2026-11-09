@@ -1,0 +1,37 @@
+{
+  "format": "campanion-job/1",
+  "source": { "path": "nest.dxf", "hash": "c8aed49f9577be3c" },
+  "units": "mm",
+  "tools": [
+    { "id": 1, "diameter": 6, "speed": 12000 }
+  ],
+  "operations": [
+    {
+      "name": "left",
+      "type": "engrave",
+      "layers": ["LEFT"],
+      "tool_id": 1,
+      "depth": 1,
+      "step_down": 1,
+      "feeds": { "cut": 1000, "plunge": 300 }
+    },
+    {
+      "name": "right",
+      "type": "engrave",
+      "layers": ["RIGHT"],
+      "tool_id": 1,
+      "depth": 1,
+      "step_down": 1,
+      "feeds": { "cut": 1000, "plunge": 300 }
+    }
+  ],
+  "sheet": { "width": 50, "height": 30 },
+  "nest": {
+    "gap": 4,
+    "margin": 0,
+    "parts": [
+      { "name": "left", "operations": ["left"] },
+      { "name": "right", "operations": ["right"] }
+    ]
+  }
+}

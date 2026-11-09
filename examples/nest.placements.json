@@ -1,0 +1,29 @@
+{
+  "format": "campanion-nest/1",
+  "gap": 4.0,
+  "keep_out": [],
+  "margin": 0.0,
+  "placements": [
+    {
+      "height": 20.0,
+      "name": "left",
+      "rotation_deg": 0.0,
+      "width": 20.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "height": 20.0,
+      "name": "right",
+      "rotation_deg": 0.0,
+      "width": 20.0,
+      "x": 24.0,
+      "y": 0.0
+    }
+  ],
+  "sheet": {
+    "height": 30.0,
+    "width": 50.0
+  },
+  "tool_radius": 3.0
+}

@@ -27,6 +27,7 @@ cargo run -p campanion-cli -- run examples/sample.job.json -o out.ngc --ir out.j
 
 - `examples/sample.job.json` describes the source drawing (`examples/sample.dxf`), tools,
   heights and operations (inside/outside profiles by layer).
+- `examples/nest.job.json` packs two 20 mm squares from `examples/nest.dxf` onto a 50 by 30 mm sheet. See [Sheet nesting](docs/job-file.md#sheet-nesting).
 - `-o out.ngc` writes reference G-code; `--ir out.json` writes the machine-neutral toolpath.
   Pass `--post` to write a controller dialect instead of the test sink. See [Posts](#posts).
 - The toolpath is verified before anything is written; errors stop the run.
@@ -96,6 +97,7 @@ that post. The G-code is read back and compared to the toolpath at the job chord
 
 ```sh
 campanion run examples/sample.job.json -o out.ngc --post linuxcnc
+campanion run examples/nest.job.json -o out.ngc --nest-out placements.json
 campanion run examples/sample.job.json -o out.ngc --ir out.json --post path/to/my-post.json
 campanion post out.json --post grbl -o out.nc
 campanion post out.json --post grbl

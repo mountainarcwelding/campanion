@@ -112,6 +112,12 @@
 //! so Z is up. `z` and `y` skip that probe. Any other source ignores the flag. The face point
 //! is in the frame after the turn. A file point `(x, y, z)` is `(x, -z, y)` once Y up has been
 //! turned.
+//!
+//! A job with `sheet` and `nest` packs each part before the paths are built. The placement is a
+//! translation and an optional quarter-turn of that part's contours. The IR stays a list of
+//! ordinary toolpaths in the sheet frame. Placements are printed on stderr. `--nest-out` writes
+//! them after the program is accepted. A part that does not fit, or that fails a clearance
+//! check, exits 1 and nothing is written. See `docs/job-file.md`.
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
@@ -161,6 +167,7 @@ struct RunArgs {
     stock_report: Option<PathBuf>,
     stock_out: Option<PathBuf>,
     stock_snapshots: Option<usize>,
+    nest_out: Option<PathBuf>,
 }
 
 struct Cut<'a> {
@@ -179,6 +186,9 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         None => None,
     };
     let job = jobfile::load(&args.job).map_err(show)?;
+    if args.nest_out.is_some() && job.nest().is_none() {
+        return Err(CliError::run("--nest-out needs a job with sheet and nest"));
+    }
     let source = jobfile::source_path(&job);
     if job.source().is_stl() {
         let bytes = read_bytes(&source)?;
@@ -188,7 +198,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         let gouges = crate::gouge::check_job(&job, &mesh, doc.program())?;
         crate::collision::check_job(&job, Some(&mesh), doc.program())?;
         apply_stock(&job, Some(&mesh), doc.program(), None, &args)?;
-        return emit_program(&args, &job, doc, &gouges, post.as_ref());
+        return emit_program(&args, &job, doc, &gouges, post.as_ref(), None);
     }
     let text = read_text(&source)?;
     warn_if_changed(&job, text.as_bytes())?;
@@ -221,11 +231,18 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         let kinds = drawing.skipped_types().iter().map(|(name, count)| format!("{name} x{count}")).collect::<Vec<_>>().join(", ");
         warn(&format!("skipped {format} entities: {kinds}"))?;
     }
-    let doc = build(&job, &drawing)?;
+    let (doc, nest_report) = build(&job, &drawing)?;
+    if let Some(report) = nest_report.as_ref()
+        && !report.summary.is_empty()
+    {
+        let mut err_out = io::stderr().lock();
+        write_all(&mut err_out, &report.summary)?;
+        err_out.flush()?;
+    }
     crate::collision::check_job(&job, None, doc.program())?;
     let implicit = if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(&job, &drawing)?) } else { None };
     apply_stock(&job, None, doc.program(), implicit, &args)?;
-    emit_program(&args, &job, doc, &[], post.as_ref())
+    emit_program(&args, &job, doc, &[], post.as_ref(), nest_report.as_ref())
 }
 
 /// Replay the program when the stock model is on, and print the STL leftover summary.
@@ -368,7 +385,14 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
     finish_program(job, groups, None, &sweep)
 }
 
-fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::GougeNote], post: Option<&PostDef>) -> Result<ExitCode, CliError> {
+fn emit_program(
+    args: &RunArgs,
+    job: &JobFile,
+    doc: Document,
+    gouges: &[report::GougeNote],
+    post: Option<&PostDef>,
+    nest_report: Option<&crate::nest::Report>,
+) -> Result<ExitCode, CliError> {
     if let Some(post) = post {
         require_spindle_speeds(job, post)?;
     }
@@ -397,6 +421,10 @@ fn emit_program(args: &RunArgs, job: &JobFile, doc: Document, gouges: &[report::
     if let Some(ir_path) = &args.ir {
         write_output(ir_path, &doc.to_json_pretty()?)?;
     }
+    if let Some(path) = &args.nest_out {
+        let report = nest_report.ok_or_else(|| CliError::run("--nest-out needs a job with sheet and nest"))?;
+        write_output(path, &report.json)?;
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -409,6 +437,7 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     let mut stock_report: Option<&OsStr> = None;
     let mut stock_out: Option<&OsStr> = None;
     let mut stock_snapshots: Option<usize> = None;
+    let mut nest_out: Option<&OsStr> = None;
     let mut index = 0;
     while index < args.len() {
         let Some(arg) = args.get(index) else {
@@ -470,6 +499,18 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
                 return Err(CliError::usage(format!("{flag} is already set")));
             }
             *slot = Some(value.as_os_str());
+        } else if arg.as_os_str() == "--nest-out" {
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage("--nest-out needs a file"));
+            };
+            index += 1;
+            if value.is_empty() {
+                return Err(CliError::usage("--nest-out needs a file"));
+            }
+            if nest_out.is_some() {
+                return Err(CliError::usage("--nest-out is already set"));
+            }
+            nest_out = Some(value.as_os_str());
         } else if arg.as_os_str() == "--stock-snapshots" {
             let Some(value) = args.get(index) else {
                 return Err(CliError::usage("--stock-snapshots needs a positive integer"));
@@ -503,11 +544,16 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
     let ir_path = ir.map(PathBuf::from);
     let report_path = stock_report.map(PathBuf::from);
     let stock_path = stock_out.map(PathBuf::from);
+    let nest_path = nest_out.map(PathBuf::from);
     distinct_pair("-o", Some(&output_path), "--stock-report", report_path.as_deref())?;
     distinct_pair("-o", Some(&output_path), "--stock-out", stock_path.as_deref())?;
+    distinct_pair("-o", Some(&output_path), "--nest-out", nest_path.as_deref())?;
     distinct_pair("--ir", ir_path.as_deref(), "--stock-report", report_path.as_deref())?;
     distinct_pair("--ir", ir_path.as_deref(), "--stock-out", stock_path.as_deref())?;
+    distinct_pair("--ir", ir_path.as_deref(), "--nest-out", nest_path.as_deref())?;
     distinct_pair("--stock-report", report_path.as_deref(), "--stock-out", stock_path.as_deref())?;
+    distinct_pair("--stock-report", report_path.as_deref(), "--nest-out", nest_path.as_deref())?;
+    distinct_pair("--stock-out", stock_path.as_deref(), "--nest-out", nest_path.as_deref())?;
     Ok(RunArgs {
         job: PathBuf::from(job),
         output: output_path,
@@ -517,6 +563,7 @@ fn parse_run(args: &[OsString]) -> Result<RunArgs, CliError> {
         stock_report: report_path,
         stock_out: stock_path,
         stock_snapshots,
+        nest_out: nest_path,
     })
 }
 
@@ -546,7 +593,7 @@ fn starts_with_dash(arg: &OsStr) -> bool {
     arg.to_string_lossy().starts_with('-')
 }
 
-fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
+fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::nest::Report>), CliError> {
     // One nesting pass for the drawing. Operations then pick OUTER / INNER instead of layer "0".
     // Contours are collected first so the swept radius, including every wrap cylinder, is known
     // before a wrap path is built. A wrap's drawing is not stock: its X/Y are cylinder coordinates.
@@ -566,6 +613,9 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
         }
         selected.push((op, contours));
     }
+    let nest_ops: Vec<crate::nest::OpGeometry<'_>> =
+        selected.iter().map(|(op, contours)| crate::nest::OpGeometry { name: op.name(), contours }).collect();
+    let nest_report = crate::nest::plan(job, drawing, &nest_ops)?;
     let corners = if job.rotary().is_some() { Some(stock.corners()?) } else { None };
     let safe_z = job.rotary().map(|setup| swept_clearance(job, &setup, corners.as_deref(), &[]));
     let plane_job = job.five_axis().is_some();
@@ -576,7 +626,12 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
         };
         let import = import_for(op, tool)?;
-        let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours, job };
+        let transformed = match nest_report.as_ref().and_then(|report| report.frame(op.name())) {
+            Some(frame) => Some(crate::nest::transform_contours(contours, frame, job.tolerance())?),
+            None => None,
+        };
+        let view = transformed.as_deref().unwrap_or(contours.as_slice());
+        let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours: view, job };
         let mut paths = Vec::new();
         match op.kind() {
             OperationKind::Profile { side } => profile_paths(&mut paths, &cut, side)?,
@@ -596,7 +651,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
                 let Some(safe) = safe_z else {
                     return Err(op_err(op, "wrap needs a rotary setup"));
                 };
-                wrap::cut(&mut paths, op, tool, contours, &setup, job.tolerance().chord(), safe)?;
+                wrap::cut(&mut paths, op, tool, view, &setup, job.tolerance().chord(), safe)?;
             }
         }
         // Planning-frame Z, before a tilted plane maps the paths. A wrap checks its own levels.
@@ -610,7 +665,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
             safety::check_radial(op.name(), &paths, setup.center(), setup.axis_direction())?;
         } else {
             let grow = tool.diameter().map_or(0.0, |diameter| diameter * 0.5);
-            let footprint = safety::Footprint::from_contours(contours, grow).map_err(|err| op_err(op, err))?;
+            let footprint = safety::Footprint::from_contours(view, grow).map_err(|err| op_err(op, err))?;
             safety::check_planar(op.name(), &paths, &footprint, job.retract())?;
         }
         if plane_job {
@@ -630,9 +685,9 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
     }
     if plane_job {
         let paths = plane::link_frames(plane_groups, job.clearance())?;
-        return finish_paths(job, paths, None);
+        return Ok((finish_paths(job, paths, None)?, nest_report));
     }
-    finish_program(job, groups, corners.as_deref(), &[])
+    Ok((finish_program(job, groups, corners.as_deref(), &[])?, nest_report))
 }
 
 /// Axis-aligned stock for a 2D job: contour bounds in XY, and Z from `-depth` up to the stock surface.
