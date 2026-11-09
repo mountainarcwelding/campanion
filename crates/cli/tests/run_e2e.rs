@@ -54,6 +54,7 @@ fn sample_jobs_write_ngc_and_clean_ir() -> Result<(), String> {
         ("examples/sample_delays.job.json", true),
         ("examples/sample_svg.job.json", false),
         ("examples/curves.job.json", false),
+        ("examples/router_cutter_sense.job.json", false),
     ] {
         if let Err(err) = check_job(&root, job, delays) {
             failures.push(err);

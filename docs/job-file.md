@@ -86,6 +86,19 @@ lengths in `units`, positive, and at most 1e6 mm after conversion. The same rule
 job: a diameter is a rotating cutter, a kerf is a kerf-only process, and the path offset is half
 of that value.
 
+A diameter tool may set `cutter_sense`: `"upcut"`, `"downcut"`, or `"compression"`. Omitted,
+compensation stays the flat diameter offset used today. Sense is data for the job and the
+verifier; it does not change the 2D offset. `"compression"` requires `upcut_length`, a positive
+finite length in `units` measured at the tip. That length must be at most the tool stickout and
+flute length when `assembly` sets them. Without stickout, any positive finite value at most
+`diameter * 100` is accepted. `upcut_length` is rejected on `"upcut"` and `"downcut"`. A kerf
+tool cannot set either field. Unknown keys and illegal combinations fail the load. Existing jobs
+that omit these keys parse unchanged. Posted G-code is unchanged when the field is omitted. This
+output has not been proven on a machine.
+
+`examples/router_cutter_sense.job.json` profiles `examples/sample.dxf` with a 6 mm compression
+cutter and a 12 mm upcut length at the tip.
+
 `speed` is optional. It is a spindle speed in rpm: positive, finite, and at most 100000. It is not
 scaled by `units`. Omitted, the tool has no speed. An operation may set `speed` too; see below.
 

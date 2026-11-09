@@ -238,7 +238,7 @@ pub(crate) fn parse_tool(value: &Value) -> Result<ParsedTool, CliError> {
     let diameter = optional_f64(map, "diameter")?;
     let kerf = optional_f64(map, "kerf")?;
     let (path, diameter, kerf) = match (diameter, kerf) {
-        (Some(diameter), None) => (PathTool::Diameter { diameter }, Some(diameter), None),
+        (Some(diameter), None) => (PathTool::diameter(diameter), Some(diameter), None),
         (None, Some(kerf)) => (PathTool::Kerf { width: kerf }, None, Some(kerf)),
         (Some(_), Some(_)) => return Err(CliError::invalid("tool has both diameter and kerf")),
         (None, None) => return Err(CliError::invalid("tool needs a diameter or a kerf")),

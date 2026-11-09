@@ -136,13 +136,13 @@ fn closed_circles(path: &Toolpath) -> Vec<FullCircle> {
 fn pocket_disk(cx: f64, cy: f64, radius: f64) -> Toolpath {
     let contour = circle_contour(cx, cy, radius + TOOL_RADIUS);
     let region = Region::from_contour(contour, &Tolerance::default()).expect("region");
-    let tool = Tool::Diameter { diameter: TOOL_RADIUS * 2.0 };
+    let tool = Tool::diameter(TOOL_RADIUS * 2.0);
     PocketOp::new(tool, PocketStrategy::OffsetRings, radius + 1.0).z(-1.0).retract_z(1.0).generate(&region).expect("pocket").toolpath().clone()
 }
 
 fn inside_profile(cx: f64, cy: f64, radius: f64, direction: CutDirection) -> Toolpath {
     let contour = circle_contour(cx, cy, radius + TOOL_RADIUS);
-    ProfileOp::new(Tool::Diameter { diameter: TOOL_RADIUS * 2.0 }, Compensation::Computed, ProfileSide::Inside, direction)
+    ProfileOp::new(Tool::diameter(TOOL_RADIUS * 2.0), Compensation::Computed, ProfileSide::Inside, direction)
         .z(-1.0)
         .generate(&contour)
         .expect("profile")
@@ -331,13 +331,7 @@ fn ring_pocket() -> Toolpath {
     };
     assert!((mid_y - 40.05843).abs() < 1e-4, "flipped centre y {mid_y}");
     let region = Region::try_new(outer, vec![hole], &Tolerance::default()).expect("region");
-    PocketOp::new(Tool::Diameter { diameter: 6.0 }, PocketStrategy::OffsetRings, 2.0)
-        .z(-3.0)
-        .retract_z(2.0)
-        .generate(&region)
-        .expect("pocket")
-        .toolpath()
-        .clone()
+    PocketOp::new(Tool::diameter(6.0), PocketStrategy::OffsetRings, 2.0).z(-3.0).retract_z(2.0).generate(&region).expect("pocket").toolpath().clone()
 }
 
 #[test]
@@ -358,7 +352,7 @@ fn reported_ring_posts_on_every_mill() {
 fn inside_circle_profile_posts_on_every_mill() {
     let contour = circle_contour(15.0, 30.0, 5.0);
     for direction in [CutDirection::Climb, CutDirection::Conventional] {
-        let path = ProfileOp::new(Tool::Diameter { diameter: 6.0 }, Compensation::Computed, ProfileSide::Inside, direction)
+        let path = ProfileOp::new(Tool::diameter(6.0), Compensation::Computed, ProfileSide::Inside, direction)
             .z(-1.0)
             .generate(&contour)
             .expect("profile")

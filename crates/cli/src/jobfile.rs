@@ -117,6 +117,10 @@
 //! `collision` sets the clearance, sample step and axis-angle step used when `campanion run`
 //! checks the assembly against the finished part and the fixtures. A kerf tool cannot carry an
 //! assembly. See `docs/job-file.md`.
+//!
+//! A diameter tool may set `cutter_sense`: `"upcut"`, `"downcut"`, or `"compression"`.
+//! `"compression"` requires `upcut_length`, a positive length in `units` at the tip. Omitted,
+//! compensation stays the flat diameter offset. Sense does not change that offset.
 
 use std::fmt;
 use std::fs::File;
@@ -125,10 +129,10 @@ use std::path::{Component, Path, PathBuf};
 
 use campanion_geom::Tolerance;
 use campanion_ir::{
-    Feeds, FiveAxisSetup, Kinematics, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, SolutionPolicy, Tool as IrTool,
-    ToolPose, Vec3,
+    CutterSense as IrCutterSense, Feeds, FiveAxisSetup, Kinematics, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup,
+    SolutionPolicy, Tool as IrTool, ToolPose, Vec3,
 };
-use campanion_path::{DepthEntry, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
+use campanion_path::{CutterSense, DepthEntry, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
 use serde_json::{Map, Number, Value};
 
 use crate::error::{CliError, MAX_JSON_BYTES};
@@ -559,6 +563,16 @@ impl JobTool {
     /// Holder and head envelope. `None` when the file omits `assembly`.
     pub fn assembly(&self) -> Option<&ToolAssembly> {
         self.assembly.as_ref()
+    }
+
+    /// Router flute helix. `None` when the file omits `cutter_sense`.
+    pub fn cutter_sense(&self) -> Option<CutterSense> {
+        self.path_tool.cutter_sense()
+    }
+
+    /// Upcut length at the tip, millimetres. `None` unless the sense is compression.
+    pub fn upcut_length(&self) -> Option<f64> {
+        self.path_tool.upcut_length()
     }
 }
 
@@ -1565,11 +1579,13 @@ fn parse_tools(value: &Value, scale: f64) -> Result<Vec<JobTool>, JobFileError> 
 
 fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> {
     let map = object(value, "tool").map_err(from_cli)?;
-    check_keys(map, &["id", "diameter", "kerf", "shape", "speed", "assembly"], "tool").map_err(from_cli)?;
+    check_keys(map, &["id", "diameter", "kerf", "shape", "speed", "assembly", "cutter_sense", "upcut_length"], "tool").map_err(from_cli)?;
     let mut scaled = map.clone();
     scaled.remove("shape");
     scaled.remove("speed");
     scaled.remove("assembly");
+    scaled.remove("cutter_sense");
+    scaled.remove("upcut_length");
     scale_key(&mut scaled, "diameter", scale)?;
     scale_key(&mut scaled, "kerf", scale)?;
     let parsed = parse_tool(&Value::Object(scaled)).map_err(from_cli)?;
@@ -1577,7 +1593,58 @@ fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> 
     let shape = parse_tool_shape(optional(map, "shape"), parsed.ir().diameter(), scale)?;
     let speed = parse_rpm(optional(map, "speed"))?;
     let assembly = parse_assembly(optional(map, "assembly"), parsed.ir().diameter(), scale)?;
-    Ok(JobTool { id: parsed.ir().id(), path_tool: parsed.path_tool(), ir: parsed.ir().clone(), shape, speed, assembly })
+    let (cutter_sense, upcut_length) =
+        parse_cutter_sense(optional(map, "cutter_sense"), optional(map, "upcut_length"), parsed.ir().diameter(), assembly.as_ref(), scale)?;
+    let path_tool =
+        parsed.path_tool().with_cutter_sense(cutter_sense, upcut_length).map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
+    let ir = parsed
+        .ir()
+        .clone()
+        .with_cutter_sense(cutter_sense.map(ir_cutter_sense), upcut_length)
+        .map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
+    Ok(JobTool { id: parsed.ir().id(), path_tool, ir, shape, speed, assembly })
+}
+
+fn ir_cutter_sense(sense: CutterSense) -> IrCutterSense {
+    match sense {
+        CutterSense::Upcut => IrCutterSense::Upcut,
+        CutterSense::Downcut => IrCutterSense::Downcut,
+        CutterSense::Compression => IrCutterSense::Compression,
+    }
+}
+
+/// `"upcut"`, `"downcut"`, or `"compression"`. `upcut_length` is a length in file units.
+fn parse_cutter_sense(
+    sense_value: Option<&Value>,
+    length_value: Option<&Value>,
+    diameter: Option<f64>,
+    assembly: Option<&ToolAssembly>,
+    scale: f64,
+) -> Result<(Option<CutterSense>, Option<f64>), JobFileError> {
+    if sense_value.is_none() && length_value.is_none() {
+        return Ok((None, None));
+    }
+    let Some(diameter) = diameter else {
+        return Err(JobFileError::invalid("cutter_sense is only valid on a diameter tool"));
+    };
+    let Some(sense_value) = sense_value else {
+        return Err(JobFileError::invalid("upcut_length is only valid with compression"));
+    };
+    let sense = match as_str(sense_value, "cutter_sense").map_err(from_cli)? {
+        "upcut" => CutterSense::Upcut,
+        "downcut" => CutterSense::Downcut,
+        "compression" => CutterSense::Compression,
+        other => return Err(JobFileError::invalid(format!("unknown cutter_sense `{other}`"))),
+    };
+    let upcut_length = match length_value {
+        Some(value) => Some(positive_length(value, scale, "upcut_length")?),
+        None => None,
+    };
+    let stickout = assembly.map(ToolAssembly::stickout);
+    let flute_length = assembly.map(ToolAssembly::flute_length);
+    campanion_path::check_cutter_sense(Some(diameter), stickout, flute_length, Some(sense), upcut_length)
+        .map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
+    Ok((Some(sense), upcut_length))
 }
 
 /// `"flat"`, `"ball"`, or `{"bull": corner_radius}`. The corner radius is a length in file units.
@@ -3566,8 +3633,9 @@ enum DotFold {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use campanion_ir::{SolutionPolicy, Vec3};
+    use campanion_ir::{Document, Program, SolutionPolicy, Vec3};
     use campanion_path::Tool as PathTool;
+    use proptest::prelude::*;
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3660,7 +3728,7 @@ mod tests {
         assert_eq!(job.retract(), 2.0);
 
         let diameter = job.tool(1).expect("tool 1");
-        assert_eq!(diameter.path_tool(), PathTool::Diameter { diameter: 6.0 });
+        assert_eq!(diameter.path_tool(), PathTool::diameter(6.0));
         assert_eq!(diameter.ir().diameter(), Some(6.0));
         assert_eq!(diameter.ir().kerf(), None);
         assert_eq!(diameter.speed(), None);
@@ -3765,6 +3833,190 @@ mod tests {
         );
         let err = load(&write_job("op-zero", &op_job)).expect_err("op zero");
         assert!(err.to_string().contains("speed must be positive and at most 100000"), "{err}");
+    }
+
+    #[test]
+    fn parses_cutter_sense_on_diameter_tools() {
+        let upcut =
+            load(&write_job("sense-upcut", &envelope("plate.dxf", r#"[{"id":1,"diameter":6,"cutter_sense":"upcut"}]"#, "[]"))).expect("upcut");
+        let tool = upcut.tool(1).expect("tool");
+        assert_eq!(tool.cutter_sense(), Some(CutterSense::Upcut));
+        assert_eq!(tool.upcut_length(), None);
+        assert_eq!(tool.ir().cutter_sense(), Some(IrCutterSense::Upcut));
+        assert_eq!(tool.ir().upcut_length(), None);
+        near(tool.path_tool().compensation_distance().expect("radius"), 3.0);
+
+        let downcut =
+            load(&write_job("sense-downcut", &envelope("plate.dxf", r#"[{"id":1,"diameter":6,"cutter_sense":"downcut"}]"#, "[]"))).expect("downcut");
+        assert_eq!(downcut.tool(1).expect("tool").cutter_sense(), Some(CutterSense::Downcut));
+
+        let compression = load(&write_job(
+            "sense-compression",
+            &envelope("plate.dxf", r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":12}]"#, "[]"),
+        ))
+        .expect("compression");
+        let tool = compression.tool(1).expect("tool");
+        assert_eq!(tool.cutter_sense(), Some(CutterSense::Compression));
+        near(tool.upcut_length().expect("length"), 12.0);
+        assert_eq!(tool.ir().cutter_sense(), Some(IrCutterSense::Compression));
+        near(tool.ir().upcut_length().expect("ir length"), 12.0);
+        near(tool.path_tool().compensation_distance().expect("radius"), 3.0);
+
+        let omitted = load(&write_job("sense-omitted", &envelope("plate.dxf", r#"[{"id":1,"diameter":6}]"#, "[]"))).expect("omitted");
+        let tool = omitted.tool(1).expect("tool");
+        assert_eq!(tool.cutter_sense(), None);
+        assert_eq!(tool.upcut_length(), None);
+        let json = serde_json::to_string(tool.ir()).expect("json");
+        assert!(!json.contains("cutter_sense"), "{json}");
+        assert!(!json.contains("upcut_length"), "{json}");
+
+        let with_assembly = load(&write_job(
+            "sense-assembly",
+            &envelope(
+                "plate.dxf",
+                r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":8,"assembly":{"stickout":20,"flute_length":10,"holder":[{"diameter":12,"length":8}]}}]"#,
+                "[]",
+            ),
+        ))
+        .expect("assembly");
+        near(with_assembly.tool(1).expect("tool").upcut_length().expect("length"), 8.0);
+
+        let inch = load(&write_job(
+            "sense-inch",
+            r#"{"format":"campanion-job/1","source":{"path":"plate.dxf","hash":"cbf29ce484222325"},"units":"inch","tools":[{"id":1,"diameter":0.25,"cutter_sense":"compression","upcut_length":0.5}],"operations":[]}"#,
+        ))
+        .expect("inch");
+        near(inch.tool(1).expect("tool").upcut_length().expect("length"), 0.5 * 25.4);
+    }
+
+    #[test]
+    fn cutter_sense_matches_bare_diameter_compensation() {
+        let bare = load(&write_job("sense-comp-bare", &envelope("plate.dxf", r#"[{"id":1,"diameter":6}]"#, "[]"))).expect("bare");
+        let sensed = load(&write_job(
+            "sense-comp-set",
+            &envelope("plate.dxf", r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":12}]"#, "[]"),
+        ))
+        .expect("sensed");
+        let left = bare.tool(1).expect("bare").path_tool().compensation_distance().expect("bare radius");
+        let right = sensed.tool(1).expect("sensed").path_tool().compensation_distance().expect("sensed radius");
+        near(left, right);
+        near(left, 3.0);
+    }
+
+    #[test]
+    fn rejects_illegal_cutter_sense() {
+        let too_long_flute = concat!(
+            r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":12,"#,
+            r#""assembly":{"stickout":20,"flute_length":10,"holder":[{"diameter":12,"length":8}]}}]"#
+        );
+        let cases = [
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"climb"}]"#, "unknown cutter_sense `climb`"),
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"upcut","upcut_length":1}]"#, "upcut_length is only valid with compression"),
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"downcut","upcut_length":1}]"#, "upcut_length is only valid with compression"),
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"compression"}]"#, "compression needs upcut_length"),
+            (r#"[{"id":1,"diameter":6,"upcut_length":1}]"#, "upcut_length is only valid with compression"),
+            (r#"[{"id":1,"kerf":1.2,"cutter_sense":"upcut"}]"#, "cutter_sense is only valid on a diameter tool"),
+            (r#"[{"id":1,"kerf":1.2,"upcut_length":1}]"#, "cutter_sense is only valid on a diameter tool"),
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":0}]"#, "upcut_length must be greater than 0"),
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":-1}]"#, "upcut_length must be greater than 0"),
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":601}]"#, "upcut_length must be at most diameter * 100"),
+            (too_long_flute, "upcut_length must be at most flute_length"),
+            (
+                r#"[{"id":1,"diameter":6,"cutter_sense":"compression","upcut_length":21,"assembly":{"stickout":20,"holder":[{"diameter":12,"length":8}]}}]"#,
+                "upcut_length must be at most stickout",
+            ),
+            (r#"[{"id":1,"diameter":6,"cutter_sense":"upcut","foo":1}]"#, "unknown tool field `foo`"),
+        ];
+        for (index, (tools, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("sense-bad-{index}"), &envelope("plate.dxf", tools, "[]"))).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
+    }
+
+    #[test]
+    fn example_router_cutter_sense_job_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/router_cutter_sense.job.json");
+        let job = load(&path).expect("example");
+        let tool = job.tool(1).expect("tool");
+        assert_eq!(tool.cutter_sense(), Some(CutterSense::Compression));
+        near(tool.upcut_length().expect("length"), 12.0);
+        near(tool.path_tool().compensation_distance().expect("radius"), 3.0);
+    }
+
+    fn cutter_sense_config() -> ProptestConfig {
+        ProptestConfig { cases: 24, max_shrink_iters: 20, rng_seed: proptest::test_runner::RngSeed::Fixed(0xC077_E5E1), ..ProptestConfig::default() }
+    }
+
+    fn ir_round_trip_tool(tool: &IrTool) -> IrTool {
+        let program = Program::try_new(None, vec![tool.clone()], None, Vec::new(), Vec::new(), Vec::new(), None).expect("program");
+        let doc = Document::new(program).expect("doc");
+        let json = doc.to_json().expect("json");
+        let loaded = Document::from_json(&json).expect("load");
+        loaded.program().tools()[0].clone()
+    }
+
+    proptest! {
+        #![proptest_config(cutter_sense_config())]
+        #[test]
+        fn diameter_tools_with_sense_round_trip_job_to_ir_json(
+            diameter in 0.5f64..40.0,
+            kind in 0u8..4,
+            upcut_frac in 0.05f64..1.0,
+            with_assembly in proptest::bool::ANY,
+            stickout in 15.0f64..80.0,
+            flute_frac in 0.2f64..1.0,
+        ) {
+            prop_assume!(diameter.is_finite() && stickout.is_finite());
+            let (sense, length, assembly) = match kind {
+                0 => (None, None, None),
+                1 => (Some("upcut"), None, None),
+                2 => (Some("downcut"), None, None),
+                _ => {
+                    let flute = if with_assembly { Some(stickout * flute_frac) } else { None };
+                    let cap = flute.unwrap_or(diameter * 100.0);
+                    let length = (cap * upcut_frac).max(1e-6);
+                    let assembly = if with_assembly {
+                        Some(format!(
+                            r#","assembly":{{"stickout":{stickout},"flute_length":{},"holder":[{{"diameter":12,"length":8}}]}}"#,
+                            flute.expect("flute")
+                        ))
+                    } else {
+                        None
+                    };
+                    (Some("compression"), Some(length), assembly)
+                }
+            };
+            let mut tool = format!(r#"{{"id":1,"diameter":{diameter}"#);
+            if let Some(sense) = sense {
+                tool.push_str(&format!(r#","cutter_sense":"{sense}""#));
+            }
+            if let Some(length) = length {
+                tool.push_str(&format!(r#","upcut_length":{length}"#));
+            }
+            if let Some(assembly) = assembly {
+                tool.push_str(&assembly);
+            }
+            tool.push('}');
+            let job = load(&write_job("sense-prop", &envelope("plate.dxf", &format!("[{tool}]"), "[]"))).expect("load");
+            let parsed = job.tool(1).expect("tool");
+            let back = ir_round_trip_tool(parsed.ir());
+            prop_assert_eq!(back.cutter_sense(), parsed.ir().cutter_sense());
+            match (back.upcut_length(), parsed.ir().upcut_length()) {
+                (None, None) => {}
+                (Some(left), Some(right)) => prop_assert!((left - right).abs() < 1e-9, "{left} {right}"),
+                other => prop_assert!(false, "upcut_length {other:?}"),
+            }
+            let json = serde_json::to_string(parsed.ir()).expect("json");
+            if sense.is_none() {
+                prop_assert!(!json.contains("cutter_sense"), "{json}");
+                prop_assert!(!json.contains("upcut_length"), "{json}");
+            } else {
+                prop_assert!(json.contains("cutter_sense"), "{json}");
+            }
+            let expected = parsed.path_tool().compensation_distance().expect("radius");
+            let bare = PathTool::diameter(diameter).compensation_distance().expect("bare");
+            prop_assert!((expected - bare).abs() < 1e-12);
+        }
     }
 
     #[test]

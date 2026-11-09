@@ -239,11 +239,8 @@ fn clearance(outer: &Contour, holes: &[Contour], samples: &[Point]) -> f64 {
 
 fn check(name: &str, outer: &Contour, holes: &[Contour], tol: &Tolerance, bounds: [f64; 4]) -> Result<()> {
     let region = if holes.is_empty() { Region::from_contour(outer.clone(), tol)? } else { Region::try_new(outer.clone(), holes.to_vec(), tol)? };
-    let pocket = PocketOp::new(Tool::Diameter { diameter: DIAMETER }, PocketStrategy::OffsetRings, STEP)
-        .z(CUT_Z)
-        .retract_z(2.0)
-        .tolerance(*tol)
-        .generate(&region)?;
+    let pocket =
+        PocketOp::new(Tool::diameter(DIAMETER), PocketStrategy::OffsetRings, STEP).z(CUT_Z).retract_z(2.0).tolerance(*tol).generate(&region)?;
     let cuts = cutting(pocket.toolpath().moves())?;
     let mut sample_off = 0.0_f64;
     for (i, point) in cuts.samples.iter().enumerate() {

@@ -1445,7 +1445,7 @@ mod tests {
     }
 
     fn tool_diameter(diameter: f64) -> Tool {
-        Tool::Diameter { diameter }
+        Tool::diameter(diameter)
     }
 
     fn rings_op(stepover: f64) -> PocketOp {
@@ -2062,7 +2062,7 @@ mod tests {
         let region =
             if holes.is_empty() { Region::from_contour(outer.clone(), &tol)? } else { Region::try_new(outer.clone(), holes.to_vec(), &tol)? };
         let clearance = offset_region(&region, radius, &tol)?;
-        let cut = PocketOp::new(Tool::Diameter { diameter }, PocketStrategy::OffsetRings, stepover).tolerance(tol).generate(&region)?;
+        let cut = PocketOp::new(Tool::diameter(diameter), PocketStrategy::OffsetRings, stepover).tolerance(tol).generate(&region)?;
         let segs = cut_segments(cut.toolpath())?;
         let samples = samples_of(cut.toolpath());
         if segs.is_empty() || samples.is_empty() {
@@ -2388,7 +2388,7 @@ mod tests {
             DepthEntry::Helix { radius, pitch } => (pitch / (radius * TAU)).atan(),
             DepthEntry::Plunge => return Err(invalid("expected a ramp or helix")),
         };
-        let cut = PocketOp::new(Tool::Diameter { diameter }, PocketStrategy::OffsetRings, stepover)
+        let cut = PocketOp::new(Tool::diameter(diameter), PocketStrategy::OffsetRings, stepover)
             .z(-1.0)
             .retract_z(2.0)
             .entry(entry)

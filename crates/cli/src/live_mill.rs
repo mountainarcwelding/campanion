@@ -212,7 +212,7 @@ fn x_span(name: &str, contours: &[Contour]) -> Result<f64, CliError> {
 fn toolpath_moves(spec: &MillSpec, contours: &[Contour]) -> Result<Vec<Move>, CliError> {
     let depths = pass_depths(spec.depth, spec.step_down).map_err(|err| op_err(&spec.name, err))?;
     let tolerance = Tolerance::new(spec.tolerance, Tolerance::DEFAULT_ANGULAR_RAD).map_err(|err| op_err(&spec.name, err))?;
-    let tool = Tool::Diameter { diameter: spec.tool_diameter };
+    let tool = Tool::diameter(spec.tool_diameter);
     let mut moves = Vec::new();
     match spec.strategy {
         MillStrategy::Profile { side } => {

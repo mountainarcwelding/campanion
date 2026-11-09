@@ -12,6 +12,21 @@ use crate::Result;
 use crate::check::{self, finite, non_negative, optional_name, positive, required_name, text_len};
 use crate::geom::Pose;
 
+/// Helix sense of a rotating router cutter.
+///
+/// Stored on a diameter tool. Omitted, compensation stays the flat diameter offset. Sense is
+/// data for the job and the verifier; it does not change the 2D offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CutterSense {
+    /// Chips climb the flute toward the shank.
+    Upcut,
+    /// Chips are pushed toward the tip.
+    Downcut,
+    /// Upcut at the tip, downcut above that. Requires [`Tool`]'s `upcut_length`.
+    Compression,
+}
+
 /// A cutter or a kerf-only process.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -28,11 +43,17 @@ pub struct Tool {
     /// Holder and head envelope. Absent on a tool that does not name one, so older files stay unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assembly: Option<ToolAssembly>,
+    /// Router flute helix. Omitted from JSON when absent, so older files stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cutter_sense: Option<CutterSense>,
+    /// Upcut length at the tip, millimetres. Only with [`CutterSense::Compression`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upcut_length: Option<f64>,
 }
 
 impl Tool {
     pub fn try_new(id: u32, name: Option<String>, diameter: Option<f64>, kerf: Option<f64>) -> Result<Self> {
-        let tool = Self { id, name, diameter, kerf, assembly: None };
+        let tool = Self { id, name, diameter, kerf, assembly: None, cutter_sense: None, upcut_length: None };
         tool.check()?;
         Ok(tool)
     }
@@ -40,6 +61,17 @@ impl Tool {
     /// Store a tool assembly and re-validate. A kerf tool cannot carry one.
     pub fn with_assembly(self, assembly: ToolAssembly) -> Result<Self> {
         let tool = Self { assembly: Some(assembly), ..self };
+        tool.check()?;
+        Ok(tool)
+    }
+
+    /// Store router cutter sense and re-validate. A kerf tool cannot carry one.
+    ///
+    /// [`CutterSense::Compression`] needs a positive finite `upcut_length` at most the flute
+    /// length and stickout when an assembly is present, otherwise at most `diameter * 100`.
+    /// Other senses reject `upcut_length`.
+    pub fn with_cutter_sense(self, cutter_sense: Option<CutterSense>, upcut_length: Option<f64>) -> Result<Self> {
+        let tool = Self { cutter_sense, upcut_length, ..self };
         tool.check()?;
         Ok(tool)
     }
@@ -65,6 +97,16 @@ impl Tool {
         self.assembly.as_ref()
     }
 
+    /// Router flute helix. `None` when the file omits `cutter_sense`.
+    pub fn cutter_sense(&self) -> Option<CutterSense> {
+        self.cutter_sense
+    }
+
+    /// Upcut length at the tip, millimetres. `None` unless the sense is compression.
+    pub fn upcut_length(&self) -> Option<f64> {
+        self.upcut_length
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
         optional_name(&self.name, "tool name")?;
         if let Some(diameter) = self.diameter {
@@ -79,7 +121,7 @@ impl Tool {
             }
             assembly.check()?;
         }
-        Ok(())
+        check_tool_cutter_sense(self.diameter, self.kerf, self.assembly.as_ref(), self.cutter_sense, self.upcut_length)
     }
 }
 
@@ -202,6 +244,44 @@ impl ToolAssembly {
 fn check_cutter(value: f64, what: &str) -> Result<()> {
     let value = positive(value, what)?;
     if value > check::MAX_CUTTER_MM { Err(check::invalid(format!("{what} is larger than {} mm", check::MAX_CUTTER_MM))) } else { Ok(()) }
+}
+
+fn check_tool_cutter_sense(
+    diameter: Option<f64>,
+    kerf: Option<f64>,
+    assembly: Option<&ToolAssembly>,
+    cutter_sense: Option<CutterSense>,
+    upcut_length: Option<f64>,
+) -> Result<()> {
+    if cutter_sense.is_none() && upcut_length.is_none() {
+        return Ok(());
+    }
+    let Some(diameter) = diameter.filter(|_| kerf.is_none()) else {
+        return Err(check::invalid("cutter_sense is not valid on a kerf tool"));
+    };
+    match cutter_sense {
+        None | Some(CutterSense::Upcut) | Some(CutterSense::Downcut) => {
+            if upcut_length.is_some() {
+                return Err(check::invalid("upcut_length is only valid with compression"));
+            }
+            Ok(())
+        }
+        Some(CutterSense::Compression) => {
+            let Some(length) = upcut_length else {
+                return Err(check::invalid("compression needs upcut_length"));
+            };
+            let length = positive(length, "upcut_length")?;
+            let (cap, what) = match assembly {
+                Some(assembly) if assembly.flute_length() < assembly.stickout() => (assembly.flute_length(), "flute_length"),
+                Some(assembly) => (assembly.stickout(), "stickout"),
+                None => (diameter * 100.0, "diameter * 100"),
+            };
+            if length > cap {
+                return Err(check::invalid(format!("upcut_length must be at most {what}")));
+            }
+            Ok(())
+        }
+    }
 }
 
 /// What a process-on event turns on.
@@ -765,5 +845,78 @@ impl Event {
             Self::ToolChange { tool_id } => Some(*tool_id),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::{Document, Program};
+
+    fn mill(id: u32, diameter: f64) -> Tool {
+        Tool::try_new(id, None, Some(diameter), None).expect("mill")
+    }
+
+    fn holder(stickout: f64, flute: Option<f64>) -> ToolAssembly {
+        ToolAssembly::try_new(stickout, flute, None, vec![AssemblySegment::try_new(16.0, 10.0).expect("holder")], None).expect("assembly")
+    }
+
+    fn round_trip(tool: &Tool) -> Tool {
+        let program = Program::try_new(None, vec![tool.clone()], None, Vec::new(), Vec::new(), Vec::new(), None).expect("program");
+        let doc = Document::new(program).expect("doc");
+        let json = doc.to_json().expect("json");
+        let loaded = Document::from_json(&json).expect("load");
+        loaded.program().tools()[0].clone()
+    }
+
+    #[test]
+    fn omitted_cutter_sense_is_dropped_from_json() {
+        let tool = mill(1, 6.0);
+        let json = serde_json::to_string(&tool).expect("json");
+        assert!(!json.contains("cutter_sense"), "{json}");
+        assert!(!json.contains("upcut_length"), "{json}");
+        let back = round_trip(&tool);
+        assert_eq!(back.cutter_sense(), None);
+        assert_eq!(back.upcut_length(), None);
+    }
+
+    #[test]
+    fn cutter_sense_round_trips() {
+        let upcut = mill(1, 6.0).with_cutter_sense(Some(CutterSense::Upcut), None).expect("upcut");
+        let back = round_trip(&upcut);
+        assert_eq!(back.cutter_sense(), Some(CutterSense::Upcut));
+        assert_eq!(back.upcut_length(), None);
+        let json = serde_json::to_string(&upcut).expect("json");
+        assert!(json.contains("\"cutter_sense\":\"upcut\""), "{json}");
+        assert!(!json.contains("upcut_length"), "{json}");
+
+        let compression = mill(2, 6.0).with_cutter_sense(Some(CutterSense::Compression), Some(12.0)).expect("compression");
+        let back = round_trip(&compression);
+        assert_eq!(back.cutter_sense(), Some(CutterSense::Compression));
+        assert_eq!(back.upcut_length(), Some(12.0));
+        let json = serde_json::to_string(&compression).expect("json");
+        assert!(json.contains("\"cutter_sense\":\"compression\""), "{json}");
+        assert!(json.contains("\"upcut_length\":12"), "{json}");
+    }
+
+    #[test]
+    fn cutter_sense_rejects_illegal_combinations() {
+        let tool = mill(1, 6.0);
+        assert!(tool.clone().with_cutter_sense(Some(CutterSense::Upcut), Some(1.0)).is_err());
+        assert!(tool.clone().with_cutter_sense(Some(CutterSense::Downcut), Some(1.0)).is_err());
+        assert!(tool.clone().with_cutter_sense(Some(CutterSense::Compression), None).is_err());
+        assert!(tool.clone().with_cutter_sense(None, Some(1.0)).is_err());
+        assert!(tool.clone().with_cutter_sense(Some(CutterSense::Compression), Some(0.0)).is_err());
+        assert!(tool.clone().with_cutter_sense(Some(CutterSense::Compression), Some(601.0)).is_err());
+        assert!(tool.with_cutter_sense(Some(CutterSense::Compression), Some(600.0)).is_ok());
+
+        let kerf = Tool::try_new(2, None, None, Some(1.2)).expect("kerf");
+        assert!(kerf.with_cutter_sense(Some(CutterSense::Upcut), None).is_err());
+
+        let short =
+            mill(3, 6.0).with_assembly(holder(20.0, Some(8.0))).expect("assembly").with_cutter_sense(Some(CutterSense::Compression), Some(9.0));
+        assert!(short.is_err());
+        let ok = mill(4, 6.0).with_assembly(holder(20.0, Some(8.0))).expect("assembly").with_cutter_sense(Some(CutterSense::Compression), Some(8.0));
+        assert!(ok.is_ok());
     }
 }

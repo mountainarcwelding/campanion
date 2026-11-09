@@ -204,16 +204,12 @@ fn too_many_axes_are_rejected() {
 
 #[test]
 fn profile_converts_to_ir() {
-    let profile = ProfileOp::new(
-        PathTool::Diameter { diameter: 6.0 },
-        Compensation::Controller(ControllerSide::Left),
-        ProfileSide::On,
-        CutDirection::Conventional,
-    )
-    .lead_in(Lead::Arc { radius: 3.0 })
-    .tabs(TabSpec::count(1, 4.0).height(2.0))
-    .generate(&rect(40.0, 20.0))
-    .expect("profile");
+    let profile =
+        ProfileOp::new(PathTool::diameter(6.0), Compensation::Controller(ControllerSide::Left), ProfileSide::On, CutDirection::Conventional)
+            .lead_in(Lead::Arc { radius: 3.0 })
+            .tabs(TabSpec::count(1, 4.0).height(2.0))
+            .generate(&rect(40.0, 20.0))
+            .expect("profile");
     let feeds = Feeds::try_new(1000.0, Some(600.0), Some(700.0), Some(300.0), Some(800.0)).expect("feeds");
     let params =
         ProcessParams::new().speed(Some(12_000.0)).expect("speed").pierce_delay(0.3, false).expect("pierce").post_delay(0.15, true).expect("post");

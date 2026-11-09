@@ -33,7 +33,7 @@ pub use profile::{
     CutDirection, DEFAULT_CLEARANCE_MM, DEFAULT_RETRACT_MM, Lead, Profile, ProfileOp, ProfileSide, StartPoint, Tab, TabLayout, TabSpec,
 };
 pub use timing::{ProcessTiming, apply_timing};
-pub use tool::{Compensation, ControllerSide, Tool};
+pub use tool::{Compensation, ControllerSide, CutterSense, Tool, check_cutter_sense};
 pub use toolpath::{CutKind, Move, Point3, ProcessEvent, Toolpath};
 
 /// Crate version from the package manifest.

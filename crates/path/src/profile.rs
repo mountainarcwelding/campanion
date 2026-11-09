@@ -1229,7 +1229,7 @@ mod tests {
     }
 
     fn tool2() -> Tool {
-        Tool::Diameter { diameter: 2.0 }
+        Tool::diameter(2.0)
     }
 
     fn outside_conventional() -> ProfileOp {
@@ -1598,9 +1598,9 @@ mod tests {
             outside_conventional().lead_in(Lead::Arc { radius: f64::NAN }),
             outside_conventional().lead_in(Lead::Perpendicular { length: f64::NEG_INFINITY }),
             outside_conventional().lead_out(Lead::Arc { radius: 0.0 }),
-            ProfileOp::new(Tool::Diameter { diameter: f64::NAN }, Compensation::Computed, ProfileSide::Outside, CutDirection::Climb),
-            ProfileOp::new(Tool::Diameter { diameter: 0.0 }, Compensation::Computed, ProfileSide::Outside, CutDirection::Climb),
-            ProfileOp::new(Tool::Diameter { diameter: -4.0 }, Compensation::Computed, ProfileSide::Inside, CutDirection::Conventional),
+            ProfileOp::new(Tool::diameter(f64::NAN), Compensation::Computed, ProfileSide::Outside, CutDirection::Climb),
+            ProfileOp::new(Tool::diameter(0.0), Compensation::Computed, ProfileSide::Outside, CutDirection::Climb),
+            ProfileOp::new(Tool::diameter(-4.0), Compensation::Computed, ProfileSide::Inside, CutDirection::Conventional),
             ProfileOp::new(Tool::Kerf { width: f64::NAN }, Compensation::Computed, ProfileSide::Outside, CutDirection::Conventional),
             ProfileOp::new(Tool::Kerf { width: -1.5 }, Compensation::Controller(ControllerSide::Right), ProfileSide::Outside, CutDirection::Climb),
             inside_climb().tabs(TabSpec::count(0, 1.0)),
@@ -1618,7 +1618,7 @@ mod tests {
             inside_climb().heights(DEFAULT_CLEARANCE_MM, f64::NAN),
             inside_climb().heights(DEFAULT_CLEARANCE_MM, -0.1),
             inside_climb().heights(1.0, 2.0),
-            ProfileOp::new(Tool::Diameter { diameter: 100.0 }, Compensation::Computed, ProfileSide::Inside, CutDirection::Climb),
+            ProfileOp::new(Tool::diameter(100.0), Compensation::Computed, ProfileSide::Inside, CutDirection::Climb),
             ProfileOp::new(tool2(), Compensation::Computed, ProfileSide::On, CutDirection::Conventional).allowance(0.4),
         ];
         for op in cases {
@@ -1660,7 +1660,7 @@ mod tests {
         let z = -12.0;
         let height = 3.0;
         let raised = z + height;
-        let profile = ProfileOp::new(Tool::Diameter { diameter }, Compensation::Computed, ProfileSide::Outside, CutDirection::Climb)
+        let profile = ProfileOp::new(Tool::diameter(diameter), Compensation::Computed, ProfileSide::Outside, CutDirection::Climb)
             .z(z)
             .tabs(TabSpec::count(6, 10.0).height(height))
             .generate(&part)
@@ -1763,7 +1763,7 @@ mod tests {
         let z = -6.0;
         let height = 2.0;
         let raised = z + height;
-        let profile = ProfileOp::new(Tool::Diameter { diameter: 4.0 }, Compensation::Computed, ProfileSide::On, CutDirection::Conventional)
+        let profile = ProfileOp::new(Tool::diameter(4.0), Compensation::Computed, ProfileSide::On, CutDirection::Conventional)
             .z(z)
             .tabs(TabSpec::count(3, 8.0).height(height))
             .generate(&circle)
@@ -1836,7 +1836,7 @@ mod tests {
         exact_line_gap: bool,
     ) {
         assert_eq!(part.orientation(&Tolerance::default()).unwrap(), Orientation::CounterClockwise);
-        let profile = ProfileOp::new(Tool::Diameter { diameter }, Compensation::Computed, side, direction)
+        let profile = ProfileOp::new(Tool::diameter(diameter), Compensation::Computed, side, direction)
             .z(-10.0)
             .tabs(TabSpec::count(count, width))
             .generate(part)
@@ -2271,7 +2271,7 @@ mod tests {
             if height > 0.0 {
                 spec = spec.height(height.min((-z) * 0.5).max(0.2));
             }
-            let op = ProfileOp::new(Tool::Diameter { diameter }, Compensation::Computed, ProfileSide::Outside, direction).z(z).tabs(spec);
+            let op = ProfileOp::new(Tool::diameter(diameter), Compensation::Computed, ProfileSide::Outside, direction).z(z).tabs(spec);
             let Ok(profile) = op.generate(&part) else {
                 return Ok(());
             };

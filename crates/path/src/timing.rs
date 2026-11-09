@@ -422,17 +422,13 @@ mod tests {
 
     #[test]
     fn profile_with_three_tabs_and_leads_times_every_start_and_stop() {
-        let profile = ProfileOp::new(
-            Tool::Diameter { diameter: 2.0 },
-            Compensation::Controller(ControllerSide::Left),
-            ProfileSide::On,
-            CutDirection::Conventional,
-        )
-        .lead_in(Lead::Line { length: 5.0 })
-        .lead_out(Lead::Line { length: 4.0 })
-        .tabs(TabSpec::count(3, 2.0).height(1.5))
-        .generate(&rect(40.0, 20.0))
-        .unwrap();
+        let profile =
+            ProfileOp::new(Tool::diameter(2.0), Compensation::Controller(ControllerSide::Left), ProfileSide::On, CutDirection::Conventional)
+                .lead_in(Lead::Line { length: 5.0 })
+                .lead_out(Lead::Line { length: 4.0 })
+                .tabs(TabSpec::count(3, 2.0).height(1.5))
+                .generate(&rect(40.0, 20.0))
+                .unwrap();
         assert_eq!(profile.tabs().len(), 3);
         let source = profile.toolpath();
         let starts = source.moves().iter().filter(|mv| matches!(mv, Move::Event(ProcessEvent::On))).count();

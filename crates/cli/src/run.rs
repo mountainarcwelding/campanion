@@ -1001,7 +1001,7 @@ fn push_wall_contour(cut: &Cut<'_>, contour: &Contour, side: ProfileSide, finish
 /// Those rapids share one Z, so `campanion verify` (safe height inferred from the rapids)
 /// accepts them. The document is built the same way a drill is.
 fn face_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
-    let PathTool::Diameter { diameter } = cut.tool.path_tool() else {
+    let PathTool::Diameter { diameter, .. } = cut.tool.path_tool() else {
         return Err(op_err(cut.op, "face is not valid with a kerf tool"));
     };
     let Some(stepover) = cut.op.stepover() else {
@@ -1080,7 +1080,7 @@ fn is_not_circle(err: &impl std::fmt::Display) -> bool {
 
 /// One V-bit plunge per closed contour, then the same clearance link an engrave uses.
 fn chamfer_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide) -> Result<(), CliError> {
-    let PathTool::Diameter { diameter } = cut.tool.path_tool() else {
+    let PathTool::Diameter { diameter, .. } = cut.tool.path_tool() else {
         return Err(op_err(cut.op, "chamfer is not valid with a kerf tool"));
     };
     let mut features = Vec::with_capacity(cut.contours.len());

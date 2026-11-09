@@ -103,7 +103,7 @@ pub use kinematics::{
 pub use machine::{Axis, AxisIndex, AxisKind, AxisLetter, AxisLimits, AxisName, Channel, KinematicNode, Machine};
 pub use motion::{AxisBlock, AxisMotion, AxisTarget, ChannelProgram, ClBlock, ClMotion, ClPath, CompensationMode, Feeds, MoveRole, ProfileTab};
 pub use ngc::{NgcOptions, ProgramEnd, write_ngc, write_ngc_with};
-pub use process::{AssemblySegment, CoolantMode, Event, LiveDirection, ParamValue, ProcessKind, ProcessParams, Tool, ToolAssembly};
+pub use process::{AssemblySegment, CoolantMode, CutterSense, Event, LiveDirection, ParamValue, ProcessKind, ProcessParams, Tool, ToolAssembly};
 pub use program::{DEFAULT_MAX_AXIS_STEP_DEG, Document, Fixture, FixtureBox, Program, SyncPoint};
 pub use rotary::{
     RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup, index_angle_for_axis, machine_to_part, part_to_machine, rotate_point, rotate_vector,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- A diameter tool may set `cutter_sense` (`upcut`, `downcut`, or `compression`) and, with compression, `upcut_length` (millimetres at the tip). Omitted, compensation stays the flat diameter offset. Sense is stored on the job and the IR for later checks; it does not change the 2D offset. Posted G-code is unchanged when the field is omitted. This output has not been proven on a machine.
+
 ## 0.9.3 — 2026-11-03
 
 Code-generation hardening and in-process stock. A modal replay checker and property tests now cover every built-in post (mill, plasma, laser, Grbl, lathe and mill-turn, five-axis with and without TCP, and 3+1 rotary). The audit found five bugs, fixed below: three in posted output and two in the `compare` checker. Mill jobs may model the in-process stock as a Z-dexel and check rapids and the tool assembly against it, with removal rate and engagement per move. This output has not been proven on a machine.
