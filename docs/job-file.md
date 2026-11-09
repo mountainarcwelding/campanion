@@ -126,7 +126,8 @@ unique within that operation. The same layer may appear on two operations.
 | `tool_id` | yes | `id` of a tool in this file. |
 | `speed` | no | Spindle speed in rpm: positive, finite, and at most 100000. Not scaled by `units`. When set, it overrides `tools[].speed` for this operation. Omitted, the tool's speed is used. See [Spindle speed](#spindle-speed) and [Tool changes](#tool-changes). |
 | `depth` | yes, except chamfer, surface, rough, waterline and rotary finish | Positive distance downward, in `units`. Not an absolute Z. On a profile, pocket, drill, engrave or face this is below the stock surface. On a wrap it is below the cylinder surface. A chamfer rejects `depth`; the tip depth follows from the geometry. A surface, a rough, a waterline or a rotary finish rejects `depth`. |
-| `step_down` | yes, except chamfer, surface and rotary finish | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface or a rotary finish rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. On a drill it is the peck depth: when it is less than `depth` the drill pecks, and otherwise the drill feeds to depth in one move. |
+| `step_down` | yes, except chamfer, surface and rotary finish | Positive maximum thickness of one pass, in `units`. The last pass of a 2D operation, including a wrap, stops at `depth` and is not deeper. A chamfer rejects `step_down`. A surface or a rotary finish rejects `step_down`. A rough or a waterline requires it: the spacing between Z levels. On a drill it is the peck depth: when it is less than `depth` the drill pecks, and otherwise the drill feeds to depth in one move. A drill with `onion_skin` pecks even when `step_down` is at least `depth`, so the skin is its own last peck. |
+| `onion_skin` | no | Positive length in `units`, strictly less than `depth`. On a profile, pocket, face, engrave, drill or wrap, earlier depth passes stop this far short of `depth`, and the last pass cuts that skin with the same entry as the other passes. Omitted, the depth plan is unchanged. Rejected on a chamfer, a surface, a rough, a waterline and a rotary finish. Not proven on a machine. |
 | `dwell` | drill only | Seconds to pause at the bottom of a drill, from 0 to 3600 inclusive. Not scaled by `units`. Rejected on every other kind. Omitted, the drill does not pause. |
 | `stepover` | pocket, face, surface, rough and rotary finish | Positive step between passes, in `units`. At most the tool diameter on a pocket, face, surface or rough. Rejected on a kerf tool. A face that omits it uses 0.75 times the tool diameter. A pocket that omits it leaves the choice to the path generator (the tool radius). A surface requires exactly one of `stepover` and `scallop_height`. A rough that omits it uses 0.4 times the tool diameter. A waterline rejects `stepover`. On a rotary finish it is the arc length between angle passes at the largest radius, and it is not capped at the tool diameter. When `angle_step_deg` is also set, the run uses `stepover`. |
 | `scallop_height` | surface only | Positive length in `units`. Flat-floor cusp height used instead of `stepover`. See below. Rejected on every other kind. |
@@ -161,6 +162,16 @@ unique within that operation. The same layer may appear on two operations.
 `depth` and `step_down` must be a legal `campanion-path` depth plan: positive, at most 1e6 mm,
 and at most 1024 passes. Five millimetres at a two millimetre step is three passes (2, 4, 5).
 When `finish.step_down` is set, it must satisfy the same rule against `depth`.
+
+`onion_skin`, when set, is a positive length strictly less than `depth`. Roughing passes are the
+plan of `depth - onion_skin`, and one further pass cuts the skin at `depth` with the same entry.
+Five millimetres at a two millimetre step with a one millimetre skin is 2, 4, then 5. Six
+millimetres at a two millimetre step with a one millimetre skin is 2, 4, 5, then 6. The extra
+pass counts toward the 1024-pass limit. `finish.step_down`, when set, must form a legal plan
+with the same skin. Omitting the field leaves the depth plan unchanged. `campanion run` checks
+that every earlier cut stays at least `onion_skin` above the floor and that the last pass
+reaches it. A roughing link that leaves floor stock and has no finish pass stays out of the
+skin and is not required to reach the sheet floor. This output has not been proven on a machine.
 
 ### Tool changes
 
@@ -235,7 +246,7 @@ the tips are at −0.5 mm and −0.3 mm.
 
 `diameter` is the cylinder surface diameter, not the tool diameter.
 
-`depth` is a positive distance below that surface. `step_down` is the maximum thickness of one pass, the same plan as a profile. A depth of 0.5 mm at a step of 0.25 mm is two passes.
+`depth` is a positive distance below that surface. `step_down` is the maximum thickness of one pass, the same plan as a profile. A depth of 0.5 mm at a step of 0.25 mm is two passes. Optional `onion_skin` leaves that thickness until the last pass, which is the only pass at `depth`. The check uses those planned levels (`w = -level`).
 
 Flat frame, in millimetres after `load`:
 
@@ -532,7 +543,7 @@ The safe radius is at least the swept radius plus `heights.clearance`, and at le
 
 `examples/rotary.job.json` finishes `examples/rotary.stl` with a 3 mm ball, zigzag, a 30° angle step and a 0.25 mm sample step, about axis A through the origin. The mesh is a vase revolved about X, 60 mm long and about 30 mm in diameter, with closed ends. `crates/mesh/tests/rotary_vase.rs` builds that STL.
 
-A drill is expanded into moves: each hole is a rapid to clearance over the hole, a rapid to the job retract height (the R plane), a plunge feed to depth (pecking back to the R plane when `step_down` is less than `depth`), an optional `dwell`, and a rapid out to clearance. No canned cycle is written. `step_down` on a drill is the peck depth. Pocket strategy, leads and tabs are not part of this version.
+A drill is expanded into moves: each hole is a rapid to clearance over the hole, a rapid to the job retract height (the R plane), a plunge feed to depth (pecking back to the R plane when `step_down` is less than `depth`), an optional `dwell`, and a rapid out to clearance. No canned cycle is written. `step_down` on a drill is the peck depth. Optional `onion_skin` stops every peck but the last short of the hole bottom by that thickness, and the drill pecks even when `step_down` is at least `depth`. Pocket strategy, leads and tabs are not part of this version.
 
 ### Timing
 
@@ -1294,7 +1305,7 @@ Front clearance is Z `z_start + retract` at the hole radius. Moves from one fron
 | `stepover` | no | Z step as a fraction of the live-tool diameter, in `(0, 1]`. Default `0.6`. |
 | `rpm`, `feed` | yes | Same as `live_drill`. |
 
-`live_mill` cuts a drawing with the same profile and pocket operations a mill job uses (`ProfileOp` and `PocketOp`). It does not invent a second offsetter. Lengths in the drawing are millimetres. A DXF is millimetres when `$INSUNITS` is millimetres or unitless. An SVG is converted to millimetres; a unitless SVG is 96 dpi. `drawing` is a `.dxf` or `.svg` path relative to the job file, with the same path rules as `source`. Optional `layer` keeps one layer, compared as a string. `strategy` is `profile` or `pocket`. A profile needs `side` (`outside`, `inside` or `on`). A pocket rejects `side` and takes `stepover`, a fraction of the live-tool diameter in `(0, 1]`, default `0.4`. `depth` is positive. `step_down` is the maximum thickness of one pass and defaults to `depth`. `rpm` and `feed` match `live_drill`.
+`live_mill` cuts a drawing with the same profile and pocket operations a mill job uses (`ProfileOp` and `PocketOp`). It does not invent a second offsetter. Lengths in the drawing are millimetres. A DXF is millimetres when `$INSUNITS` is millimetres or unitless. An SVG is converted to millimetres; a unitless SVG is 96 dpi. `drawing` is a `.dxf` or `.svg` path relative to the job file, with the same path rules as `source`. Optional `layer` keeps one layer, compared as a string. `strategy` is `profile` or `pocket`. A profile needs `side` (`outside`, `inside` or `on`). A pocket rejects `side` and takes `stepover`, a fraction of the live-tool diameter in `(0, 1]`, default `0.4`. `depth` is positive. `step_down` is the maximum thickness of one pass and defaults to `depth`. Optional `onion_skin` is a positive length strictly less than `depth`. Earlier passes stop that far short of `depth`, and only the last pass reaches it. The check uses those planned levels, not the machine pose after the frame mapping. Omitting it leaves the depth plan unchanged. `rpm` and `feed` match `live_drill`. This output has not been proven on a machine.
 
 The toolpath is built in the drawing plane. Its Z is 0 on the surface and negative into the part, and the job `clearance` is the positive retract height. Rapids from one feature to the next stay at that clearance.
 
@@ -1313,6 +1324,7 @@ A pocket, and a profile with `side` `inside`, need a closed contour. None is `op
 | `side` | profile | `outside`, `inside` or `on`. Rejected on a pocket. |
 | `stepover` | pocket | Fraction of the cutter diameter, in `(0, 1]`. Default `0.4`. Rejected on a profile. |
 | `step_down` | no | Maximum pass thickness. Default `depth`. |
+| `onion_skin` | no | Positive length strictly less than `depth`. Earlier passes stop short by this thickness. Only the last pass reaches `depth`. Omitted, the depth plan is unchanged. |
 | `z_start` | front | Z of the face. Rejected on an OD mill. |
 | `y_axis` | no | Front only. Default false. Direct X/Y at the indexed C, with no face interpolation. |
 | `c` | no | Front `y_axis` only. Index angle in degrees. Default `0`. |

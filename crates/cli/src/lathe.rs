@@ -409,6 +409,7 @@ enum Operation {
         strategy: MillStrategy,
         depth: f64,
         step_down: f64,
+        onion_skin: Option<f64>,
         z_start: f64,
         diameter: f64,
         y_axis: bool,
@@ -2315,8 +2316,22 @@ fn parse_live_mill(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_s
     if face == LiveFace::Front && !y_axis && map.contains_key("c") {
         return Err(CliError::invalid("c is only valid when y_axis is true"));
     }
-    let mut allowed =
-        vec!["name", "type", "tool_id", "spindle", "channel", "face", "drawing", "layer", "strategy", "depth", "step_down", "rpm", "feed"];
+    let mut allowed = vec![
+        "name",
+        "type",
+        "tool_id",
+        "spindle",
+        "channel",
+        "face",
+        "drawing",
+        "layer",
+        "strategy",
+        "depth",
+        "step_down",
+        "onion_skin",
+        "rpm",
+        "feed",
+    ];
     match face {
         LiveFace::Front => {
             allowed.push("z_start");
@@ -2343,6 +2358,17 @@ fn parse_live_mill(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_s
     let step_down = match optional(map, "step_down") {
         Some(value) => positive(value, "step_down")?,
         None => depth,
+    };
+    let onion_skin = match optional(map, "onion_skin") {
+        Some(value) => {
+            let skin = positive(value, "onion_skin")?;
+            if skin >= depth {
+                return Err(CliError::invalid("onion_skin must be less than depth"));
+            }
+            crate::live_mill::mill_depths(&name, depth, step_down, Some(skin))?;
+            Some(skin)
+        }
+        None => None,
     };
     let (z_start, diameter) = match face {
         LiveFace::Front => (as_f64(require(map, "z_start")?, "z_start")?, 0.0),
@@ -2383,6 +2409,7 @@ fn parse_live_mill(map: &Map<String, Value>, names: &mut BTreeSet<String>, has_s
         strategy,
         depth,
         step_down,
+        onion_skin,
         z_start,
         diameter,
         y_axis,
@@ -3676,8 +3703,24 @@ fn flat_blocks(name: &str, tool_id: u32, feed: f64, rpm: f64, path: &FlatPath, p
 }
 
 fn mill_toolpath(job_path: &Path, job: &LatheJob, operation: &Operation, previous: &mut Option<u32>) -> Result<ClPath, CliError> {
-    let Operation::LiveMill { name, tool_id, rpm, feed, face, drawing, layer, strategy, depth, step_down, z_start, diameter, y_axis, c_deg, .. } =
-        operation
+    let Operation::LiveMill {
+        name,
+        tool_id,
+        rpm,
+        feed,
+        face,
+        drawing,
+        layer,
+        strategy,
+        depth,
+        step_down,
+        onion_skin,
+        z_start,
+        diameter,
+        y_axis,
+        c_deg,
+        ..
+    } = operation
     else {
         return Err(CliError::run(format!("internal: operation {} is not a live mill", operation.name())));
     };
@@ -3698,6 +3741,7 @@ fn mill_toolpath(job_path: &Path, job: &LatheJob, operation: &Operation, previou
         feed: *feed,
         depth: *depth,
         step_down: *step_down,
+        onion_skin: *onion_skin,
         clearance: job.clearance,
         tolerance: job.linear,
         strategy: *strategy,

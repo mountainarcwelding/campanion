@@ -13,6 +13,7 @@ use crate::Result;
 use crate::check::{self, finite, non_negative, positive};
 use crate::pass_depths;
 use crate::toolpath::{CutKind, Move, Point3, Toolpath};
+use crate::{DepthEntry, DepthPlan};
 
 const TAU: f64 = std::f64::consts::TAU;
 
@@ -24,11 +25,13 @@ pub struct DrillCycle {
     peck_depth: Option<f64>,
     retract: Option<f64>,
     dwell: Option<f64>,
+    /// Skin left until the last peck. `None` keeps the ordinary peck list.
+    onion_skin: Option<f64>,
 }
 
 impl DrillCycle {
     pub fn new() -> Self {
-        Self { peck_depth: None, retract: None, dwell: None }
+        Self { peck_depth: None, retract: None, dwell: None, onion_skin: None }
     }
 
     /// Depth of one peck, in millimetres. Validated when the operation runs.
@@ -49,6 +52,15 @@ impl DrillCycle {
         self
     }
 
+    /// Leave `mm` millimetres above the hole bottom until the last peck.
+    ///
+    /// Earlier pecks are the ordinary plan of `depth - mm`. Only the last peck reaches the
+    /// bottom. Replaces a skin already set.
+    pub fn onion_skin(mut self, mm: f64) -> Self {
+        self.onion_skin = Some(mm);
+        self
+    }
+
     pub fn peck(&self) -> Option<f64> {
         self.peck_depth
     }
@@ -61,6 +73,11 @@ impl DrillCycle {
         self.dwell
     }
 
+    /// Skin left above the hole bottom, in millimetres. `None` when the cycle has no onion skin.
+    pub fn onion(&self) -> Option<f64> {
+        self.onion_skin
+    }
+
     fn validate(self) -> Result<()> {
         if let Some(depth) = self.peck_depth {
             positive(depth, "peck depth")?;
@@ -70,6 +87,9 @@ impl DrillCycle {
         }
         if let Some(seconds) = self.dwell {
             non_negative(seconds, "dwell")?;
+        }
+        if let Some(skin) = self.onion_skin {
+            positive(skin, "onion skin")?;
         }
         Ok(())
     }
@@ -152,7 +172,7 @@ impl Drilling {
             if r_plane <= bottom {
                 return Err(check::invalid("R plane must be above the hole bottom"));
             }
-            let levels = hole_levels(self.cycle.peck(), top_z, bottom)?;
+            let levels = hole_levels(self.cycle.peck(), top_z, bottom, self.cycle.onion())?;
             let last = levels.len().saturating_sub(1);
             check::push(&mut moves, Move::Rapid { to: Point3::new(x, y, clearance)? })?;
             check::push(&mut moves, Move::Rapid { to: Point3::new(x, y, r_plane)? })?;
@@ -275,7 +295,26 @@ impl DrillOp {
 }
 
 /// Peck Z levels for one hole. The last entry is exactly `bottom`.
-fn hole_levels(peck: Option<f64>, top_z: f64, bottom: f64) -> Result<Vec<f64>> {
+///
+/// With no onion skin this is the ordinary peck list. With a skin, earlier pecks stop
+/// `onion` short of the hole and only the last peck reaches `bottom`.
+fn hole_levels(peck: Option<f64>, top_z: f64, bottom: f64, onion: Option<f64>) -> Result<Vec<f64>> {
+    let Some(skin) = onion else {
+        return hole_levels_plain(peck, top_z, bottom);
+    };
+    let depth = top_z - bottom;
+    let step = peck.unwrap_or(depth);
+    let plan = DepthPlan::new(top_z, depth, step, DepthEntry::Plunge).with_onion_skin(skin);
+    let mut levels: Vec<f64> = plan.depths()?.into_iter().map(|level| top_z - level).collect();
+    match levels.last_mut() {
+        Some(last) => *last = bottom,
+        None => levels.push(bottom),
+    }
+    Ok(levels)
+}
+
+/// Peck Z levels with no onion skin. The last entry is exactly `bottom`.
+fn hole_levels_plain(peck: Option<f64>, top_z: f64, bottom: f64) -> Result<Vec<f64>> {
     let Some(peck) = peck else {
         return Ok(vec![bottom]);
     };
@@ -364,6 +403,16 @@ mod tests {
 
     fn near(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    fn plunge_z(path: &Toolpath) -> Vec<f64> {
+        path.moves()
+            .iter()
+            .filter_map(|mv| match mv {
+                Move::Linear { to, kind: CutKind::Plunge } => Some(to.z()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -532,6 +581,18 @@ mod tests {
         }
         assert!(fed_below, "the plunge has to go below the R plane");
         assert!(exceptions.is_empty(), "exceptions: none, found {exceptions:?}");
+    }
+
+    #[test]
+    fn onion_skin_pecks_stop_short_of_the_floor() {
+        // Depth 6 mm, peck 2 mm, skin 1 mm: -2, -4, -5, then the floor at -6.
+        // The same peck without a skin is -2, -4, -6.
+        let skinned = DrillCycle::new().peck_depth(2.0).onion_skin(1.0);
+        let path = one_hole(skinned, -6.0).expand(0.0, 2.0, 5.0, CutKind::Plunge).unwrap();
+        let feeds = plunge_z(&path);
+        assert_eq!(feeds, vec![-2.0, -4.0, -5.0, -6.0]);
+        let plain = one_hole(DrillCycle::new().peck_depth(2.0), -6.0).expand(0.0, 2.0, 5.0, CutKind::Plunge).unwrap();
+        assert_eq!(plunge_z(&plain), vec![-2.0, -4.0, -6.0]);
     }
 
     #[test]

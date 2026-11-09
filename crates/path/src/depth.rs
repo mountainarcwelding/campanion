@@ -4,6 +4,11 @@
 //! at `stock_z - d`. Passes are spaced by the step-down. The last pass is the total depth and
 //! is not deeper: 5 mm at a 2 mm step is 2, 4, 5.
 //!
+//! [`DepthPlan::with_onion_skin`] leaves a skin. Earlier passes stop short of the total depth
+//! by that thickness, and only the last pass reaches it. The final pass uses the same entry as
+//! the others. Five millimetres at a two millimetre step with a one millimetre skin is 2, 4, 5.
+//! Six millimetres at a two millimetre step with a one millimetre skin is 2, 4, 5, 6.
+//!
 //! A ramp follows the contour. Its angle with the XY plane never exceeds the given maximum.
 //! A helix is a counter-clockwise circle about the contour's bounding-box centre; each full
 //! turn lowers Z by the pitch. A plunge is a vertical move at the contour start. The contour
@@ -94,6 +99,8 @@ impl DepthTabs {
 /// limit when the posted move actually starts at the retract height. Later passes start
 /// at the previous level. A plunge ignores it and still starts on the stock. Tabs, when
 /// set, lift a ramp across each bridge instead of letting that descent cut through it.
+/// `onion_skin`, when set, is the thickness left above the floor until the last pass.
+/// Only that last pass reaches `total_depth`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DepthPlan {
     stock_z: f64,
@@ -102,15 +109,16 @@ pub struct DepthPlan {
     entry: DepthEntry,
     entry_start: f64,
     tabs: Option<DepthTabs>,
+    onion_skin: Option<f64>,
 }
 
 impl DepthPlan {
     /// `total_depth` and `step_down` are millimetres downward from `stock_z`.
     ///
     /// The first ramp or helix starts on the stock surface. Values are checked when the plan is used.
-    /// Tabs are off until [`Self::with_tabs`].
+    /// Tabs are off until [`Self::with_tabs`]. Onion skin is off until [`Self::with_onion_skin`].
     pub fn new(stock_z: f64, total_depth: f64, step_down: f64, entry: DepthEntry) -> Self {
-        Self { stock_z, total_depth, step_down, entry, entry_start: stock_z, tabs: None }
+        Self { stock_z, total_depth, step_down, entry, entry_start: stock_z, tabs: None, onion_skin: None }
     }
 
     /// Start a ramp or helix at `z` instead of the stock surface.
@@ -125,6 +133,17 @@ impl DepthPlan {
     /// Leave bridges on this plan. Replaces a tab spec already set.
     pub fn with_tabs(mut self, tabs: DepthTabs) -> Self {
         self.tabs = Some(tabs);
+        self
+    }
+
+    /// Leave `mm` millimetres of skin above the floor.
+    ///
+    /// Earlier passes are [`pass_depths`] of `total_depth - mm`. Only the last pass reaches
+    /// [`Self::total_depth`], and it uses the same entry as the other passes. `mm` must be
+    /// positive and strictly less than the total depth. Checked when the plan is used.
+    /// Replaces a skin already set.
+    pub fn with_onion_skin(mut self, mm: f64) -> Self {
+        self.onion_skin = Some(mm);
         self
     }
 
@@ -151,6 +170,22 @@ impl DepthPlan {
 
     pub fn tabs(self) -> Option<DepthTabs> {
         self.tabs
+    }
+
+    /// Skin left above the floor, in millimetres. `None` when the plan has no onion skin.
+    pub fn onion_skin(self) -> Option<f64> {
+        self.onion_skin
+    }
+
+    /// Depth of each pass, in millimetres downward from the stock surface.
+    ///
+    /// Without onion skin this is [`pass_depths`]. With onion skin, roughing stops at
+    /// `total_depth - onion_skin` and only the last pass is the full depth.
+    pub fn depths(self) -> Result<Vec<f64>> {
+        match self.onion_skin {
+            None => pass_depths(self.total_depth, self.step_down),
+            Some(skin) => onion_pass_depths(self.total_depth, self.step_down, skin),
+        }
     }
 }
 
@@ -185,6 +220,133 @@ pub fn pass_depths(total_depth: f64, step_down: f64) -> Result<Vec<f64>> {
     Ok(depths)
 }
 
+/// Roughing passes for `total_depth - skin`, then one pass at `total_depth`.
+///
+/// Only that last pass reaches full depth. `skin` must be positive and strictly less than
+/// `total_depth`.
+fn onion_pass_depths(total_depth: f64, step_down: f64, skin: f64) -> Result<Vec<f64>> {
+    let total_depth = capped_positive(total_depth, "total depth")?;
+    let skin = capped_positive(skin, "onion skin")?;
+    if skin >= total_depth {
+        return Err(check::invalid("onion skin must be less than total depth"));
+    }
+    let roughing = total_depth - skin;
+    if !(roughing > 0.0) || roughing >= total_depth {
+        return Err(check::invalid("onion skin must be less than total depth"));
+    }
+    let mut depths = pass_depths(roughing, step_down)?;
+    if depths.last().is_some_and(|depth| *depth + 1e-9 >= total_depth) {
+        return Err(check::invalid("onion skin must be less than total depth"));
+    }
+    if depths.len() >= MAX_PASSES {
+        return Err(check::invalid(format!("too many depth passes: limit is {MAX_PASSES}")));
+    }
+    depths.push(total_depth);
+    Ok(depths)
+}
+
+/// Confirm that only the last level in `levels` reaches `floor_z`.
+///
+/// `levels` are cut heights in order. Z is up, so a deeper pass is a smaller Z. Every level
+/// before the last is strictly above `floor_z` and at least `onion_skin` above it, within
+/// `tolerance` millimetres. The last level is the floor within that tolerance.
+pub fn check_onion_levels(levels: &[f64], floor_z: f64, onion_skin: f64, tolerance: f64) -> Result<()> {
+    if levels.is_empty() {
+        return Err(check::invalid("onion skin produced no depth pass"));
+    }
+    if !(floor_z.is_finite() && onion_skin.is_finite() && tolerance.is_finite() && tolerance >= 0.0) {
+        return Err(check::invalid("onion skin check is not finite"));
+    }
+    if onion_skin <= 0.0 {
+        return Err(check::invalid("onion skin must be positive"));
+    }
+    let last = levels[levels.len() - 1];
+    if !last.is_finite() || (last - floor_z).abs() > tolerance {
+        return Err(check::invalid("onion skin last pass does not reach the floor"));
+    }
+    let skin_z = floor_z + onion_skin;
+    for z in &levels[..levels.len() - 1] {
+        if !z.is_finite() || *z <= floor_z + tolerance {
+            return Err(check::invalid("a depth pass before the last reaches full depth"));
+        }
+        if *z + tolerance < skin_z {
+            return Err(check::invalid("a depth pass cuts into the onion skin"));
+        }
+    }
+    Ok(())
+}
+
+/// Same check as [`check_onion_levels`], over each descent in `cut_z`.
+///
+/// Consecutive heights within `tolerance` are one level. A later height that is higher starts
+/// another descent, which is how a second contour or a finish link begins. At least one descent
+/// reaches `floor_z`. A descent that stays up must not enter the skin.
+pub fn check_onion_cuts(cut_z: &[f64], floor_z: f64, onion_skin: f64, tolerance: f64) -> Result<()> {
+    if !(tolerance.is_finite() && tolerance >= 0.0) {
+        return Err(check::invalid("onion skin check is not finite"));
+    }
+    let levels = collapse_heights(cut_z, tolerance);
+    let descents = split_descents(&levels, tolerance);
+    if descents.is_empty() {
+        return Err(check::invalid("onion skin produced no depth pass"));
+    }
+    let mut reached = false;
+    for descent in &descents {
+        let Some(last) = descent.last().copied() else {
+            continue;
+        };
+        if (last - floor_z).abs() <= tolerance {
+            reached = true;
+            check_onion_levels(descent, floor_z, onion_skin, tolerance)?;
+        } else if last < floor_z + onion_skin - tolerance {
+            return Err(check::invalid("a depth pass cuts into the onion skin"));
+        }
+    }
+    if !reached {
+        return Err(check::invalid("onion skin last pass does not reach the floor"));
+    }
+    Ok(())
+}
+
+fn collapse_heights(heights: &[f64], tolerance: f64) -> Vec<f64> {
+    let mut levels = Vec::new();
+    for z in heights {
+        if levels.last().is_none_or(|prev: &f64| (*z - prev).abs() > tolerance) {
+            levels.push(*z);
+        }
+    }
+    levels
+}
+
+fn split_descents(levels: &[f64], tolerance: f64) -> Vec<Vec<f64>> {
+    let mut descents = Vec::new();
+    let mut current = Vec::new();
+    for z in levels {
+        if current.last().is_some_and(|prev: &f64| *z > *prev + tolerance) {
+            descents.push(std::mem::take(&mut current));
+        }
+        current.push(*z);
+    }
+    if !current.is_empty() {
+        descents.push(current);
+    }
+    descents
+}
+
+/// Cut heights of a toolpath, in order. Side cuts win. A drill, which only plunges, uses those.
+pub fn onion_cut_heights(moves: &[Move]) -> Vec<f64> {
+    let mut cuts = Vec::new();
+    let mut plunges = Vec::new();
+    for mv in moves {
+        match *mv {
+            Move::Linear { to, kind: CutKind::Cut } | Move::Arc { to, kind: CutKind::Cut, .. } => cuts.push(to.z()),
+            Move::Linear { to, kind: CutKind::Plunge } | Move::Arc { to, kind: CutKind::Plunge, .. } => plunges.push(to.z()),
+            _ => {}
+        }
+    }
+    if cuts.is_empty() { plunges } else { cuts }
+}
+
 /// Cut `contour` once at each depth, entering with `plan.entry`.
 ///
 /// Tabs allow an open contour. Without them the contour must be closed.
@@ -203,7 +365,7 @@ pub fn depth_toolpath(contour: &Contour, plan: &DepthPlan, tolerance: &Tolerance
     if !contour.is_closed() {
         return Err(check::invalid("depth passes need a closed contour"));
     }
-    let depths = pass_depths(plan.total_depth, plan.step_down)?;
+    let depths = plan.depths()?;
     let length = contour.length()?;
     if !length.is_finite() || length <= tolerance.linear() {
         return Err(check::invalid("contour length is too small"));
@@ -561,7 +723,7 @@ impl TabCut {
 
 fn tabbed_toolpath(contour: &Contour, plan: &DepthPlan, tolerance: &Tolerance, entry_start: f64) -> Result<Toolpath> {
     let cut = prepare_tabs(contour, plan, tolerance)?;
-    let depths = pass_depths(plan.total_depth, plan.step_down)?;
+    let depths = plan.depths()?;
     let floor = cut.stock_z - plan.total_depth;
     finite(floor, "final depth")?;
     match plan.entry {
@@ -978,6 +1140,84 @@ mod tests {
     }
 
     #[test]
+    fn onion_skin_five_at_two_with_one_is_two_four_then_five() {
+        let plan = DepthPlan::new(0.0, 5.0, 2.0, DepthEntry::Plunge).with_onion_skin(1.0);
+        let depths = plan.depths().unwrap();
+        assert_eq!(depths, vec![2.0, 4.0, 5.0]);
+        assert_eq!(depths.last().copied(), Some(5.0));
+        // Stock Z is 0, so the same passes sit at -2, -4, then -5.
+        let shape = rect(10.0, 10.0);
+        let path = depth_toolpath(&shape, &plan, &Tolerance::default()).unwrap();
+        let heights = onion_cut_heights(path.moves());
+        check_onion_cuts(&heights, -5.0, 1.0, 1e-6).unwrap();
+        let levels = collapse_heights(&heights, 1e-6);
+        assert_eq!(levels, vec![-2.0, -4.0, -5.0]);
+
+        // A skin that does not land on the ordinary last step inserts the floor after it.
+        let deeper = DepthPlan::new(0.0, 6.0, 2.0, DepthEntry::Plunge).with_onion_skin(1.0);
+        assert_eq!(deeper.depths().unwrap(), vec![2.0, 4.0, 5.0, 6.0]);
+        assert_eq!(pass_depths(6.0, 2.0).unwrap(), vec![2.0, 4.0, 6.0]);
+        let path = depth_toolpath(&shape, &deeper, &Tolerance::default()).unwrap();
+        check_onion_cuts(&onion_cut_heights(path.moves()), -6.0, 1.0, 1e-6).unwrap();
+
+        // Omitted skin is the ordinary plan.
+        assert_eq!(DepthPlan::new(0.0, 5.0, 2.0, DepthEntry::Plunge).depths().unwrap(), pass_depths(5.0, 2.0).unwrap());
+        assert!(DepthPlan::new(0.0, 5.0, 2.0, DepthEntry::Plunge).onion_skin().is_none());
+    }
+
+    #[test]
+    fn onion_skin_final_pass_uses_the_same_entry() {
+        let shape = rect(40.0, 10.0);
+        let angle = 0.2;
+        let plan = DepthPlan::new(0.0, 6.0, 2.0, DepthEntry::Ramp { max_angle: angle }).with_onion_skin(1.0);
+        let path = depth_toolpath(&shape, &plan, &Tolerance::default()).unwrap();
+        check_onion_cuts(&onion_cut_heights(path.moves()), -6.0, 1.0, 1e-6).unwrap();
+        let mut lead_to_floor = false;
+        for mv in path.moves() {
+            if let Move::Linear { to, kind: CutKind::LeadIn } = *mv
+                && (to.z() + 6.0).abs() < 1e-6
+            {
+                lead_to_floor = true;
+            }
+        }
+        assert!(lead_to_floor, "the last pass did not ramp to the floor");
+
+        let helix = DepthPlan::new(0.0, 6.0, 2.0, DepthEntry::Helix { radius: 2.0, pitch: 1.5 }).with_onion_skin(1.0);
+        let path = depth_toolpath(&shape, &helix, &Tolerance::default()).unwrap();
+        check_onion_cuts(&onion_cut_heights(path.moves()), -6.0, 1.0, 1e-6).unwrap();
+        let mut helix_to_floor = false;
+        for mv in path.moves() {
+            if let Move::Arc { to, kind: CutKind::LeadIn, .. } = *mv
+                && (to.z() + 6.0).abs() < 1e-6
+            {
+                helix_to_floor = true;
+            }
+        }
+        assert!(helix_to_floor, "the last pass did not helix to the floor");
+    }
+
+    #[test]
+    fn onion_skin_rejects_a_skin_that_is_not_inside_the_depth() {
+        let plunge = DepthEntry::Plunge;
+        for skin in [0.0, -1.0, 5.0, 5.1, f64::NAN, f64::INFINITY] {
+            let plan = DepthPlan::new(0.0, 5.0, 2.0, plunge).with_onion_skin(skin);
+            assert!(plan.depths().is_err(), "accepted skin {skin}");
+        }
+        let shape = rect(10.0, 10.0);
+        let bad = DepthPlan::new(0.0, 5.0, 2.0, plunge).with_onion_skin(5.0);
+        assert!(depth_toolpath(&shape, &bad, &Tolerance::default()).is_err());
+    }
+
+    #[test]
+    fn onion_skin_with_tabs_still_reaches_the_floor_last() {
+        let shape = rect(80.0, 40.0);
+        let spec = crate::TabSpec::count(4, 8.0).height(2.0);
+        let plan = DepthPlan::new(0.0, 6.0, 2.0, DepthEntry::Plunge).with_onion_skin(1.0).with_tabs(crate::DepthTabs::new(spec, 6.0, 2.0, 0.0));
+        let path = depth_toolpath(&shape, &plan, &Tolerance::default()).unwrap();
+        check_onion_cuts(&onion_cut_heights(path.moves()), -6.0, 1.0, 1e-6).unwrap();
+    }
+
+    #[test]
     fn ramp_angle_is_never_exceeded() {
         let shape = rect(30.0, 10.0);
         let max_angle = 0.1_f64.atan();
@@ -1330,6 +1570,39 @@ mod tests {
         let centre = Point::new(0.0, 0.0).unwrap();
         let arc = |start| Segment::Arc(campanion_geom::Arc::new(centre, radius, start, std::f64::consts::PI).unwrap());
         Contour::try_new(vec![arc(0.0), arc(std::f64::consts::PI)], true, &Tolerance::default()).unwrap()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn random_onion_skin_only_the_last_pass_reaches_full_depth(
+            depth in 0.5f64..30.0,
+            step_frac in 0.2f64..1.2,
+            skin_frac in 0.05f64..0.8,
+        ) {
+            let step = (depth * step_frac).max(0.05);
+            let skin = (depth * skin_frac).clamp(0.02, depth - 0.02);
+            prop_assume!(skin + 1e-6 < depth);
+            prop_assume!(step <= depth * 2.0);
+            let plan = DepthPlan::new(0.0, depth, step, DepthEntry::Plunge).with_onion_skin(skin);
+            let levels = plan.depths().unwrap();
+            let mut expect = pass_depths(depth - skin, step).unwrap();
+            expect.push(depth);
+            prop_assert_eq!(&levels[..], &expect[..]);
+            let floor = -depth;
+            let zs: Vec<f64> = levels.iter().map(|level| -level).collect();
+            check_onion_levels(&zs, floor, skin, 1e-6).unwrap();
+            check_onion_cuts(&zs, floor, skin, 1e-6).unwrap();
+            prop_assert!((levels.last().copied().unwrap_or(0.0) - depth).abs() < 1e-9);
+            for earlier in &levels[..levels.len() - 1] {
+                prop_assert!(*earlier < depth - 1e-9);
+                prop_assert!(*earlier <= depth - skin + 1e-6);
+            }
+            let shape = rect(12.0, 8.0);
+            let path = depth_toolpath(&shape, &plan, &Tolerance::default()).unwrap();
+            check_onion_cuts(&onion_cut_heights(path.moves()), floor, skin, 1e-6).unwrap();
+        }
     }
 
     proptest! {

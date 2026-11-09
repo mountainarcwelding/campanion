@@ -23,7 +23,7 @@ mod tool;
 mod toolpath;
 
 pub use chamfer::{Chamfer, ChamferOp};
-pub use depth::{DepthEntry, DepthPlan, DepthTabs, depth_toolpath, pass_depths};
+pub use depth::{DepthEntry, DepthPlan, DepthTabs, check_onion_cuts, check_onion_levels, depth_toolpath, onion_cut_heights, pass_depths};
 pub use drill::{DrillCycle, DrillHit, DrillOp, Drilling};
 pub use engrave::{Engrave, EngraveOp};
 pub use face::{Face, FaceOp};

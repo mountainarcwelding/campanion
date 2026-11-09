@@ -132,7 +132,7 @@ use campanion_ir::{
     CutterSense as IrCutterSense, Feeds, FiveAxisSetup, Kinematics, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup,
     SolutionPolicy, Tool as IrTool, ToolPose, Vec3,
 };
-use campanion_path::{CutterSense, DepthEntry, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
+use campanion_path::{CutterSense, DepthEntry, DepthPlan, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
 use serde_json::{Map, Number, Value};
 
 use crate::error::{CliError, MAX_JSON_BYTES};
@@ -695,6 +695,8 @@ impl Finish {
 /// [`Self::dwell`] is the pause at the bottom of a drill, in seconds. Other kinds store `None`.
 /// On a drill, [`Self::step_down`] is the peck depth: when it is less than [`Self::depth`] the
 /// drill pecks, and otherwise the drill feeds to depth in one move.
+/// [`Self::onion_skin`] is the thickness left until the last depth pass. `None` means the file
+/// omitted it, and the depth plan is unchanged.
 /// [`Self::index_deg`] is the machine A/B angle for this operation, in degrees. `None` means the
 /// file omitted it. A job with a rotary setup then runs the operation at 0°. A wrap rejects
 /// `index_deg`. [`Self::cylinder_diameter`] is set only on a wrap. [`Self::u_offset`] and
@@ -711,6 +713,8 @@ pub struct Operation {
     tool_id: u32,
     depth: f64,
     step_down: f64,
+    /// Thickness left until the last depth pass, in millimetres. `None` when the file omits `onion_skin`.
+    onion_skin: Option<f64>,
     /// Pause at the bottom of a drill, in seconds. `None` except on a drill that sets `dwell`.
     dwell: Option<f64>,
     stepover: Option<f64>,
@@ -872,6 +876,15 @@ impl Operation {
     /// and otherwise the drill feeds to depth in one move.
     pub fn step_down(&self) -> f64 {
         self.step_down
+    }
+
+    /// Thickness left until the last depth pass, in millimetres.
+    ///
+    /// `None` when the file omits `onion_skin`. Earlier passes then follow the ordinary depth
+    /// plan. When set, those passes stop this far short of [`Self::depth`] and only the last
+    /// pass reaches that depth.
+    pub fn onion_skin(&self) -> Option<f64> {
+        self.onion_skin
     }
 
     /// Pause at the bottom of a drilled hole, in seconds.
@@ -1883,6 +1896,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "depth",
             "dwell",
             "step_down",
+            "onion_skin",
             "stepover",
             "scallop_height",
             "sample_step",
@@ -1994,6 +2008,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale)?;
     let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
+    let onion_skin = parse_onion_skin(map, kind, depth, step_down, finish.as_ref(), scale)?;
     Ok(Operation {
         name,
         kind,
@@ -2001,6 +2016,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         tool_id,
         depth,
         step_down,
+        onion_skin,
         dwell,
         stepover,
         scallop_height: None,
@@ -2036,6 +2052,7 @@ fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileEr
         "layers",
         "depth",
         "step_down",
+        "onion_skin",
         "top_z",
         "grid",
         "min_slope_deg",
@@ -2127,6 +2144,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         tool_id,
         depth: 0.0,
         step_down: 0.0,
+        onion_skin: None,
         dwell: None,
         stepover,
         scallop_height,
@@ -2273,6 +2291,7 @@ fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErro
     for key in [
         "layers",
         "depth",
+        "onion_skin",
         "scallop_height",
         "sample_step",
         "angle_deg",
@@ -2363,6 +2382,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         tool_id,
         depth: 0.0,
         step_down,
+        onion_skin: None,
         dwell: None,
         stepover: Some(stepover),
         scallop_height: None,
@@ -2397,6 +2417,7 @@ fn reject_waterline_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFile
     for key in [
         "layers",
         "depth",
+        "onion_skin",
         "stepover",
         "scallop_height",
         "sample_step",
@@ -2486,6 +2507,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         tool_id,
         depth: 0.0,
         step_down,
+        onion_skin: None,
         dwell: None,
         stepover: None,
         scallop_height: None,
@@ -2559,6 +2581,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         return Err(JobFileError::invalid(format!("unknown tool {tool_id}")));
     }
     let (depth, step_down) = parse_depth_and_step(map, OperationKind::Wrap, scale, None)?;
+    let onion_skin = parse_onion_skin(map, OperationKind::Wrap, depth, step_down, None, scale)?;
     let Some(diameter_value) = optional(map, "diameter") else {
         return Err(JobFileError::invalid("wrap needs a diameter"));
     };
@@ -2580,6 +2603,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         tool_id,
         depth,
         step_down,
+        onion_skin,
         dwell: None,
         stepover: None,
         scallop_height: None,
@@ -2615,6 +2639,7 @@ fn reject_rotary_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErr
         "layers",
         "depth",
         "step_down",
+        "onion_skin",
         "scallop_height",
         "angle_deg",
         "margin",
@@ -2700,6 +2725,7 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         tool_id,
         depth: 0.0,
         step_down: 0.0,
+        onion_skin: None,
         dwell: None,
         stepover,
         scallop_height: None,
@@ -3331,16 +3357,62 @@ fn finite_height(z: f64, what: &str) -> Result<f64, JobFileError> {
 }
 
 fn check_depth(depth: f64, step_down: f64) -> Result<(), JobFileError> {
-    let depths = campanion_path::pass_depths(depth, step_down).map_err(|err| {
-        let message = err.to_string();
-        let detail = message.strip_prefix("invalid input: ").unwrap_or(message.as_str());
-        let detail = detail.replacen("total depth", "depth", 1);
-        JobFileError::invalid(detail.replacen("step-down", "step_down", 1))
-    })?;
+    let depths = campanion_path::pass_depths(depth, step_down).map_err(depth_plan_error)?;
     if depths.is_empty() {
         return Err(JobFileError::invalid("depth plan is empty"));
     }
     Ok(())
+}
+
+/// Optional skin on a profile, pocket, face, engrave, drill or wrap.
+///
+/// The length is positive and strictly less than `depth`. Roughing passes use
+/// `depth - onion_skin`, then one pass at `depth`. An omitted field stays `None`.
+fn parse_onion_skin(
+    map: &Map<String, Value>,
+    kind: OperationKind,
+    depth: f64,
+    step_down: f64,
+    finish: Option<&Finish>,
+    scale: f64,
+) -> Result<Option<f64>, JobFileError> {
+    let Some(value) = optional(map, "onion_skin") else {
+        return Ok(None);
+    };
+    if !matches!(
+        kind,
+        OperationKind::Profile { .. }
+            | OperationKind::Pocket
+            | OperationKind::Face
+            | OperationKind::Engrave
+            | OperationKind::Drill
+            | OperationKind::Wrap
+    ) {
+        return Err(JobFileError::invalid("onion_skin is only valid on a profile, a pocket, a face, an engrave, a drill or a wrap"));
+    }
+    let skin = positive_length(value, scale, "onion_skin")?;
+    if skin >= depth {
+        return Err(JobFileError::invalid("onion_skin must be less than depth"));
+    }
+    check_onion_plan(depth, step_down, skin)?;
+    if let Some(finish) = finish {
+        check_onion_plan(depth, finish.step_down(), skin)?;
+    }
+    Ok(Some(skin))
+}
+
+fn check_onion_plan(depth: f64, step_down: f64, skin: f64) -> Result<(), JobFileError> {
+    let plan = DepthPlan::new(0.0, depth, step_down, DepthEntry::Plunge).with_onion_skin(skin);
+    plan.depths().map_err(depth_plan_error)?;
+    Ok(())
+}
+
+fn depth_plan_error(err: impl std::fmt::Display) -> JobFileError {
+    let message = err.to_string();
+    let detail = message.strip_prefix("invalid input: ").unwrap_or(message.as_str());
+    let detail = detail.replacen("total depth", "depth", 1);
+    let detail = detail.replacen("step-down", "step_down", 1);
+    JobFileError::invalid(detail.replacen("onion skin", "onion_skin", 1))
 }
 
 fn scale_key(map: &mut Map<String, Value>, key: &str, scale: f64) -> Result<(), JobFileError> {
@@ -6528,6 +6600,135 @@ mod tests {
         ];
         for (index, (text, needle)) in cases.iter().enumerate() {
             let err = load(&write_job(&format!("assembly-bad-{index}"), text)).expect_err(needle);
+            assert!(err.to_string().contains(needle), "{needle}: {err}");
+        }
+    }
+
+    #[test]
+    fn onion_skin_parses_in_mm_and_inches_and_rejects_a_bad_value() {
+        let tools = r#"[{"id":1,"diameter":6}]"#;
+        let mm = load(&write_job(
+            "onion-mm",
+            &op_job(
+                "mm",
+                tools,
+                r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"onion_skin":1,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("mm");
+        near(mm.operations()[0].onion_skin().expect("skin"), 1.0);
+
+        let inch = load(&write_job(
+            "onion-inch",
+            &op_job(
+                "inch",
+                r#"[{"id":1,"diameter":0.25}]"#,
+                r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":0.5,"onion_skin":0.1,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("inch");
+        near(inch.operations()[0].onion_skin().expect("skin"), 2.54);
+        near(inch.operations()[0].depth(), 25.4);
+
+        let plain = load(&write_job(
+            "onion-omit",
+            &op_job(
+                "mm",
+                tools,
+                r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"feeds":{"cut":1}}"#,
+            ),
+        ))
+        .expect("omit");
+        assert!(plain.operations()[0].onion_skin().is_none());
+
+        for kind in ["pocket", "face", "engrave", "drill"] {
+            let op =
+                format!(r#"{{"name":"a","type":"{kind}","layers":["L"],"tool_id":1,"depth":5,"step_down":2,"onion_skin":1,"feeds":{{"cut":1}}}}"#);
+            let job = load(&write_job(&format!("onion-{kind}"), &op_job("mm", tools, &op))).unwrap_or_else(|err| panic!("{kind}: {err}"));
+            near(job.operations()[0].onion_skin().expect("skin"), 1.0);
+        }
+
+        let letters =
+            r#"{"name":"letters","type":"wrap","layers":["L"],"tool_id":1,"depth":6,"step_down":2,"onion_skin":1,"diameter":40,"feeds":{"cut":1}}"#;
+        let wrap = load(&write_job("onion-wrap", &rotary_job("mm", tools, &format!("[{letters}]")))).expect("wrap");
+        near(wrap.operations()[0].onion_skin().expect("skin"), 1.0);
+
+        let cases = [
+            (
+                op_job(
+                    "mm",
+                    tools,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"onion_skin":0,"feeds":{"cut":1}}"#,
+                ),
+                "onion_skin must be greater than 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    tools,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"onion_skin":-1,"feeds":{"cut":1}}"#,
+                ),
+                "onion_skin must be greater than 0",
+            ),
+            (
+                op_job(
+                    "mm",
+                    tools,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"onion_skin":6,"feeds":{"cut":1}}"#,
+                ),
+                "onion_skin must be less than depth",
+            ),
+            (
+                op_job(
+                    "mm",
+                    tools,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":6,"step_down":2,"onion_skin":6.1,"feeds":{"cut":1}}"#,
+                ),
+                "onion_skin must be less than depth",
+            ),
+            (
+                op_job(
+                    "mm",
+                    tools,
+                    r#"{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1024,"step_down":1,"onion_skin":0.5,"feeds":{"cut":1}}"#,
+                ),
+                "too many depth passes",
+            ),
+            (
+                op_job(
+                    "mm",
+                    tools,
+                    r#"{"name":"a","type":"chamfer","layers":["L"],"side":"outside","tool_id":1,"width":0.5,"v_angle_deg":90,"onion_skin":0.1,"feeds":{"cut":1}}"#,
+                ),
+                "onion_skin is only valid on a profile, a pocket, a face, an engrave, a drill or a wrap",
+            ),
+            (
+                envelope("dome.stl", r#"[{"id":1,"diameter":6}]"#, r#"[{"name":"a","type":"surface","tool_id":1,"onion_skin":1,"feeds":{"cut":1}}]"#),
+                "onion_skin is not valid on a surface",
+            ),
+            (
+                envelope("dome.stl", r#"[{"id":1,"diameter":6}]"#, r#"[{"name":"a","type":"rough","tool_id":1,"onion_skin":1,"feeds":{"cut":1}}]"#),
+                "onion_skin is not valid on a rough",
+            ),
+            (
+                envelope(
+                    "dome.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"waterline","tool_id":1,"onion_skin":1,"feeds":{"cut":1}}]"#,
+                ),
+                "onion_skin is not valid on a waterline",
+            ),
+            (
+                envelope(
+                    "dome.stl",
+                    r#"[{"id":1,"diameter":6}]"#,
+                    r#"[{"name":"a","type":"rotary_finish","tool_id":1,"onion_skin":1,"feeds":{"cut":1}}]"#,
+                ),
+                "onion_skin is not valid on a rotary finish",
+            ),
+        ];
+        for (index, (text, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("onion-bad-{index}"), text)).expect_err(needle);
             assert!(err.to_string().contains(needle), "{needle}: {err}");
         }
     }

@@ -123,8 +123,8 @@ use std::process::ExitCode;
 use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{
-    AssemblySegment, ClBlock, ClPath, CompensationMode, Document, Event, Fixture, Import, ProcessKind, ProcessParams, Program, RotarySetup, Tool,
-    ToolAssembly, Vec3, hold_spindle,
+    AssemblySegment, ClBlock, ClMotion, ClPath, CompensationMode, Document, Event, Fixture, Import, MoveRole, ProcessKind, ProcessParams, Program,
+    RotarySetup, Tool, ToolAssembly, Vec3, hold_spindle,
 };
 use campanion_mesh::Mesh;
 use campanion_path::{
@@ -599,6 +599,10 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<Document, CliError> {
                 wrap::cut(&mut paths, op, tool, contours, &setup, job.tolerance().chord(), safe)?;
             }
         }
+        // Planning-frame Z, before a tilted plane maps the paths. A wrap checks its own levels.
+        if op.onion_skin().is_some() {
+            check_posted_onion(op, &paths)?;
+        }
         if matches!(op.kind(), OperationKind::Wrap) {
             let Some(setup) = job.rotary() else {
                 return Err(op_err(op, "wrap needs a rotary setup"));
@@ -894,7 +898,9 @@ fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide) -> R
     let radius = tool_radius(cut)?;
     let stock = cut.op.stock_to_leave();
     // Roughing stands off the wall by `wall` and stops `floor` short of the final depth.
-    link_profile(paths, cut, side, radius + stock.wall(), cut.op.depth() - stock.floor(), cut.op.step_down())?;
+    // A shortened link must not enter an onion skin. The finish link, at full depth, cuts it.
+    let rough = roughing_depth(cut.op, cut.op.depth() - stock.floor());
+    link_profile(paths, cut, side, radius + stock.wall(), rough, cut.op.step_down())?;
     if let Some(finish) = cut.op.finish() {
         link_profile(paths, cut, side, radius, cut.op.depth(), finish.step_down())?;
     }
@@ -921,7 +927,8 @@ fn pocket_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> 
     let stock = cut.op.stock_to_leave();
     // All regions at one depth, then the next depth. Linking each depth on its own keeps that
     // order; `order_and_link` only chooses the travel order inside the depth.
-    for z in depth_levels(cut.op, cut.op.depth() - stock.floor(), cut.op.step_down())? {
+    let area = roughing_depth(cut.op, cut.op.depth() - stock.floor());
+    for z in depth_levels(cut.op, area, cut.op.step_down())? {
         link_pocket_level(paths, cut, &regions, z, stepover, stock.wall())?;
     }
     let Some(finish) = cut.op.finish() else {
@@ -1008,14 +1015,16 @@ fn face_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
         return Err(op_err(cut.op, "face needs a stepover"));
     };
     let area = face_area(cut)?;
-    let face = FaceOp::new(diameter, stepover)
+    let mut face = FaceOp::new(diameter, stepover)
         .angle(cut.op.face_angle())
         .stock_z(0.0)
         .depth(cut.op.depth())
         .step_down(cut.op.step_down())
-        .retract_z(retract_z(cut.job))
-        .generate(&area)
-        .map_err(|err| op_err(cut.op, err))?;
+        .retract_z(retract_z(cut.job));
+    if let Some(skin) = cut.op.onion_skin() {
+        face = face.onion_skin(skin);
+    }
+    let face = face.generate(&area).map_err(|err| op_err(cut.op, err))?;
     push_doc(paths, Document::from_toolpath(face.toolpath(), cut.import)?)
 }
 
@@ -1059,8 +1068,12 @@ fn drill_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
     let selected = if circles.is_empty() { cut.contours } else { circles.as_slice() };
     let mut cycle = DrillCycle::new();
     // `step_down` is the peck. A step that reaches the full depth is one feed, not a peck.
-    if cut.op.step_down() < cut.op.depth() - 1e-9 {
+    // A skin still needs that peck so the last feed is the only one at full depth.
+    if cut.op.step_down() < cut.op.depth() - 1e-9 || cut.op.onion_skin().is_some() {
         cycle = cycle.peck_depth(cut.op.step_down());
+    }
+    if let Some(skin) = cut.op.onion_skin() {
+        cycle = cycle.onion_skin(skin);
     }
     if let Some(seconds) = cut.op.dwell() {
         cycle = cycle.dwell(seconds);
@@ -1117,7 +1130,7 @@ fn depth_at_retract(cut: &Cut<'_>, contour: &Contour) -> Result<Toolpath, CliErr
 }
 
 fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> Result<Toolpath, CliError> {
-    let mut plan = DepthPlan::new(0.0, total, step_down, cut.op.entry());
+    let mut plan = apply_onion(DepthPlan::new(0.0, total, step_down, cut.op.entry()), cut.op, total);
     // Linking rapids to the retract height and the entry feed starts there. A ramp or helix
     // planned from the stock surface would be posted from that higher Z over a length sized
     // for the stock step, and the first descent would be steeper than angle_deg. Size the
@@ -1364,13 +1377,32 @@ fn orient_climb(op: &Operation, side: ProfileSide, path: &Contour, tolerance: &T
     if is_ccw == want_ccw { Ok(path.clone()) } else { Ok(path.reversed()) }
 }
 
-/// Depths from [`campanion_path::pass_depths`], as absolute Z below the stock surface.
+/// Depths from the operation's depth plan, as absolute Z below the stock surface.
 fn cut_levels(op: &Operation) -> Result<Vec<f64>, CliError> {
     depth_levels(op, op.depth(), op.step_down())
 }
 
+/// Put the skin on a plan whose target is the operation depth. A shorter link is left alone.
+fn apply_onion(plan: DepthPlan, op: &Operation, total: f64) -> DepthPlan {
+    match op.onion_skin() {
+        Some(skin) if (total - op.depth()).abs() <= 1e-9 => plan.with_onion_skin(skin),
+        _ => plan,
+    }
+}
+
+/// Keep a link that already stops short of `depth` out of the skin.
+///
+/// When `onion_skin` is omitted this is `target`, so the ordinary depth is unchanged.
+fn roughing_depth(op: &Operation, target: f64) -> f64 {
+    match op.onion_skin() {
+        Some(skin) if (target - op.depth()).abs() > 1e-9 => target.min(op.depth() - skin),
+        _ => target,
+    }
+}
+
 fn depth_levels(op: &Operation, total: f64, step_down: f64) -> Result<Vec<f64>, CliError> {
-    let depths = campanion_path::pass_depths(total, step_down).map_err(|err| op_err(op, err))?;
+    let plan = apply_onion(DepthPlan::new(0.0, total, step_down, DepthEntry::Plunge), op, total);
+    let depths = plan.depths().map_err(|err| op_err(op, err))?;
     let mut levels = Vec::with_capacity(depths.len());
     for depth in depths {
         let z = -depth;
@@ -1543,6 +1575,60 @@ fn show(err: impl std::fmt::Display) -> CliError {
 
 fn op_err(op: &Operation, err: impl std::fmt::Display) -> CliError {
     CliError::run(format!("operation {}: {err}", op.name()))
+}
+
+/// Earlier cut passes stay at least `onion_skin` above the floor. The last pass reaches it.
+///
+/// A roughing link that leaves floor stock, and has no finish pass, never reaches the sheet
+/// floor. That path must still stay out of the skin. A wrap is checked from its planned levels.
+fn check_posted_onion(op: &Operation, paths: &[ClPath]) -> Result<(), CliError> {
+    if matches!(op.kind(), OperationKind::Wrap) {
+        return Ok(());
+    }
+    let Some(skin) = op.onion_skin() else {
+        return Ok(());
+    };
+    let floor = -op.depth();
+    const TOL: f64 = 1e-4;
+    let heights = onion_feed_heights(paths);
+    let holds_skin = op.finish().is_none() && op.stock_to_leave().floor() > 1e-9;
+    if holds_skin {
+        let skin_z = floor + skin;
+        if heights.iter().any(|z| *z < skin_z - TOL) {
+            return Err(op_err(op, "a depth pass cuts into the onion skin"));
+        }
+        return Ok(());
+    }
+    campanion_path::check_onion_cuts(&heights, floor, skin, TOL).map_err(|err| op_err(op, err))
+}
+
+/// Cut heights in order. Side cuts win. A drill, which only plunges, uses those.
+fn onion_feed_heights(paths: &[ClPath]) -> Vec<f64> {
+    let mut cuts = Vec::new();
+    let mut plunges = Vec::new();
+    for path in paths {
+        for block in path.blocks() {
+            let ClBlock::Motion(motion) = block else {
+                continue;
+            };
+            let Some((z, role)) = feed_z(motion) else {
+                continue;
+            };
+            match role {
+                MoveRole::Cut => cuts.push(z),
+                MoveRole::Plunge => plunges.push(z),
+                _ => {}
+            }
+        }
+    }
+    if cuts.is_empty() { plunges } else { cuts }
+}
+
+fn feed_z(motion: &ClMotion) -> Option<(f64, MoveRole)> {
+    match motion {
+        ClMotion::Linear { to, role, .. } | ClMotion::Arc { to, role, .. } | ClMotion::Helix { to, role, .. } => Some((to.tip().z(), *role)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use campanion_geom::{BoundingBox, Containment, Contour, Region, Tolerance};
 use campanion_import::{ImportOptions, import_dxf, import_svg};
 use campanion_ir::{ArcSense, ClMotion, MoveRole, Plane, Pose, Vec3};
-use campanion_path::{Compensation, CutDirection, CutKind, Move, PocketOp, PocketStrategy, ProfileOp, ProfileSide, Tool, pass_depths};
+use campanion_path::{
+    Compensation, CutDirection, CutKind, DepthEntry, DepthPlan, Move, PocketOp, PocketStrategy, ProfileOp, ProfileSide, Tool, check_onion_levels,
+};
 
 use crate::error::CliError;
 use crate::job::read_text;
@@ -56,6 +58,8 @@ pub(crate) struct MillSpec {
     pub feed: f64,
     pub depth: f64,
     pub step_down: f64,
+    /// Skin left until the last pass. `None` keeps the ordinary depth plan.
+    pub onion_skin: Option<f64>,
     pub clearance: f64,
     pub tolerance: f64,
     pub strategy: MillStrategy,
@@ -210,7 +214,7 @@ fn x_span(name: &str, contours: &[Contour]) -> Result<f64, CliError> {
 }
 
 fn toolpath_moves(spec: &MillSpec, contours: &[Contour]) -> Result<Vec<Move>, CliError> {
-    let depths = pass_depths(spec.depth, spec.step_down).map_err(|err| op_err(&spec.name, err))?;
+    let depths = mill_depths(&spec.name, spec.depth, spec.step_down, spec.onion_skin)?;
     let tolerance = Tolerance::new(spec.tolerance, Tolerance::DEFAULT_ANGULAR_RAD).map_err(|err| op_err(&spec.name, err))?;
     let tool = Tool::diameter(spec.tool_diameter);
     let mut moves = Vec::new();
@@ -618,6 +622,23 @@ fn resolve(job: &Path, relative: &str) -> PathBuf {
     }
 }
 
+/// Depth of each live-mill pass. `d` on the toolpath is the negation of these levels.
+///
+/// Only the last pass reaches `depth` when `onion_skin` is set. The check uses that planned
+/// list, not the machine pose after the frame mapping.
+pub(crate) fn mill_depths(name: &str, depth: f64, step_down: f64, onion_skin: Option<f64>) -> Result<Vec<f64>, CliError> {
+    let mut plan = DepthPlan::new(0.0, depth, step_down, DepthEntry::Plunge);
+    if let Some(skin) = onion_skin {
+        plan = plan.with_onion_skin(skin);
+    }
+    let depths = plan.depths().map_err(|err| op_err(name, err))?;
+    if let Some(skin) = onion_skin {
+        let levels: Vec<f64> = depths.iter().map(|level| -level).collect();
+        check_onion_levels(&levels, -depth, skin, 1e-6).map_err(|err| op_err(name, err))?;
+    }
+    Ok(depths)
+}
+
 fn op_err(name: &str, err: impl std::fmt::Display) -> CliError {
     let text = err.to_string();
     let detail = text.strip_prefix("invalid input: ").unwrap_or(text.as_str());
@@ -636,6 +657,7 @@ mod tests {
             feed: 100.0,
             depth: 1.0,
             step_down: 1.0,
+            onion_skin: None,
             clearance: 2.0,
             tolerance: 1e-4,
             strategy,
@@ -662,6 +684,15 @@ mod tests {
 
     fn tip(motion: &ClMotion) -> Vec3 {
         pose(motion).tip()
+    }
+
+    #[test]
+    fn onion_skin_levels_stop_short_of_full_depth() {
+        let skinned = mill_depths("mill", 6.0, 2.0, Some(1.0)).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(skinned, vec![2.0, 4.0, 5.0, 6.0]);
+        let plain = mill_depths("mill", 6.0, 2.0, None).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(plain, vec![2.0, 4.0, 6.0]);
+        assert!(mill_depths("mill", 5.0, 2.0, Some(5.0)).is_err());
     }
 
     #[test]

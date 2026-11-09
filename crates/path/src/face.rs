@@ -3,6 +3,8 @@
 //! Passes run parallel to the angle and step over outside the area, so the link between two
 //! lines does not cross the rectangle. Each depth repeats that pattern. [`crate::pass_depths`]
 //! chooses the levels: the last one is the total depth and is not deeper.
+//! [`FaceOp::onion_skin`] stops every earlier level short of that depth. Only the last
+//! level reaches it.
 //!
 //! An angle of `0` runs along +X. `π/2` runs along +Y. Any other angle is
 //! [`crate::PathError::NotSupported`].
@@ -10,7 +12,7 @@
 use campanion_geom::BoundingBox;
 
 use crate::check::{self, finite, invalid, non_negative, positive};
-use crate::pass_depths;
+use crate::depth::{DepthEntry, DepthPlan};
 use crate::toolpath::{CutKind, Move, Point3, ProcessEvent, Toolpath};
 use crate::{PathError, Result};
 
@@ -52,6 +54,7 @@ pub struct FaceOp {
     depth: f64,
     step_down: f64,
     retract_z: f64,
+    onion_skin: Option<f64>,
 }
 
 impl FaceOp {
@@ -59,7 +62,7 @@ impl FaceOp {
     ///
     /// It must be positive and no larger than `tool_diameter`.
     pub fn new(tool_diameter: f64, stepover: f64) -> Self {
-        Self { tool_diameter, stepover, angle: 0.0, overrun: None, stock_z: 0.0, depth: 0.0, step_down: 0.0, retract_z: 2.0 }
+        Self { tool_diameter, stepover, angle: 0.0, overrun: None, stock_z: 0.0, depth: 0.0, step_down: 0.0, retract_z: 2.0, onion_skin: None }
     }
 
     /// Direction of the passes, in radians from +X.
@@ -98,6 +101,15 @@ impl FaceOp {
         self
     }
 
+    /// Leave `mm` millimetres of skin. Earlier levels stop at `depth - mm`.
+    ///
+    /// Only the last level reaches [`Self::depth`]. `mm` must be positive and strictly less
+    /// than the depth. Checked when [`Self::generate`] runs.
+    pub fn onion_skin(mut self, mm: f64) -> Self {
+        self.onion_skin = Some(mm);
+        self
+    }
+
     /// Safe height for the rapid into each pass and the retract out. Defaults to 2 mm.
     pub fn retract_z(mut self, z: f64) -> Self {
         self.retract_z = z;
@@ -125,7 +137,11 @@ impl FaceOp {
         let along_x = along_x(self.angle)?;
         let stock_z = finite(self.stock_z, "stock z")?;
         let retract_z = finite(self.retract_z, "retract z")?;
-        let depths = pass_depths(self.depth, self.step_down)?;
+        let mut plan = DepthPlan::new(stock_z, self.depth, self.step_down, DepthEntry::Plunge);
+        if let Some(skin) = self.onion_skin {
+            plan = plan.with_onion_skin(skin);
+        }
+        let depths = plan.depths()?;
 
         let min_x = finite(area.min().x(), "area")?;
         let min_y = finite(area.min().y(), "area")?;
@@ -249,6 +265,7 @@ mod tests {
     use super::*;
     use crate::PathError;
     use crate::pass_depths;
+    use crate::{check_onion_cuts, onion_cut_heights};
     use campanion_geom::Point;
     use proptest::prelude::*;
     use std::f64::consts::{FRAC_PI_2, PI};
@@ -418,6 +435,18 @@ mod tests {
         let wider = FaceOp::new(10.0, 6.0).overrun(8.0).depth(1.0).step_down(1.0).generate(&area).expect("overrun");
         assert_at(plunges(wider.toolpath())[0], -8.0, 0.0, final_z);
         assert!(FaceOp::new(10.0, 10.0).depth(1.0).step_down(1.0).generate(&area).is_ok());
+    }
+
+    #[test]
+    fn onion_skin_stops_short_until_the_last_level() {
+        let area = rectangle(0.0, 0.0, 30.0, 20.0);
+        let face = FaceOp::new(10.0, 6.0).depth(6.0).step_down(2.0).onion_skin(1.0).generate(&area).expect("onion");
+        let plunge_z: Vec<f64> = plunges(face.toolpath()).into_iter().map(|point| point.z()).collect();
+        assert_eq!(plunge_z, vec![-2.0, -4.0, -5.0, -6.0]);
+        check_onion_cuts(&onion_cut_heights(face.toolpath().moves()), -6.0, 1.0, 1e-6).expect("skin");
+        let plain = FaceOp::new(10.0, 6.0).depth(6.0).step_down(2.0).generate(&area).expect("plain");
+        let plain_z: Vec<f64> = plunges(plain.toolpath()).into_iter().map(|point| point.z()).collect();
+        assert_eq!(plain_z, vec![-2.0, -4.0, -6.0]);
     }
 
     #[test]

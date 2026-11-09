@@ -7,7 +7,7 @@
 
 use campanion_geom::{Arc, Contour, Point, Segment};
 use campanion_ir::{ClBlock, ClMotion, ClPath, CompensationMode, Cylinder, Event, MoveRole, Pose, ProcessKind, RotarySetup, wrap_polyline};
-use campanion_path::{Tool as PathTool, pass_depths};
+use campanion_path::{DepthEntry, DepthPlan, Tool as PathTool, check_onion_levels};
 
 use crate::error::CliError;
 use crate::jobfile::{JobTool, Operation};
@@ -40,10 +40,7 @@ pub(crate) fn cut(
     if !(w_safe.is_finite() && diameter * 0.5 + w_safe > 0.0) {
         return Err(op_err(op, "wrap radius must be positive"));
     }
-    let levels = pass_depths(op.depth(), op.step_down()).map_err(|err| op_err(op, err))?;
-    if levels.is_empty() {
-        return Err(op_err(op, "depth plan is empty"));
-    }
+    let levels = wrap_levels(op)?;
     let process = match tool.path_tool() {
         PathTool::Diameter { .. } => ProcessKind::Spindle,
         PathTool::Kerf { .. } => ProcessKind::Torch,
@@ -206,4 +203,23 @@ fn angular_step(radius: f64, tol: f64) -> f64 {
 
 fn op_err(op: &Operation, err: impl std::fmt::Display) -> CliError {
     CliError::run(format!("operation {}: {err}", op.name()))
+}
+
+/// Depth of each wrap pass. Only the last pass reaches full depth when `onion_skin` is set.
+///
+/// The check uses these planned levels (`w = -level`), not the wrapped machine Z.
+fn wrap_levels(op: &Operation) -> Result<Vec<f64>, CliError> {
+    let mut plan = DepthPlan::new(0.0, op.depth(), op.step_down(), DepthEntry::Plunge);
+    if let Some(skin) = op.onion_skin() {
+        plan = plan.with_onion_skin(skin);
+    }
+    let levels = plan.depths().map_err(|err| op_err(op, err))?;
+    if levels.is_empty() {
+        return Err(op_err(op, "depth plan is empty"));
+    }
+    if let Some(skin) = op.onion_skin() {
+        let cut_z: Vec<f64> = levels.iter().map(|level| -level).collect();
+        check_onion_levels(&cut_z, -op.depth(), skin, 1e-4).map_err(|err| op_err(op, err))?;
+    }
+    Ok(levels)
 }

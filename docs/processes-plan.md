@@ -41,7 +41,8 @@ and so do `linuxcnc`, `fanuc` and `haas`.
 1. **IR.** No new process kind, event or axis. The diameter tool gains an optional cutter sense:
    upcut, downcut or compression. A compression tool also names the upcut length at the tip.
    Omitted, the offset stays the flat diameter offset used today. Onion-skin is an operation
-   thickness: earlier passes stop short of the sheet, and the last pass cuts the skin. Nesting
+   thickness: earlier passes stop short of the sheet, and the last pass cuts the skin. The job
+   field is `onion_skin` on a profile, pocket, face, engrave, drill, wrap or live mill. Nesting
    and hold-down are setup data: a sheet rectangle, part spacing, and keep-out rectangles for
    clamps. The IR still stores ordinary toolpaths. Tool-length probing uses the existing `Probe`
    event (expected contact and feed). Tabs stay the profile tabs already in the job file: bridge
@@ -53,7 +54,8 @@ and so do `linuxcnc`, `fanuc` and `haas`.
 3. **Simulation.** The mill verifier already checks gouges, low rapids and tabs. Nesting checks
    that every part lies on the sheet, that parts clear each other and the keep-outs by the tool
    radius plus the stated gap, and that the same part list always packs the same way. Onion-skin
-   checks that only the last pass reaches full depth. The probe move is a feed toward the named
+   checks that only the last pass reaches full depth: every earlier cut stays at least
+   `onion_skin` above the floor. The probe move is a feed toward the named
    contact, with the spindle off. In-process stock stays unmodelled: the sheet top is Z 0, the
    same rapid rule as a drawing. This process deposits nothing, so the deposited-material model
    stays unused.
@@ -279,8 +281,8 @@ in `docs/plan.md`).
 ### 1. Router gaps
 
 Mill operations, tabs, leads, `grbl`, `mach3` and the probe event are already shipped. This step
-finishes that gantry path: cutter-sense data, a deterministic sheet packer, onion-skin passes and
-a LinuxCNC router dialect. Containment, spacing, skin height and tab bridges are geometry tests
+finishes that gantry path: cutter-sense data, a deterministic sheet packer, onion-skin passes
+(`onion_skin`) and a LinuxCNC router dialect. Containment, spacing, skin height and tab bridges are geometry tests
 and need no machine. The risk is the probe cycle, which read-back against a cited manual covers.
 
 ### 2. Laser raster
