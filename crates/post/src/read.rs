@@ -56,6 +56,8 @@ pub enum ReadMove {
         end: Xyz,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
+        /// `S` word written on this block, when present. Modal S on an earlier block is not used.
+        s: Option<f64>,
         /// Modal A/B or lathe C angle in degrees after this block.
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
@@ -75,6 +77,8 @@ pub enum ReadMove {
         radius: Option<f64>,
         /// Feed word on this block, or the modal feed when the block omits `F`.
         feed: Option<f64>,
+        /// `S` word written on this block, when present. Modal S on an earlier block is not used.
+        s: Option<f64>,
         /// Modal A/B or lathe C angle in degrees after this block.
         rotary: Option<f64>,
         /// Modal inverse-time state (`G93` on LinuxCNC) after this block.
@@ -108,6 +112,14 @@ pub enum ReadMove {
 }
 
 impl ReadMove {
+    /// `S` written on this feed or arc block. `None` when the block omitted `S`, and on rapids, dwells and threads.
+    pub fn s_word(&self) -> Option<f64> {
+        match self {
+            Self::Linear { s, .. } | Self::Arc { s, .. } => *s,
+            Self::Rapid { .. } | Self::Dwell { .. } | Self::Thread { .. } | Self::Other { .. } => None,
+        }
+    }
+
     /// Modal A, B, C after this block. `[None; 3]` on a dwell or a post without `five_axis`.
     pub fn five(&self) -> [Option<f64>; 3] {
         match self {
@@ -490,7 +502,7 @@ impl<'a> Parser<'a> {
         let five = self.five;
         let move_ = match motion {
             Motion::Rapid => ReadMove::Rapid { end, feed, rotary, inverse_time, five },
-            Motion::Linear => ReadMove::Linear { end, feed, rotary, inverse_time, five },
+            Motion::Linear => ReadMove::Linear { end, feed, s: unique(words, 'S')?, rotary, inverse_time, five },
             Motion::Cw | Motion::Ccw => {
                 let mut sense = if matches!(motion, Motion::Cw) { ArcSense::Cw } else { ArcSense::Ccw };
                 if plane == Plane::Zx && self.post.lathe.as_ref().is_some_and(|lathe| lathe.arc_flip) {
@@ -515,7 +527,7 @@ impl<'a> Parser<'a> {
                 } else {
                     return Err(invalid("arc needs IJK or R"));
                 };
-                ReadMove::Arc { sense, end, center, radius, feed, rotary, inverse_time, five }
+                ReadMove::Arc { sense, end, center, radius, feed, s: unique(words, 'S')?, rotary, inverse_time, five }
             }
         };
         self.pos = end;

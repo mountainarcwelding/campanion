@@ -427,6 +427,7 @@ fn trace_rejects_a_missing_half_and_a_near_full_gap() {
         center: [0.0, 0.0, 0.0],
         radius: None,
         feed: Some(100.0),
+        s: None,
         rotary: None,
         inverse_time: false,
         five: [None; 3],

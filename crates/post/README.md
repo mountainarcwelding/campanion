@@ -38,6 +38,12 @@ one returns an explicit error. Their metric output and verification are unchange
 
 `per_cut` writes every process-on. When any process is still on and the next motion is a rapid (`G0`), the writer emits `thc.off` and that process's off lines before the rapid, then the on lines again before the next feed. Speed and power come from the process-on that is still in effect. A pierce dwell is written only when the IR already has a dwell at that cut. Plasma and `grbl_laser` set `per_cut`, so a torch or beam stays off through G0 travel even when the IR process is `spindle`.
 
+## Laser power
+
+`grbl_laser` arms dynamic power with `M4 S0` and scales IR power 0..1 by `power_scale` 1000 onto `S0`..`S1000`. A process-on without power still posts at full scale (`S1000`) and notes that in a comment, which is the existing vector-cut behaviour.
+
+When any feed in the program carries per-move `power`, each of those feeds and arcs writes its own `S` word, including `S0` for a zero-power overscan. A missing power in that program is an error; it is never filled as `S1000`. A process-on without power then writes `M4 S0` and lets the moves set the level. Read-back records the `S` on that block, and `compare` checks it against the IR value. A post without `power_scale` refuses per-move power. This output has not been proven on a machine.
+
 ## LinuxCNC router
 
 `linuxcnc_router` is the millimetre LinuxCNC dialect for a gantry. Motion matches `linuxcnc`: absolute millimetres, cancelled cutter compensation, IJK arcs and helices, and path blend `G64 P0.01`. There is no `rotary` block. A typical gantry is XYZ, so a program with an A or B angle is rejected. Use `linuxcnc` when the machine has a fourth axis.

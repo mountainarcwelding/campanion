@@ -58,6 +58,7 @@ pub fn post_program(program: &Program, post: &PostDef, options: &PostOptions) ->
     check_tilted_plane(program, post)?;
     let sections = crate::balance::channel_sections(program, post)?;
     let mut writer = Writer::new(post, options, program.rotary().copied(), program.turning(), program.five_axis());
+    writer.per_move_power = program_has_move_power(program);
     let name = sanitize(program.name().unwrap_or(""));
     let number = post.program_number.clone().unwrap_or_default();
     let header_vars = [("program_name", name.as_str()), ("program_number", number.as_str()), ("date-free!", "")];
@@ -238,6 +239,11 @@ struct Writer<'a> {
     thc_phase: ThcPhase,
     last_speed: String,
     last_power: String,
+    /// True when any feed in the program carries per-move power. Missing power is then an error,
+    /// and a process-on without power writes S0 instead of filling full scale.
+    per_move_power: bool,
+    /// Power for the motion currently being written. Cleared when that motion is done.
+    pending_move_power: Option<f64>,
     /// Plane after [`Self::begin_lathe`]. Each channel restores it without writing it again.
     channel_plane: Option<Plane>,
     /// Inverse-time flag after [`Self::begin_lathe`].
@@ -314,6 +320,8 @@ impl<'a> Writer<'a> {
             thc_phase: ThcPhase::Idle,
             last_speed: String::new(),
             last_power: "0".to_string(),
+            per_move_power: false,
+            pending_move_power: None,
             channel_plane: plane,
             channel_inverse: inverse_time,
             multi_channel: false,
@@ -367,6 +375,7 @@ impl<'a> Writer<'a> {
         self.thc_phase = ThcPhase::Idle;
         self.last_speed.clear();
         self.last_power = "0".to_string();
+        self.pending_move_power = None;
         self.b_deg = 0.0;
     }
 
@@ -940,6 +949,13 @@ impl<'a> Writer<'a> {
     }
 
     fn motion(&mut self, motion: &ClMotion) -> Result<()> {
+        self.pending_move_power = motion.power();
+        let result = self.write_motion(motion);
+        self.pending_move_power = None;
+        result
+    }
+
+    fn write_motion(&mut self, motion: &ClMotion) -> Result<()> {
         if self.per_cut() {
             if matches!(motion, ClMotion::Rapid { .. }) {
                 self.suspend_processes()?;
@@ -1483,6 +1499,7 @@ impl<'a> Writer<'a> {
             ArcMode::Lines => return Err(invalid("line mode reached an arc block")),
         }
         self.push_feed(&mut words, Some(feed), false)?;
+        self.push_move_power(&mut words, true)?;
         if self.post.planes {
             self.plane = Some(plane);
         }
@@ -1520,6 +1537,7 @@ impl<'a> Writer<'a> {
         self.push_rotary(&mut words, posted.angle)?;
         self.push_c(&mut words, posted.c)?;
         self.push_feed(&mut words, feed, force)?;
+        self.push_move_power(&mut words, code != "G0")?;
         self.linear = Some(if code == "G0" { "G0" } else { "G1" });
         self.pos = Some(rounded);
         self.exact = Some(posted.xyz);
@@ -1954,6 +1972,31 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    /// S word for a feed that carries per-move power. A raster program must set every feed.
+    fn push_move_power(&mut self, words: &mut Vec<String>, is_feed: bool) -> Result<()> {
+        if !is_feed {
+            return Ok(());
+        }
+        match self.pending_move_power {
+            Some(power) => {
+                let text = format_move_power(self.post, power)?;
+                words.push(format!("S{text}"));
+                self.last_power.clone_from(&text);
+                Ok(())
+            }
+            None if self.per_move_power => Err(invalid("move power is required when other moves set power")),
+            None => Ok(()),
+        }
+    }
+
+    /// Process-on `{power}`. A program that uses per-move power does not fill a missing value at full scale.
+    fn process_on_power(&self, power: Option<f64>) -> Result<(String, bool)> {
+        if self.per_move_power && power.is_none() {
+            return format_power(self.post, Some(0.0));
+        }
+        format_power(self.post, power)
+    }
+
     fn event(&mut self, event: &Event) -> Result<()> {
         if self.tailstock_engaged && matches!(event, Event::SpindleMove { .. } | Event::SpindleSync { .. } | Event::ChuckClamp { .. }) {
             return Err(invalid("retract the tailstock before a part transfer"));
@@ -2014,7 +2057,7 @@ impl<'a> Writer<'a> {
                 {
                     return Ok(());
                 }
-                let (power, missing) = format_power(self.post, params.power_value())?;
+                let (power, missing) = self.process_on_power(params.power_value())?;
                 self.note_on(process, &speed, &power);
                 self.arm_thc();
                 if missing {
@@ -3208,6 +3251,20 @@ impl<'a> Writer<'a> {
 fn format_param(value: Option<f64>) -> Result<f64> {
     let value = value.unwrap_or(0.0);
     if value.is_finite() && value >= 0.0 { Ok(value) } else { Err(invalid("process speed or power must be >= 0")) }
+}
+
+fn program_has_move_power(program: &Program) -> bool {
+    program.toolpaths().iter().any(|path| path.blocks().iter().any(|block| matches!(block, ClBlock::Motion(motion) if motion.power().is_some())))
+}
+
+/// Scaled S text for a known IR power. Refuses a post that has no `power_scale`.
+pub(crate) fn format_move_power(post: &PostDef, power: f64) -> Result<String> {
+    if post.power_scale.is_none() {
+        return Err(invalid("per-move power needs a post with power_scale"));
+    }
+    let (text, missing) = format_power(post, Some(power))?;
+    debug_assert!(!missing);
+    Ok(text)
 }
 
 /// `{power}` text, and whether a missing IR power was filled in at full scale.

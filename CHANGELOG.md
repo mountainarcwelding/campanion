@@ -4,7 +4,8 @@
 
 ### Added
 
-- Feed moves in the IR may carry an optional `power` (the same quantity as process-on power). Omitted, the field is absent and old IR loads unchanged. Laser raster uses one value per scan segment. This does not change posted G-code yet.
+- Feed moves in the IR may carry an optional `power` (the same quantity as process-on power). Omitted, the field is absent and old IR loads unchanged. Laser raster uses one value per scan segment.
+- Posts with `power_scale`, including `grbl_laser`, write each feed's `S` from that per-move power, including `S0` on a zero-power overscan. A program that uses per-move power refuses a feed that omits it, and a process-on without power writes `S0` instead of filling full scale. Vector programs without per-move power are unchanged, including the missing-power `S1000` comment. Read-back and `compare` check the `S` word against the IR. This output has not been proven on a machine.
 
 ## 0.10.1 — 2026-11-12
 

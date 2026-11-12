@@ -131,6 +131,7 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                             within_percent: c_inverse,
                         });
                         if rotating || !skip_z_only(post, written, written_end, false)? {
+                            let from = cursor;
                             take_line(
                                 &motions,
                                 &mut cursor,
@@ -148,12 +149,14 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                                     feed_scale: post.length_scale(),
                                 },
                             )?;
+                            check_move_powers(&motions[from..cursor], motion.power(), post, index)?;
                         }
                     }
                     ClMotion::Arc { plane, center, sense, feed, .. } => {
                         let start = part.ok_or_else(|| invalid(format!("motion {index}: arc needs a prior position")))?;
                         let center = xyz(*center);
                         let sweep = geom::arc_sweep(start, part_end, center, *plane, *sense, 0.0)?;
+                        let from = cursor;
                         consume_curve(
                             &motions,
                             &mut cursor,
@@ -168,10 +171,12 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                             drop_z,
                             CurveCheck { setup, start_angle: prev_angle, end_angle, ir_feed: *feed, angle_tol, post },
                         )?;
+                        check_move_powers(&motions[from..cursor], motion.power(), post, index)?;
                     }
                     ClMotion::Helix { plane, center, sense, sweep, feed, .. } => {
                         let start = part.ok_or_else(|| invalid(format!("motion {index}: helix needs a prior position")))?;
                         let center = xyz(*center);
+                        let from = cursor;
                         consume_curve(
                             &motions,
                             &mut cursor,
@@ -186,6 +191,7 @@ pub fn compare(program: &Program, moves: &[ReadMove], tol: f64, post: &PostDef) 
                             drop_z,
                             CurveCheck { setup, start_angle: prev_angle, end_angle, ir_feed: *feed, angle_tol, post },
                         )?;
+                        check_move_powers(&motions[from..cursor], motion.power(), post, index)?;
                     }
                     ClMotion::Thread { lead, .. } => {
                         take_thread(&motions, &mut cursor, part_end, *lead, tol, index, drop_z, post, end_angle, angle_tol, setup)?;
@@ -425,6 +431,24 @@ struct LineCheck<'a> {
     feed: Option<FeedCheck>,
     feed_decimals: u8,
     feed_scale: f64,
+}
+
+/// When the IR names a power, every posted feed or arc for that move must carry the scaled S word.
+fn check_move_powers(moves: &[&ReadMove], ir_power: Option<f64>, post: &PostDef, index: usize) -> Result<()> {
+    let Some(power) = ir_power else {
+        return Ok(());
+    };
+    let expect = crate::write::format_move_power(post, power)?;
+    let expect_s: f64 = expect.parse().map_err(|_| invalid(format!("motion {index}: posted S is not a number")))?;
+    for mv in moves {
+        let Some(got) = mv.s_word() else {
+            return Err(invalid(format!("motion {index}: missing S word for move power")));
+        };
+        if (got - expect_s).abs() > 1e-9 {
+            return Err(invalid(format!("motion {index}: S word {got} does not match move power {power}")));
+        }
+    }
+    Ok(())
 }
 
 fn take_line(
