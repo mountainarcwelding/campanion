@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.11.0 — 2026-11-12
+
+Laser raster: optional per-move power in the IR, posts with `power_scale` write each feed's `S` including `S0` on overscan, and `laser_raster` jobs engrave a PGM through the planner (#159–#161). This output has not been proven on a machine.
+
 ### Added
 
 - Feed moves in the IR may carry an optional `power` (the same quantity as process-on power). Omitted, the field is absent and old IR loads unchanged. Laser raster uses one value per scan segment.
