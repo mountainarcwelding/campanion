@@ -160,6 +160,7 @@ unique within that operation. The same layer may appear on two operations.
 | `lead_out` | profile | Same object as `lead_in`. Omitted, the same default as `lead_in`. |
 | `direction` | profile and rotary finish | On a profile: `climb` (the default), `conventional`, or `auto`. `auto` uses climb travel after the side is known. On a rotary finish: `zigzag` (the default) or `one_way`. Rejected on every other kind. |
 | `compensation` | profile | `computed` (the default), `controller_left`, or `controller_right`. Computed offsets the path in CAMpanion. Controller leaves the path on the contour so the post can write G41/G42 when it has `cutter_comp`. Refused with a non-zero `stock_to_leave.wall`. Rejected on every other kind. |
+
 | `feeds` | yes | `cut` (required) and `plunge` (optional), in file-length units per minute. Omitted `plunge` means use `cut`. |
 | `pierce_height` | no | Absolute Z to rapid to before the pierce delay. |
 | `cut_height` | no | Absolute Z to feed to after the pierce, before the cut. |
@@ -171,7 +172,8 @@ unique within that operation. The same layer may appear on two operations.
 | `u_min` | rotary finish | Length in `units`. Low end of the pass along the rotary axis. Omitted, the mesh minimum on that axis. May be negative. |
 | `u_max` | rotary finish | Length in `units`. High end of the pass along the rotary axis. Omitted, the mesh maximum on that axis. `u_min` greater than `u_max` is rejected. |
 | `angle_step_deg` | rotary finish | Degrees between passes, greater than 0 and at most 360. Not scaled by `units`. See below. |
-| `direction` | rotary finish | `zigzag` (the default) or `one_way`. |
+
+An inside profile whose offset disappears is refused. On a kerf tool the error is that the slot is narrower than the kerf; on a diameter tool it stays that the tool does not fit inside the contour. After a closed inside profile is cut with no tabs, a later rapid whose XY travel crosses that loop writes `campanion: warning:` that a rapid crosses a freed slug. The job still posts.
 
 `depth` and `step_down` must be a legal `campanion-path` depth plan: positive, at most 1e6 mm,
 and at most 1024 passes. Five millimetres at a two millimetre step is three passes (2, 4, 5).

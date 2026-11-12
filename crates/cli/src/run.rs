@@ -630,6 +630,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
     let plane_job = job.five_axis().is_some();
     let mut groups = Vec::new();
     let mut plane_groups = Vec::new();
+    let mut freed_slugs: Vec<Contour> = Vec::new();
     for (op, contours) in &selected {
         let Some(tool) = job.tool(op.tool_id()) else {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
@@ -643,7 +644,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
         let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours: view, job };
         let mut paths = Vec::new();
         match op.kind() {
-            OperationKind::Profile { side } => profile_paths(&mut paths, &cut, side)?,
+            OperationKind::Profile { side } => profile_paths(&mut paths, &cut, side, &mut freed_slugs)?,
             OperationKind::Pocket => pocket_paths(&mut paths, &cut)?,
             OperationKind::Drill => drill_paths(&mut paths, &cut)?,
             OperationKind::Engrave => engrave_paths(&mut paths, &cut)?,
@@ -665,6 +666,9 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
                 };
                 wrap::cut(&mut paths, op, tool, view, &setup, job.tolerance().chord(), safe)?;
             }
+        }
+        if !matches!(op.kind(), OperationKind::Profile { .. }) {
+            warn_paths_across_slugs(op, &paths, &freed_slugs, &job.tolerance())?;
         }
         // Planning-frame Z, before a tilted plane maps the paths. A wrap checks its own levels.
         if op.onion_skin().is_some() {
@@ -972,21 +976,29 @@ fn import_with_params(op: &Operation, tool: &JobTool, params: ProcessParams) -> 
     Ok(import.compensation(mode))
 }
 
-fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide) -> Result<(), CliError> {
+fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide, slugs: &mut Vec<Contour>) -> Result<(), CliError> {
     let radius = tool_radius(cut)?;
     let stock = cut.op.stock_to_leave();
     // Roughing stands off the wall by `wall` and stops `floor` short of the final depth.
     // A shortened link must not enter an onion skin. The finish link, at full depth, cuts it.
     let rough = roughing_depth(cut.op, cut.op.depth() - stock.floor());
-    link_profile(paths, cut, side, radius + stock.wall(), rough, cut.op.step_down())?;
+    link_profile(paths, cut, side, radius + stock.wall(), rough, cut.op.step_down(), slugs)?;
     if let Some(finish) = cut.op.finish() {
-        link_profile(paths, cut, side, radius, cut.op.depth(), finish.step_down())?;
+        link_profile(paths, cut, side, radius, cut.op.depth(), finish.step_down(), slugs)?;
     }
     Ok(())
 }
 
 /// One linked profile. `distance` is how far the cutter centre sits from the part.
-fn link_profile(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide, distance: f64, total: f64, step_down: f64) -> Result<(), CliError> {
+fn link_profile(
+    paths: &mut Vec<ClPath>,
+    cut: &Cut<'_>,
+    side: JobProfileSide,
+    distance: f64,
+    total: f64,
+    step_down: f64,
+    slugs: &mut Vec<Contour>,
+) -> Result<(), CliError> {
     if !distance.is_finite() {
         return Err(op_err(cut.op, "profile offset is not finite"));
     }
@@ -997,7 +1009,7 @@ fn link_profile(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide, di
         let toolpath = depth_with(cut, &shaped, total, step_down)?;
         features.push(Feature::new(contour.clone(), toolpath));
     }
-    link_operation(paths, cut, &features)
+    link_operation(paths, cut, &features, Some(slugs))
 }
 
 fn resolve_profile_side(cut: &Cut<'_>, side: JobProfileSide, contour: &Contour) -> Result<ProfileSide, CliError> {
@@ -1041,7 +1053,7 @@ fn pocket_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> 
         link_pocket_level(paths, cut, &regions, -cut.op.depth(), stepover, stock.wall())?;
     }
     let walls = pocket_wall_features(cut, &regions, finish)?;
-    link_operation(paths, cut, &walls)
+    link_operation(paths, cut, &walls, None)
 }
 
 fn pocket_stepover(cut: &Cut<'_>) -> Result<f64, CliError> {
@@ -1057,7 +1069,7 @@ fn link_pocket_level(paths: &mut Vec<ClPath>, cut: &Cut<'_>, regions: &[Region],
         let toolpath = pocket_toolpath(cut, region, z, stepover, allowance)?;
         features.push(Feature::new(region.outer().clone(), toolpath));
     }
-    link_operation(paths, cut, &features)
+    link_operation(paths, cut, &features, None)
 }
 
 fn pocket_toolpath(cut: &Cut<'_>, region: &Region, z: f64, stepover: f64, allowance: f64) -> Result<Toolpath, CliError> {
@@ -1213,7 +1225,7 @@ fn chamfer_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide) -> R
             .map_err(|err| op_err(cut.op, err))?;
         features.push(Feature::new(contour.clone(), clearance_retracts(cut, chamfer.toolpath().moves())?));
     }
-    link_operation(paths, cut, &features)
+    link_operation(paths, cut, &features, None)
 }
 
 fn engrave_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
@@ -1222,7 +1234,7 @@ fn engrave_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError>
         let toolpath = depth_at_retract(cut, contour)?;
         features.push(Feature::new(contour.clone(), toolpath));
     }
-    link_operation(paths, cut, &features)
+    link_operation(paths, cut, &features, None)
 }
 
 /// Depth passes from stock Z 0, with the same clearance and retract links as a pocket section.
@@ -1381,11 +1393,14 @@ fn motion_to(mv: Move) -> Option<Point3> {
     }
 }
 
-fn link_operation(paths: &mut Vec<ClPath>, cut: &Cut<'_>, features: &[Feature]) -> Result<(), CliError> {
+fn link_operation(paths: &mut Vec<ClPath>, cut: &Cut<'_>, features: &[Feature], slugs: Option<&mut Vec<Contour>>) -> Result<(), CliError> {
     let origin = Point::new(0.0, 0.0).map_err(|err| op_err(cut.op, err))?;
     let tol = cut.job.tolerance();
     let ordered = campanion_path::order_and_link(features, origin, cut.job.clearance(), &tol).map_err(|err| op_err(cut.op, err))?;
     reject_low_rapids(cut.op, ordered.toolpath(), cut.job.retract())?;
+    if let Some(slugs) = slugs {
+        warn_feature_rapids_across_slugs(cut, features, &ordered, slugs)?;
+    }
     // `from_toolpath` applies timing again from the import's parameters. Pass a zero-delay
     // import so this call is the one that places pierce and post events, then put the real
     // parameters back on each process-on.
@@ -1448,6 +1463,132 @@ fn restore_process_params(doc: Document, params: &ProcessParams) -> Result<Docum
     Ok(Document::new(rebuilt)?)
 }
 
+fn inside_offset_error(cut: &Cut<'_>, side: ProfileSide) -> &'static str {
+    if !matches!(side, ProfileSide::Inside) {
+        return "offset produced no contour";
+    }
+    match cut.tool.path_tool() {
+        PathTool::Kerf { .. } => "slot is narrower than the kerf",
+        PathTool::Diameter { .. } => "tool does not fit inside the contour",
+    }
+}
+
+fn is_freed_slug(cut: &Cut<'_>, side: JobProfileSide, feature: &Feature) -> Result<bool, CliError> {
+    if cut.op.tabs().is_some() || !feature.contour().is_closed() {
+        return Ok(false);
+    }
+    Ok(matches!(resolve_profile_side(cut, side, feature.contour())?, ProfileSide::Inside))
+}
+
+fn warn_feature_rapids_across_slugs(
+    cut: &Cut<'_>,
+    features: &[Feature],
+    ordered: &campanion_path::OrderedCuts,
+    slugs: &mut Vec<Contour>,
+) -> Result<(), CliError> {
+    let side = match cut.op.kind() {
+        OperationKind::Profile { side } => side,
+        _ => JobProfileSide::On,
+    };
+    let mut prev = Point::new(0.0, 0.0).map_err(|err| op_err(cut.op, err))?;
+    for &index in ordered.sequence() {
+        let Some(feature) = features.get(index) else {
+            return Err(op_err(cut.op, "feature index is out of range"));
+        };
+        if let Some(entry) = path_xy(feature.toolpath().moves().first()) {
+            warn_segment_across_slugs(cut.op, prev, entry, slugs, &cut.tolerance)?;
+        }
+        warn_toolpath_rapids_across_slugs(cut.op, feature.toolpath(), slugs, &cut.tolerance)?;
+        if is_freed_slug(cut, side, feature)? {
+            slugs.push(feature.contour().clone());
+        }
+        if let Some(end) = path_xy(feature.toolpath().moves().last()) {
+            prev = end;
+        }
+    }
+    Ok(())
+}
+
+fn warn_paths_across_slugs(op: &Operation, paths: &[ClPath], slugs: &[Contour], tolerance: &Tolerance) -> Result<(), CliError> {
+    for path in paths {
+        let mut prev: Option<Point> = None;
+        for block in path.blocks() {
+            let Some((point, rapid)) = cl_xy(block) else {
+                continue;
+            };
+            if let Some(from) = prev
+                && rapid
+            {
+                warn_segment_across_slugs(op, from, point, slugs, tolerance)?;
+            }
+            prev = Some(point);
+        }
+    }
+    Ok(())
+}
+
+fn warn_toolpath_rapids_across_slugs(op: &Operation, path: &Toolpath, slugs: &[Contour], tolerance: &Tolerance) -> Result<(), CliError> {
+    let mut prev: Option<Point> = None;
+    for mv in path.moves() {
+        let Some(point) = path_xy(Some(mv)) else {
+            continue;
+        };
+        if let Some(from) = prev
+            && matches!(mv, Move::Rapid { .. })
+        {
+            warn_segment_across_slugs(op, from, point, slugs, tolerance)?;
+        }
+        prev = Some(point);
+    }
+    Ok(())
+}
+
+fn warn_segment_across_slugs(op: &Operation, from: Point, to: Point, slugs: &[Contour], tolerance: &Tolerance) -> Result<(), CliError> {
+    for slug in slugs {
+        if rapid_crosses_slug(from, to, slug, tolerance).map_err(|err| op_err(op, err))? {
+            warn(&format!("operation `{}`: a rapid crosses a freed slug", op.name()))?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn rapid_crosses_slug(from: Point, to: Point, slug: &Contour, tolerance: &Tolerance) -> Result<bool, campanion_geom::GeomError> {
+    let length = from.distance(to);
+    let steps = ((length / 0.5).ceil() as usize).max(2);
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        let point = Point::new(from.x() + t * (to.x() - from.x()), from.y() + t * (to.y() - from.y()))?;
+        if matches!(slug.containment(point, tolerance)?, Containment::Inside) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn path_xy(mv: Option<&Move>) -> Option<Point> {
+    let mv = mv?;
+    let p = match mv {
+        Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } => to,
+        Move::Event(_) | Move::Dwell { .. } => return None,
+    };
+    Point::new(p.x(), p.y()).ok()
+}
+
+fn cl_xy(block: &ClBlock) -> Option<(Point, bool)> {
+    match block {
+        ClBlock::Motion(motion) => {
+            let (pose, rapid) = match motion {
+                ClMotion::Rapid { to, .. } => (to, true),
+                ClMotion::Linear { to, .. } | ClMotion::Arc { to, .. } | ClMotion::Helix { to, .. } | ClMotion::Thread { to, .. } => (to, false),
+            };
+            let tip = pose.tip();
+            Some((Point::new(tip.x(), tip.y()).ok()?, rapid))
+        }
+        _ => None,
+    }
+}
+
 fn reject_low_rapids(op: &Operation, path: &Toolpath, retract: f64) -> Result<(), CliError> {
     for mv in path.moves() {
         if let Move::Rapid { to } = *mv
@@ -1480,10 +1621,7 @@ fn offset_profile(cut: &Cut<'_>, side: ProfileSide, contour: &Contour, distance:
     }
     let parts = campanion_geom::offset(contour, signed, &cut.tolerance).map_err(|err| op_err(cut.op, err))?;
     match parts.len() {
-        0 => Err(op_err(
-            cut.op,
-            if matches!(side, ProfileSide::Inside) { "tool does not fit inside the contour" } else { "offset produced no contour" },
-        )),
+        0 => Err(op_err(cut.op, inside_offset_error(cut, side))),
         1 => {
             let Some(path) = parts.into_iter().next() else {
                 return Err(op_err(cut.op, "offset produced no contour"));
