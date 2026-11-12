@@ -419,3 +419,4 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   five fixes) and the in-process Z-dexel stock with rapid, holder and removal-rate checks.
 - 2026-11-09: v0.10.0 is router gaps (cutter sense, onion-skin, deterministic sheet packer,
   linuxcnc_router with G38.2 probe and vacuum/dust). Processes plan approved; laser raster is next.
+- 2026-11-12: v0.10.1 is G91.1 incremental IJK, G53 mill-audit retracts, IR tool shapes for per-move verify, and inch output for three-axis mill posts (#152-#155). Laser raster is next.

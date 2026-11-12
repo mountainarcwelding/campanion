@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.10.1 — 2026-11-12
+
+Post and IR follow-ups contributed by DarkBiscuits: G91.1 incremental arc centres in read-back and mill/five-axis audit, G53 machine retracts in mill audit, tool shapes preserved in IR for per-move mesh verification, and inch output for three-axis mill posts. This output has not been proven on a machine.
+
 ### Added
 
 - Optional flat, ball, bull and V-bit cutter geometry in IR tools. Run jobs preserve their shapes and resolve chamfer geometry per tool ID, rejecting conflicting definitions before output (#146).
