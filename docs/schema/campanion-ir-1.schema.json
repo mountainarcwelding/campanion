@@ -498,6 +498,14 @@
               "format": "double",
               "type": "number"
             },
+            "power": {
+              "description": "Optional process power on this feed, the same quantity as process-on power.\nLaser posts scale 0..1 onto the S word. Ordinary cuts omit it.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
             "role": {
               "$ref": "#/$defs/MoveRole",
               "description": "Cut, lead, plunge or retract."
@@ -535,6 +543,14 @@
             "plane": {
               "$ref": "#/$defs/Plane",
               "description": "Plane."
+            },
+            "power": {
+              "description": "Optional process power on this feed, the same quantity as process-on power.\nLaser posts scale 0..1 onto the S word. Ordinary cuts omit it.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
             },
             "role": {
               "$ref": "#/$defs/MoveRole",
@@ -580,6 +596,14 @@
             "plane": {
               "$ref": "#/$defs/Plane",
               "description": "Plane."
+            },
+            "power": {
+              "description": "Optional process power on this feed, the same quantity as process-on power.\nLaser posts scale 0..1 onto the S word. Ordinary cuts omit it.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
             },
             "role": {
               "$ref": "#/$defs/MoveRole",

@@ -131,7 +131,7 @@ fn travel(
 fn motion(pose: Pose, kind: &Travel) -> ClBlock {
     match *kind {
         Travel::Rapid => ClBlock::Motion(ClMotion::Rapid { to: pose, feed: None }),
-        Travel::Feed { feed, role } => ClBlock::Motion(ClMotion::Linear { to: pose, feed, role }),
+        Travel::Feed { feed, role } => ClBlock::Motion(ClMotion::Linear { to: pose, feed, role, power: None }),
     }
 }
 

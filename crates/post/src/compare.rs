@@ -968,6 +968,7 @@ mod tests {
                 sense: ArcSense::Cw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
         ];
         let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
@@ -1007,12 +1008,13 @@ mod tests {
     /// Two identical full circles, then a line off the circle.
     fn two_full_circles() -> Program {
         let start = tip(5.0, 0.0, 0.0);
-        let arc = ClMotion::Arc { to: start, plane: Plane::Xy, center: Vec3::ZERO, sense: ArcSense::Ccw, feed: 100.0, role: MoveRole::Cut };
+        let arc =
+            ClMotion::Arc { to: start, plane: Plane::Xy, center: Vec3::ZERO, sense: ArcSense::Ccw, feed: 100.0, role: MoveRole::Cut, power: None };
         program_of(vec![
             ClBlock::Motion(ClMotion::Rapid { to: start, feed: None }),
             ClBlock::Motion(arc.clone()),
             ClBlock::Motion(arc),
-            ClBlock::Motion(ClMotion::Linear { to: tip(15.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(15.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ])
     }
 
@@ -1028,6 +1030,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 80.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
             ClBlock::Motion(ClMotion::Arc {
                 to: quarter_end,
@@ -1036,8 +1039,9 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 90.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(20.0, 10.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(20.0, 10.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ]);
         let post = linux();
         let text = post_program(&program, &post, &options()).expect("post");
@@ -1059,6 +1063,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
             ClBlock::Motion(ClMotion::Arc {
                 to: end,
@@ -1067,8 +1072,9 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 80.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(10.0, 10.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(10.0, 10.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ]);
         for id in ["linuxcnc", "fanuc"] {
             let post = builtin(id).expect(id);
@@ -1120,8 +1126,9 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ]);
         let post = linux();
         let text = post_program(&program, &post, &options()).expect("post");
@@ -1147,8 +1154,9 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ]);
         let post = linux();
         let text = post_program(&program, &post, &options()).expect("post");
@@ -1178,8 +1186,9 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(end_x + 5.0, end_y, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ]);
         let post = linux();
         let text = post_program(&program, &post, &options()).expect("post");

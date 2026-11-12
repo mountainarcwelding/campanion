@@ -655,7 +655,7 @@ mod tests {
         let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
         let blocks = vec![
             ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 0.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(0.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(0.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ];
         let path = ClPath::try_new(Some("cut".into()), Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
         let tool = Tool::try_new(1, None, Some(6.0), None).expect("tool");

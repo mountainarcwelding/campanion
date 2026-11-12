@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::check::{self, positive};
+use crate::check::{self, non_negative, positive};
 use crate::geom::{ArcSense, Plane, Pose, Vec3};
 use crate::kinematics::{self, DEFAULT_SINGULAR_CONE_DEG};
 use crate::process::Event;
@@ -171,6 +171,10 @@ pub enum ClMotion {
         feed: f64,
         /// Cut, lead, plunge or retract.
         role: MoveRole,
+        /// Optional process power on this feed, the same quantity as process-on power.
+        /// Laser posts scale 0..1 onto the S word. Ordinary cuts omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<f64>,
     },
     /// Circular feed of at most one full turn. The sense and the endpoints pick the sweep.
     Arc {
@@ -186,6 +190,10 @@ pub enum ClMotion {
         feed: f64,
         /// Cut, lead, plunge or retract.
         role: MoveRole,
+        /// Optional process power on this feed, the same quantity as process-on power.
+        /// Laser posts scale 0..1 onto the S word. Ordinary cuts omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<f64>,
     },
     /// Circular feed plus travel along the plane normal. `sweep` is radians and may exceed one turn.
     Helix {
@@ -203,6 +211,10 @@ pub enum ClMotion {
         feed: f64,
         /// Cut, lead, plunge or retract.
         role: MoveRole,
+        /// Optional process power on this feed, the same quantity as process-on power.
+        /// Laser posts scale 0..1 onto the S word. Ordinary cuts omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<f64>,
     },
     /// Spindle-synchronised straight feed (single-point threading). `lead` is millimetres per spindle revolution. Turning programs only.
     Thread {
@@ -222,20 +234,23 @@ impl ClMotion {
                     positive(*feed, "rapid feed")?;
                 }
             }
-            Self::Linear { to, feed, .. } => {
+            Self::Linear { to, feed, power, .. } => {
                 to.check()?;
                 positive(*feed, "feed")?;
+                check_move_power(*power)?;
             }
-            Self::Arc { to, center, feed, .. } => {
+            Self::Arc { to, center, feed, power, .. } => {
                 to.check()?;
                 center.check("arc centre")?;
                 positive(*feed, "feed")?;
+                check_move_power(*power)?;
             }
-            Self::Helix { to, center, sweep, feed, .. } => {
+            Self::Helix { to, center, sweep, feed, power, .. } => {
                 to.check()?;
                 center.check("helix centre")?;
                 positive(*sweep, "helix sweep")?;
                 positive(*feed, "feed")?;
+                check_move_power(*power)?;
             }
             Self::Thread { to, lead } => {
                 to.check()?;
@@ -247,6 +262,21 @@ impl ClMotion {
         }
         Ok(())
     }
+
+    /// Process power on this feed, if any. Rapids and threads have none.
+    pub fn power(&self) -> Option<f64> {
+        match self {
+            Self::Linear { power, .. } | Self::Arc { power, .. } | Self::Helix { power, .. } => *power,
+            Self::Rapid { .. } | Self::Thread { .. } => None,
+        }
+    }
+}
+
+fn check_move_power(power: Option<f64>) -> Result<()> {
+    if let Some(power) = power {
+        non_negative(power, "move power")?;
+    }
+    Ok(())
 }
 
 /// One tool-space step: a motion or an event.
@@ -602,5 +632,108 @@ impl ChannelProgram {
 
     pub fn blocks(&self) -> &[AxisBlock] {
         &self.blocks
+    }
+}
+
+#[cfg(test)]
+mod power_tests {
+    use super::*;
+    use crate::geom::{ArcSense, Plane, Pose, Vec3};
+    use crate::process::Tool;
+    use crate::program::{Document, Program};
+    use proptest::prelude::*;
+
+    fn pose() -> Pose {
+        Pose::new(Vec3::new(1.0, 2.0, 3.0).expect("tip"), Vec3::Z).expect("pose")
+    }
+
+    fn document(motion: ClMotion) -> Document {
+        let feeds = Feeds::try_new(300.0, None, None, None, None).expect("feeds");
+        let path = ClPath::try_new(None, Some(1), CompensationMode::Off, feeds, None, vec![], vec![ClBlock::Motion(motion)]).expect("path");
+        let tool = Tool::try_new(1, None, Some(6.0), None).expect("tool");
+        Document::new(Program::try_new(None, vec![tool], None, vec![path], vec![], vec![], None).expect("program")).expect("document")
+    }
+
+    fn linear(power: Option<f64>) -> ClMotion {
+        ClMotion::Linear { to: pose(), feed: 300.0, role: MoveRole::Cut, power }
+    }
+
+    #[test]
+    fn omitted_power_round_trips_and_old_ir_stays_unchanged() {
+        let doc = document(linear(None));
+        let json = doc.to_json().expect("json");
+        assert!(!json.contains("\"power\""), "{json}");
+        assert_eq!(Document::from_json(&json).expect("load").to_json().expect("json"), json);
+        let ClBlock::Motion(motion) = &doc.program().toolpaths()[0].blocks()[0] else { panic!("motion") };
+        assert_eq!(motion.power(), None);
+    }
+
+    #[test]
+    fn per_move_power_round_trips_and_is_omitted_when_none() {
+        let doc = document(linear(Some(0.4)));
+        let json = doc.to_json().expect("json");
+        assert!(json.contains("\"power\":0.4") || json.contains("\"power\":0.40"), "{json}");
+        let loaded = Document::from_json(&json).expect("load");
+        assert_eq!(loaded, doc);
+        let ClBlock::Motion(motion) = &loaded.program().toolpaths()[0].blocks()[0] else { panic!("motion") };
+        assert_eq!(motion.power(), Some(0.4));
+        assert_eq!(
+            document(ClMotion::Rapid { to: pose(), feed: None }).program().toolpaths()[0].blocks()[0],
+            ClBlock::Motion(ClMotion::Rapid { to: pose(), feed: None })
+        );
+        assert_eq!(ClMotion::Rapid { to: pose(), feed: None }.power(), None);
+    }
+
+    #[test]
+    fn move_power_is_rejected_when_not_finite_or_negative() {
+        for power in [Some(f64::NAN), Some(f64::INFINITY), Some(-0.1)] {
+            let feeds = Feeds::try_new(300.0, None, None, None, None).expect("feeds");
+            let motion = ClMotion::Linear { to: pose(), feed: 300.0, role: MoveRole::Cut, power };
+            let err =
+                ClPath::try_new(None, Some(1), CompensationMode::Off, feeds, None, vec![], vec![ClBlock::Motion(motion)]).expect_err("bad power");
+            assert!(err.to_string().contains("move power"), "{err}");
+        }
+        let feeds = Feeds::try_new(300.0, None, None, None, None).expect("feeds");
+        ClPath::try_new(None, Some(1), CompensationMode::Off, feeds, None, vec![], vec![ClBlock::Motion(linear(Some(0.0)))]).expect("zero power");
+    }
+
+    #[test]
+    fn arc_and_helix_carry_power_the_same_way() {
+        let center = Vec3::ZERO;
+        let arc = ClMotion::Arc { to: pose(), plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: 200.0, role: MoveRole::Cut, power: Some(0.25) };
+        let helix = ClMotion::Helix {
+            to: pose(),
+            plane: Plane::Xy,
+            center,
+            sense: ArcSense::Ccw,
+            sweep: 1.0,
+            feed: 200.0,
+            role: MoveRole::Plunge,
+            power: Some(0.0),
+        };
+        assert_eq!(
+            document(arc.clone()).to_json().and_then(|j| Document::from_json(&j)).expect("arc").program().toolpaths()[0].blocks()[0],
+            ClBlock::Motion(arc)
+        );
+        assert_eq!(
+            document(helix.clone()).to_json().and_then(|j| Document::from_json(&j)).expect("helix").program().toolpaths()[0].blocks()[0],
+            ClBlock::Motion(helix)
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn arbitrary_feed_power_round_trips(n in 0u16..=10_000, kind in 0u8..3) {
+            let power = f64::from(n) / 10_000.0;
+            let motion = match kind {
+                0 => linear(Some(power)),
+                1 => ClMotion::Arc { to: pose(), plane: Plane::Xy, center: Vec3::ZERO, sense: ArcSense::Cw, feed: 100.0, role: MoveRole::Cut, power: Some(power) },
+                _ => ClMotion::Helix { to: pose(), plane: Plane::Xy, center: Vec3::ZERO, sense: ArcSense::Ccw, sweep: 0.5, feed: 100.0, role: MoveRole::Cut, power: Some(power) },
+            };
+            let json = document(motion).to_json().expect("json");
+            let loaded = Document::from_json(&json).expect("load");
+            prop_assert_eq!(loaded.to_json().expect("json"), json);
+        }
     }
 }

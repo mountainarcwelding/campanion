@@ -710,7 +710,7 @@ mod tests {
         let surface = DropCutter::new(&mesh, Cutter::new_flat(1.0).expect("flat")).expect("index").tip_z(0.0, 0.0).expect("contact");
         let blocks = vec![
             ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, surface), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(0.2, 0.0, surface - 0.1), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(0.2, 0.0, surface - 0.1), feed: 100.0, role: MoveRole::Cut, power: None }),
         ];
         let notes = ok(check_program(&program("dome", blocks), &mesh, Cutter::new_flat(1.0).expect("flat"), 0.01));
         let worst = notes.first().expect("gouge");
@@ -731,6 +731,7 @@ mod tests {
             sense: ArcSense::Ccw,
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         });
         let blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(5.0, 0.0, surface), feed: None }), arc];
         let notes = ok(check_program(&program("arc", blocks), &mesh, Cutter::new_ball(1.0).expect("ball"), 0.01));
@@ -743,6 +744,7 @@ mod tests {
             sense: ArcSense::Ccw,
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         });
         let low_blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(5.0, 0.0, surface - 0.5), feed: None }), low];
         let low_notes = ok(check_program(&program("arc", low_blocks), &mesh, Cutter::new_ball(1.0).expect("ball"), 0.01));
@@ -756,6 +758,7 @@ mod tests {
             sense: ArcSense::Ccw,
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         });
         let zx_blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(5.0, 0.0, surface), feed: None }), zx];
         let err = check_program(&program("arc", zx_blocks), &mesh, Cutter::new_ball(1.0).expect("ball"), 0.01).expect_err("zx");
@@ -793,7 +796,7 @@ mod tests {
     fn cut_at(z: f64) -> Vec<ClBlock> {
         vec![
             ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, z), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(1.0, 0.0, z), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(1.0, 0.0, z), feed: 100.0, role: MoveRole::Cut, power: None }),
         ]
     }
 
@@ -837,7 +840,7 @@ mod tests {
     }
 
     fn cut_block(to: Pose) -> ClBlock {
-        ClBlock::Motion(ClMotion::Linear { to, feed: 100.0, role: MoveRole::Cut })
+        ClBlock::Motion(ClMotion::Linear { to, feed: 100.0, role: MoveRole::Cut, power: None })
     }
 
     /// A square bar's corner swings above the flat faces. A rotate at the face height gouges only

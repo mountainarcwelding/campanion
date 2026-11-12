@@ -146,7 +146,7 @@ mod tests {
             let radians = deg.to_radians();
             Pose::new(Vec3::new(1.0, 2.0, 3.0).expect("tip"), Vec3::new(radians.sin(), 0.0, radians.cos()).expect("axis")).expect("pose")
         };
-        let feed = |deg: f64| ClBlock::Motion(ClMotion::Linear { to: pose_at(deg), feed: 100.0, role: MoveRole::Cut });
+        let feed = |deg: f64| ClBlock::Motion(ClMotion::Linear { to: pose_at(deg), feed: 100.0, role: MoveRole::Cut, power: None });
         let rapid = |deg: f64| ClBlock::Motion(ClMotion::Rapid { to: pose_at(deg), feed: None });
         let make = |blocks: Vec<ClBlock>| {
             ClPath::try_new(

@@ -928,7 +928,7 @@ mod tests {
         let mut blocks = Vec::new();
         for tip in tips {
             let pose = Pose::new(vec3(tip[0], tip[1], tip[2]), IrVec::Z).expect("pose");
-            blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose, feed: 100.0, role: MoveRole::Cut }));
+            blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose, feed: 100.0, role: MoveRole::Cut, power: None }));
         }
         let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
         let path = ClPath::try_new(Some("cut".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
@@ -946,7 +946,7 @@ mod tests {
             feeds,
             None,
             Vec::new(),
-            vec![ClBlock::Motion(ClMotion::Linear { to: pose, feed: 100.0, role: MoveRole::Cut })],
+            vec![ClBlock::Motion(ClMotion::Linear { to: pose, feed: 100.0, role: MoveRole::Cut, power: None })],
         )
         .expect("path");
         let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");

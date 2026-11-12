@@ -653,7 +653,7 @@ mod tests {
         let job = load_job("holder", text);
         let blocks = vec![
             ClBlock::Motion(ClMotion::Rapid { to: pose(5.0, 5.0, 40.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(5.0, 5.0, 2.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(5.0, 5.0, 2.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ];
         let err = check_job(&job, None, &program_of("cut", blocks), None).expect_err("holder");
         let text = err.to_string();
@@ -665,13 +665,13 @@ mod tests {
         let job = stock_job(r#","stock_model":{"cell":1}"#);
         let cut = vec![
             ClBlock::Motion(ClMotion::Rapid { to: pose(2.0, 2.0, 30.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(2.0, 2.0, 6.0), feed: 120.0, role: MoveRole::Plunge }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(8.0, 2.0, 6.0), feed: 200.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(2.0, 2.0, 6.0), feed: 120.0, role: MoveRole::Plunge, power: None }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(8.0, 2.0, 6.0), feed: 200.0, role: MoveRole::Cut, power: None }),
             ClBlock::Motion(ClMotion::Rapid { to: pose(8.0, 2.0, 30.0), feed: None }),
         ];
         let again = vec![
             ClBlock::Motion(ClMotion::Rapid { to: pose(8.0, 6.0, 30.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(8.0, 6.0, 6.0), feed: 80.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(8.0, 6.0, 6.0), feed: 80.0, role: MoveRole::Cut, power: None }),
         ];
         let program = program_paths(&[("cut", cut), ("finish", again)]);
         let want = StockWant { csv: true, file: true, snapshot_every: Some(2) };

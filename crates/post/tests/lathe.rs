@@ -89,7 +89,7 @@ fn rapid(x: f64, z: f64) -> ClBlock {
 }
 
 fn linear(x: f64, z: f64, feed: f64) -> ClBlock {
-    ClBlock::Motion(ClMotion::Linear { to: xz(x, z), feed, role: MoveRole::Cut })
+    ClBlock::Motion(ClMotion::Linear { to: xz(x, z), feed, role: MoveRole::Cut, power: None })
 }
 
 /// Quarter-circle in ZX. Start (10, 0), centre (5, 0), end (5, -5), counter-clockwise, radius 5.
@@ -104,6 +104,7 @@ fn quarter_blocks() -> Vec<ClBlock> {
             sense: ArcSense::Ccw,
             feed: 80.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ]
 }
@@ -272,6 +273,7 @@ fn a_lathe_pose_off_the_xz_plane_is_rejected() {
             sense: ArcSense::Ccw,
             feed: 40.0,
             role: MoveRole::Cut,
+            power: None,
         })],
         turning(None, false),
     );
@@ -326,6 +328,7 @@ fn turn_document() -> Document {
             sense: ArcSense::Ccw,
             feed: 80.0,
             role: MoveRole::Cut,
+            power: None,
         }),
         ClBlock::Motion(ClMotion::Arc {
             to: xz(28.0, -16.0),
@@ -334,6 +337,7 @@ fn turn_document() -> Document {
             sense: ArcSense::Cw,
             feed: 80.0,
             role: MoveRole::Cut,
+            power: None,
         }),
         rapid(32.0, 5.0),
         spindle_off(),
@@ -500,6 +504,7 @@ fn fanuc_lathe_writes_a_decimal_point_on_axes_only() {
             sense: ArcSense::Ccw,
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ];
     let program = lathe_program(blocks, turning(None, false));
@@ -629,7 +634,7 @@ fn rapid_c(x: f64, z: f64, c: f64) -> ClBlock {
 }
 
 fn linear_c(x: f64, z: f64, c: f64, feed: f64) -> ClBlock {
-    ClBlock::Motion(ClMotion::Linear { to: c_pose(x, z, c), feed, role: MoveRole::Cut })
+    ClBlock::Motion(ClMotion::Linear { to: c_pose(x, z, c), feed, role: MoveRole::Cut, power: None })
 }
 
 fn millturn_setup() -> TurningSetup {
@@ -725,9 +730,9 @@ fn haas_y_axis_writes_g19_y_and_restores_g18() {
         ClBlock::Motion(ClMotion::Rapid { to: radial_pose(20.0, 0.0, 2.0, 90.0), feed: None }),
         ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
         ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, 5.0, -4.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut, power: None }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut, power: None }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, 5.0, -4.0, 90.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::LiveToolOff),
         ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
@@ -756,9 +761,10 @@ fn haas_axial_xy_arc_writes_g17_and_reads_back() {
             sense: ArcSense::Ccw,
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         }),
         // X changes after G17. Diameter mode still doubles it; face interpolation would not.
-        ClBlock::Motion(ClMotion::Linear { to: axial_pose(8.0, 10.0, -5.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: axial_pose(8.0, 10.0, -5.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
     ];
     let program = millturn_y_program(blocks);
@@ -778,7 +784,7 @@ fn c_and_y_cannot_change_in_one_move() {
     let line = millturn_y_program(vec![
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
         ClBlock::Motion(ClMotion::Rapid { to: radial_pose(20.0, 0.0, 0.0, 0.0), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, 4.0, 0.0, 45.0), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, 4.0, 0.0, 45.0), feed: 80.0, role: MoveRole::Cut, power: None }),
     ]);
     let err = post_program(&line, &haas_lathe(), &options()).expect_err("line");
     assert!(err.to_string().contains("C and Y in one move"), "{err}");
@@ -793,6 +799,7 @@ fn c_and_y_cannot_change_in_one_move() {
             sense: ArcSense::Ccw,
             feed: 80.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ]);
     let err = post_program(&arc, &haas_lathe(), &options()).expect_err("arc");
@@ -803,7 +810,7 @@ fn c_and_y_cannot_change_in_one_move() {
 fn fanuc_lathe_has_no_y_axis() {
     let blocks = vec![
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, 3.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, 3.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
     ];
     let err = post_program(&millturn_y_program(blocks), &builtin("fanuc_lathe").expect("fanuc"), &options()).expect_err("y");
     assert!(err.to_string().contains("post `fanuc_lathe` has no Y axis"), "{err}");
@@ -908,6 +915,7 @@ fn engaged_arc_stays_in_zx_without_a_c_word() {
             sense: ArcSense::Ccw,
             feed: 80.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ];
     let program = millturn_program(blocks);
@@ -977,7 +985,7 @@ const FACE_Z: f64 = -1.0;
 /// A centre at (10, 0) would put the left side on x = 0 and cross the spindle axis.
 /// Bounds are x = 2..22, y = -10..10. The path starts at (4, -10) and walks counter-clockwise.
 fn face_square() -> Vec<ClBlock> {
-    let line = |x, y| ClBlock::Motion(ClMotion::Linear { to: yz(x, y, FACE_Z), feed: 100.0, role: MoveRole::Cut });
+    let line = |x, y| ClBlock::Motion(ClMotion::Linear { to: yz(x, y, FACE_Z), feed: 100.0, role: MoveRole::Cut, power: None });
     let arc = |x, y, cx, cy| {
         ClBlock::Motion(ClMotion::Arc {
             to: yz(x, y, FACE_Z),
@@ -986,6 +994,7 @@ fn face_square() -> Vec<ClBlock> {
             sense: ArcSense::Ccw,
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         })
     };
     vec![
@@ -1066,8 +1075,8 @@ fn haas_cylinder_interpolation_writes_g107_and_reads_back() {
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
         ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) }),
         ClBlock::Motion(ClMotion::Rapid { to: yz(20.0, -5.0, -10.0), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -10.0), feed: 100.0, role: MoveRole::Cut }),
-        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -20.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -10.0), feed: 100.0, role: MoveRole::Cut, power: None }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -20.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::CylinderInterpolation { radius: None }),
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
     ];
@@ -1106,7 +1115,7 @@ fn face_fallback_writes_continuous_c_and_a_centre_crossing_errors() {
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
         ClBlock::Event(Event::FaceInterpolation { on: true }),
         ClBlock::Motion(ClMotion::Rapid { to: yz(5.0, 0.0, FACE_Z), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: yz(-5.0, 0.0, FACE_Z), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(-5.0, 0.0, FACE_Z), feed: 80.0, role: MoveRole::Cut, power: None }),
     ]);
     let message = "face path crosses the spindle centre; split it or use a post with face interpolation";
     let native = post_program(&crossing, &haas_lathe(), &options()).expect_err("native centre");
@@ -1145,6 +1154,7 @@ fn interpolation_rejects_a_disengaged_c_axis_a_y_move_and_an_xy_arc() {
             sense: ArcSense::Ccw,
             feed: 50.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ]);
     let arc_err = post_program(&arc, &haas, &options()).expect_err("xy");
@@ -1219,8 +1229,8 @@ fn linuxcnc_cylinder_fallback_writes_inverse_time_and_reads_back() {
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: true }),
         ClBlock::Event(Event::CylinderInterpolation { radius: Some(20.0) }),
         ClBlock::Motion(ClMotion::Rapid { to: yz(20.0, -5.0, -10.0), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -10.0), feed: 100.0, role: MoveRole::Cut }),
-        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -20.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -10.0), feed: 100.0, role: MoveRole::Cut, power: None }),
+        ClBlock::Motion(ClMotion::Linear { to: yz(20.0, 5.0, -20.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::CylinderInterpolation { radius: None }),
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
     ];
@@ -1243,9 +1253,9 @@ fn linuxcnc_y_axis_writes_g19_and_live_spindle() {
         ClBlock::Motion(ClMotion::Rapid { to: radial_pose(20.0, 0.0, 2.0, 90.0), feed: None }),
         ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: true }),
         ClBlock::Event(Event::LiveToolOn { rpm: 1_500.0, direction: LiveDirection::Forward }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
-        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, 5.0, -4.0, 90.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(20.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut, power: None }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, -5.0, 2.0, 90.0), feed: 100.0, role: MoveRole::Cut, power: None }),
+        ClBlock::Motion(ClMotion::Linear { to: radial_pose(18.0, 5.0, -4.0, 90.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::LiveToolOff),
         ClBlock::Event(Event::SpindleBrake { spindle: "main".into(), clamp: false }),
         ClBlock::Event(Event::CAxis { spindle: "main".into(), engage: false }),
@@ -1526,6 +1536,7 @@ fn mirror_z_negates_z_and_flips_g2_g3() {
             sense: ArcSense::Ccw,
             feed: 80.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ];
     let program = program_on(

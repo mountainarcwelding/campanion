@@ -94,7 +94,7 @@ fn b90_blocks() -> Vec<ClBlock> {
     let second = pose(Vec3::new(1.0, 2.0, 3.0).expect("tip"), axis);
     vec![
         ClBlock::Motion(ClMotion::Rapid { to: first, feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: second, feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: second, feed: 100.0, role: MoveRole::Cut, power: None }),
     ]
 }
 
@@ -170,7 +170,7 @@ fn continuous_toolpath_is_rejected_before_indexed_output() {
     let axis_z = Vec3::Z;
     let constant = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose(Vec3::new(1.0, 2.0, 3.0).expect("a"), axis_z), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(4.0, 2.0, 3.0).expect("b"), axis_z), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(4.0, 2.0, 3.0).expect("b"), axis_z), feed: 80.0, role: MoveRole::Cut, power: None }),
     ];
     let cases = [(constant, None), (b90_blocks(), Some(setup(B_TABLE)))];
     for (blocks, five) in cases {
@@ -197,7 +197,7 @@ fn constant_blocks() -> Vec<ClBlock> {
     let axis_z = Vec3::Z;
     vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose(Vec3::new(1.0, 2.0, 3.0).expect("a"), axis_z), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(4.0, 2.0, 3.0).expect("b"), axis_z), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(4.0, 2.0, 3.0).expect("b"), axis_z), feed: 80.0, role: MoveRole::Cut, power: None }),
     ]
 }
 
@@ -207,7 +207,7 @@ fn toolpath_rejects_an_axis_change_inside_a_move() {
     let axis_y = Vec3::new(0.0, -1.0, 0.0).expect("axis");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose(Vec3::new(1.0, 2.0, 3.0).expect("a"), axis_z), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(1.0, 2.0, 4.0).expect("b"), axis_y), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(Vec3::new(1.0, 2.0, 4.0).expect("b"), axis_y), feed: 80.0, role: MoveRole::Cut, power: None }),
     ];
     let err = post_program(&program(Some(setup(B_TABLE)), blocks), &builtin("haas_umc").expect("post"), &options(0.05)).expect_err("axis");
     assert_eq!(err.to_string(), "invalid input: toolpath 0 changes tool axis inside a 3+2 move");
@@ -235,7 +235,7 @@ fn non_cardinal_arc_uses_the_exact_error_or_chords() {
     let center = Vec3::new(0.0, 0.0, 0.0).expect("center");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: start, feed: None }),
-        ClBlock::Motion(ClMotion::Arc { to: end, plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Arc { to: end, plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: 100.0, role: MoveRole::Cut, power: None }),
     ];
     let err = post_program(&program(Some(setup(B_TABLE)), blocks.clone()), &builtin("haas_umc").expect("post"), &options(0.0)).expect_err("arc");
     assert_eq!(err.to_string(), "invalid input: arc is not in a cardinal plane after the 3+2 rotation");
@@ -252,7 +252,7 @@ fn cardinal_arc_after_b90_stays_an_arc() {
     let center = Vec3::new(0.0, 0.0, 0.0).expect("center");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: start, feed: None }),
-        ClBlock::Motion(ClMotion::Arc { to: end, plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Arc { to: end, plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: 100.0, role: MoveRole::Cut, power: None }),
     ];
     let text = post_program(&program(Some(setup(B_TABLE)), blocks), &builtin("haas_umc").expect("post"), &options(0.05)).expect("arc");
     let arc = text.lines().find(|line| line.split_whitespace().any(|word| word == "G2" || word == "G3")).expect("arc line");
@@ -270,11 +270,13 @@ fn continuous_machine_output_writes_xyz_and_inverse_time() {
             to: pose(Vec3::new(4.0, 5.0, 6.0).expect("b"), Vec3::new(-0.5, 0.0, 0.8660254037844386).expect("axis")),
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         }),
         ClBlock::Motion(ClMotion::Linear {
             to: pose(Vec3::new(10.0, 5.0, 6.0).expect("c"), Vec3::new(-0.5, 0.0, 0.8660254037844386).expect("axis")),
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ];
     let path = path(blocks).with_continuous(true);

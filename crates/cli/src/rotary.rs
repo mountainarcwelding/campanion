@@ -455,7 +455,7 @@ fn move_to(
         let pose = posed(setup, u, radius, angle)?;
         blocks.push(match *travel {
             Travel::Rapid => ClBlock::Motion(ClMotion::Rapid { to: pose, feed: None }),
-            Travel::Feed { feed, role } => ClBlock::Motion(ClMotion::Linear { to: pose, feed, role }),
+            Travel::Feed { feed, role } => ClBlock::Motion(ClMotion::Linear { to: pose, feed, role, power: None }),
         });
         *cursor = Some(Cursor { u, radius, angle });
     }

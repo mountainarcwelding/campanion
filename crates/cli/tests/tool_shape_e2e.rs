@@ -26,7 +26,7 @@ fn write_ir(dir: &Path, shape: Option<ToolShape>) {
     let pose = |x| Pose::new(Vec3::new(x, 0.0, 1.0).expect("point"), Vec3::Z).expect("pose");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose(0.0), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(1.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(1.0), feed: 100.0, role: MoveRole::Cut, power: None }),
     ];
     let path = ClPath::try_new(
         None,

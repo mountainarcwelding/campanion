@@ -591,7 +591,7 @@ fn thirteen_axis_sample() -> Document {
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 5.0), feed: None }),
         ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: params.clone() }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 5.0), feed: 1000.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 5.0), feed: 1000.0, role: MoveRole::Cut, power: None }),
         ClBlock::Motion(ClMotion::Arc {
             to: pose(10.0, 10.0, 5.0),
             plane: Plane::Xy,
@@ -599,6 +599,7 @@ fn thirteen_axis_sample() -> Document {
             sense: ArcSense::Ccw,
             feed: 1000.0,
             role: MoveRole::Cut,
+            power: None,
         }),
         ClBlock::Motion(ClMotion::Helix {
             to: pose(0.0, 0.0, 8.0),
@@ -608,6 +609,7 @@ fn thirteen_axis_sample() -> Document {
             sweep: PI,
             feed: 250.0,
             role: MoveRole::Plunge,
+            power: None,
         }),
         ClBlock::Event(Event::Dwell { seconds: 0.2 }),
         ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),

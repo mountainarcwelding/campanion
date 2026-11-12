@@ -47,8 +47,9 @@ fn program_of(case: &ArcCase) -> Program {
             sense,
             feed: case.feed,
             role: MoveRole::Cut,
+            power: None,
         }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(end[0] + 5.0, end[1], end[2]), feed: case.feed, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(end[0] + 5.0, end[1], end[2]), feed: case.feed, role: MoveRole::Cut, power: None }),
     ];
     let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
     let path = ClPath::try_new(Some("arc".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");

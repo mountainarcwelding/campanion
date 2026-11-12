@@ -131,7 +131,7 @@ mod tests {
     }
 
     fn cut(to: Pose) -> ClBlock {
-        ClBlock::Motion(ClMotion::Linear { to, feed: 100.0, role: MoveRole::Cut })
+        ClBlock::Motion(ClMotion::Linear { to, feed: 100.0, role: MoveRole::Cut, power: None })
     }
 
     fn program(tools: Vec<Tool>, paths: Vec<ClPath>) -> Program {

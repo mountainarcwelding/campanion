@@ -94,6 +94,7 @@ fn custom_mach3_header_posts_and_round_trips_a_full_circle() {
             sense: ArcSense::Ccw,
             feed: 100.0,
             role: MoveRole::Cut,
+            power: None,
         }),
     ];
     let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");

@@ -2982,13 +2982,20 @@ fn apply_b_axis(job: &LatheJob, path: ClPath, b_deg: f64) -> Result<ClPath, CliE
 fn map_motion(motion: &ClMotion, axis: Vec3) -> Result<ClMotion, CliError> {
     Ok(match motion {
         ClMotion::Rapid { to, feed } => ClMotion::Rapid { to: map_pose(*to, axis)?, feed: *feed },
-        ClMotion::Linear { to, feed, role } => ClMotion::Linear { to: map_pose(*to, axis)?, feed: *feed, role: *role },
-        ClMotion::Arc { to, plane, center, sense, feed, role } => {
-            ClMotion::Arc { to: map_pose(*to, axis)?, plane: *plane, center: *center, sense: *sense, feed: *feed, role: *role }
+        ClMotion::Linear { to, feed, role, .. } => ClMotion::Linear { to: map_pose(*to, axis)?, feed: *feed, role: *role, power: None },
+        ClMotion::Arc { to, plane, center, sense, feed, role, .. } => {
+            ClMotion::Arc { to: map_pose(*to, axis)?, plane: *plane, center: *center, sense: *sense, feed: *feed, role: *role, power: None }
         }
-        ClMotion::Helix { to, plane, center, sense, sweep, feed, role } => {
-            ClMotion::Helix { to: map_pose(*to, axis)?, plane: *plane, center: *center, sense: *sense, sweep: *sweep, feed: *feed, role: *role }
-        }
+        ClMotion::Helix { to, plane, center, sense, sweep, feed, role, .. } => ClMotion::Helix {
+            to: map_pose(*to, axis)?,
+            plane: *plane,
+            center: *center,
+            sense: *sense,
+            sweep: *sweep,
+            feed: *feed,
+            role: *role,
+            power: None,
+        },
         ClMotion::Thread { to, lead } => ClMotion::Thread { to: map_pose(*to, axis)?, lead: *lead },
     })
 }
@@ -3630,7 +3637,9 @@ fn live_cl_path(name: &str, tool_id: u32, feed: f64, path: &LivePath) -> Result<
     for step in &path.steps {
         let block = match *step {
             LiveStep::Rapid { z, x, c_deg } => ClBlock::Motion(ClMotion::Rapid { to: live_pose(z, x, c_deg, axis)?, feed: None }),
-            LiveStep::Feed { z, x, c_deg } => ClBlock::Motion(ClMotion::Linear { to: live_pose(z, x, c_deg, axis)?, feed, role: MoveRole::Cut }),
+            LiveStep::Feed { z, x, c_deg } => {
+                ClBlock::Motion(ClMotion::Linear { to: live_pose(z, x, c_deg, axis)?, feed, role: MoveRole::Cut, power: None })
+            }
             LiveStep::Clamp => ClBlock::Event(Event::SpindleBrake { spindle: SPINDLE.to_string(), clamp: true }),
             LiveStep::Release => ClBlock::Event(Event::SpindleBrake { spindle: SPINDLE.to_string(), clamp: false }),
         };
@@ -3790,7 +3799,7 @@ fn flat_block(step: &FlatStep, feed: f64) -> Result<ClBlock, CliError> {
     let pose = Pose::new(Vec3::new(step.x(), step.y(), step.z())?, Vec3::X)?.with_rotary(step.c_deg())?;
     let motion = match step {
         FlatStep::Rapid { .. } => ClMotion::Rapid { to: pose, feed: None },
-        FlatStep::Feed { .. } => ClMotion::Linear { to: pose, feed, role: MoveRole::Cut },
+        FlatStep::Feed { .. } => ClMotion::Linear { to: pose, feed, role: MoveRole::Cut, power: None },
     };
     Ok(ClBlock::Motion(motion))
 }

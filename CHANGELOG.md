@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Feed moves in the IR may carry an optional `power` (the same quantity as process-on power). Omitted, the field is absent and old IR loads unchanged. Laser raster uses one value per scan segment. This does not change posted G-code yet.
+
 ## 0.10.1 — 2026-11-12
 
 Post and IR follow-ups contributed by DarkBiscuits: G91.1 incremental arc centres in read-back and mill/five-axis audit, G53 machine retracts in mill audit, tool shapes preserved in IR for per-move mesh verification, and inch output for three-axis mill posts. This output has not been proven on a machine.

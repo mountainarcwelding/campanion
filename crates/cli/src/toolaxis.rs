@@ -500,7 +500,7 @@ fn axis_differs(left: MeshVec, right: MeshVec) -> bool {
 }
 
 fn linear(tip: MeshVec, axis: MeshVec, feed: f64, role: MoveRole) -> Result<ClBlock, CliError> {
-    Ok(ClBlock::Motion(ClMotion::Linear { to: pose_of(tip, axis)?, feed, role }))
+    Ok(ClBlock::Motion(ClMotion::Linear { to: pose_of(tip, axis)?, feed, role, power: None }))
 }
 
 fn rapid(tip: MeshVec, axis: MeshVec) -> Result<ClBlock, CliError> {
@@ -729,7 +729,7 @@ mod tests {
             feeds,
             None,
             Vec::new(),
-            vec![ClBlock::Motion(ClMotion::Linear { to: pose, feed: 100.0, role: MoveRole::Cut })],
+            vec![ClBlock::Motion(ClMotion::Linear { to: pose, feed: 100.0, role: MoveRole::Cut, power: None })],
         )
         .expect("path")
         .with_continuous(true);

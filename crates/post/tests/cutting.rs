@@ -43,8 +43,8 @@ fn plasma_document() -> Result<Document, String> {
         ClBlock::Motion(ClMotion::Rapid { to: pose(10.0, 10.0, 3.0)?, feed: None }),
         ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params }),
         ClBlock::Event(Event::Dwell { seconds: 0.5 }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 10.0, 1.2)?, feed: 300.0, role: MoveRole::Plunge }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(40.0, 10.0, 1.2)?, feed: 1200.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 10.0, 1.2)?, feed: 300.0, role: MoveRole::Plunge, power: None }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(40.0, 10.0, 1.2)?, feed: 1200.0, role: MoveRole::Cut, power: None }),
         ClBlock::Motion(ClMotion::Arc {
             to: pose(50.0, 20.0, 1.2)?,
             plane: Plane::Xy,
@@ -52,6 +52,7 @@ fn plasma_document() -> Result<Document, String> {
             sense: ArcSense::Ccw,
             feed: 1200.0,
             role: MoveRole::Cut,
+            power: None,
         }),
         ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }),
         ClBlock::Event(Event::Dwell { seconds: 0.25 }),

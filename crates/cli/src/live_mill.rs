@@ -512,7 +512,7 @@ fn emit_step(spec: &MillSpec, step: Step, prev: Uv) -> Result<ClMotion, CliError
         Step::Rapid { u, v, d } => rapid(spec, u, v, d),
         Step::Linear { u, v, d, role } => {
             let to = pose_at(spec, u, v, d)?;
-            Ok(ClMotion::Linear { to, feed: spec.feed, role })
+            Ok(ClMotion::Linear { to, feed: spec.feed, role, power: None })
         }
         Step::Arc { u, v, d, cu, cv, cd, ccw, role } => {
             if matches!(spec.frame, MillFrame::Front { .. } | MillFrame::FrontY { .. }) {
@@ -528,9 +528,9 @@ fn emit_step(spec: &MillSpec, step: Step, prev: Uv) -> Result<ClMotion, CliError
             let feed = spec.feed;
             if (prev.d - d).abs() > MOVE_EPS {
                 let sweep = planar_sweep(&spec.name, prev.u, prev.v, u, v, cu, cv, ccw)?;
-                Ok(ClMotion::Helix { to, plane, center, sense, sweep, feed, role })
+                Ok(ClMotion::Helix { to, plane, center, sense, sweep, feed, role, power: None })
             } else {
-                Ok(ClMotion::Arc { to, plane, center, sense, feed, role })
+                Ok(ClMotion::Arc { to, plane, center, sense, feed, role, power: None })
             }
         }
     }

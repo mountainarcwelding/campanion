@@ -663,7 +663,7 @@ mod tests {
     }
 
     fn linear(x: f64, y: f64, z: f64, feed: f64) -> ClBlock {
-        ClBlock::Motion(ClMotion::Linear { to: pose(x, y, z), feed, role: MoveRole::Cut })
+        ClBlock::Motion(ClMotion::Linear { to: pose(x, y, z), feed, role: MoveRole::Cut, power: None })
     }
 
     fn rapid(x: f64, y: f64, z: f64, feed: Option<f64>) -> ClBlock {
@@ -678,6 +678,7 @@ mod tests {
             sense,
             feed,
             role: MoveRole::Cut,
+            power: None,
         })
     }
 
@@ -767,6 +768,7 @@ M30
                     sweep: TAU / 2.0,
                     feed: 80.0,
                     role: MoveRole::Plunge,
+                    power: None,
                 }),
                 ClBlock::Event(Event::Dwell { seconds: 0.5 }),
                 ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
@@ -865,6 +867,7 @@ M30
                 sweep: TAU * 2.0,
                 feed: 60.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
             ClBlock::Motion(ClMotion::Helix {
                 to: pose(10.0, -4.0, 0.0),
@@ -874,6 +877,7 @@ M30
                 sweep: TAU,
                 feed: 25.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
         ];
         let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new(), None).expect("program");
@@ -963,8 +967,15 @@ M30
 
     #[test]
     fn arc_without_a_position_is_rejected() {
-        let arc =
-            ClMotion::Arc { to: pose(1.0, 0.0, 0.0), plane: Plane::Xy, center: Vec3::ZERO, sense: ArcSense::Ccw, feed: 10.0, role: MoveRole::Cut };
+        let arc = ClMotion::Arc {
+            to: pose(1.0, 0.0, 0.0),
+            plane: Plane::Xy,
+            center: Vec3::ZERO,
+            sense: ArcSense::Ccw,
+            feed: 10.0,
+            role: MoveRole::Cut,
+            power: None,
+        };
         let only = Program::try_new(None, Vec::new(), None, vec![path(None, vec![ClBlock::Motion(arc.clone())])], Vec::new(), Vec::new(), None)
             .expect("program");
         let err = write_ngc(&only).expect_err("arc");
@@ -1034,6 +1045,7 @@ M30
                 sweep: TAU * 10_001.0,
                 feed: 10.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
         ];
         let program = Program::try_new(None, Vec::new(), None, vec![path(None, blocks)], Vec::new(), Vec::new(), None).expect("program");

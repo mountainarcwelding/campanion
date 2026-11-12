@@ -54,7 +54,7 @@ fn program_from(center: Vec3, negative: bool, steps: &[Step]) -> Result<Program,
         let pose = turned(&setup, tip, step.angle).ok_or_else(|| format!("pose at {}", step.angle))?;
         let motion = match step.feed {
             None => ClMotion::Rapid { to: pose, feed: None },
-            Some(feed) => ClMotion::Linear { to: pose, feed, role: MoveRole::Cut },
+            Some(feed) => ClMotion::Linear { to: pose, feed, role: MoveRole::Cut, power: None },
         };
         blocks.push(ClBlock::Motion(motion));
         prev = Some((point, step.angle));

@@ -1155,7 +1155,7 @@ mod tests {
             ClBlock::Event(Event::ToolChange { tool_id: 1 }),
             ClBlock::Motion(ClMotion::Rapid { to: start, feed: None }),
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params }),
-            ClBlock::Motion(ClMotion::Linear { to: cut, feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: cut, feed: 100.0, role: MoveRole::Cut, power: None }),
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
         ];
         let path = ClPath::try_new(Some("outer".into()), Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
@@ -1188,7 +1188,7 @@ mod tests {
             ClBlock::Event(Event::Probe { toward: Some(toward), feed: Some(100.0) }),
             ClBlock::Motion(ClMotion::Rapid { to: approach, feed: None }),
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: spindle }),
-            ClBlock::Motion(ClMotion::Linear { to: cut, feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: cut, feed: 100.0, role: MoveRole::Cut, power: None }),
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("vacuum".into()) }),
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("dust".into()) }),

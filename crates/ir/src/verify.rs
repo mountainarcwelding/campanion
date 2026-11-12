@@ -1058,8 +1058,8 @@ mod tests {
             ClBlock::Motion(ClMotion::Rapid { to: tip(0.0, 0.0, 0.0), feed: None }),
             ClBlock::Motion(ClMotion::Rapid { to: tip(0.0, 0.0, 5.0), feed: Some(3000.0) }),
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(0.0, 0.0, 0.0), feed: 300.0, role: MoveRole::Plunge }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(10.0, 0.0, 0.0), feed: 600.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(0.0, 0.0, 0.0), feed: 300.0, role: MoveRole::Plunge, power: None }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(10.0, 0.0, 0.0), feed: 600.0, role: MoveRole::Cut, power: None }),
             ClBlock::Motion(ClMotion::Arc {
                 to: tip(-10.0, 0.0, 0.0),
                 plane: Plane::Xy,
@@ -1067,6 +1067,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 600.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
             ClBlock::Event(Event::Dwell { seconds: 1.5 }),
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
@@ -1112,6 +1113,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
         ];
         let report = verify(&program_with_path(blocks));
@@ -1164,7 +1166,7 @@ mod tests {
     fn mill_spindle_left_on_is_reported_at_program_end() {
         let blocks = vec![
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ];
         let report = verify(&program_with_path(blocks));
         assert!(
@@ -1181,9 +1183,9 @@ mod tests {
         let fast = ProcessParams::new().speed(Some(16_000.0)).expect("speed");
         let blocks = vec![
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: slow }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut, power: None }),
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: fast }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(2.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(2.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut, power: None }),
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
         ];
         let report = verify(&program_with_path(blocks));
@@ -1194,7 +1196,7 @@ mod tests {
     fn mill_spindle_may_cross_toolpaths_when_a_later_path_stops_it() {
         let on = ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() });
         let off = ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle });
-        let cut = ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut });
+        let cut = ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, -1.0), feed: 100.0, role: MoveRole::Cut, power: None });
         let report = verify(&program_with_paths(vec![vec![on, cut.clone()], vec![cut, off]]));
         assert!(report.issues().iter().all(|issue| !matches!(issue, Issue::ProcessNotClosed { .. })), "{:?}", report.issues());
     }
@@ -1203,7 +1205,7 @@ mod tests {
     fn process_left_on_is_reported() {
         let blocks = vec![
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params: ProcessParams::new() }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(1.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ];
         let report = verify(&program_with_path(blocks));
         assert!(report.issues().iter().any(|issue| matches!(issue, Issue::ProcessNotClosed { process: ProcessKind::Torch, toolpath: Some(0), .. })));
@@ -1213,7 +1215,7 @@ mod tests {
     fn non_finite_length_is_reported() {
         let blocks = vec![
             ClBlock::Motion(ClMotion::Rapid { to: tip(1.0e308, 0.0, 0.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(-1.0e308, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(-1.0e308, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ];
         let report = verify(&program_with_path(blocks));
         assert!(report.issues().iter().any(|issue| matches!(issue, Issue::NonFinite { what } if what == "move length")));
@@ -1226,7 +1228,7 @@ mod tests {
     fn bad_feed_on_a_cutting_move_is_reported() {
         let blocks = vec![
             ClBlock::Motion(ClMotion::Rapid { to: tip(0.0, 0.0, 0.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: tip(10.0, 0.0, 0.0), feed: 600.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(10.0, 0.0, 0.0), feed: 600.0, role: MoveRole::Cut, power: None }),
         ];
         let program = patched(&program_with_path(blocks), |value| {
             let Some(feed) = value.pointer_mut("/toolpaths/0/blocks/1/feed") else {
@@ -1304,7 +1306,7 @@ mod tests {
             rapid(0.0, 0.0, 10.0),
             rapid(3.0, 4.0, 10.0),
             rapid(3.0, 4.0, 0.0),
-            ClBlock::Motion(ClMotion::Linear { to: tip(30.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(30.0, 0.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
         ];
         let report = verify_with(&program_with_path(blocks), &heights(Some(10.0), None));
         assert!(report.rapid_safe_errors().is_empty(), "{:?}", report.rapid_safe_errors());
@@ -1329,7 +1331,7 @@ mod tests {
         // The rapid leaves the feed height, so that Z is reached by the rapid and becomes the clearance.
         let fed = vec![
             rapid(0.0, 0.0, 3.0),
-            ClBlock::Motion(ClMotion::Linear { to: tip(0.0, 0.0, 40.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: tip(0.0, 0.0, 40.0), feed: 100.0, role: MoveRole::Cut, power: None }),
             rapid(5.0, 0.0, 3.0),
         ];
         let report = verify(&program_with_path(fed));
@@ -1415,7 +1417,7 @@ mod tests {
     }
 
     fn linear_at(deg: f64) -> ClBlock {
-        ClBlock::Motion(ClMotion::Linear { to: axis_pose(deg), feed: 100.0, role: MoveRole::Cut })
+        ClBlock::Motion(ClMotion::Linear { to: axis_pose(deg), feed: 100.0, role: MoveRole::Cut, power: None })
     }
 
     fn marked(continuous: bool, blocks: Vec<ClBlock>) -> ClPath {

@@ -198,7 +198,7 @@ mod tests {
     }
 
     fn linear(x: f64, y: f64, z: f64) -> ClBlock {
-        ClBlock::Motion(ClMotion::Linear { to: pose(x, y, z), feed: 100.0, role: MoveRole::Cut })
+        ClBlock::Motion(ClMotion::Linear { to: pose(x, y, z), feed: 100.0, role: MoveRole::Cut, power: None })
     }
 
     fn path(blocks: Vec<ClBlock>) -> ClPath {

@@ -2556,7 +2556,7 @@ mod tests {
         let blocks = vec![
             ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 20.0), feed: None }),
             ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 0.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 2.0), feed: 100.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 2.0), feed: 100.0, role: MoveRole::Cut, power: None }),
             ClBlock::Motion(ClMotion::Arc {
                 to: pose(0.0, 10.0, 4.0),
                 plane: Plane::Xy,
@@ -2564,6 +2564,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
             ClBlock::Motion(ClMotion::Helix {
                 to: pose(10.0, 0.0, 8.0),
@@ -2573,8 +2574,9 @@ mod tests {
                 sweep: std::f64::consts::FRAC_PI_2,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
-            ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 5.0), feed: 100.0, role: MoveRole::Plunge }),
+            ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 5.0), feed: 100.0, role: MoveRole::Plunge, power: None }),
         ];
         let path = ClPath::try_new(Some("curves".to_string()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
         let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
@@ -2824,11 +2826,11 @@ mod tests {
         let feeds = Feeds::try_new(1000.0, None, None, Some(300.0), None).expect("feeds");
         let face0 = vec![
             ClBlock::Motion(ClMotion::Rapid { to: rotary_tip(&setup, 0.0, 0.0, 5.0, 0.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 20.0, 0.0, 5.0, 0.0), feed: 1000.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 20.0, 0.0, 5.0, 0.0), feed: 1000.0, role: MoveRole::Cut, power: None }),
         ];
         let face90 = vec![
             ClBlock::Motion(ClMotion::Rapid { to: rotary_tip(&setup, 20.0, 8.0, 5.0, 90.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 0.0, 8.0, 5.0, 90.0), feed: 1000.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 0.0, 8.0, 5.0, 90.0), feed: 1000.0, role: MoveRole::Cut, power: None }),
         ];
         let path =
             |name: &str, blocks| ClPath::try_new(Some(name.to_string()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
@@ -2884,7 +2886,7 @@ mod tests {
         let feeds = Feeds::try_new(800.0, None, None, None, None).expect("feeds");
         let blocks = vec![
             ClBlock::Motion(ClMotion::Rapid { to: rotary_tip(&setup, 0.0, 0.0, 0.0, 10.0), feed: None }),
-            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 0.0, 10.0, 0.0, 190.0), feed: 800.0, role: MoveRole::Cut }),
+            ClBlock::Motion(ClMotion::Linear { to: rotary_tip(&setup, 0.0, 10.0, 0.0, 190.0), feed: 800.0, role: MoveRole::Cut, power: None }),
         ];
         let path = ClPath::try_new(Some("wrap".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
         let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), Some(setup)).expect("program");
@@ -3022,6 +3024,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 80.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
         ];
         let path = ClPath::try_new(Some("arc".into()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
@@ -3061,6 +3064,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 80.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
         ];
         let path = ClPath::try_new(None, None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
@@ -3137,7 +3141,7 @@ mod tests {
         let path =
             |name: &str, blocks| ClPath::try_new(Some(name.to_string()), None, CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");
         let rapid = |x, z| ClBlock::Motion(ClMotion::Rapid { to: pose(x, 0.0, z), feed: None });
-        let cut = |x, z| ClBlock::Motion(ClMotion::Linear { to: pose(x, 0.0, z), feed: 80.0, role: MoveRole::Cut });
+        let cut = |x, z| ClBlock::Motion(ClMotion::Linear { to: pose(x, 0.0, z), feed: 80.0, role: MoveRole::Cut, power: None });
         let on = ClBlock::Event(Event::ProcessOn { process: ProcessKind::Spindle, params: ProcessParams::new() });
         let off = ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle });
         let clamp = |spindle: &str, closed| ClBlock::Event(Event::ChuckClamp { spindle: spindle.to_string(), clamp: closed });

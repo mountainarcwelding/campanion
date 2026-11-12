@@ -146,7 +146,7 @@ fn rapid(pose: Pose) -> ClBlock {
 }
 
 fn linear(pose: Pose, feed: f64) -> ClBlock {
-    ClBlock::Motion(ClMotion::Linear { to: pose, feed, role: MoveRole::Cut })
+    ClBlock::Motion(ClMotion::Linear { to: pose, feed, role: MoveRole::Cut, power: None })
 }
 
 fn change(id: u32) -> ClBlock {
@@ -1416,7 +1416,7 @@ fn check_rotary(id: &str, setup: &RotarySetup, steps: &[RotaryStep]) -> Result<(
         let pose = turned(setup, step.tip, step.angle);
         let motion = match step.feed {
             None => ClMotion::Rapid { to: pose, feed: None },
-            Some(feed) => ClMotion::Linear { to: pose, feed, role: MoveRole::Cut },
+            Some(feed) => ClMotion::Linear { to: pose, feed, role: MoveRole::Cut, power: None },
         };
         blocks.push(ClBlock::Motion(motion));
     }

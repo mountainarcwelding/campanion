@@ -268,20 +268,20 @@ fn map_block(block: &ClBlock, setup: &RotarySetup, angle_deg: f64, chord_mm: f64
             *cursor = Some(to.tip());
             Ok(vec![ClBlock::Motion(ClMotion::Rapid { to: mapped, feed: *feed })])
         }
-        ClBlock::Motion(ClMotion::Linear { to, feed, role }) => {
+        ClBlock::Motion(ClMotion::Linear { to, feed, role, .. }) => {
             let mapped = map_machine_pose(setup, *to, angle_deg)?;
             *cursor = Some(to.tip());
-            Ok(vec![ClBlock::Motion(ClMotion::Linear { to: mapped, feed: *feed, role: *role })])
+            Ok(vec![ClBlock::Motion(ClMotion::Linear { to: mapped, feed: *feed, role: *role, power: None })])
         }
         ClBlock::Motion(ClMotion::Thread { to, lead }) => {
             let mapped = map_machine_pose(setup, *to, angle_deg)?;
             *cursor = Some(to.tip());
             Ok(vec![ClBlock::Motion(ClMotion::Thread { to: mapped, lead: *lead })])
         }
-        ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role }) => {
+        ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role, .. }) => {
             map_curve(Curve::Arc, *to, *plane, *center, *sense, None, *feed, *role, setup, angle_deg, chord_mm, cursor)
         }
-        ClBlock::Motion(ClMotion::Helix { to, plane, center, sense, sweep, feed, role }) => {
+        ClBlock::Motion(ClMotion::Helix { to, plane, center, sense, sweep, feed, role, .. }) => {
             map_curve(Curve::Helix, *to, *plane, *center, *sense, Some(*sweep), *feed, *role, setup, angle_deg, chord_mm, cursor)
         }
         ClBlock::Event(Event::Probe { toward, feed }) => {
@@ -344,10 +344,10 @@ pub(crate) fn curve_block(
     role: MoveRole,
 ) -> Result<ClMotion, CliError> {
     match curve {
-        Curve::Arc => Ok(ClMotion::Arc { to, plane, center, sense, feed, role }),
+        Curve::Arc => Ok(ClMotion::Arc { to, plane, center, sense, feed, role, power: None }),
         Curve::Helix => {
             let sweep = sweep.ok_or_else(|| CliError::run("index helix needs a sweep"))?;
-            Ok(ClMotion::Helix { to, plane, center, sense, sweep, feed, role })
+            Ok(ClMotion::Helix { to, plane, center, sense, sweep, feed, role, power: None })
         }
     }
 }
@@ -377,7 +377,7 @@ fn linearize_curve(
             let machine = Pose::new(*sample, to.axis())?;
             map_machine_pose(setup, machine, angle_deg)?
         };
-        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose, feed, role }));
+        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose, feed, role, power: None }));
     }
     *cursor = Some(to.tip());
     Ok(blocks)
@@ -744,7 +744,15 @@ mod tests {
             Vec::new(),
             vec![
                 ClBlock::Motion(ClMotion::Rapid { to: start, feed: None }),
-                ClBlock::Motion(ClMotion::Arc { to: end, plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: 20.0, role: MoveRole::Cut }),
+                ClBlock::Motion(ClMotion::Arc {
+                    to: end,
+                    plane: Plane::Xy,
+                    center,
+                    sense: ArcSense::Ccw,
+                    feed: 20.0,
+                    role: MoveRole::Cut,
+                    power: None,
+                }),
             ],
         )
         .expect("path");
@@ -794,6 +802,7 @@ mod tests {
                     sense: ArcSense::Ccw,
                     feed: 20.0,
                     role: MoveRole::Cut,
+                    power: None,
                 }),
             ],
         )
@@ -848,7 +857,8 @@ mod tests {
     }
 
     fn wrapped(name: &str, poses: &[Pose]) -> IndexedOp {
-        let blocks = poses.iter().map(|pose| ClBlock::Motion(ClMotion::Linear { to: *pose, feed: 100.0, role: MoveRole::Cut })).collect();
+        let blocks =
+            poses.iter().map(|pose| ClBlock::Motion(ClMotion::Linear { to: *pose, feed: 100.0, role: MoveRole::Cut, power: None })).collect();
         let path = ClPath::try_new(Some(name.into()), Some(1), CompensationMode::Off, feeds(), None, Vec::new(), blocks).expect("path");
         let angle = poses[0].rotary().expect("angle");
         IndexedOp { angle_deg: angle, tool_id: Some(1), feeds: feeds(), paths: vec![path], part_frame: true }

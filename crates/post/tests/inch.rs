@@ -26,7 +26,7 @@ fn rapid(p: [f64; 3]) -> ClBlock {
     ClBlock::Motion(ClMotion::Rapid { to: pose(p), feed: None })
 }
 fn line(p: [f64; 3], feed: f64) -> ClBlock {
-    ClBlock::Motion(ClMotion::Linear { to: pose(p), feed, role: MoveRole::Cut })
+    ClBlock::Motion(ClMotion::Linear { to: pose(p), feed, role: MoveRole::Cut, power: None })
 }
 fn program(blocks: Vec<ClBlock>) -> Program {
     let feeds = Feeds::try_new(254.0, None, None, None, None).expect("valid synthetic fixture");
@@ -152,7 +152,7 @@ fn arc_program(plane: Plane, radius: f64, sweep: f64, rise: f64, feed: f64) -> P
     let end = if sweep == std::f64::consts::TAU { map(radius, 0.0, rise) } else { map(radius * sweep.cos(), radius * sweep.sin(), rise) };
     program(vec![
         rapid(map(radius, 0.0, 0.0)),
-        ClBlock::Motion(ClMotion::Arc { to: pose(end), plane, center: Vec3::ZERO, sense: ArcSense::Ccw, feed, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Arc { to: pose(end), plane, center: Vec3::ZERO, sense: ArcSense::Ccw, feed, role: MoveRole::Cut, power: None }),
     ])
 }
 

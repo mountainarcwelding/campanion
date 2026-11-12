@@ -281,7 +281,7 @@ mod tests {
     }
 
     fn cut(z: f64) -> ClBlock {
-        ClBlock::Motion(ClMotion::Linear { to: pose(1.0, 0.0, z), feed: 1000.0, role: MoveRole::Cut })
+        ClBlock::Motion(ClMotion::Linear { to: pose(1.0, 0.0, z), feed: 1000.0, role: MoveRole::Cut, power: None })
     }
 
     fn kinds(path: &ClPath) -> Vec<&'static str> {

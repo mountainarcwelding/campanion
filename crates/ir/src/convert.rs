@@ -171,7 +171,12 @@ fn convert_moves(path: &Toolpath, import: &Import) -> Result<Vec<ClBlock>> {
             }
             Move::Linear { to, kind } => {
                 let role = role_of(kind);
-                blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(to, import.tool_axis)?, feed: import.feeds.resolve(role), role }));
+                blocks.push(ClBlock::Motion(ClMotion::Linear {
+                    to: pose(to, import.tool_axis)?,
+                    feed: import.feeds.resolve(role),
+                    role,
+                    power: None,
+                }));
                 cursor = Some(to);
             }
             Move::Arc { to, centre, ccw, kind } => {
@@ -185,9 +190,9 @@ fn convert_moves(path: &Toolpath, import: &Import) -> Result<Vec<ClBlock>> {
                 let to_pose = pose(to, import.tool_axis)?;
                 if start.z() != to.z() {
                     let sweep = xy_sweep(start, to, centre, ccw)?;
-                    blocks.push(ClBlock::Motion(ClMotion::Helix { to: to_pose, plane: Plane::Xy, center, sense, sweep, feed, role }));
+                    blocks.push(ClBlock::Motion(ClMotion::Helix { to: to_pose, plane: Plane::Xy, center, sense, sweep, feed, role, power: None }));
                 } else {
-                    blocks.push(ClBlock::Motion(ClMotion::Arc { to: to_pose, plane: Plane::Xy, center, sense, feed, role }));
+                    blocks.push(ClBlock::Motion(ClMotion::Arc { to: to_pose, plane: Plane::Xy, center, sense, feed, role, power: None }));
                 }
                 cursor = Some(to);
             }

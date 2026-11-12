@@ -38,7 +38,7 @@ fn program_from(steps: &[Step]) -> Option<Program> {
                 if !placed {
                     return None;
                 }
-                blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(x, y, z)?, feed, role: MoveRole::Cut }));
+                blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(x, y, z)?, feed, role: MoveRole::Cut, power: None }));
                 pos = [x, y, z];
             }
             Step::Arc { radius, sweep, ccw, feed } => {
@@ -63,6 +63,7 @@ fn program_from(steps: &[Step]) -> Option<Program> {
                     sense,
                     feed,
                     role: MoveRole::Cut,
+                    power: None,
                 }));
                 pos = end;
             }
@@ -130,7 +131,7 @@ fn xz_program(steps: &[XzStep]) -> Option<Program> {
                 if !placed {
                     return None;
                 }
-                blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(x, 0.0, z)?, feed, role: MoveRole::Cut }));
+                blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(x, 0.0, z)?, feed, role: MoveRole::Cut, power: None }));
                 pos = [x, z];
             }
             XzStep::Arc { radius, sweep, ccw, feed } => {
@@ -156,6 +157,7 @@ fn xz_program(steps: &[XzStep]) -> Option<Program> {
                     sense,
                     feed,
                     role: MoveRole::Cut,
+                    power: None,
                 }));
                 pos = end;
             }

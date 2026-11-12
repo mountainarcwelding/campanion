@@ -150,7 +150,7 @@ fn linear_at(
     push_motion(
         blocks,
         moves,
-        ClMotion::Linear { to: pose, feed, role: MoveRole::Cut },
+        ClMotion::Linear { to: pose, feed, role: MoveRole::Cut, power: None },
         Expect { end, rapid: false, feed, lead: None, arc: None, tool, live, c, c_word: false, on_sub, brake },
     );
 }
@@ -466,7 +466,7 @@ fn build_turn(spec: &TurnSpec) -> Built {
     push_motion(
         &mut blocks,
         &mut moves,
-        ClMotion::Arc { to: arc_end, plane: Plane::Zx, center, sense, feed, role: MoveRole::Cut },
+        ClMotion::Arc { to: arc_end, plane: Plane::Zx, center, sense, feed, role: MoveRole::Cut, power: None },
         Expect {
             end: tip_of(arc_end),
             rapid: false,
@@ -490,7 +490,7 @@ fn build_turn(spec: &TurnSpec) -> Built {
     push_motion(
         &mut blocks,
         &mut moves,
-        ClMotion::Arc { to: quarter_to, plane: Plane::Zx, center: quarter_c, sense: ArcSense::Ccw, feed, role: MoveRole::Cut },
+        ClMotion::Arc { to: quarter_to, plane: Plane::Zx, center: quarter_c, sense: ArcSense::Ccw, feed, role: MoveRole::Cut, power: None },
         Expect {
             end: tip_of(quarter_to),
             rapid: false,
@@ -660,7 +660,7 @@ fn linear_live(blocks: &mut Vec<ClBlock>, moves: &mut Vec<Expect>, pose: Pose, f
     push_motion(
         blocks,
         moves,
-        ClMotion::Linear { to: pose, feed, role: MoveRole::Cut },
+        ClMotion::Linear { to: pose, feed, role: MoveRole::Cut, power: None },
         Expect { end, rapid: false, feed, lead: None, arc: None, tool: 1, live: true, c, c_word: false, on_sub: false, brake },
     );
 }
@@ -760,14 +760,14 @@ fn build_sub(spec: &SubSpec) -> Built {
         ClBlock::Event(Event::ToolChange { tool_id: 1 }),
         spindle_on(),
         ClBlock::Motion(ClMotion::Rapid { to: xz(spec.main_r, 1.0), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: xz(spec.main_r, -6.0), feed: spec.feed, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: xz(spec.main_r, -6.0), feed: spec.feed, role: MoveRole::Cut, power: None }),
         spindle_off(),
     ];
     let sub_blocks = vec![
         ClBlock::Event(Event::ToolChange { tool_id: 2 }),
         spindle_on(),
         ClBlock::Motion(ClMotion::Rapid { to: xz(spec.sub_r, 0.5), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: xz(spec.sub_r - 1.0, -4.0), feed: spec.feed, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: xz(spec.sub_r - 1.0, -4.0), feed: spec.feed, role: MoveRole::Cut, power: None }),
         spindle_off(),
     ];
     let main_path = ClPath::try_new(Some("main_face".into()), Some(1), CompensationMode::Off, feeds(), None, Vec::new(), main_blocks).expect("main");
@@ -873,8 +873,8 @@ fn build_channels(spec: &ChanSpec) -> (Program, Vec<u32>) {
     for index in 1..=spec.syncs {
         let id = u32::from(index);
         waits.push(100 + id);
-        left.push(ClBlock::Motion(ClMotion::Linear { to: xz(spec.r0, -f64::from(index)), feed: spec.feed, role: MoveRole::Cut }));
-        right.push(ClBlock::Motion(ClMotion::Linear { to: xz(spec.r1, -f64::from(index) - 0.5), feed: spec.feed, role: MoveRole::Cut }));
+        left.push(ClBlock::Motion(ClMotion::Linear { to: xz(spec.r0, -f64::from(index)), feed: spec.feed, role: MoveRole::Cut, power: None }));
+        right.push(ClBlock::Motion(ClMotion::Linear { to: xz(spec.r1, -f64::from(index) - 0.5), feed: spec.feed, role: MoveRole::Cut, power: None }));
         left.push(ClBlock::Event(Event::Sync { id }));
         right.push(ClBlock::Event(Event::Sync { id }));
     }
@@ -945,13 +945,13 @@ impl RapidLike for LatheMotion {
 fn check_haas_accessories() -> Result<(), String> {
     let mut blocks = vec![
         ClBlock::Event(Event::Tailstock { engage: true }),
-        ClBlock::Motion(ClMotion::Linear { to: xz(18.0, -8.0), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: xz(18.0, -8.0), feed: 80.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::Tailstock { engage: false }),
         ClBlock::Event(Event::SteadyRest { clamp: true }),
-        ClBlock::Motion(ClMotion::Linear { to: xz(16.0, -9.0), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: xz(16.0, -9.0), feed: 80.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::SteadyRest { clamp: false }),
         ClBlock::Event(Event::PartsCatcher { extend: true }),
-        ClBlock::Motion(ClMotion::Linear { to: xz(14.0, -10.0), feed: 80.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: xz(14.0, -10.0), feed: 80.0, role: MoveRole::Cut, power: None }),
         ClBlock::Event(Event::PartsCatcher { extend: false }),
         ClBlock::Event(Event::ChuckClamp { spindle: "sub".into(), clamp: false }),
         ClBlock::Event(Event::SpindleRun { spindle: "main".into(), rpm: 0.0, reverse: false }),
@@ -1045,6 +1045,7 @@ fn diameter_arcs_keep_the_short_sweep() {
                             sense: if ccw { ArcSense::Ccw } else { ArcSense::Cw },
                             feed,
                             role: MoveRole::Cut,
+                            power: None,
                         }),
                         spindle_off(),
                     ];

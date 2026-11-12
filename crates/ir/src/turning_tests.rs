@@ -35,7 +35,7 @@ fn rapid(x: f64, y: f64, z: f64) -> ClBlock {
 }
 
 fn linear(x: f64, y: f64, z: f64) -> ClBlock {
-    ClBlock::Motion(ClMotion::Linear { to: pose_xz(x, y, z), feed: 80.0, role: MoveRole::Cut })
+    ClBlock::Motion(ClMotion::Linear { to: pose_xz(x, y, z), feed: 80.0, role: MoveRole::Cut, power: None })
 }
 
 fn tool(id: u32) -> Tool {
@@ -447,6 +447,7 @@ fn turning_poses_stay_on_the_radius_plane() {
         sense: ArcSense::Cw,
         feed: 50.0,
         role: MoveRole::Cut,
+        power: None,
     });
     assert!(program_with(vec![], vec![path_with(None, vec![arc])], bind(0), None).is_ok());
 
@@ -458,6 +459,7 @@ fn turning_poses_stay_on_the_radius_plane() {
         sweep: 1.0,
         feed: 40.0,
         role: MoveRole::Cut,
+        power: None,
     });
     assert!(program_with(vec![], vec![path_with(None, vec![helix])], bind(0), None).is_ok());
 
@@ -504,6 +506,7 @@ fn y_axis_head_allows_off_plane_poses_only_while_c_is_engaged() {
             to: Pose::new(Vec3::new(x, y, z).expect("tip"), axis).expect("pose").with_rotary(c).expect("c"),
             feed: 80.0,
             role: MoveRole::Cut,
+            power: None,
         })
     };
     let y_then_other_c = vec![engage.clone(), at(18.0, -4.0, -10.0, 0.0, Vec3::X), at(18.0, 4.0, -10.0, 90.0, Vec3::X)];
@@ -516,6 +519,7 @@ fn y_axis_head_allows_off_plane_poses_only_while_c_is_engaged() {
         sense: ArcSense::Ccw,
         feed: 40.0,
         role: MoveRole::Cut,
+        power: None,
     });
     let yz = ClBlock::Motion(ClMotion::Arc {
         to: Pose::new(Vec3::new(18.0, 5.0, -5.0).expect("tip"), Vec3::X).expect("pose").with_rotary(10.0).expect("c"),
@@ -524,6 +528,7 @@ fn y_axis_head_allows_off_plane_poses_only_while_c_is_engaged() {
         sense: ArcSense::Cw,
         feed: 40.0,
         role: MoveRole::Cut,
+        power: None,
     });
     let arcs = vec![engage.clone(), at(10.0, 0.0, -5.0, 10.0, Vec3::Z), xy, yz];
     assert!(program_with(vec![], vec![path_with(None, arcs)], setup.clone(), None).is_ok());
@@ -911,7 +916,7 @@ fn mill_turn_events_round_trip_and_reject_bad_spindles_and_rpm() {
     let edge = pose_xz(10.0, 0.0, 1.0).with_rotary(99_999.0).expect("pose");
     program_with(Vec::new(), vec![path_with(None, vec![ClBlock::Motion(ClMotion::Rapid { to: edge, feed: None })])], m10(None), None).expect("max c");
     let neg = pose_xz(10.0, 0.0, 1.0).with_rotary(-99_999.0).expect("pose");
-    let neg_block = ClBlock::Motion(ClMotion::Linear { to: neg, feed: 10.0, role: MoveRole::Cut });
+    let neg_block = ClBlock::Motion(ClMotion::Linear { to: neg, feed: 10.0, role: MoveRole::Cut, power: None });
     program_with(Vec::new(), vec![path_with(None, vec![neg_block])], m10(None), None).expect("min c");
 }
 

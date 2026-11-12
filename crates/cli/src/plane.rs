@@ -123,20 +123,20 @@ fn map_block(block: &ClBlock, frame: &ViewFrame, chord_mm: f64, cursor: &mut Opt
             *cursor = Some(to.tip());
             Ok(vec![ClBlock::Motion(ClMotion::Rapid { to: mapped, feed: *feed })])
         }
-        ClBlock::Motion(ClMotion::Linear { to, feed, role }) => {
+        ClBlock::Motion(ClMotion::Linear { to, feed, role, .. }) => {
             let mapped = map_pose(frame, *to)?;
             *cursor = Some(to.tip());
-            Ok(vec![ClBlock::Motion(ClMotion::Linear { to: mapped, feed: *feed, role: *role })])
+            Ok(vec![ClBlock::Motion(ClMotion::Linear { to: mapped, feed: *feed, role: *role, power: None })])
         }
         ClBlock::Motion(ClMotion::Thread { to, lead }) => {
             let mapped = map_pose(frame, *to)?;
             *cursor = Some(to.tip());
             Ok(vec![ClBlock::Motion(ClMotion::Thread { to: mapped, lead: *lead })])
         }
-        ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role }) => {
+        ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role, .. }) => {
             map_curve(Curve::Arc, *to, *plane, *center, *sense, None, *feed, *role, frame, chord_mm, cursor)
         }
-        ClBlock::Motion(ClMotion::Helix { to, plane, center, sense, sweep, feed, role }) => {
+        ClBlock::Motion(ClMotion::Helix { to, plane, center, sense, sweep, feed, role, .. }) => {
             map_curve(Curve::Helix, *to, *plane, *center, *sense, Some(*sweep), *feed, *role, frame, chord_mm, cursor)
         }
         ClBlock::Event(Event::Probe { toward, feed }) => {
@@ -208,7 +208,7 @@ fn linearize_curve(
         } else {
             Pose::new(frame.to_part_point(*sample)?, frame.z).map_err(CliError::from)?
         };
-        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose, feed, role }));
+        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose, feed, role, power: None }));
     }
     *cursor = Some(to.tip());
     Ok(blocks)
@@ -357,6 +357,7 @@ mod tests {
                 sense: ArcSense::Ccw,
                 feed: 100.0,
                 role: MoveRole::Cut,
+                power: None,
             }),
         ]
     }
@@ -427,10 +428,11 @@ mod tests {
     fn link_frames_inserts_the_two_rapids() {
         let side = side_frame();
         let safe = 8.0;
-        let left = path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(vec(1.0, 2.0, 3.0)), feed: 100.0, role: MoveRole::Cut })]);
+        let left =
+            path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(vec(1.0, 2.0, 3.0)), feed: 100.0, role: MoveRole::Cut, power: None })]);
         let hole = must(side.to_part_point(vec(4.0, 5.0, -2.0)), "hole");
-        let right = path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(hole), feed: 100.0, role: MoveRole::Cut })]);
-        let same = path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(hole), feed: 100.0, role: MoveRole::Cut })]);
+        let right = path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(hole), feed: 100.0, role: MoveRole::Cut, power: None })]);
+        let same = path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(hole), feed: 100.0, role: MoveRole::Cut, power: None })]);
         let linked = must(link_frames(vec![(None, vec![left]), (Some(side), vec![right]), (Some(side), vec![same])], safe), "link");
         assert_eq!(linked.len(), 3);
         let retract = motion_pose(linked[0].blocks().last().expect("retract")).expect("retract pose");
@@ -444,7 +446,7 @@ mod tests {
         assert_eq!(linked[1].blocks().len(), 2);
         assert_eq!(linked[2].blocks().len(), 1, "same frame must not add a rapid");
 
-        let alone = path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(hole), feed: 100.0, role: MoveRole::Cut })]);
+        let alone = path_of(vec![ClBlock::Motion(ClMotion::Linear { to: pose_at(hole), feed: 100.0, role: MoveRole::Cut, power: None })]);
         let first = must(link_frames(vec![(Some(side), vec![alone])], safe), "first");
         assert_eq!(first[0].blocks().len(), 2);
         assert!(matches!(first[0].blocks().first(), Some(ClBlock::Motion(ClMotion::Rapid { .. }))));

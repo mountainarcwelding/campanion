@@ -185,7 +185,7 @@ fn motion_from(pos: [f64; 3], cut: &Cut) -> Option<(ClMotion, [f64; 3])> {
     match cut.kind {
         CutKind::Line { x, y, z } => {
             let end = [x, y, z];
-            let motion = ClMotion::Linear { to: pose_at(x, y, z)?, feed: cut.feed, role: MoveRole::Cut };
+            let motion = ClMotion::Linear { to: pose_at(x, y, z)?, feed: cut.feed, role: MoveRole::Cut, power: None };
             Some((motion, end))
         }
         CutKind::Arc { plane, radius, sweep, ccw, axial } => arc_motion(pos, plane, radius, sweep, ccw, axial, cut.feed, false),
@@ -229,9 +229,9 @@ fn arc_motion(pos: [f64; 3], plane: Plane, radius: f64, sweep: f64, ccw: bool, a
     let center = Vec3::new(center[0], center[1], center[2]).ok()?;
     let to = pose_at(end[0], end[1], end[2])?;
     let motion = if helix {
-        ClMotion::Helix { to, plane, center, sense, sweep, feed, role: MoveRole::Cut }
+        ClMotion::Helix { to, plane, center, sense, sweep, feed, role: MoveRole::Cut, power: None }
     } else {
-        ClMotion::Arc { to, plane, center, sense, feed, role: MoveRole::Cut }
+        ClMotion::Arc { to, plane, center, sense, feed, role: MoveRole::Cut, power: None }
     };
     Some((motion, end))
 }
@@ -968,11 +968,13 @@ fn rotary_program(spec: &RotarySpec) -> Option<Program> {
             to: turned(setup, spec.x + spec.distance, spec.y, spec.z, spec.angle)?,
             feed: spec.feed,
             role: MoveRole::Cut,
+            power: None,
         }),
         ClBlock::Motion(ClMotion::Linear {
             to: turned(setup, spec.x + spec.distance + 10.0, spec.y, spec.z, spec.angle)?,
             feed: spec.feed,
             role: MoveRole::Cut,
+            power: None,
         }),
         ClBlock::Event(Event::ProcessOff { process: ProcessKind::Spindle }),
     ];

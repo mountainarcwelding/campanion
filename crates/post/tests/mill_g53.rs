@@ -35,7 +35,7 @@ fn custom_tool_change_retract_posts_and_round_trips() {
     let blocks = vec![
         ClBlock::Event(Event::ToolChange { tool_id: 1 }),
         ClBlock::Motion(ClMotion::Rapid { to: pose(12.0, 20.0, 5.0), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose(12.0, 20.0, 0.0), feed: 100.0, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(12.0, 20.0, 0.0), feed: 100.0, role: MoveRole::Cut, power: None }),
     ];
     let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
     let path = ClPath::try_new(None, Some(1), CompensationMode::Off, feeds, None, Vec::new(), blocks).expect("path");

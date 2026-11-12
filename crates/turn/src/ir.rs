@@ -50,7 +50,7 @@ fn cl_block(motion: TurnMove, cut_feed: f64) -> Result<ClBlock> {
 fn cl_move(motion: TurnMove, cut_feed: f64) -> Result<ClMotion> {
     Ok(match motion {
         TurnMove::Rapid { z, x } => ClMotion::Rapid { to: pose_at(z, x)?, feed: None },
-        TurnMove::Feed { z, x } => ClMotion::Linear { to: pose_at(z, x)?, feed: cut_feed, role: MoveRole::Cut },
+        TurnMove::Feed { z, x } => ClMotion::Linear { to: pose_at(z, x)?, feed: cut_feed, role: MoveRole::Cut, power: None },
         TurnMove::Arc { z, x, cz, cx, ccw } => ClMotion::Arc {
             to: pose_at(z, x)?,
             plane: Plane::Zx,
@@ -58,6 +58,7 @@ fn cl_move(motion: TurnMove, cut_feed: f64) -> Result<ClMotion> {
             sense: if ccw { ArcSense::Ccw } else { ArcSense::Cw },
             feed: cut_feed,
             role: MoveRole::Cut,
+            power: None,
         },
         TurnMove::Thread { .. } | TurnMove::Dwell { .. } => {
             return Err(TurnError::InvalidInput("not a feed or arc move".into()));
@@ -124,14 +125,14 @@ mod tests {
         };
         assert_eq!((to.tip().z(), to.tip().x()), (0.0, 12.0));
 
-        let Some(ClBlock::Motion(ClMotion::Linear { to, feed, role })) = cl.blocks().get(2) else {
+        let Some(ClBlock::Motion(ClMotion::Linear { to, feed, role, .. })) = cl.blocks().get(2) else {
             panic!("feed move");
         };
         assert_eq!((to.tip().z(), to.tip().x()), (-5.0, 12.0));
         assert_eq!(*feed, 80.0);
         assert_eq!(*role, MoveRole::Cut);
 
-        let Some(ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role })) = cl.blocks().get(3) else {
+        let Some(ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role, .. })) = cl.blocks().get(3) else {
             panic!("ccw arc");
         };
         assert_eq!(*plane, Plane::Zx);
@@ -141,7 +142,7 @@ mod tests {
         assert_eq!((center.x(), center.y(), center.z()), (11.0, 0.0, -5.0));
         assert_eq!((to.tip().z(), to.tip().x()), (-6.0, 11.0));
 
-        let Some(ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role })) = cl.blocks().get(4) else {
+        let Some(ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, feed, role, .. })) = cl.blocks().get(4) else {
             panic!("cw arc");
         };
         assert_eq!(*plane, Plane::Zx);

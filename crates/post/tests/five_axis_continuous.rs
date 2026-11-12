@@ -311,8 +311,8 @@ fn swarf_program() -> Program {
     let center = Vec3::new(0.0, 0.0, 10.0).expect("c");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: start, feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: mid, feed: FEED, role: MoveRole::Cut }),
-        ClBlock::Motion(ClMotion::Arc { to: end, plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: mid, feed: FEED, role: MoveRole::Cut, power: None }),
+        ClBlock::Motion(ClMotion::Arc { to: end, plane: Plane::Xy, center, sense: ArcSense::Ccw, feed: FEED, role: MoveRole::Cut, power: None }),
     ];
     program_of(five, blocks)
 }
@@ -371,7 +371,7 @@ fn rotary_only_without_rotary_block_is_an_error() {
     let tip = Vec3::new(4.0, 5.0, 6.0).expect("tip");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(tip, Vec3::Z), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(tip, axis), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(tip, axis), feed: FEED, role: MoveRole::Cut, power: None }),
     ];
     let program = program_of(setup_of(B_HEAD_JSON), blocks);
     let err = post_program(&program, &post, &options()).expect_err("rotary-only");
@@ -393,7 +393,12 @@ fn continuous_move_inside_the_singular_cone_posts() {
     assert!(axis_deg(end_axis, Vec3::Z) < CONE_DEG, "end left the cone");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(5.0, 2.0, 12.0).expect("tip"), start_axis), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 2.0, 12.0).expect("tip"), end_axis), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear {
+            to: pose_of(Vec3::new(8.0, 2.0, 12.0).expect("tip"), end_axis),
+            feed: FEED,
+            role: MoveRole::Cut,
+            power: None,
+        }),
     ];
     let program = program_of(setup_of(TABLE_TABLE_AC), blocks.clone());
     let tcp = tcp_program_of(setup_of(TABLE_TABLE_AC), blocks);
@@ -450,11 +455,16 @@ fn continuous_after_indexed_cancels_the_work_frame() {
     let axis = Vec3::new(-1.0, 0.0, 0.0).expect("axis");
     let indexed = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(4.0, 5.0, 6.0).expect("a"), axis), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(1.0, 2.0, 3.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(1.0, 2.0, 3.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut, power: None }),
     ];
     let cont = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(4.0, 5.0, 6.0).expect("c"), Vec3::Z), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("d"), Vec3::Z), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear {
+            to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("d"), Vec3::Z),
+            feed: FEED,
+            role: MoveRole::Cut,
+            power: None,
+        }),
     ];
     let indexed_path = ClPath::try_new(
         Some("index".into()),
@@ -500,11 +510,11 @@ fn indexed_after_continuous_restores_the_work_frame() {
     let axis = Vec3::new(-1.0, 0.0, 0.0).expect("axis");
     let cont = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(4.0, 5.0, 6.0).expect("c"), axis), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("d"), axis), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("d"), axis), feed: FEED, role: MoveRole::Cut, power: None }),
     ];
     let indexed = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(4.0, 5.0, 6.0).expect("a"), axis), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(1.0, 2.0, 3.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(1.0, 2.0, 3.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut, power: None }),
     ];
     let indexed_path = ClPath::try_new(
         Some("index".into()),
@@ -637,6 +647,7 @@ fn build_blocks(
                     sense: ArcSense::Ccw,
                     feed: FEED,
                     role: MoveRole::Cut,
+                    power: None,
                 }));
                 ir_tips.push(end);
                 ir_axes.push(poses[i].axis);
@@ -644,7 +655,7 @@ fn build_blocks(
                 continue;
             }
         }
-        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose_of(poses[i].tip, poses[i].axis), feed: FEED, role: MoveRole::Cut }));
+        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose_of(poses[i].tip, poses[i].axis), feed: FEED, role: MoveRole::Cut, power: None }));
         ir_tips.push(poses[i].tip);
         ir_axes.push(poses[i].axis);
         segs.push(TipSeg::Line);
@@ -1036,7 +1047,7 @@ fn tcp_after_indexed_cancels_g254_before_g234() {
     let axis = Vec3::new(-1.0, 0.0, 0.0).expect("axis");
     let indexed = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(Vec3::new(4.0, 5.0, 6.0).expect("a"), axis), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(1.0, 2.0, 3.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(1.0, 2.0, 3.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut, power: None }),
     ];
     let indexed_path = ClPath::try_new(
         Some("index".into()),
@@ -1132,7 +1143,7 @@ fn haas_tcpc_without_a_tool_is_refused() {
     let axis = Vec3::new(10_f64.to_radians().sin(), 0.0, 10_f64.to_radians().cos()).expect("axis");
     let blocks = vec![
         ClBlock::Motion(ClMotion::Rapid { to: pose_of(tip, Vec3::Z), feed: None }),
-        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut }),
+        ClBlock::Motion(ClMotion::Linear { to: pose_of(Vec3::new(8.0, 5.0, 6.0).expect("b"), axis), feed: FEED, role: MoveRole::Cut, power: None }),
     ];
     let program = program_of(setup_of(B_TABLE_JSON), blocks.clone());
     let err = post_program(&program, &builtin("haas_umc_tcpc").expect("tcp"), &options()).expect_err("no tool");
