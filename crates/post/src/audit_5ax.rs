@@ -637,7 +637,7 @@ impl<'a> Parser<'a> {
                 19 => self.set_plane(line_no, Plane::Yz, &mut block_plane)?,
                 20 => return Err(fail(line_no, "inch five-axis verification is not supported yet")),
                 21 => self.set_units(line_no, UnitMode::Millimetre)?,
-                40 | 64 | 80 => {}
+                40 | 41 | 42 | 64 | 80 => {}
                 43 => want_length = true,
                 49 => cancel_length = true,
                 53 => {}

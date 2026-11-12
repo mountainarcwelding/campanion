@@ -722,11 +722,15 @@ fn zx_arc_and_r_mode_and_lines_round_trip() {
 }
 
 #[test]
-fn channel_programs_and_controller_compensation_are_rejected() {
+fn channel_programs_are_rejected() {
     let program: Program =
         serde_json::from_str(r#"{"tools":[],"toolpaths":[],"channel_programs":[{"channel":0,"blocks":[]}],"syncs":[]}"#).expect("json");
     let err = post_program(&program, &linux(), &options()).expect_err("channel");
     assert!(err.to_string().contains("not supported"), "{err}");
+}
+
+#[test]
+fn controller_compensation_is_rejected_without_cutter_comp() {
     let blocks = vec![ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 0.0), feed: None })];
     let path = ClPath::try_new(
         None,
@@ -739,8 +743,8 @@ fn channel_programs_and_controller_compensation_are_rejected() {
     )
     .expect("path");
     let program = Program::try_new(None, Vec::new(), None, vec![path], Vec::new(), Vec::new(), None).expect("program");
-    let err = post_program(&program, &linux(), &options()).expect_err("comp");
-    assert!(err.to_string().contains("not supported"), "{err}");
+    let err = post_program(&program, &builtin("grbl").expect("grbl"), &options()).expect_err("comp");
+    assert!(err.to_string().contains("controller left compensation is not supported"), "{err}");
 }
 
 fn spindle_speed(speed: f64) -> ProcessParams {

@@ -28,6 +28,7 @@
     "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
   },
   "tool_change": ["T{tool} M6", "G43 H{tool}"],
+  "cutter_comp": { "left": ["G41 D{tool}"], "right": ["G42 D{tool}"], "off": ["G40"] },
   "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
   "comments": { "style": "paren" },
   "program_end": ["M30", "%"],

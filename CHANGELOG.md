@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Posts may set `cutter_comp` (`left`, `right`, `off`). A path whose IR compensation is `controller_left` or `controller_right` writes those words before the first feed and cancels at the end of the path. `plasma`, `linuxcnc`, `linuxcnc_router` and `mach3` write `G41`/`G42`/`G40`; `fanuc` and `haas` write `G41 D{tool}`/`G42 D{tool}`/`G40`. Posts that omit the block, including `grbl`, still refuse controller compensation. Computed programs are unchanged. Read-back and mill audit accept `G41`/`G42`, and audit requires cancellation before the program ends. This output has not been proven on a machine.
+
 ## 0.11.0 — 2026-11-12
 
 Laser raster: optional per-move power in the IR, posts with `power_scale` write each feed's `S` including `S0` on overscan, and `laser_raster` jobs engrave a PGM through the planner (#159–#161). This output has not been proven on a machine.

@@ -369,7 +369,7 @@ impl<'a> Parser<'a> {
                 7 | 8 | 50 | 96 | 97 | 98 if self.post.is_lathe() => {}
                 28 if self.post.is_lathe() => {}
                 53 => {}
-                21 | 40 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
+                21 | 40 | 41 | 42 | 43 | 49 | 54 | 55 | 56 | 57 | 58 | 59 | 61 | 64 | 80 | 90 | 94 => {}
                 code if self.is_five_mode_g(code) => {}
                 code if self.is_sub_spindle_g(code) => {}
                 code if self.is_transfer_g(code) => {}

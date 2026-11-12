@@ -271,6 +271,10 @@ struct Writer<'a> {
     /// Bar-feed lengths to write after the home lines. `None` until a bar-feed event. Last event wins.
     /// Not cleared between channels: the feed is a program-end command.
     pending_bar_feed: Option<(Option<f64>, Option<f64>)>,
+    /// Controller compensation to write before the first feed of this path.
+    pending_cutter_comp: Option<CompensationMode>,
+    /// True after `cutter_comp.left` or `right` has been written on this path.
+    cutter_comp_on: bool,
 }
 
 impl<'a> Writer<'a> {
@@ -335,6 +339,8 @@ impl<'a> Writer<'a> {
             five_started: false,
             tool_id: None,
             pending_bar_feed: None,
+            pending_cutter_comp: None,
+            cutter_comp_on: false,
         }
     }
 
@@ -447,15 +453,21 @@ impl<'a> Writer<'a> {
             self.tool_id = Some(id);
         }
         self.sync_spindle()?;
-        match path.compensation() {
-            CompensationMode::ControllerLeft => return Err(unsupported("controller left compensation is not supported")),
-            CompensationMode::ControllerRight => return Err(unsupported("controller right compensation is not supported")),
-            CompensationMode::Computed | CompensationMode::Off => {}
-        }
+        self.pending_cutter_comp = match path.compensation() {
+            CompensationMode::ControllerLeft | CompensationMode::ControllerRight => {
+                self.require_cutter_comp(path.compensation())?;
+                Some(path.compensation())
+            }
+            CompensationMode::Computed | CompensationMode::Off => None,
+        };
+        self.cutter_comp_on = false;
         if let Some(name) = path.name() {
             self.comment(&format!("toolpath {}", sanitize(name)))?;
         }
         if path.continuous() {
+            if self.pending_cutter_comp.is_some() {
+                return Err(unsupported("controller compensation is not supported on a continuous toolpath"));
+            }
             self.continuous_toolpath(index, path)?;
             self.restore_feed_mode()?;
             return Ok(());
@@ -473,6 +485,7 @@ impl<'a> Writer<'a> {
                 ClBlock::Event(event) => self.event(event)?,
             }
         }
+        self.end_cutter_comp()?;
         self.restore_feed_mode()?;
         Ok(())
     }
@@ -949,6 +962,9 @@ impl<'a> Writer<'a> {
     }
 
     fn motion(&mut self, motion: &ClMotion) -> Result<()> {
+        if !matches!(motion, ClMotion::Rapid { .. }) {
+            self.ensure_cutter_comp()?;
+        }
         self.pending_move_power = motion.power();
         let result = self.write_motion(motion);
         self.pending_move_power = None;
@@ -3194,6 +3210,67 @@ impl<'a> Writer<'a> {
             CoolantMode::Assist => return self.comment("coolant assist"),
         };
         self.templates("coolant", &lines, &[("program_name", ""), ("date-free!", "")])
+    }
+
+    fn require_cutter_comp(&self, mode: CompensationMode) -> Result<()> {
+        let side = match mode {
+            CompensationMode::ControllerLeft => "left",
+            CompensationMode::ControllerRight => "right",
+            CompensationMode::Computed | CompensationMode::Off => return Ok(()),
+        };
+        if self.post.cutter_comp.is_none() {
+            return Err(unsupported(format!("controller {side} compensation is not supported")));
+        }
+        Ok(())
+    }
+
+    fn ensure_cutter_comp(&mut self) -> Result<()> {
+        if self.cutter_comp_on {
+            return Ok(());
+        }
+        let Some(mode) = self.pending_cutter_comp else {
+            return Ok(());
+        };
+        let Some(comp) = self.post.cutter_comp.clone() else {
+            return self.require_cutter_comp(mode);
+        };
+        let (field, lines) = match mode {
+            CompensationMode::ControllerLeft => ("cutter_comp.left", comp.left),
+            CompensationMode::ControllerRight => ("cutter_comp.right", comp.right),
+            CompensationMode::Computed | CompensationMode::Off => return Ok(()),
+        };
+        let tool = self.cutter_comp_tool(&lines, &comp.off)?;
+        self.templates(field, &lines, &[("tool", tool.as_str()), ("program_name", ""), ("date-free!", "")])?;
+        self.cutter_comp_on = true;
+        Ok(())
+    }
+
+    fn end_cutter_comp(&mut self) -> Result<()> {
+        if !self.cutter_comp_on {
+            return Ok(());
+        }
+        let Some(comp) = self.post.cutter_comp.clone() else {
+            self.cutter_comp_on = false;
+            return Ok(());
+        };
+        let tool = self.cutter_comp_tool(&comp.left, &comp.off)?;
+        self.templates("cutter_comp.off", &comp.off, &[("tool", tool.as_str()), ("program_name", ""), ("date-free!", "")])?;
+        self.cutter_comp_on = false;
+        Ok(())
+    }
+
+    fn cutter_comp_tool(&self, on_lines: &[String], off_lines: &[String]) -> Result<String> {
+        match self.tool_id {
+            Some(id) => Ok(id.to_string()),
+            None => {
+                let named = on_lines.iter().chain(off_lines).any(|line| line.contains("{tool}"));
+                if named {
+                    Err(invalid("cutter compensation needs a tool number for {tool}, but the toolpath has no tool"))
+                } else {
+                    Ok(String::new())
+                }
+            }
+        }
     }
 
     fn comment(&mut self, text: &str) -> Result<()> {

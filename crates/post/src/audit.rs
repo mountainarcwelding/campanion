@@ -2,7 +2,8 @@
 //!
 //! [`audit`] reads the text a post wrote and tracks the modal state a control would keep:
 //! motion, plane, distance, units, feed mode, the active feed, work offset, the tool in the
-//! spindle, tool length, spindle or beam, and coolant. Each motion block is one [`MotionState`].
+//! spindle, tool length, cutter compensation (`G40`/`G41`/`G42`), spindle or beam, and coolant.
+//! Each motion block is one [`MotionState`].
 //!
 //! A word this checker does not know is an error, so a typo in a template fails here. Geometry
 //! is also checked against [`crate::read_back`] so the two readers stay aligned.
@@ -14,6 +15,8 @@
 //! Five-axis posts are replayed by [`crate::audit_five`]. Work offset
 //! stays unset when the program never writes `G54`–`G59`. Feed mode stays
 //! units per minute until `G93` or `G94`. `M2` and `M30` turn the spindle and coolant off.
+//! `G41` and `G42` select cutter compensation; `G40` cancels it. A `D` word is accepted only on a
+//! `G41` or `G42` block. Compensation must be off at the end of the program (`G40`, or `M2`/`M30`).
 //! `M3` or `M4` with `S0` is running with the beam or torch off: [`SpindleState::cutting`] is false.
 //! A post with `probe` treats its `G38.2` or `G38.3` as a non-motion: position and motion mode
 //! stay put, and `F` on that block updates the modal feed. A post with `digital_out` accepts
@@ -181,6 +184,17 @@ pub struct MotionState {
     pub rotary: Option<f64>,
 }
 
+/// Cutter radius compensation. Power-up and the usual header are [`Self::Off`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CutterComp {
+    /// `G40`.
+    Off,
+    /// `G41`, tool left of travel.
+    Left,
+    /// `G42`, tool right of travel.
+    Right,
+}
+
 /// Modal replay of one posted program.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AuditReport {
@@ -231,6 +245,7 @@ pub fn audit(text: &str, post: &PostDef) -> Result<AuditReport> {
         }
         parser.line(index + 1, line)?;
     }
+    parser.finish()?;
     parser.cross_check(text, post)?;
     Ok(parser.report())
 }
@@ -256,6 +271,7 @@ struct Parser<'a> {
     length: LengthOffset,
     spindle: SpindleState,
     coolant: CoolantState,
+    cutter_comp: CutterComp,
     rotary: Option<f64>,
     next_number: Option<u64>,
     tool_patterns: Vec<(String, String)>,
@@ -298,11 +314,19 @@ impl<'a> Parser<'a> {
             length: LengthOffset::Unset,
             spindle: SpindleState::off(),
             coolant: CoolantState::Off,
+            cutter_comp: CutterComp::Off,
             rotary: None,
             next_number,
             tool_patterns: tool_patterns(post),
             motions: Vec::new(),
         }
+    }
+
+    fn finish(&self) -> Result<()> {
+        if self.cutter_comp != CutterComp::Off {
+            return Err(invalid("cutter compensation is not cancelled"));
+        }
+        Ok(())
     }
 
     fn report(self) -> AuditReport {
@@ -407,6 +431,8 @@ impl<'a> Parser<'a> {
         let mut probe_words = 0u32;
         let mut digital = false;
         let mut block_feed: Option<FeedMode> = None;
+        let mut block_comp: Option<CutterComp> = None;
+        let mut d_word: Option<u32> = None;
         let axes = axis_letters(self.post);
 
         for word in words {
@@ -420,7 +446,16 @@ impl<'a> Parser<'a> {
                 'G' => {
                     let code = g_or_m(line_no, word, 'G')?;
                     machine_move |= code == 53;
-                    self.apply_g(line_no, code, &mut saw_dwell, &mut want_length, &mut block_motion, &mut block_plane, &mut block_feed)?;
+                    self.apply_g(
+                        line_no,
+                        code,
+                        &mut saw_dwell,
+                        &mut want_length,
+                        &mut block_motion,
+                        &mut block_plane,
+                        &mut block_feed,
+                        &mut block_comp,
+                    )?;
                 }
                 'M' if self.is_immediate_digital(word) => {
                     if digital {
@@ -462,6 +497,12 @@ impl<'a> Parser<'a> {
                     }
                     h_word = Some(whole_word(line_no, word, 'H')?);
                 }
+                'D' => {
+                    if d_word.is_some() {
+                        return Err(fail(line_no, "duplicate D word"));
+                    }
+                    d_word = Some(whole_word(line_no, word, 'D')?);
+                }
                 'P' => {
                     if p_value.is_some() {
                         return Err(fail(line_no, "duplicate P word"));
@@ -487,6 +528,10 @@ impl<'a> Parser<'a> {
                 letter if Some(letter) == axes[2] => set_unique(line_no, &mut z, word)?,
                 letter => return Err(fail(line_no, format!("unexpected word {letter}"))),
             }
+        }
+
+        if d_word.is_some() && !matches!(block_comp, Some(CutterComp::Left | CutterComp::Right)) {
+            return Err(fail(line_no, "D word needs G41 or G42"));
         }
 
         // Resolve modal G words before normalizing this block's lengths and feed.
@@ -636,6 +681,7 @@ impl<'a> Parser<'a> {
         block_motion: &mut Option<MotionMode>,
         block_plane: &mut Option<Plane>,
         block_feed: &mut Option<FeedMode>,
+        block_comp: &mut Option<CutterComp>,
     ) -> Result<()> {
         match code {
             0 => self.set_motion(line_no, MotionMode::Rapid, block_motion)?,
@@ -648,7 +694,10 @@ impl<'a> Parser<'a> {
             19 => self.set_plane(line_no, Plane::Yz, block_plane)?,
             20 => self.set_units(line_no, UnitMode::Inch)?,
             21 => self.set_units(line_no, UnitMode::Millimetre)?,
-            40 | 53 | 64 | 80 => {}
+            40 => self.set_cutter_comp(line_no, CutterComp::Off, block_comp)?,
+            41 => self.set_cutter_comp(line_no, CutterComp::Left, block_comp)?,
+            42 => self.set_cutter_comp(line_no, CutterComp::Right, block_comp)?,
+            53 | 64 | 80 => {}
             43 => *want_length = true,
             49 => {
                 if *want_length {
@@ -706,6 +755,17 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn set_cutter_comp(&mut self, line_no: usize, mode: CutterComp, block: &mut Option<CutterComp>) -> Result<()> {
+        if let Some(prev) = *block
+            && prev != mode
+        {
+            return Err(fail(line_no, "line has conflicting G codes"));
+        }
+        *block = Some(mode);
+        self.cutter_comp = mode;
+        Ok(())
+    }
+
     fn set_distance(&mut self, line_no: usize, distance: DistanceMode) -> Result<()> {
         if let Some(prev) = self.distance
             && prev != distance
@@ -742,6 +802,7 @@ impl<'a> Parser<'a> {
             2 | 30 => {
                 self.spindle.on = false;
                 self.coolant = CoolantState::Off;
+                self.cutter_comp = CutterComp::Off;
             }
             3 => {
                 self.spindle.on = true;
@@ -1015,7 +1076,7 @@ fn lex(line: &str, line_no: usize, post: &PostDef) -> Result<Vec<Word>> {
 }
 
 fn letter_allowed(post: &PostDef, letter: char) -> bool {
-    if post.axis_letters.contains(letter) || matches!(letter, 'G' | 'M' | 'F' | 'S' | 'T' | 'H' | 'P' | 'I' | 'J' | 'K' | 'R') {
+    if post.axis_letters.contains(letter) || matches!(letter, 'G' | 'M' | 'F' | 'S' | 'T' | 'H' | 'D' | 'P' | 'I' | 'J' | 'K' | 'R') {
         return true;
     }
     if letter == 'N' && post.line_numbers.enabled {

@@ -33,6 +33,7 @@
   "digital_out": { "vacuum_pin": 0, "dust_pin": 1 },
   "probe": { "code": "G38.2" },
   "tool_change": ["T{tool} M6"],
+  "cutter_comp": { "left": ["G41"], "right": ["G42"], "off": ["G40"] },
   "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },
   "comments": { "style": "paren" },
   "program_end": ["M2"],

@@ -44,6 +44,12 @@ one returns an explicit error. Their metric output and verification are unchange
 
 When any feed in the program carries per-move `power`, each of those feeds and arcs writes its own `S` word, including `S0` for a zero-power overscan. A missing power in that program is an error; it is never filled as `S1000`. A process-on without power then writes `M4 S0` and lets the moves set the level. Read-back records the `S` on that block, and `compare` checks it against the IR value. A post without `power_scale` refuses per-move power. This output has not been proven on a machine.
 
+## Cutter compensation
+
+A path whose IR compensation is `controller_left` or `controller_right` is the programmed contour, not a CAM-offset path. Posts that set `cutter_comp` write the `left` or `right` template before the first feed of that path and the `off` template at the end of the path. `{tool}` is the path's tool id. `linuxcnc`, `linuxcnc_router`, `mach3` and `plasma` write `G41` / `G42` / `G40`. `fanuc` and `haas` write `G41 D{tool}` / `G42 D{tool}` / `G40`.
+
+A post that omits `cutter_comp`, including `grbl` and `grbl_laser`, still refuses controller compensation. Computed or off compensation is unchanged: the path is already offset and the header's `G40` stays in effect. Read-back accepts `G41` and `G42`. Mill audit tracks them, accepts a `D` word only on a `G41` or `G42` block, and requires compensation to be cancelled by `G40` or by `M2`/`M30` at the end of the program. This output has not been proven on a machine.
+
 ## LinuxCNC router
 
 `linuxcnc_router` is the millimetre LinuxCNC dialect for a gantry. Motion matches `linuxcnc`: absolute millimetres, cancelled cutter compensation, IJK arcs and helices, and path blend `G64 P0.01`. There is no `rotary` block. A typical gantry is XYZ, so a program with an A or B angle is rejected. Use `linuxcnc` when the machine has a fourth axis.

@@ -10,7 +10,9 @@
 //! `ir_power * power_scale`. A missing IR power then uses full scale (`1 * power_scale`) and the
 //! writer adds a comment. `process_feeds.rapid_z` drops rapids that only change Z. `z_mode`
 //! `drop` omits Z words. `thc.on` is written on the first feed move after process on and a dwell,
-//! and `thc.off` is written before process off.
+//! and `thc.off` is written before process off. `cutter_comp`, when present, writes `left` or `right`
+//! before the first feed of a path whose IR compensation is controller-side, and `off` at the end of
+//! that path. `{tool}` is allowed. A post that omits the block still refuses controller compensation.
 //!
 //! `process_cycle` is `hold` or `per_cut`. The default is `hold`. A hold post does not write a
 //! second spindle-on when that spindle is already running at the same speed, so the spindle stays
@@ -139,6 +141,9 @@ pub struct PostDef {
     /// Torch-height control. `on` follows the pierce dwell. `off` precedes process off.
     #[serde(default)]
     pub(crate) thc: Option<ThcWords>,
+    /// Controller-side cutter compensation. Absent refuses a path that asks for it.
+    #[serde(default)]
+    pub(crate) cutter_comp: Option<CutterCompWords>,
     pub(crate) tool_change: Vec<String>,
     pub(crate) coolant: CoolantWords,
     pub(crate) comments: Comments,
@@ -248,6 +253,18 @@ pub(crate) struct ThcWords {
     /// Written on the first feed move after process on and a pierce dwell.
     pub(crate) on: Vec<String>,
     /// Written immediately before process off.
+    pub(crate) off: Vec<String>,
+}
+
+/// Controller cutter compensation words. `left` is G41, `right` is G42, `off` is G40.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CutterCompWords {
+    /// Written before the first feed of a controller-left path.
+    pub(crate) left: Vec<String>,
+    /// Written before the first feed of a controller-right path.
+    pub(crate) right: Vec<String>,
+    /// Written at the end of a path that turned compensation on.
     pub(crate) off: Vec<String>,
 }
 
@@ -775,6 +792,20 @@ impl PostDef {
         if let Some(thc) = &self.thc {
             check_templates("thc.on", &thc.on, PROCESS_KEYS)?;
             check_templates("thc.off", &thc.off, PROCESS_KEYS)?;
+        }
+        if let Some(comp) = &self.cutter_comp {
+            check_templates("cutter_comp.left", &comp.left, TOOL_KEYS)?;
+            check_templates("cutter_comp.right", &comp.right, TOOL_KEYS)?;
+            check_templates("cutter_comp.off", &comp.off, TOOL_KEYS)?;
+            if comp.left.is_empty() {
+                return Err(field("cutter_comp.left", "needs at least one line"));
+            }
+            if comp.right.is_empty() {
+                return Err(field("cutter_comp.right", "needs at least one line"));
+            }
+            if comp.off.is_empty() {
+                return Err(field("cutter_comp.off", "needs at least one line"));
+            }
         }
         check_templates("tool_change", &self.tool_change, TOOL_KEYS)?;
         check_coolant(&self.coolant)?;
