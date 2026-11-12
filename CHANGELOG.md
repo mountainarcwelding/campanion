@@ -6,6 +6,7 @@
 
 - Feed moves in the IR may carry an optional `power` (the same quantity as process-on power). Omitted, the field is absent and old IR loads unchanged. Laser raster uses one value per scan segment.
 - Posts with `power_scale`, including `grbl_laser`, write each feed's `S` from that per-move power, including `S0` on a zero-power overscan. A program that uses per-move power refuses a feed that omits it, and a process-on without power writes `S0` instead of filling full scale. Vector programs without per-move power are unchanged, including the missing-power `S1000` comment. Read-back and `compare` check the `S` word against the IR. This output has not been proven on a machine.
+- `laser_raster` operations engrave a PGM beside the job. Scan lines zigzag across the placed image at the stated step, with overscan at power 0 and an optional scanning offset applied along each pass so opposite passes agree on the image. Grey is mapped to power by a linear, gamma, or table map; a grey the map sends to zero is power 0. Images larger than 8192 pixels on a side, or more than 4,000,000 pixels, are refused. This output has not been proven on a machine.
 
 ## 0.10.1 — 2026-11-12
 

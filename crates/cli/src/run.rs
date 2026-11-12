@@ -300,7 +300,7 @@ fn drawing_stock_bounds(job: &JobFile, drawing: &Drawing) -> Result<(campanion_m
     let step_labels = if job.source().is_step() { Some(step_contour_labels(drawing, &job.tolerance())?) } else { None };
     let mut stock = StockBox::default();
     for op in job.operations() {
-        if matches!(op.kind(), OperationKind::Wrap) {
+        if matches!(op.kind(), OperationKind::Wrap | OperationKind::LaserRaster) {
             continue;
         }
         let contours = select(drawing, op.layers(), step_labels.as_deref());
@@ -369,6 +369,7 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
                 push_doc(&mut paths, Document::from_toolpath(&path, &import)?)?;
             }
             OperationKind::RotaryFinish => return Err(op_err(op, "rotary finish needs a rotary setup")),
+            OperationKind::LaserRaster => return Err(op_err(op, "laser raster is not valid on an STL source")),
             _ => return Err(op_err(op, "an STL source only allows surface, rough, waterline or rotary_finish operations")),
         }
         // Stock top is the highest Z of this planning mesh. The R plane is the job retract
@@ -601,6 +602,13 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
     let mut selected = Vec::new();
     let mut stock = StockBox::default();
     for op in job.operations() {
+        if matches!(op.kind(), OperationKind::LaserRaster) {
+            if job.nest().is_some() {
+                return Err(op_err(op, "laser raster is not valid with nest"));
+            }
+            selected.push((op, Vec::new()));
+            continue;
+        }
         let contours = select(drawing, op.layers(), step_labels.as_deref());
         if contours.is_empty() {
             return Err(op_err(op, "no geometry on the selected layers"));
@@ -644,6 +652,9 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
             OperationKind::Rough => return Err(op_err(op, "roughing needs an STL source")),
             OperationKind::Waterline => return Err(op_err(op, "waterline finishing needs an STL source")),
             OperationKind::RotaryFinish => return Err(op_err(op, "rotary finish needs an STL source")),
+            OperationKind::LaserRaster => {
+                paths.push(crate::raster::cut(job, op, tool)?);
+            }
             OperationKind::Wrap => {
                 let Some(setup) = job.rotary() else {
                     return Err(op_err(op, "wrap needs a rotary setup"));
@@ -663,6 +674,12 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
                 return Err(op_err(op, "wrap needs a rotary setup"));
             };
             safety::check_radial(op.name(), &paths, setup.center(), setup.axis_direction())?;
+        } else if matches!(op.kind(), OperationKind::LaserRaster) {
+            // Rapids stay at the retract height; scans are at cut height, typically 0.
+            let grow = 0.0;
+            let (min_x, min_y, max_x, max_y) = crate::raster::bounds(op).map_err(|err| op_err(op, err))?;
+            let footprint = safety::Footprint::from_aabb(min_x, min_y, max_x, max_y, grow);
+            safety::check_planar(op.name(), &paths, &footprint, job.retract())?;
         } else {
             let grow = tool.diameter().map_or(0.0, |diameter| diameter * 0.5);
             let footprint = safety::Footprint::from_contours(view, grow).map_err(|err| op_err(op, err))?;

@@ -24,6 +24,7 @@ mod plane;
 #[allow(dead_code)]
 mod jobfile;
 mod post;
+mod raster;
 mod report;
 mod rotary;
 mod rough;

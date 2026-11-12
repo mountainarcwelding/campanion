@@ -1,7 +1,7 @@
 //! Machine-neutral 2D toolpaths.
 //!
 //! Moves carry geometry and a feed class. They are not G-code and they do not name a controller.
-//! Profiles, pockets, facing, drilling, engraving and chamfers build those moves. A profile either offsets the
+//! Profiles, pockets, facing, drilling, engraving, laser rasters and chamfers build those moves. A profile either offsets the
 //! contour here (computed compensation, through [`campanion_geom`]) or leaves the path on the
 //! contour and records a left/right flag for a later IR. Ordering links those features.
 //! Depth passes repeat a closed contour downward. A profile with tabs may also repeat an open contour.
@@ -15,6 +15,7 @@ mod depth;
 mod drill;
 mod engrave;
 mod face;
+mod laser;
 mod order;
 mod pocket;
 mod profile;
@@ -27,6 +28,9 @@ pub use depth::{DepthEntry, DepthPlan, DepthTabs, check_onion_cuts, check_onion_
 pub use drill::{DrillCycle, DrillHit, DrillOp, Drilling};
 pub use engrave::{Engrave, EngraveOp};
 pub use face::{Face, FaceOp};
+pub use laser::{
+    GreyImage, GreyMap, MAX_RASTER_DIM, MAX_RASTER_PIXELS, MAX_RASTER_SEGMENTS, RasterLine, RasterSegment, RasterSpec, plan_raster, unoffset,
+};
 pub use order::{Feature, OrderedCuts, link_features, order_and_link};
 pub use pocket::{Pocket, PocketOp, PocketStrategy, RingOrder};
 pub use profile::{

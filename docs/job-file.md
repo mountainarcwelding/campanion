@@ -130,8 +130,8 @@ unique within that operation. The same layer may appear on two operations.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `name` | yes | Short unique name. |
-| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer`, `surface`, `rough`, `waterline`, `wrap` or `rotary_finish`. |
-| `layers` | yes, except surface, rough, waterline and rotary finish | One or more layer names. A surface, a rough, a waterline or a rotary finish rejects `layers`. |
+| `type` | yes | `profile`, `pocket`, `drill`, `engrave`, `face`, `chamfer`, `surface`, `rough`, `waterline`, `wrap`, `rotary_finish` or `laser_raster`. |
+| `layers` | yes, except surface, rough, waterline, rotary finish and laser raster | One or more layer names. A surface, a rough, a waterline, a rotary finish or a laser raster rejects `layers`. |
 | `side` | profile and chamfer | Profile: `inside`, `outside` or `on`. Chamfer: `inside` or `outside`; `on` is rejected. Rejected on pocket, drill, engrave, face, surface, rough, waterline, wrap and rotary finish. |
 | `tool_id` | yes | `id` of a tool in this file. |
 | `speed` | no | Spindle speed in rpm: positive, finite, and at most 100000. Not scaled by `units`. When set, it overrides `tools[].speed` for this operation. Omitted, the tool's speed is used. See [Spindle speed](#spindle-speed) and [Tool changes](#tool-changes). |
@@ -920,6 +920,36 @@ as the cell. This output has not been proven on a machine.
 
 `examples/dome_stock.job.json` roughs and finishes `examples/dome.stl` with an explicit stock box
 and a 2 mm cell.
+
+
+## Laser raster
+
+`type` `laser_raster` engraves a PGM image that sits beside the job. The source part is still
+required (any 2D format); its layers are not used. An STL source is refused. This output has
+not been proven on a machine.
+
+`image` is a `.pgm` path relative to the job file, `P2` or `P5`, with a max value in 1..=65535.
+Lightness is the sample divided by that max: 0 is black and 1 is white. Images larger than 8192
+pixels on a side, or more than 4,000,000 pixels, are refused.
+
+`origin` is the lower-left of the placed image, in `units`. `width` and `height` are the placed
+size, in `units`. `angle_deg` is the scan direction (default 0, along +X, with +Y the step
+direction) and is not scaled. `step` is the spacing between scan lines; omitted, it is the
+smaller pixel size. Lines zigzag. `overscan` (default 0) is extra travel past each end of the
+image at power 0. `scanning_offset` (default 0) is applied along each pass's travel so a
+forward pass and a reverse pass agree on the image once that offset is undone.
+
+`grey_map` maps lightness to IR power in 0..1. Omitted or `"linear"` is `power = 1 - lightness`
+(black burns at full power, white is 0). `{"type":"gamma","gamma"}` uses
+`power = 1 - lightness**gamma` with a positive `gamma`. `{"type":"table","values"}` is a
+piecewise-linear map, at least two values in 0..=1, from lightness 0 to 1. A grey the map
+sends to zero is power 0, and a completely white image is refused.
+
+`feeds.cut` is the scan feed. Optional `timing` and `cut_height` are the same as on other
+operations; omitted, the burns sit at Z 0. Rapids between lines are at the job retract height.
+The `grbl_laser` post writes each segment's `S` from that power, including `S0` on the overscan.
+
+Layers, depth, step-down, and the other 2D or mesh-only keys are rejected.
 
 ## Limits
 

@@ -747,6 +747,8 @@ pub enum OperationKind {
     Wrap,
     /// Continuous rotary finish around the job rotary axis. No layers and no side.
     RotaryFinish,
+    /// Raster a PGM beside the job with per-move laser power. No layers and no side.
+    LaserRaster,
 }
 
 /// How consecutive rotary-finish passes are joined.
@@ -769,6 +771,58 @@ struct RotaryFinishGeom {
     u_max: Option<f64>,
     angle_step_deg: Option<f64>,
     travel: RotaryTravel,
+}
+
+/// Placement and scan parameters for a [`OperationKind::LaserRaster`]. Lengths are millimetres.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LaserRasterGeom {
+    image: String,
+    origin: (f64, f64),
+    width: f64,
+    height: f64,
+    angle: f64,
+    step: Option<f64>,
+    overscan: f64,
+    scanning_offset: f64,
+    map: campanion_path::GreyMap,
+}
+
+impl LaserRasterGeom {
+    pub(crate) fn image(&self) -> &str {
+        &self.image
+    }
+
+    pub(crate) fn origin(&self) -> (f64, f64) {
+        self.origin
+    }
+
+    pub(crate) fn width(&self) -> f64 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> f64 {
+        self.height
+    }
+
+    pub(crate) fn angle(&self) -> f64 {
+        self.angle
+    }
+
+    pub(crate) fn step(&self) -> Option<f64> {
+        self.step
+    }
+
+    pub(crate) fn overscan(&self) -> f64 {
+        self.overscan
+    }
+
+    pub(crate) fn scanning_offset(&self) -> f64 {
+        self.scanning_offset
+    }
+
+    pub(crate) fn map(&self) -> &campanion_path::GreyMap {
+        &self.map
+    }
 }
 
 /// Cylinder and flat-frame offsets for a [`OperationKind::Wrap`]. Lengths are millimetres.
@@ -899,6 +953,8 @@ pub struct Operation {
     tabs: Option<TabSpec>,
     /// Continuous tool axis. `None` except on a surface that sets `tool_axis`.
     tool_axis: Option<ToolAxis>,
+    /// Raster placement. `None` except on a laser raster.
+    raster: Option<LaserRasterGeom>,
 }
 
 /// How a surface aims the tool, then clamps it toward +Z.
@@ -990,6 +1046,11 @@ impl Operation {
 
     pub fn kind(&self) -> OperationKind {
         self.kind
+    }
+
+    /// Raster placement. `None` except on a laser raster.
+    pub(crate) fn raster(&self) -> Option<&LaserRasterGeom> {
+        self.raster.as_ref()
     }
 
     /// Layer names in the source part. Unique within this operation, case-sensitive.
@@ -1597,6 +1658,9 @@ fn check_mesh_source(source: &Source, operations: &[Operation], tools: &[JobTool
         }
         if matches!(operation.kind(), OperationKind::RotaryFinish) && !stl {
             return Err(JobFileError::invalid("rotary finish is only valid on an STL source"));
+        }
+        if matches!(operation.kind(), OperationKind::LaserRaster) && stl {
+            return Err(JobFileError::invalid("laser raster is not valid on an STL source"));
         }
     }
     for tool in tools {
@@ -2331,6 +2395,14 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "speed",
             "tabs",
             "tool_axis",
+            "image",
+            "origin",
+            "height",
+            "pixel_size",
+            "step",
+            "overscan",
+            "scanning_offset",
+            "grey_map",
         ],
         "operation",
     )
@@ -2362,6 +2434,14 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     }
     if matches!(kind, OperationKind::RotaryFinish) {
         return Ok(attach_plane(with_speed(finish_rotary(name, map, scale, tools)?, speed), plane));
+    }
+    if matches!(kind, OperationKind::LaserRaster) {
+        return Ok(attach_plane(with_speed(with_index(finish_laser_raster(name, map, scale, tools)?, index_deg), speed), plane));
+    }
+    for key in ["image", "origin", "height", "pixel_size", "step", "overscan", "scanning_offset", "grey_map"] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is only valid on a laser raster")));
+        }
     }
     if optional(map, "sample_step").is_some() {
         return Err(JobFileError::invalid("sample_step is only valid on a surface"));
@@ -2445,6 +2525,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         speed,
         tabs,
         tool_axis: None,
+        raster: None,
     })
 }
 
@@ -2573,6 +2654,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         speed: None,
         tabs: None,
         tool_axis,
+        raster: None,
     })
 }
 
@@ -2811,6 +2893,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         speed: None,
         tabs: None,
         tool_axis: None,
+        raster: None,
     })
 }
 
@@ -2936,6 +3019,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         speed: None,
         tabs: None,
         tool_axis: None,
+        raster: None,
     })
 }
 
@@ -3032,6 +3116,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         speed: None,
         tabs: None,
         tool_axis: None,
+        raster: None,
     })
 }
 
@@ -3154,7 +3239,176 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         speed: None,
         tabs: None,
         tool_axis: None,
+        raster: None,
     })
+}
+
+/// Keys a laser raster does not accept. `side` is already rejected by [`parse_kind`].
+fn reject_laser_raster_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError> {
+    for key in [
+        "layers",
+        "depth",
+        "step_down",
+        "onion_skin",
+        "stepover",
+        "scallop_height",
+        "sample_step",
+        "margin",
+        "floor_z",
+        "top_z",
+        "grid",
+        "min_slope_deg",
+        "v_angle_deg",
+        "tip_diameter",
+        "tip_clearance",
+        "stock_to_leave",
+        "finish",
+        "entry",
+        "dwell",
+        "diameter",
+        "u_offset",
+        "v_offset",
+        "u_min",
+        "u_max",
+        "angle_step_deg",
+        "direction",
+        "tabs",
+        "tool_axis",
+        "pixel_size",
+    ] {
+        if optional(map, key).is_some() {
+            return Err(JobFileError::invalid(format!("{key} is not valid on a laser raster")));
+        }
+    }
+    Ok(())
+}
+
+fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
+    reject_laser_raster_foreign_keys(map)?;
+    let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
+    if tools.iter().all(|tool| tool.id() != tool_id) {
+        return Err(JobFileError::invalid(format!("unknown tool {tool_id}")));
+    }
+    let image = as_str(require(map, "image").map_err(from_cli)?, "image").map_err(from_cli)?;
+    check_source_path(image)?;
+    if !image.to_ascii_lowercase().ends_with(".pgm") {
+        return Err(JobFileError::invalid("laser raster image must be a .pgm file"));
+    }
+    let origin = parse_xy(require(map, "origin").map_err(from_cli)?, scale, "origin")?;
+    let width = positive_length(require(map, "width").map_err(from_cli)?, scale, "width")?;
+    let height = positive_length(require(map, "height").map_err(from_cli)?, scale, "height")?;
+    let angle = match optional(map, "angle_deg") {
+        Some(value) => {
+            let degrees = as_f64(value, "angle_deg").map_err(from_cli)?;
+            if !degrees.is_finite() {
+                return Err(JobFileError::invalid("angle_deg must be finite"));
+            }
+            degrees.to_radians()
+        }
+        None => 0.0,
+    };
+    let step = match optional(map, "step") {
+        Some(value) => Some(positive_length(value, scale, "step")?),
+        None => None,
+    };
+    let overscan = match optional(map, "overscan") {
+        Some(value) => non_negative_length(value, scale, "overscan")?,
+        None => 0.0,
+    };
+    let scanning_offset = match optional(map, "scanning_offset") {
+        Some(value) => {
+            let value = scale_f64(value, scale, "scanning_offset")?;
+            if !value.is_finite() {
+                return Err(JobFileError::invalid("scanning_offset must be finite"));
+            }
+            value
+        }
+        None => 0.0,
+    };
+    let map_kind = parse_grey_map(optional(map, "grey_map"))?;
+    let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
+    let params = parse_timing(map, scale)?;
+    Ok(Operation {
+        name,
+        kind: OperationKind::LaserRaster,
+        layers: Vec::new(),
+        tool_id,
+        depth: 0.0,
+        step_down: 0.0,
+        onion_skin: None,
+        dwell: None,
+        stepover: None,
+        scallop_height: None,
+        sample_step: None,
+        floor_z: None,
+        top_z: None,
+        grid: None,
+        min_slope_deg: 0.0,
+        face_angle: angle,
+        margin: 0.0,
+        width,
+        v_angle: 0.0,
+        tip_diameter: 0.0,
+        tip_clearance: 0.0,
+        stock_to_leave: StockToLeave::default(),
+        finish: None,
+        entry: DepthEntry::Plunge,
+        feeds,
+        params,
+        index_deg: None,
+        wrap_geom: None,
+        rotary_geom: None,
+        plane: None,
+        speed: None,
+        tabs: None,
+        tool_axis: None,
+        raster: Some(LaserRasterGeom { image: image.to_string(), origin, width, height, angle, step, overscan, scanning_offset, map: map_kind }),
+    })
+}
+
+fn parse_grey_map(value: Option<&Value>) -> Result<campanion_path::GreyMap, JobFileError> {
+    let Some(value) = value else {
+        return Ok(campanion_path::GreyMap::Linear);
+    };
+    if let Some(text) = value.as_str() {
+        return match text {
+            "linear" => Ok(campanion_path::GreyMap::Linear),
+            _ => Err(JobFileError::invalid("grey_map must be \"linear\" or an object")),
+        };
+    }
+    let map = object(value, "grey_map").map_err(from_cli)?;
+    let kind = as_str(require(map, "type").map_err(from_cli)?, "grey_map type").map_err(from_cli)?;
+    match kind {
+        "linear" => {
+            check_keys(map, &["type"], "grey_map").map_err(from_cli)?;
+            Ok(campanion_path::GreyMap::Linear)
+        }
+        "gamma" => {
+            check_keys(map, &["type", "gamma"], "grey_map").map_err(from_cli)?;
+            let gamma = as_f64(require(map, "gamma").map_err(from_cli)?, "gamma").map_err(from_cli)?;
+            if !(gamma.is_finite() && gamma > 0.0) {
+                return Err(JobFileError::invalid("grey map gamma must be positive"));
+            }
+            Ok(campanion_path::GreyMap::Gamma { gamma })
+        }
+        "table" => {
+            check_keys(map, &["type", "values"], "grey_map").map_err(from_cli)?;
+            let list = array(require(map, "values").map_err(from_cli)?, "grey_map values", 4096)?;
+            if list.len() < 2 {
+                return Err(JobFileError::invalid("grey map table needs at least two values"));
+            }
+            let mut values = Vec::with_capacity(list.len());
+            for item in list {
+                let value = as_f64(item, "grey map table value").map_err(from_cli)?;
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                    return Err(JobFileError::invalid("grey map table values must be in 0..=1"));
+                }
+                values.push(value);
+            }
+            Ok(campanion_path::GreyMap::Table { values })
+        }
+        other => Err(JobFileError::invalid(format!("unknown grey_map type `{other}`"))),
+    }
 }
 
 fn with_index(mut operation: Operation, index_deg: Option<f64>) -> Operation {
@@ -3646,6 +3900,10 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
         "rotary_finish" => {
             reject_side(side)?;
             Ok(OperationKind::RotaryFinish)
+        }
+        "laser_raster" => {
+            reject_side(side)?;
+            Ok(OperationKind::LaserRaster)
         }
         "chamfer" => {
             let Some(side) = side else {
