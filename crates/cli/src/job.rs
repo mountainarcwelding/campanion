@@ -373,7 +373,7 @@ fn parse_direction(text: &str) -> Result<CutDirection, CliError> {
     }
 }
 
-fn parse_compensation(value: &Value) -> Result<(Compensation, CompensationMode), CliError> {
+pub(crate) fn parse_compensation(value: &Value) -> Result<(Compensation, CompensationMode), CliError> {
     match as_str(value, "compensation")? {
         "computed" => Ok((Compensation::Computed, CompensationMode::Computed)),
         "controller_left" => Ok((Compensation::Controller(ControllerSide::Left), CompensationMode::ControllerLeft)),

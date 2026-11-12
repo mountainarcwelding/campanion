@@ -18,6 +18,12 @@
 //! Lengths scale with `units`. Omitted, a kerf tool uses an arc of one kerf radius and a
 //! diameter tool uses none. On a closed inside path, leads that would leave the waste shrink
 //! to at least a quarter of the kerf or are dropped. Leads are refused with a ramp or helix entry.
+//! A profile may set `direction`: `climb` (the default), `conventional`, or `auto` (`auto` is
+//! climb after the side is known). `side` may be `auto`: a closed contour contained by an odd
+//! number of other selected closed contours is an inside cut, otherwise outside. A profile may
+//! set `compensation`: `computed` (the default), `controller_left`, or `controller_right`.
+//! Controller compensation does not offset the path; the post writes G41/G42 when it supports
+//! `cutter_comp`. Controller compensation is refused with a non-zero `stock_to_leave.wall`.
 //!
 //! A STEP source, a path ending in `.step` or `.stp` in any case, must include `face`: a
 //! point `[x, y, z]` on the planar face to cut. Those coordinates are millimetres in model
@@ -140,13 +146,13 @@ use campanion_ir::{
     CutterSense as IrCutterSense, Feeds, FiveAxisSetup, Kinematics, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup,
     SolutionPolicy, Tool as IrTool, ToolPose, Vec3,
 };
-use campanion_path::{CutterSense, DepthEntry, DepthPlan, Lead, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
+use campanion_path::{Compensation, CutDirection, CutterSense, DepthEntry, DepthPlan, Lead, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
 use serde_json::{Map, Number, Value};
 
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::job::{
-    as_bool, as_f64, as_str, as_u32, check_keys, object, optional, parse_feeds, parse_lead, parse_params, parse_side, parse_tabs, parse_tool,
-    require, required_name,
+    as_bool, as_f64, as_str, as_u32, check_keys, object, optional, parse_compensation, parse_feeds, parse_lead, parse_params, parse_side, parse_tabs,
+    parse_tool, require, required_name,
 };
 
 /// On-disk tag this build reads. Minor tags are not accepted: unknown fields already fail the load.
@@ -720,13 +726,38 @@ impl JobTool {
     }
 }
 
+/// Profile side in a job file, including `auto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobProfileSide {
+    /// Offset into the interior.
+    Inside,
+    /// Offset away from the interior.
+    Outside,
+    /// Follow the contour with no offset.
+    On,
+    /// Infer inside or outside from which selected contours contain this one.
+    Auto,
+}
+
+impl JobProfileSide {
+    /// Fixed side when the file did not say `auto`.
+    pub fn fixed(self) -> Option<ProfileSide> {
+        match self {
+            Self::Inside => Some(ProfileSide::Inside),
+            Self::Outside => Some(ProfileSide::Outside),
+            Self::On => Some(ProfileSide::On),
+            Self::Auto => None,
+        }
+    }
+}
+
 /// What an operation asks the path engine to do. Geometry comes from the source layers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationKind {
-    /// Profile. `side` is the same enum the profile job uses.
+    /// Profile. `side` may also be `auto`, which the runner resolves from containment.
     Profile {
-        /// Inside, outside, or on the contour.
-        side: ProfileSide,
+        /// Inside, outside, on the contour, or auto.
+        side: JobProfileSide,
     },
     /// Clear the interior of the layers.
     Pocket,
@@ -959,6 +990,10 @@ pub struct Operation {
     lead_in: Option<Lead>,
     /// Lead-out on a profile. `None` when the file omits `lead_out`.
     lead_out: Option<Lead>,
+    /// Travel direction on a profile. Other kinds store climb (unused).
+    cut_direction: CutDirection,
+    /// Kerf or cutter compensation on a profile. Other kinds store computed (unused).
+    compensation: Compensation,
     /// Continuous tool axis. `None` except on a surface that sets `tool_axis`.
     tool_axis: Option<ToolAxis>,
     /// Raster placement. `None` except on a laser raster.
@@ -1216,6 +1251,16 @@ impl Operation {
     /// Lead-out when the file set `lead_out`. `None` means the runner should apply the default.
     pub fn lead_out(&self) -> Option<Lead> {
         self.lead_out
+    }
+
+    /// Climb, conventional, or auto (auto is stored as climb). Default climb.
+    pub fn cut_direction(&self) -> CutDirection {
+        self.cut_direction
+    }
+
+    /// Computed or controller compensation. Default computed.
+    pub fn compensation(&self) -> Compensation {
+        self.compensation
     }
 
     /// Cut feed, and an optional plunge feed. `plunge` of `None` means "use the cut feed".
@@ -2414,6 +2459,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "tabs",
             "lead_in",
             "lead_out",
+            "compensation",
             "tool_axis",
             "image",
             "origin",
@@ -2437,6 +2483,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     }
     if (optional(map, "lead_in").is_some() || optional(map, "lead_out").is_some()) && !matches!(kind, OperationKind::Profile { .. }) {
         return Err(op_invalid(&name, "leads are only valid on a profile"));
+    }
+    if optional(map, "compensation").is_some() && !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(op_invalid(&name, "compensation is only valid on a profile"));
     }
     if optional(map, "tool_axis").is_some() && !matches!(kind, OperationKind::Surface) {
         return Err(JobFileError::invalid("tool_axis is only valid on a surface"));
@@ -2493,10 +2542,13 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     if optional(map, "v_offset").is_some() {
         return Err(JobFileError::invalid("v_offset is only valid on a wrap"));
     }
-    for key in ["u_min", "u_max", "angle_step_deg", "direction"] {
+    for key in ["u_min", "u_max", "angle_step_deg"] {
         if optional(map, key).is_some() {
             return Err(JobFileError::invalid(format!("{key} is only valid on a rotary finish")));
         }
+    }
+    if optional(map, "direction").is_some() && !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(JobFileError::invalid("direction is only valid on a profile or a rotary finish"));
     }
     reject_chamfer_cut_keys(map, kind)?;
     let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
@@ -2518,6 +2570,11 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     } else {
         (None, None)
     };
+    let cut_direction = parse_profile_direction(optional(map, "direction"), kind)?;
+    let compensation = parse_profile_compensation(optional(map, "compensation"), kind)?;
+    if !matches!(compensation, Compensation::Computed) && stock_to_leave.wall() != 0.0 {
+        return Err(op_invalid(&name, "controller compensation cannot be combined with stock_to_leave.wall"));
+    }
     let onion_skin = parse_onion_skin(map, kind, depth, step_down, finish.as_ref(), scale)?;
     Ok(Operation {
         name,
@@ -2554,6 +2611,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         tabs,
         lead_in,
         lead_out,
+        cut_direction,
+        compensation,
         tool_axis: None,
         raster: None,
     })
@@ -2685,6 +2744,8 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         tabs: None,
         lead_in: None,
         lead_out: None,
+        cut_direction: CutDirection::Climb,
+        compensation: Compensation::Computed,
         tool_axis,
         raster: None,
     })
@@ -2926,6 +2987,8 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         tabs: None,
         lead_in: None,
         lead_out: None,
+        cut_direction: CutDirection::Climb,
+        compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
     })
@@ -3054,6 +3117,8 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         tabs: None,
         lead_in: None,
         lead_out: None,
+        cut_direction: CutDirection::Climb,
+        compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
     })
@@ -3153,6 +3218,8 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         tabs: None,
         lead_in: None,
         lead_out: None,
+        cut_direction: CutDirection::Climb,
+        compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
     })
@@ -3278,6 +3345,8 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         tabs: None,
         lead_in: None,
         lead_out: None,
+        cut_direction: CutDirection::Climb,
+        compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
     })
@@ -3403,6 +3472,8 @@ fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools
         tabs: None,
         lead_in: None,
         lead_out: None,
+        cut_direction: CutDirection::Climb,
+        compensation: Compensation::Computed,
         tool_axis: None,
         raster: Some(LaserRasterGeom { image: image.to_string(), origin, width, height, angle, step, overscan, scanning_offset, map: map_kind }),
     })
@@ -3928,8 +3999,7 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
             let Some(side) = side else {
                 return Err(JobFileError::invalid("profile needs a side"));
             };
-            let side = parse_side(as_str(side, "side").map_err(from_cli)?).map_err(from_cli)?;
-            Ok(OperationKind::Profile { side })
+            Ok(OperationKind::Profile { side: parse_job_profile_side(as_str(side, "side").map_err(from_cli)?)? })
         }
         "pocket" => {
             reject_side(side)?;
@@ -3987,6 +4057,41 @@ fn parse_kind(map: &Map<String, Value>) -> Result<OperationKind, JobFileError> {
 
 fn reject_side(side: Option<&Value>) -> Result<(), JobFileError> {
     if side.is_some() { Err(JobFileError::invalid("side is only valid on a profile or a chamfer")) } else { Ok(()) }
+}
+
+fn parse_job_profile_side(text: &str) -> Result<JobProfileSide, JobFileError> {
+    match text {
+        "inside" => Ok(JobProfileSide::Inside),
+        "outside" => Ok(JobProfileSide::Outside),
+        "on" => Ok(JobProfileSide::On),
+        "auto" => Ok(JobProfileSide::Auto),
+        _ => Err(JobFileError::invalid(format!("unknown profile side `{text}`"))),
+    }
+}
+
+fn parse_profile_direction(value: Option<&Value>, kind: OperationKind) -> Result<CutDirection, JobFileError> {
+    let Some(value) = value else {
+        return Ok(CutDirection::Climb);
+    };
+    if !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(JobFileError::invalid("direction is only valid on a profile or a rotary finish"));
+    }
+    match as_str(value, "direction").map_err(from_cli)? {
+        "climb" | "auto" => Ok(CutDirection::Climb),
+        "conventional" => Ok(CutDirection::Conventional),
+        other => Err(JobFileError::invalid(format!("unknown direction `{other}`; a profile takes auto, climb, or conventional"))),
+    }
+}
+
+fn parse_profile_compensation(value: Option<&Value>, kind: OperationKind) -> Result<Compensation, JobFileError> {
+    let Some(value) = value else {
+        return Ok(Compensation::Computed);
+    };
+    if !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(JobFileError::invalid("compensation is only valid on a profile"));
+    }
+    let (compensation, _) = parse_compensation(value).map_err(from_cli)?;
+    Ok(compensation)
 }
 
 fn parse_layers(value: &Value) -> Result<Vec<String>, JobFileError> {
@@ -4432,7 +4537,7 @@ enum DotFold {
 mod tests {
     use super::*;
     use campanion_ir::{Document, Program, SolutionPolicy, Vec3};
-    use campanion_path::Tool as PathTool;
+    use campanion_path::{ControllerSide, Tool as PathTool};
     use proptest::prelude::*;
     use std::fs;
     use std::path::Path;
@@ -4536,7 +4641,7 @@ mod tests {
 
         let ops = job.operations();
         assert_eq!(ops.len(), 3);
-        assert_eq!(ops[0].kind(), OperationKind::Profile { side: ProfileSide::Outside });
+        assert_eq!(ops[0].kind(), OperationKind::Profile { side: JobProfileSide::Outside });
         assert_eq!(ops[0].layers(), &["OUTLINE".to_string()]);
         assert_eq!(ops[0].depth(), 3.0);
         assert_eq!(ops[0].step_down(), 1.5);
@@ -7023,6 +7128,53 @@ mod tests {
         ];
         for (index, (op, needle)) in cases.iter().enumerate() {
             let err = load(&write_job(&format!("leads-bad-{index}"), &envelope("p.dxf", tools, &format!("[{op}]")))).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
+    }
+
+    #[test]
+    fn profile_direction_compensation_and_auto_side_parse() {
+        let tools = r#"[{"id":1,"diameter":6}]"#;
+        let climb = load(&write_job("dir-omit", &envelope("p.dxf", tools, &format!("[{}]", profile_op("outer", ""))))).expect("omit");
+        assert_eq!(climb.operations()[0].cut_direction(), CutDirection::Climb);
+        assert_eq!(climb.operations()[0].compensation(), Compensation::Computed);
+
+        let auto = load(&write_job(
+            "dir-auto",
+            &envelope("p.dxf", tools, &format!("[{}]", r#"{"name":"outer","type":"profile","layers":["L"],"side":"auto","tool_id":1,"depth":1,"step_down":1,"direction":"auto","compensation":"controller_left","feeds":{"cut":1}}"#)),
+        ))
+        .expect("auto");
+        assert_eq!(auto.operations()[0].cut_direction(), CutDirection::Climb);
+        assert_eq!(auto.operations()[0].compensation(), Compensation::Controller(ControllerSide::Left));
+        assert_eq!(auto.operations()[0].kind(), OperationKind::Profile { side: JobProfileSide::Auto });
+
+        let conv = load(&write_job(
+            "dir-conv",
+            &envelope("p.dxf", tools, &format!("[{}]", profile_op("outer", r#","direction":"conventional","compensation":"computed""#))),
+        ))
+        .expect("conv");
+        assert_eq!(conv.operations()[0].cut_direction(), CutDirection::Conventional);
+
+        let cases = [
+            (profile_op("outer", r#","direction":"zigzag""#), "unknown direction `zigzag`"),
+            (profile_op("outer", r#","compensation":"left""#), "unknown compensation `left`"),
+            (
+                profile_op("outer", r#","compensation":"controller_left","stock_to_leave":{"wall":1}"#),
+                "controller compensation cannot be combined with stock_to_leave.wall",
+            ),
+            (
+                r#"{"name":"pocket","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"direction":"climb","feeds":{"cut":1}}"#
+                    .to_string(),
+                "direction is only valid on a profile or a rotary finish",
+            ),
+            (
+                r#"{"name":"pocket","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"compensation":"computed","feeds":{"cut":1}}"#
+                    .to_string(),
+                "operation `pocket`: compensation is only valid on a profile",
+            ),
+        ];
+        for (index, (op, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("dir-bad-{index}"), &envelope("p.dxf", tools, &format!("[{op}]")))).expect_err(needle);
             assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
         }
     }

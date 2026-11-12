@@ -134,16 +134,16 @@ use campanion_ir::{
 };
 use campanion_mesh::Mesh;
 use campanion_path::{
-    ChamferOp, Compensation, CutDirection, CutKind, DepthEntry, DepthPlan, DepthTabs, DrillCycle, DrillOp, FaceOp, Feature, Lead, Move, PocketOp,
-    PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileOp, ProfileSide, Tool as PathTool, Toolpath, apply_timing, default_kerf_lead,
-    fit_leads,
+    ChamferOp, Compensation, ControllerSide, CutDirection, CutKind, DepthEntry, DepthPlan, DepthTabs, DrillCycle, DrillOp, FaceOp, Feature, Lead,
+    Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileOp, ProfileSide, Tool as PathTool, Toolpath, apply_timing,
+    default_kerf_lead, fit_leads,
 };
 use campanion_post::PostDef;
 
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::index::{self, IndexedOp};
 use crate::job::read_text;
-use crate::jobfile::{self, Finish, JobFile, JobTool, Operation, OperationKind};
+use crate::jobfile::{self, Finish, JobFile, JobProfileSide, JobTool, Operation, OperationKind};
 use crate::plane::{self, ViewFrame};
 use crate::report;
 use crate::rotary;
@@ -964,10 +964,15 @@ fn import_with_params(op: &Operation, tool: &JobTool, params: ProcessParams) -> 
         PathTool::Kerf { .. } => ProcessKind::Torch,
     };
     let import = Import::new(process, op.feeds().cut())?.feeds(op.feeds())?.params(params)?.tool(tool.ir().clone())?.name(op.name())?;
-    Ok(import.compensation(CompensationMode::Computed))
+    let mode = match op.compensation() {
+        Compensation::Computed => CompensationMode::Computed,
+        Compensation::Controller(ControllerSide::Left) => CompensationMode::ControllerLeft,
+        Compensation::Controller(ControllerSide::Right) => CompensationMode::ControllerRight,
+    };
+    Ok(import.compensation(mode))
 }
 
-fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide) -> Result<(), CliError> {
+fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide) -> Result<(), CliError> {
     let radius = tool_radius(cut)?;
     let stock = cut.op.stock_to_leave();
     // Roughing stands off the wall by `wall` and stops `floor` short of the final depth.
@@ -981,17 +986,41 @@ fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide) -> R
 }
 
 /// One linked profile. `distance` is how far the cutter centre sits from the part.
-fn link_profile(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: ProfileSide, distance: f64, total: f64, step_down: f64) -> Result<(), CliError> {
+fn link_profile(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide, distance: f64, total: f64, step_down: f64) -> Result<(), CliError> {
     if !distance.is_finite() {
         return Err(op_err(cut.op, "profile offset is not finite"));
     }
     let mut features = Vec::with_capacity(cut.contours.len());
     for contour in cut.contours {
+        let side = resolve_profile_side(cut, side, contour)?;
         let shaped = compensate_profile(cut, side, contour, distance)?;
         let toolpath = depth_with(cut, &shaped, total, step_down)?;
         features.push(Feature::new(contour.clone(), toolpath));
     }
     link_operation(paths, cut, &features)
+}
+
+fn resolve_profile_side(cut: &Cut<'_>, side: JobProfileSide, contour: &Contour) -> Result<ProfileSide, CliError> {
+    match side.fixed() {
+        Some(side) => Ok(side),
+        None => auto_profile_side(cut, contour),
+    }
+}
+
+fn auto_profile_side(cut: &Cut<'_>, contour: &Contour) -> Result<ProfileSide, CliError> {
+    if !contour.is_closed() {
+        return Err(op_err(cut.op, "auto side needs a closed contour"));
+    }
+    let mut depth = 0usize;
+    for other in cut.contours {
+        if std::ptr::eq(other, contour) || !other.is_closed() {
+            continue;
+        }
+        if strictly_inside(contour, other, &cut.tolerance).map_err(|err| op_err(cut.op, err))? {
+            depth += 1;
+        }
+    }
+    Ok(if depth % 2 == 1 { ProfileSide::Inside } else { ProfileSide::Outside })
 }
 
 fn pocket_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>) -> Result<(), CliError> {
@@ -1069,7 +1098,7 @@ fn pocket_wall_features(cut: &Cut<'_>, regions: &[Region], finish: Finish) -> Re
 }
 
 fn push_wall_contour(cut: &Cut<'_>, contour: &Contour, side: ProfileSide, finish: Finish, features: &mut Vec<Feature>) -> Result<(), CliError> {
-    let shaped = orient_climb(cut.op, side, contour, &cut.tolerance)?;
+    let shaped = orient_travel(cut.op, side, contour, &cut.tolerance)?;
     let toolpath = depth_with(cut, &shaped, cut.op.depth(), finish.step_down())?;
     features.push(Feature::new(shaped, toolpath));
     Ok(())
@@ -1213,7 +1242,8 @@ fn resolved_leads(cut: &Cut<'_>, contour: &Contour) -> Result<(Lead, Lead), CliE
         return Ok((lead_in, lead_out));
     }
     let width = tool_radius(cut)? * 2.0;
-    fit_leads(contour, lead_in, lead_out, true, width, &cut.tolerance).map_err(|err| op_err(cut.op, err))
+    let waste_left = matches!(cut.op.cut_direction(), CutDirection::Climb);
+    fit_leads(contour, lead_in, lead_out, waste_left, width, &cut.tolerance).map_err(|err| op_err(cut.op, err))
 }
 
 fn depth_with_leads(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64, lead_in: Lead, lead_out: Lead) -> Result<Toolpath, CliError> {
@@ -1224,7 +1254,7 @@ fn depth_with_leads(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64
     let retract = retract_z(cut.job);
     let mut moves = Vec::new();
     for z in depth_levels(cut.op, total, step_down)? {
-        let mut op = ProfileOp::new(cut.tool.path_tool(), Compensation::Computed, cut_side(cut.op), CutDirection::Climb)
+        let mut op = ProfileOp::new(cut.tool.path_tool(), cut.op.compensation(), cut_side(cut.op), cut.op.cut_direction())
             .z(z)
             .heights(clearance, retract)
             .lead_in(lead_in)
@@ -1245,7 +1275,8 @@ fn depth_with_leads(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64
 
 fn cut_side(op: &Operation) -> ProfileSide {
     match op.kind() {
-        OperationKind::Profile { side } | OperationKind::Chamfer { side } => side,
+        OperationKind::Profile { side } => side.fixed().unwrap_or(ProfileSide::On),
+        OperationKind::Chamfer { side } => side,
         _ => ProfileSide::On,
     }
 }
@@ -1274,7 +1305,7 @@ fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> R
     if let Some(spec) = cut.op.tabs() {
         let cutter = tool_radius(cut)? * 2.0;
         let on_contour = match cut.op.kind() {
-            OperationKind::Profile { side } => matches!(side, ProfileSide::On),
+            OperationKind::Profile { side } => matches!(side, JobProfileSide::On),
             _ => false,
         };
         // Tab top follows the operation depth, not a roughing link that stops above the floor.
@@ -1433,12 +1464,13 @@ fn tool_radius(cut: &Cut<'_>) -> Result<f64, CliError> {
 }
 
 fn compensate_profile(cut: &Cut<'_>, side: ProfileSide, contour: &Contour, distance: f64) -> Result<Contour, CliError> {
-    let path = if matches!(side, ProfileSide::On) || distance <= cut.tolerance.linear() {
-        contour.clone()
-    } else {
-        offset_profile(cut, side, contour, distance)?
-    };
-    orient_climb(cut.op, side, &path, &cut.tolerance)
+    let path =
+        if matches!(cut.op.compensation(), Compensation::Controller(_)) || matches!(side, ProfileSide::On) || distance <= cut.tolerance.linear() {
+            contour.clone()
+        } else {
+            offset_profile(cut, side, contour, distance)?
+        };
+    orient_travel(cut.op, side, &path, &cut.tolerance)
 }
 
 fn offset_profile(cut: &Cut<'_>, side: ProfileSide, contour: &Contour, distance: f64) -> Result<Contour, CliError> {
@@ -1488,12 +1520,14 @@ fn signed_profile_offset(op: &Operation, contour: &Contour, side: ProfileSide, m
     })
 }
 
-fn orient_climb(op: &Operation, side: ProfileSide, path: &Contour, tolerance: &Tolerance) -> Result<Contour, CliError> {
+fn orient_travel(op: &Operation, side: ProfileSide, path: &Contour, tolerance: &Tolerance) -> Result<Contour, CliError> {
+    let conventional = matches!(op.cut_direction(), CutDirection::Conventional);
     if !path.is_closed() {
         let reverse = !matches!(side, ProfileSide::Inside);
+        let reverse = if conventional { !reverse } else { reverse };
         return Ok(if reverse { path.reversed() } else { path.clone() });
     }
-    let want_ccw = matches!(side, ProfileSide::Inside);
+    let want_ccw = matches!(side, ProfileSide::Inside) != conventional;
     let is_ccw = match path.orientation(tolerance).map_err(|err| op_err(op, err))? {
         Orientation::CounterClockwise => true,
         Orientation::Clockwise => false,
