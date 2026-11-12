@@ -34,7 +34,8 @@ pub use laser::{
 pub use order::{Feature, OrderedCuts, link_features, order_and_link};
 pub use pocket::{Pocket, PocketOp, PocketStrategy, RingOrder};
 pub use profile::{
-    CutDirection, DEFAULT_CLEARANCE_MM, DEFAULT_RETRACT_MM, Lead, Profile, ProfileOp, ProfileSide, StartPoint, Tab, TabLayout, TabSpec,
+    CutDirection, DEFAULT_CLEARANCE_MM, DEFAULT_RETRACT_MM, Lead, MIN_SMALL_HOLE_LEAD_FRACTION, Profile, ProfileOp, ProfileSide, StartPoint, Tab,
+    TabLayout, TabSpec, default_kerf_lead, fit_leads,
 };
 pub use timing::{ProcessTiming, apply_timing};
 pub use tool::{Compensation, ControllerSide, CutterSense, Tool, check_cutter_sense};

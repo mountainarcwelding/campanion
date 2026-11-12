@@ -4,6 +4,7 @@
 
 ### Added
 
+- `campanion-job/1` profile operations may set `lead_in` and `lead_out` (`none`, `line`, `perpendicular`, or `arc`). A kerf tool that omits them gets an arc of one kerf width. On a closed inside path, leads that would leave the waste are shrunk to the largest size not below a quarter of the kerf, or omitted. Leads are refused with a ramp or helix entry. Diameter tools still default to no leads, so existing mill programs are unchanged. This output has not been proven on a machine.
 - Posts may set `cutter_comp` (`left`, `right`, `off`). A path whose IR compensation is `controller_left` or `controller_right` writes those words before the first feed and cancels at the end of the path. `plasma`, `linuxcnc`, `linuxcnc_router` and `mach3` write `G41`/`G42`/`G40`; `fanuc` and `haas` write `G41 D{tool}`/`G42 D{tool}`/`G40`. Posts that omit the block, including `grbl`, still refuse controller compensation. Computed programs are unchanged. Read-back and mill audit accept `G41`/`G42`, and audit requires cancellation before the program ends. This output has not been proven on a machine.
 
 ## 0.11.0 — 2026-11-12

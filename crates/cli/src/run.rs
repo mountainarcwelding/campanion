@@ -134,8 +134,9 @@ use campanion_ir::{
 };
 use campanion_mesh::Mesh;
 use campanion_path::{
-    ChamferOp, CutKind, DepthEntry, DepthPlan, DepthTabs, DrillCycle, DrillOp, FaceOp, Feature, Move, PocketOp, PocketStrategy, Point3, ProcessEvent,
-    ProcessTiming, ProfileSide, Tool as PathTool, Toolpath, apply_timing,
+    ChamferOp, Compensation, CutDirection, CutKind, DepthEntry, DepthPlan, DepthTabs, DrillCycle, DrillOp, FaceOp, Feature, Lead, Move, PocketOp,
+    PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileOp, ProfileSide, Tool as PathTool, Toolpath, apply_timing, default_kerf_lead,
+    fit_leads,
 };
 use campanion_post::PostDef;
 
@@ -1201,7 +1202,59 @@ fn depth_at_retract(cut: &Cut<'_>, contour: &Contour) -> Result<Toolpath, CliErr
     depth_with(cut, contour, cut.op.depth(), cut.op.step_down())
 }
 
+fn resolved_leads(cut: &Cut<'_>, contour: &Contour) -> Result<(Lead, Lead), CliError> {
+    let fallback = match cut.tool.path_tool() {
+        PathTool::Kerf { width } => default_kerf_lead(width).map_err(|err| op_err(cut.op, err))?,
+        PathTool::Diameter { .. } => Lead::None,
+    };
+    let lead_in = cut.op.lead_in().unwrap_or(fallback);
+    let lead_out = cut.op.lead_out().unwrap_or(fallback);
+    if matches!(lead_in, Lead::None) && matches!(lead_out, Lead::None) {
+        return Ok((lead_in, lead_out));
+    }
+    let width = tool_radius(cut)? * 2.0;
+    fit_leads(contour, lead_in, lead_out, true, width, &cut.tolerance).map_err(|err| op_err(cut.op, err))
+}
+
+fn depth_with_leads(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64, lead_in: Lead, lead_out: Lead) -> Result<Toolpath, CliError> {
+    if !matches!(cut.op.entry(), DepthEntry::Plunge) {
+        return Err(op_err(cut.op, "leads are not valid with a ramp or helix entry"));
+    }
+    let clearance = cut.job.clearance();
+    let retract = retract_z(cut.job);
+    let mut moves = Vec::new();
+    for z in depth_levels(cut.op, total, step_down)? {
+        let mut op = ProfileOp::new(cut.tool.path_tool(), Compensation::Computed, cut_side(cut.op), CutDirection::Climb)
+            .z(z)
+            .heights(clearance, retract)
+            .lead_in(lead_in)
+            .lead_out(lead_out)
+            .tolerance(cut.tolerance);
+        if let Some(spec) = cut.op.tabs() {
+            op = op.tabs(spec);
+        }
+        let profile = op.generate_prepared(contour).map_err(|err| op_err(cut.op, err))?;
+        moves.extend(profile.toolpath().moves().iter().copied());
+    }
+    if moves.is_empty() {
+        return Err(op_err(cut.op, "depth plan is empty"));
+    }
+    let path = Toolpath::new(moves).map_err(|err| op_err(cut.op, err))?;
+    clearance_retracts(cut, path.moves())
+}
+
+fn cut_side(op: &Operation) -> ProfileSide {
+    match op.kind() {
+        OperationKind::Profile { side } | OperationKind::Chamfer { side } => side,
+        _ => ProfileSide::On,
+    }
+}
+
 fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> Result<Toolpath, CliError> {
+    let (lead_in, lead_out) = resolved_leads(cut, contour)?;
+    if !matches!(lead_in, Lead::None) || !matches!(lead_out, Lead::None) {
+        return depth_with_leads(cut, contour, total, step_down, lead_in, lead_out);
+    }
     let mut plan = apply_onion(DepthPlan::new(0.0, total, step_down, cut.op.entry()), cut.op, total);
     // Linking rapids to the retract height and the entry feed starts there. A ramp or helix
     // planned from the stock surface would be posted from that higher Z over a length sized

@@ -382,7 +382,7 @@ fn parse_compensation(value: &Value) -> Result<(Compensation, CompensationMode),
     }
 }
 
-fn parse_lead(value: Option<&Value>) -> Result<Lead, CliError> {
+pub(crate) fn parse_lead(value: Option<&Value>) -> Result<Lead, CliError> {
     let Some(value) = value else {
         return Ok(Lead::None);
     };

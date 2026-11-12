@@ -14,6 +14,10 @@
 //! pitch. The angle is in `(0, 90]` degrees. The radius is positive and at most 1e6 mm.
 //! `campanion run` sizes the first ramp or helix from the retract height when that height is
 //! above the stock, so the posted descent stays within the angle.
+//! A profile may set `lead_in` and `lead_out`: `none`, `line`, `perpendicular`, or `arc`.
+//! Lengths scale with `units`. Omitted, a kerf tool uses an arc of one kerf radius and a
+//! diameter tool uses none. On a closed inside path, leads that would leave the waste shrink
+//! to at least a quarter of the kerf or are dropped. Leads are refused with a ramp or helix entry.
 //!
 //! A STEP source, a path ending in `.step` or `.stp` in any case, must include `face`: a
 //! point `[x, y, z]` on the planar face to cut. Those coordinates are millimetres in model
@@ -136,13 +140,13 @@ use campanion_ir::{
     CutterSense as IrCutterSense, Feeds, FiveAxisSetup, Kinematics, ProcessParams, RotaryAxisKind, RotaryDirection, RotaryLimits, RotarySetup,
     SolutionPolicy, Tool as IrTool, ToolPose, Vec3,
 };
-use campanion_path::{CutterSense, DepthEntry, DepthPlan, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
+use campanion_path::{CutterSense, DepthEntry, DepthPlan, Lead, ProfileSide, TabLayout, TabSpec, Tool as PathTool};
 use serde_json::{Map, Number, Value};
 
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::job::{
-    as_bool, as_f64, as_str, as_u32, check_keys, object, optional, parse_feeds, parse_params, parse_side, parse_tabs, parse_tool, require,
-    required_name,
+    as_bool, as_f64, as_str, as_u32, check_keys, object, optional, parse_feeds, parse_lead, parse_params, parse_side, parse_tabs, parse_tool,
+    require, required_name,
 };
 
 /// On-disk tag this build reads. Minor tags are not accepted: unknown fields already fail the load.
@@ -951,6 +955,10 @@ pub struct Operation {
     speed: Option<f64>,
     /// Bridges on a profile. `None` when the file omits `tabs`, and on every other kind.
     tabs: Option<TabSpec>,
+    /// Lead-in on a profile. `None` when the file omits `lead_in` (the runner then applies the default).
+    lead_in: Option<Lead>,
+    /// Lead-out on a profile. `None` when the file omits `lead_out`.
+    lead_out: Option<Lead>,
     /// Continuous tool axis. `None` except on a surface that sets `tool_axis`.
     tool_axis: Option<ToolAxis>,
     /// Raster placement. `None` except on a laser raster.
@@ -1198,6 +1206,16 @@ impl Operation {
     /// inside the spec is a full-depth tab.
     pub fn tabs(&self) -> Option<TabSpec> {
         self.tabs
+    }
+
+    /// Lead-in when the file set `lead_in`. `None` means the runner should apply the default.
+    pub fn lead_in(&self) -> Option<Lead> {
+        self.lead_in
+    }
+
+    /// Lead-out when the file set `lead_out`. `None` means the runner should apply the default.
+    pub fn lead_out(&self) -> Option<Lead> {
+        self.lead_out
     }
 
     /// Cut feed, and an optional plunge feed. `plunge` of `None` means "use the cut feed".
@@ -2394,6 +2412,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "plane",
             "speed",
             "tabs",
+            "lead_in",
+            "lead_out",
             "tool_axis",
             "image",
             "origin",
@@ -2414,6 +2434,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let kind = parse_kind(map)?;
     if optional(map, "tabs").is_some() && !matches!(kind, OperationKind::Profile { .. }) {
         return Err(op_invalid(&name, "tabs is only valid on a profile"));
+    }
+    if (optional(map, "lead_in").is_some() || optional(map, "lead_out").is_some()) && !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(op_invalid(&name, "leads are only valid on a profile"));
     }
     if optional(map, "tool_axis").is_some() && !matches!(kind, OperationKind::Surface) {
         return Err(JobFileError::invalid("tool_axis is only valid on a surface"));
@@ -2490,6 +2513,11 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale)?;
     let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
+    let (lead_in, lead_out) = if matches!(kind, OperationKind::Profile { .. }) {
+        (parse_profile_lead(optional(map, "lead_in"), scale)?, parse_profile_lead(optional(map, "lead_out"), scale)?)
+    } else {
+        (None, None)
+    };
     let onion_skin = parse_onion_skin(map, kind, depth, step_down, finish.as_ref(), scale)?;
     Ok(Operation {
         name,
@@ -2524,6 +2552,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         plane,
         speed,
         tabs,
+        lead_in,
+        lead_out,
         tool_axis: None,
         raster: None,
     })
@@ -2653,6 +2683,8 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         plane: None,
         speed: None,
         tabs: None,
+        lead_in: None,
+        lead_out: None,
         tool_axis,
         raster: None,
     })
@@ -2892,6 +2924,8 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         plane: None,
         speed: None,
         tabs: None,
+        lead_in: None,
+        lead_out: None,
         tool_axis: None,
         raster: None,
     })
@@ -3018,6 +3052,8 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         plane: None,
         speed: None,
         tabs: None,
+        lead_in: None,
+        lead_out: None,
         tool_axis: None,
         raster: None,
     })
@@ -3115,6 +3151,8 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         plane: None,
         speed: None,
         tabs: None,
+        lead_in: None,
+        lead_out: None,
         tool_axis: None,
         raster: None,
     })
@@ -3238,6 +3276,8 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         plane: None,
         speed: None,
         tabs: None,
+        lead_in: None,
+        lead_out: None,
         tool_axis: None,
         raster: None,
     })
@@ -3361,6 +3401,8 @@ fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools
         plane: None,
         speed: None,
         tabs: None,
+        lead_in: None,
+        lead_out: None,
         tool_axis: None,
         raster: Some(LaserRasterGeom { image: image.to_string(), origin, width, height, angle, step, overscan, scanning_offset, map: map_kind }),
     })
@@ -3796,6 +3838,30 @@ fn parse_profile_tabs(value: Option<&Value>, depth: f64, scale: f64) -> Result<O
 fn scaled_tab_length(value: f64, scale: f64, what: &str) -> Result<f64, JobFileError> {
     let scaled = value * scale;
     if scaled.is_finite() { Ok(scaled) } else { Err(JobFileError::invalid(format!("{what} must be finite"))) }
+}
+
+fn parse_profile_lead(value: Option<&Value>, scale: f64) -> Result<Option<Lead>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    Ok(Some(scale_lead(parse_lead(Some(value)).map_err(from_cli)?, scale)?))
+}
+
+fn scale_lead(lead: Lead, scale: f64) -> Result<Lead, JobFileError> {
+    match lead {
+        Lead::None => Ok(Lead::None),
+        Lead::Line { length } => Ok(Lead::Line { length: scale_lead_length(length, scale, "lead length")? }),
+        Lead::Perpendicular { length } => Ok(Lead::Perpendicular { length: scale_lead_length(length, scale, "lead length")? }),
+        Lead::Arc { radius } => Ok(Lead::Arc { radius: scale_lead_length(radius, scale, "lead radius")? }),
+    }
+}
+
+fn scale_lead_length(value: f64, scale: f64, what: &str) -> Result<f64, JobFileError> {
+    let scaled = scaled_tab_length(value, scale, what)?;
+    if !(scaled > 0.0) {
+        return Err(JobFileError::invalid(format!("{what} must be positive")));
+    }
+    cap_under(scaled, MAX_MM, what)
 }
 
 /// `entry` is optional. Lengths scale with the file units. Angles stay in degrees until they
@@ -6906,6 +6972,59 @@ mod tests {
         );
         let err = load(&write_job("tabs-rotary", &rotary)).expect_err("rotary");
         assert!(invalid_detail(&err).contains("operation `spin`: tabs is only valid on a profile"), "{err}");
+    }
+
+    #[test]
+    fn profile_leads_parse_scale_and_reject_foreign_keys() {
+        let tools = r#"[{"id":1,"diameter":6}]"#;
+        let loaded = load(&write_job(
+            "leads-ok",
+            &envelope(
+                "p.dxf",
+                tools,
+                &format!("[{}]", profile_op("outer", r#","lead_in":{"type":"arc","radius":2},"lead_out":{"type":"line","length":3}"#)),
+            ),
+        ))
+        .expect("leads");
+        assert_eq!(loaded.operations()[0].lead_in(), Some(Lead::Arc { radius: 2.0 }));
+        assert_eq!(loaded.operations()[0].lead_out(), Some(Lead::Line { length: 3.0 }));
+
+        let omitted = load(&write_job("leads-omit", &envelope("p.dxf", tools, &format!("[{}]", profile_op("outer", ""))))).expect("omit");
+        assert_eq!(omitted.operations()[0].lead_in(), None);
+        assert_eq!(omitted.operations()[0].lead_out(), None);
+
+        let none = load(&write_job(
+            "leads-none",
+            &envelope("p.dxf", tools, &format!("[{}]", profile_op("outer", r#","lead_in":{"type":"none"},"lead_out":{"type":"none"}"#))),
+        ))
+        .expect("none");
+        assert_eq!(none.operations()[0].lead_in(), Some(Lead::None));
+        assert_eq!(none.operations()[0].lead_out(), Some(Lead::None));
+
+        let inch = load(&write_job(
+            "leads-inch",
+            r#"{"format":"campanion-job/1","source":{"path":"p.dxf","hash":"cbf29ce484222325"},"units":"inch","tools":[{"id":1,"diameter":0.25}],"operations":[{"name":"outer","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":0.5,"step_down":0.5,"lead_in":{"type":"perpendicular","length":0.25},"lead_out":{"type":"arc","radius":0.125},"feeds":{"cut":40}}]}"#,
+        ))
+        .expect("inch");
+        assert_eq!(inch.operations()[0].lead_in(), Some(Lead::Perpendicular { length: 0.25 * 25.4 }));
+        assert_eq!(inch.operations()[0].lead_out(), Some(Lead::Arc { radius: 0.125 * 25.4 }));
+
+        let cases = [
+            (profile_op("outer", r#","lead_in":{"type":"line"}"#), "missing `length`"),
+            (profile_op("outer", r#","lead_in":{"type":"arc"}"#), "missing `radius`"),
+            (profile_op("outer", r#","lead_in":{"type":"arc","radius":0}"#), "lead radius must be positive"),
+            (profile_op("outer", r#","lead_in":{"type":"line","length":-1}"#), "lead length must be positive"),
+            (profile_op("outer", r#","lead_in":{"type":"slant","length":1}"#), "unknown lead type `slant`"),
+            (
+                r#"{"name":"pocket","type":"pocket","layers":["L"],"tool_id":1,"depth":1,"step_down":1,"lead_in":{"type":"none"},"feeds":{"cut":1}}"#
+                    .to_string(),
+                "operation `pocket`: leads are only valid on a profile",
+            ),
+        ];
+        for (index, (op, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("leads-bad-{index}"), &envelope("p.dxf", tools, &format!("[{op}]")))).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
     }
 
     fn tool_axis_job(units: &str, shape: &str, kinematics: bool, axis: &str) -> String {

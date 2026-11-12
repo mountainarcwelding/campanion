@@ -21,7 +21,9 @@
 //!
 //! A line lead lies on the path tangent. A perpendicular lead lies on the normal, on the waste
 //! side. An arc lead is a quarter turn (`π/2`) that meets the path with the same tangent; its
-//! centre is on the waste side, one radius out. Overcut, on a closed profile, keeps cutting
+//! centre is on the waste side, one radius out. On a closed inside path, a lead that would
+//! leave the waste is shrunk to the largest size not below a quarter of the kerf, or omitted.
+//! That is the small-hole rule. Overcut, on a closed profile, keeps cutting
 //! along the contour past the start. A tab `width` is the bridge left on the part, measured
 //! along the part edge. The tool-centre gap is that width plus the tool diameter on a straight
 //! edge, and at least that on arcs and corners. Tabs are not placed on the lead-in span or on
@@ -305,11 +307,31 @@ impl ProfileOp {
 
     /// Build the profile for `contour`.
     pub fn generate(&self, contour: &Contour) -> Result<Profile> {
+        self.check_inputs(contour)?;
+        let magnitude = self.offset_magnitude()?;
+        let path = self.compensated(contour, magnitude)?;
+        let path = self.orient_travel(&path)?;
+        let on_contour =
+            matches!(self.side, ProfileSide::On) || matches!(self.compensation, Compensation::Controller(_)) || magnitude <= self.tolerance.linear();
+        self.finish(path, on_contour)
+    }
+
+    /// Build the profile on a path that is already offset and travel-oriented.
+    ///
+    /// Tabs are measured along the tool-centre path unless compensation is controller-side,
+    /// in which case `path` is the programmed edge.
+    pub fn generate_prepared(&self, path: &Contour) -> Result<Profile> {
+        self.check_inputs(path)?;
+        let on_contour = matches!(self.compensation, Compensation::Controller(_));
+        self.finish(path.clone(), on_contour)
+    }
+
+    fn check_inputs(&self, contour: &Contour) -> Result<()> {
         if contour.segments().len() > campanion_geom::MAX_SEGMENTS {
             return Err(invalid(format!("too many segments: {} > {}", contour.segments().len(), campanion_geom::MAX_SEGMENTS)));
         }
         let _heights = approach_heights(self.clearance, self.retract)?;
-        let z = finite(self.z, "z")?;
+        let _z = finite(self.z, "z")?;
         let overcut = non_negative(self.overcut, "overcut")?;
         if overcut > 0.0 && !contour.is_closed() {
             return Err(invalid("overcut requires a closed contour"));
@@ -320,14 +342,16 @@ impl ProfileOp {
                 return Err(invalid("finishing allowance needs an inside or outside side"));
             }
         }
-        let magnitude = self.offset_magnitude()?;
-        let path = self.compensated(contour, magnitude)?;
-        let path = self.orient_travel(&path)?;
+        Ok(())
+    }
+
+    fn finish(&self, path: Contour, on_contour: bool) -> Result<Profile> {
         let path = self.apply_start(&path)?;
         let length = path.length()?;
         if !length.is_finite() || length <= self.tolerance.linear() {
             return Err(invalid("profile length is too small"));
         }
+        let overcut = non_negative(self.overcut, "overcut")?;
         if overcut >= length {
             return Err(invalid("overcut must be shorter than the profile"));
         }
@@ -335,10 +359,6 @@ impl ProfileOp {
         let _lead_out_span = lead_span(self.lead_out)?;
         let skip = lead_in_span.max(overcut);
         let cutter = self.tool.compensation_distance()? * 2.0;
-        // Controller compensation and `side: on` program the part edge. A computed offset path
-        // is the tool centre, so arc length there scales against the part edge.
-        let on_contour =
-            matches!(self.side, ProfileSide::On) || matches!(self.compensation, Compensation::Controller(_)) || magnitude <= self.tolerance.linear();
         let material_right = matches!(self.direction, CutDirection::Climb);
         let tabs = match self.tabs {
             Some(spec) => layout_tabs(&path, spec, skip, cutter, material_right, on_contour)?,
@@ -348,7 +368,7 @@ impl ProfileOp {
             Compensation::Computed => None,
             Compensation::Controller(side) => Some(side),
         };
-        let (toolpath, pierce) = emit(self, &path, &tabs, z, overcut)?;
+        let (toolpath, pierce) = emit(self, &path, &tabs, self.z, overcut)?;
         Ok(Profile { toolpath, pierce, tabs, controller_side })
     }
 
@@ -1162,9 +1182,152 @@ fn tangent_arc(contact: Point, tangent: Vec2, radius: f64, waste_left: bool, dep
     }
 }
 
+fn quarter_mid(arc: &ArcLead) -> Result<Point> {
+    let vx = arc.start.x() - arc.centre.x();
+    let vy = arc.start.y() - arc.centre.y();
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    let (rx, ry) = if arc.ccw { (vx * s - vy * s, vx * s + vy * s) } else { (vx * s + vy * s, -vx * s + vy * s) };
+    Point::new(arc.centre.x() + rx, arc.centre.y() + ry).map_err(PathError::from)
+}
+
 fn waste_normal(tangent: Vec2, waste_left: bool) -> Result<Vec2> {
     let left = curve::left_normal(tangent)?;
     if waste_left { Ok(left) } else { Ok(Vec2::new(-left.x(), -left.y())?) }
+}
+
+/// Default lead for a kerf tool when a job omits `lead_in` / `lead_out`: an arc of one kerf radius.
+pub fn default_kerf_lead(kerf: f64) -> Result<Lead> {
+    Ok(Lead::Arc { radius: positive(kerf, "kerf")? })
+}
+
+/// Smallest lead kept by [`fit_leads`], as a fraction of the kerf.
+pub const MIN_SMALL_HOLE_LEAD_FRACTION: f64 = 0.25;
+
+/// Shrink or drop leads so they stay in the waste of an already-offset, travel-oriented path.
+///
+/// Outside and open contours are left unchanged: the waste side is unbounded in the plane of
+/// one contour. On a closed inside cut, an arc or line that would leave the interior is reduced
+/// to the largest fitting size not below a quarter of the kerf, or omitted when even that does
+/// not fit. That is the small-hole rule. `waste_left` is true for climb (waste on the left of travel).
+pub fn fit_leads(path: &Contour, lead_in: Lead, lead_out: Lead, waste_left: bool, kerf: f64, tolerance: &Tolerance) -> Result<(Lead, Lead)> {
+    let kerf = positive(kerf, "kerf")?;
+    if !path.is_closed() {
+        return Ok((lead_in, lead_out));
+    }
+    let start = path.segments().first().map(|seg| seg.start()).ok_or_else(|| invalid("contour is empty"))?;
+    let travel = curve::start_tangent(path)?;
+    // On a closed contour with no overcut, lead-out leaves at the same point lead-in arrives.
+    let lead_in = fit_one_lead(path, start, travel, waste_left, lead_in, kerf, tolerance, false)?;
+    let lead_out = fit_one_lead(path, start, travel, waste_left, lead_out, kerf, tolerance, true)?;
+    Ok((lead_in, lead_out))
+}
+
+fn fit_one_lead(
+    path: &Contour,
+    contact: Point,
+    tangent: Vec2,
+    waste_left: bool,
+    lead: Lead,
+    kerf: f64,
+    tolerance: &Tolerance,
+    departing: bool,
+) -> Result<Lead> {
+    if matches!(lead, Lead::None) {
+        return Ok(Lead::None);
+    }
+    if lead_stays_in_waste(path, contact, tangent, waste_left, lead, tolerance, departing)? {
+        return Ok(lead);
+    }
+    let min_size = kerf * MIN_SMALL_HOLE_LEAD_FRACTION;
+    // Try a shrinking arc first when the request was an arc, otherwise a shrinking line.
+    let requested = match lead {
+        Lead::Arc { radius } => radius,
+        Lead::Line { length } | Lead::Perpendicular { length } => length,
+        Lead::None => return Ok(Lead::None),
+    };
+    if requested.is_finite() && requested > min_size {
+        let mut lo = min_size;
+        let mut hi = requested;
+        let mut best: Option<Lead> = None;
+        for _ in 0..24 {
+            let mid = 0.5 * (lo + hi);
+            let candidate = scale_lead(lead, mid);
+            if lead_stays_in_waste(path, contact, tangent, waste_left, candidate, tolerance, departing)? {
+                best = Some(candidate);
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        if let Some(found) = best {
+            return Ok(found);
+        }
+    }
+    let floor = scale_lead(lead, min_size);
+    if lead_stays_in_waste(path, contact, tangent, waste_left, floor, tolerance, departing)? {
+        return Ok(floor);
+    }
+    Ok(Lead::None)
+}
+
+fn scale_lead(lead: Lead, size: f64) -> Lead {
+    match lead {
+        Lead::None => Lead::None,
+        Lead::Line { .. } => Lead::Line { length: size },
+        Lead::Perpendicular { .. } => Lead::Perpendicular { length: size },
+        Lead::Arc { .. } => Lead::Arc { radius: size },
+    }
+}
+
+fn lead_stays_in_waste(
+    path: &Contour,
+    contact: Point,
+    tangent: Vec2,
+    waste_left: bool,
+    lead: Lead,
+    tolerance: &Tolerance,
+    departing: bool,
+) -> Result<bool> {
+    let tip = if departing { lead_out_point(contact, tangent, waste_left, lead)? } else { lead_in_point(contact, tangent, waste_left, lead)? };
+    match lead {
+        Lead::None => Ok(true),
+        Lead::Line { .. } | Lead::Perpendicular { .. } => point_in_waste(path, tip, contact, waste_left, tolerance),
+        Lead::Arc { radius } => {
+            let arc = tangent_arc(contact, tangent, radius, waste_left, departing)?;
+            let mid = quarter_mid(&arc)?;
+            // Sample the free end, mid-arc, and centre. The contact sits on the path.
+            for point in [arc.start, arc.end, arc.centre, mid, tip] {
+                if !point_in_waste(path, point, contact, waste_left, tolerance)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// Waste of an inside (climb or conventional) closed path is the interior. On an outside path
+/// it is the exterior. The contact point itself is on the path and is always accepted.
+fn point_in_waste(path: &Contour, point: Point, contact: Point, waste_left: bool, tolerance: &Tolerance) -> Result<bool> {
+    if point.almost_eq(contact, tolerance.linear().max(1e-9)) {
+        return Ok(true);
+    }
+    match path.containment(point, tolerance)? {
+        campanion_geom::Containment::Boundary => Ok(true),
+        campanion_geom::Containment::Inside => Ok(waste_is_interior(path, waste_left, tolerance)?),
+        campanion_geom::Containment::Outside => Ok(!waste_is_interior(path, waste_left, tolerance)?),
+    }
+}
+
+/// Climb travels with waste on the left. For a CCW path that is the interior; for a CW path,
+/// the interior is on the right, so waste-left is the exterior.
+fn waste_is_interior(path: &Contour, waste_left: bool, tolerance: &Tolerance) -> Result<bool> {
+    let ccw = match path.orientation(tolerance)? {
+        Orientation::CounterClockwise => true,
+        Orientation::Clockwise => false,
+        Orientation::Degenerate => return Err(invalid("degenerate profile")),
+    };
+    Ok(ccw == waste_left)
 }
 
 /// Length along the contour that tabs must stay clear of, for this lead.
@@ -2276,6 +2439,106 @@ mod tests {
                 return Ok(());
             };
             assert_profile_safe(&part, &profile, diameter * 0.5);
+        }
+    }
+
+    #[test]
+    fn default_kerf_lead_is_an_arc_of_the_kerf() {
+        assert_eq!(default_kerf_lead(1.5).unwrap(), Lead::Arc { radius: 1.5 });
+        assert!(default_kerf_lead(0.0).is_err());
+    }
+
+    #[test]
+    fn a_roomy_inside_hole_keeps_the_requested_arc() {
+        let path = circle_contour(9.0);
+        let tol = Tolerance::default();
+        let waste_left = matches!(path.orientation(&tol).unwrap(), Orientation::CounterClockwise);
+        let (lead_in, lead_out) = fit_leads(&path, Lead::Arc { radius: 2.0 }, Lead::Arc { radius: 2.0 }, waste_left, 2.0, &tol).unwrap();
+        assert_eq!(lead_in, Lead::Arc { radius: 2.0 });
+        assert_eq!(lead_out, Lead::Arc { radius: 2.0 });
+    }
+
+    #[test]
+    fn a_small_hole_shrinks_or_drops_an_oversized_arc() {
+        let path = circle_contour(1.2);
+        let tol = Tolerance::default();
+        let waste_left = matches!(path.orientation(&tol).unwrap(), Orientation::CounterClockwise);
+        let (lead_in, _) = fit_leads(&path, Lead::Arc { radius: 4.0 }, Lead::None, waste_left, 4.0, &tol).unwrap();
+        match lead_in {
+            Lead::None => {}
+            Lead::Arc { radius } => {
+                assert!(radius <= 1.2 + 1e-6, "radius {radius} should fit in 1.2");
+                assert!(radius + 1e-9 >= 4.0 * MIN_SMALL_HOLE_LEAD_FRACTION);
+            }
+            other => panic!("unexpected lead {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_prepared_emits_the_lead_on_a_ready_path() {
+        let path = circle_contour(9.0);
+        let op = ProfileOp::new(Tool::kerf(2.0), Compensation::Computed, ProfileSide::Inside, CutDirection::Climb)
+            .z(-2.0)
+            .lead_in(Lead::Arc { radius: 2.0 })
+            .lead_out(Lead::None);
+        let profile = op.generate_prepared(&path).unwrap();
+        let kinds: Vec<_> = profile
+            .toolpath()
+            .moves()
+            .iter()
+            .filter_map(|mv| match mv {
+                crate::Move::Arc { kind, .. } | crate::Move::Linear { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect();
+        assert!(kinds.contains(&CutKind::LeadIn), "{kinds:?}");
+        assert!(!kinds.contains(&CutKind::LeadOut), "{kinds:?}");
+    }
+
+    fn lead_is_in_waste(path: &Contour, lead: Lead, waste_left: bool, departing: bool, tolerance: &Tolerance) -> bool {
+        let start = path.segments().first().unwrap().start();
+        let travel = crate::curve::start_tangent(path).unwrap();
+        lead_stays_in_waste(path, start, travel, waste_left, lead, tolerance, departing).unwrap()
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn fitted_arc_leads_stay_in_the_waste_of_a_closed_path(
+            width in 8.0f64..80.0,
+            height in 8.0f64..80.0,
+            kerf in 0.4f64..6.0,
+            inside in proptest::bool::ANY,
+        ) {
+            let path = rect(width, height);
+            let tol = Tolerance::default();
+            let ccw = matches!(path.orientation(&tol).unwrap(), Orientation::CounterClockwise);
+            let waste_left = ccw == inside;
+            let requested = Lead::Arc { radius: kerf };
+            let (lead_in, lead_out) = fit_leads(&path, requested, requested, waste_left, kerf, &tol).expect("fit");
+            if !inside {
+                prop_assert_eq!(lead_in, requested);
+                prop_assert_eq!(lead_out, requested);
+            }
+            for (lead, departing) in [(lead_in, false), (lead_out, true)] {
+                if matches!(lead, Lead::None) {
+                    continue;
+                }
+                prop_assert!(lead_is_in_waste(&path, lead, waste_left, departing, &tol));
+                if let Lead::Arc { radius } = lead {
+                    prop_assert!(radius <= kerf + 1e-9);
+                    if radius < kerf - 1e-9 {
+                        prop_assert!(radius + 1e-9 >= kerf * MIN_SMALL_HOLE_LEAD_FRACTION);
+                    }
+                }
+            }
+            let op = ProfileOp::new(Tool::kerf(kerf), Compensation::Computed, ProfileSide::On, CutDirection::Climb)
+                .z(-1.0)
+                .lead_in(lead_in)
+                .lead_out(lead_out);
+            prop_assert!(op.generate_prepared(&path).is_ok());
         }
     }
 }
