@@ -2005,8 +2005,9 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// Process-on `{power}`. A program that uses per-move power does not fill a missing value at full scale.
-    fn process_on_power(&self, power: Option<f64>) -> Result<(String, bool)> {
+    /// Process-on `{power}`. A program that uses per-move power writes `S0` when process-on omits power.
+    /// A vector program on a `power_scale` post must set process power; it is never filled at full scale.
+    fn process_on_power(&self, power: Option<f64>) -> Result<String> {
         if self.per_move_power && power.is_none() {
             return format_power(self.post, Some(0.0));
         }
@@ -2073,12 +2074,9 @@ impl<'a> Writer<'a> {
                 {
                     return Ok(());
                 }
-                let (power, missing) = self.process_on_power(params.power_value())?;
+                let power = self.process_on_power(params.power_value())?;
                 self.note_on(process, &speed, &power);
                 self.arm_thc();
-                if missing {
-                    self.comment(&format!("power missing, using S{power}"))?;
-                }
                 self.emit_process("process.on", key, &lines, &speed, &power)
             }
             Event::ProcessOff { process } => {
@@ -3342,30 +3340,25 @@ pub(crate) fn format_move_power(post: &PostDef, power: f64) -> Result<String> {
     if post.power_scale.is_none() {
         return Err(invalid("per-move power needs a post with power_scale"));
     }
-    let (text, missing) = format_power(post, Some(power))?;
-    debug_assert!(!missing);
-    Ok(text)
+    format_power(post, Some(power))
 }
 
-/// `{power}` text, and whether a missing IR power was filled in at full scale.
+/// `{power}` text for a process-on line.
 ///
 /// With `power_scale`, the text is the integer `ir_power * power_scale`. A missing power is
-/// treated as `1`, so scale `1000` writes `1000`. Without a scale the raw power is written with
+/// refused; it is never filled at full scale. Without a scale the raw power is written with
 /// the feed decimals, and a missing power is `0`.
-fn format_power(post: &PostDef, power: Option<f64>) -> Result<(String, bool)> {
+fn format_power(post: &PostDef, power: Option<f64>) -> Result<String> {
     let Some(scale) = post.power_scale else {
-        let text = format_fixed(format_param(power)?, post.decimals.feed, post.trailing_zeros)?;
-        return Ok((text, false));
+        return format_fixed(format_param(power)?, post.decimals.feed, post.trailing_zeros);
     };
-    let (value, missing) = match power {
-        Some(value) => (value, false),
-        None => (1.0, true),
+    let Some(value) = power else {
+        return Err(invalid("laser power is required"));
     };
     if !(value.is_finite() && value >= 0.0) {
         return Err(invalid("process speed or power must be >= 0"));
     }
-    let text = format_fixed(value * scale, 0, false)?;
-    Ok((text, missing))
+    format_fixed(value * scale, 0, false)
 }
 
 /// Live-tool `{rpm}`: rounded half away from zero, written with no decimal point.

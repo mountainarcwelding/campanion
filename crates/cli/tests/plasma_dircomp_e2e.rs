@@ -73,6 +73,7 @@ fn hole() -> &'static [(f64, f64)] {
 }
 
 fn job(hash: &str, tool: &str, side: &str, extra: &str) -> String {
+    let power = if tool.contains("kerf") { r#", "power": 1"# } else { "" };
     format!(
         r#"{{
   "format": "campanion-job/1",
@@ -87,7 +88,7 @@ fn job(hash: &str, tool: &str, side: &str, extra: &str) -> String {
     "tool_id": 1,
     "depth": 6.0,
     "step_down": 6.0,
-    "feeds": {{ "cut": 1000, "plunge": 300 }}{extra}
+    "feeds": {{ "cut": 1000, "plunge": 300 }}{power}{extra}
   }} ]
 }}"#
     )

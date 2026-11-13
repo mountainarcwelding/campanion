@@ -1034,10 +1034,10 @@ fn grbl_laser_drops_z_and_scales_power() {
     assert_eq!(rapids, 1, "Z-only rapids stay in the file:\n{text}");
     compare(&torch_cut(Some(0.8)), &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
 
-    let missing = post_program(&torch_cut(None), &post, &options()).expect("missing");
-    assert!(missing.contains("power missing, using S1000"), "{missing}");
-    assert!(missing.contains("M4 S1000"), "{missing}");
-    assert_no_z_word(&missing);
+    let err = post_program(&torch_cut(None), &post, &options()).expect_err("missing");
+    let missing = err.to_string();
+    assert!(missing.contains("laser power is required"), "{missing}");
+    assert!(!missing.contains("S1000"), "{missing}");
 
     let zero = ProcessParams::new().power(Some(0.0)).expect("zero");
     let off = program(vec![
@@ -1158,11 +1158,8 @@ fn per_cut_turns_a_held_spindle_off_before_each_rapid() {
     compare(&program, &read_back(&text, &plasma).expect("read"), 1e-3, &plasma).expect("compare");
 
     let laser = builtin("grbl_laser").expect("grbl_laser");
-    let laser_text = post_program(&program, &laser, &options()).expect("laser");
-    assert_dark_travel(&motion_marks(&laser_text), &laser_text);
-    assert_eq!(laser_text.matches("M4 S1000").count(), 2, "{laser_text}");
-    assert_eq!(count_word(&laser_text, "M5"), 2, "{laser_text}");
-    compare(&program, &read_back(&laser_text, &laser).expect("read"), 1e-3, &laser).expect("compare");
+    let err = post_program(&program, &laser, &options()).expect_err("laser power");
+    assert!(err.to_string().contains("laser power is required"), "{err}");
 
     let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/plasma.json")).expect("json");
     raw["thc"] = serde_json::json!({"on": ["(THC ON)"], "off": ["(THC OFF)"]});

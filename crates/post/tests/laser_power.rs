@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 //! Per-move laser S words on `grbl_laser`.
 //!
-//! Vector programs that omit move power keep the existing process-on default (full scale).
+//! Vector programs that omit process power are refused; they are never posted at full scale.
 //! A raster sets every feed, including S0 on overscan, and never fills a missing value as S1000.
 
 use campanion_ir::{
@@ -86,11 +86,27 @@ fn roundtrip(p: &Program) -> String {
 }
 
 #[test]
-fn vector_program_without_move_power_still_fills_missing_process_power() {
+fn vector_program_without_process_power_is_refused() {
     let p = raster(&[(10.0, 0.0, None)]);
+    let err = post_program(&p, &post(), &options()).expect_err("missing");
+    let message = err.to_string();
+    assert!(message.contains("laser power is required"), "{message}");
+    assert!(!message.contains("S1000"), "{message}");
+}
+
+#[test]
+fn vector_program_with_explicit_process_power_writes_that_scale() {
+    let params = ProcessParams::new().power(Some(0.2)).expect("power");
+    let p = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 0.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Laser, params }),
+        feed(10.0, 0.0, 0.0, None),
+        ClBlock::Event(Event::ProcessOff { process: ProcessKind::Laser }),
+    ]);
     let text = roundtrip(&p);
-    assert!(text.contains("power missing, using S1000"), "{text}");
-    assert!(text.contains("M4 S1000"), "{text}");
+    assert!(text.contains("M4 S200"), "{text}");
+    assert!(!text.contains("power missing"), "{text}");
+    assert!(!text.contains("M4 S1000"), "{text}");
     assert!(motion_s_words(&text).is_empty(), "vector feeds must not grow an S word\n{text}");
 }
 

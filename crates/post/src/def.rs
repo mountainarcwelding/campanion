@@ -7,8 +7,7 @@
 //! time placeholders are rejected so output stays stable.
 //!
 //! `{power}` on a process line is the IR power. With `power_scale` it is written as an integer,
-//! `ir_power * power_scale`. A missing IR power then uses full scale (`1 * power_scale`) and the
-//! writer adds a comment. `process_feeds.rapid_z` drops rapids that only change Z. `z_mode`
+//! `ir_power * power_scale`. A missing IR power is refused; it is never filled at full scale. `process_feeds.rapid_z` drops rapids that only change Z. `z_mode`
 //! `drop` omits Z words. `thc.on` is written on the first feed move after process on and a dwell,
 //! and `thc.off` is written before process off. `cutter_comp`, when present, writes `left` or `right`
 //! before the first feed of a path whose IR compensation is controller-side, and `off` at the end of
@@ -889,6 +888,11 @@ impl PostDef {
     /// What the dialect is for.
     pub fn description(&self) -> &str {
         &self.description
+    }
+
+    /// Scale from IR power (0..1) onto the process `S` word. `None` keeps the raw power text.
+    pub fn power_scale(&self) -> Option<f64> {
+        self.power_scale
     }
 
     /// Maximum characters on one output line, when the post sets a limit.

@@ -319,7 +319,7 @@ fn plasma_still_stops_at_each_cut_before_the_lift() -> Result<(), String> {
     let hash = write_svg(&dir, "pockets.svg", POCKETS_SVG)?;
     let operations = r#"[{
       "name":"square","type":"pocket","layers":["SQUARE"],"tool_id":1,"depth":6.0,"step_down":3.0,
-      "feeds":{"cut":1000.0,"plunge":300.0}
+      "feeds":{"cut":1000.0,"plunge":300.0}, "power": 1
     }]"#;
     let job = job_json("pockets.svg", &hash, r#"[{"id":1,"kerf":1.0}]"#, operations);
     let nc = run_job(&dir, &job, "out-plasma.nc", Some("plasma"))?;
@@ -411,10 +411,13 @@ fn spindle_process_cycles_per_cut_on_plasma_and_laser() -> Result<(), String> {
     let dir = temp_dir("campanion-spindle-per-cut")?;
     let hash = write_svg(&dir, "pockets.svg", POCKETS_SVG)?;
     let job = job_json("pockets.svg", &hash, r#"[{"id":1,"diameter":6.0,"speed":12000}]"#, &pocket_ops(r#"["RING","SQUARE"]"#, ""));
-    for post in ["plasma", "grbl_laser"] {
-        let nc = run_job(&dir, &job, &format!("out-{post}.nc"), Some(post))?;
-        assert_process_off_before_travel(&nc, post)?;
-    }
+    let nc = run_job(&dir, &job, "out-plasma.nc", Some("plasma"))?;
+    assert_process_off_before_travel(&nc, "plasma")?;
+    // grbl_laser refuses a spindle job with no power. A kerf pocket with explicit power still
+    // cycles the beam off before each rapid.
+    let laser_job = job_json("pockets.svg", &hash, r#"[{"id":1,"kerf":1.0}]"#, &pocket_ops(r#"["RING","SQUARE"]"#, r#", "power": 1"#));
+    let nc = run_job(&dir, &laser_job, "out-grbl_laser.nc", Some("grbl_laser"))?;
+    assert_process_off_before_travel(&nc, "grbl_laser")?;
     for post in ["mach3", "linuxcnc", "haas", "grbl"] {
         let nc = run_job(&dir, &job, &format!("out-{post}.nc"), Some(post))?;
         let program = read_program(&nc, false).map_err(|err| format!("{post}: {err}"))?;

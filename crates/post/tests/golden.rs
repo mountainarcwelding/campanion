@@ -66,10 +66,28 @@ fn lathe_posts() -> Result<Vec<&'static str>, String> {
     Ok(ids)
 }
 
+fn program_sets_power(program: &Program) -> bool {
+    program.toolpaths().iter().any(|path| {
+        path.blocks().iter().any(|block| match block {
+            campanion_ir::ClBlock::Event(campanion_ir::Event::ProcessOn { params, .. }) => params.power_value().is_some(),
+            campanion_ir::ClBlock::Motion(motion) => motion.power().is_some(),
+            _ => false,
+        })
+    })
+}
+
 fn check_example(example: &str, document: &Document, ids: &[&str], update: bool, options: &PostOptions) -> Result<(), String> {
     let program = document.program();
     for id in ids {
         let post: PostDef = builtin(id).ok_or_else(|| format!("missing {id}"))?;
+        if post.power_scale().is_some() && !program_sets_power(program) {
+            let err = post_program(program, &post, options).err().ok_or_else(|| format!("{example} {id}: expected a laser-power refusal"))?;
+            let message = err.to_string();
+            if !message.contains("laser power is required") {
+                return Err(format!("{example} {id}: unexpected error: {message}"));
+            }
+            continue;
+        }
         let text = post_program(program, &post, options).map_err(|err| format!("{example} {id}: {err}"))?;
         if let Some(limit) = post.max_line_length() {
             for line in text.lines() {

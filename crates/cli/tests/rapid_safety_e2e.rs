@@ -33,8 +33,13 @@ fn is_rapid_safety(stderr: &str) -> bool {
 }
 
 fn is_post_skip(stderr: &str) -> bool {
-    // A post that has no axis, or that rejects rotary or tilted output, is not a safety failure.
-    stderr.contains("has no") || stderr.contains("does not support") || stderr.contains("not supported") || stderr.contains("rejects")
+    // A post that has no axis, or that rejects rotary, tilted output, or a laser program without
+    // power, is not a rapid-safety failure.
+    stderr.contains("has no")
+        || stderr.contains("does not support")
+        || stderr.contains("not supported")
+        || stderr.contains("rejects")
+        || stderr.contains("laser power is required")
 }
 
 fn mill_post_ids() -> Result<Vec<String>, String> {

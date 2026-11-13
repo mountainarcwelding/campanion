@@ -8,6 +8,8 @@
 //! Tool, feed and timing objects are parsed by the same functions as the profile job in `job`.
 //! Timing defaults match `campanion-path`: pierce delay runs with the process on, post delay
 //! runs with the process off, and both delays are zero when the file omits them.
+//! A kerf-tool operation (laser or torch) must set `power`, an IR fraction in `0..=1`.
+//! `grbl_laser` scales that onto `S0`..`S1000`. A diameter tool and a laser raster reject the field.
 //! Each operation may set `entry`. Omitted, it is a plunge. A ramp stores `angle_deg` from the
 //! XY plane as radians on [`DepthEntry::Ramp`]. A helix stores a unit-scaled `radius` and the
 //! same angle; one turn drops `2π r tan(angle)` millimetres, which is [`DepthEntry::Helix`]'s
@@ -2461,6 +2463,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "cut_height",
             "pierce_height",
             "timing",
+            "power",
             "index_deg",
             "diameter",
             "u_offset",
@@ -2584,7 +2587,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let finish = parse_finish(optional(map, "finish"), kind, depth, start_depth, scale)?;
     let entry = parse_entry(optional(map, "entry"), scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
-    let params = parse_timing(map, scale)?;
+    let params = parse_timing(map, scale, tool, kind)?;
     let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
     let (lead_in, lead_out) = if matches!(kind, OperationKind::Profile { .. }) {
         (parse_profile_lead(optional(map, "lead_in"), scale)?, parse_profile_lead(optional(map, "lead_out"), scale)?)
@@ -2659,6 +2662,7 @@ fn reject_surface_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileEr
         "cut_height",
         "pierce_height",
         "timing",
+        "power",
         "diameter",
         "u_offset",
         "v_offset",
@@ -2904,6 +2908,7 @@ fn reject_rough_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErro
         "cut_height",
         "pierce_height",
         "timing",
+        "power",
         "diameter",
         "u_offset",
         "v_offset",
@@ -3037,6 +3042,7 @@ fn reject_waterline_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFile
         "cut_height",
         "pierce_height",
         "timing",
+        "power",
         "diameter",
         "u_offset",
         "v_offset",
@@ -3171,6 +3177,7 @@ fn reject_wrap_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError
         "cut_height",
         "pierce_height",
         "timing",
+        "power",
         "index_deg",
         "u_min",
         "u_max",
@@ -3275,6 +3282,7 @@ fn reject_rotary_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileErr
         "cut_height",
         "pierce_height",
         "timing",
+        "power",
         "index_deg",
         "diameter",
         "u_offset",
@@ -3385,6 +3393,7 @@ fn reject_laser_raster_foreign_keys(map: &Map<String, Value>) -> Result<(), JobF
         "layers",
         "depth",
         "start_depth",
+        "power",
         "step_down",
         "onion_skin",
         "stepover",
@@ -3423,9 +3432,9 @@ fn reject_laser_raster_foreign_keys(map: &Map<String, Value>) -> Result<(), JobF
 fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
     reject_laser_raster_foreign_keys(map)?;
     let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
-    if tools.iter().all(|tool| tool.id() != tool_id) {
+    let Some(tool) = tools.iter().find(|tool| tool.id() == tool_id) else {
         return Err(JobFileError::invalid(format!("unknown tool {tool_id}")));
-    }
+    };
     let image = as_str(require(map, "image").map_err(from_cli)?, "image").map_err(from_cli)?;
     check_source_path(image)?;
     if !image.to_ascii_lowercase().ends_with(".pgm") {
@@ -3464,7 +3473,7 @@ fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools
     };
     let map_kind = parse_grey_map(optional(map, "grey_map"))?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
-    let params = parse_timing(map, scale)?;
+    let params = parse_timing(map, scale, tool, OperationKind::LaserRaster)?;
     Ok(Operation {
         name,
         kind: OperationKind::LaserRaster,
@@ -4168,7 +4177,7 @@ fn parse_operation_feeds(value: &Value, scale: f64) -> Result<Feeds, JobFileErro
     parse_feeds(plunge_only.as_ref(), cut).map_err(from_cli)
 }
 
-fn parse_timing(op: &Map<String, Value>, scale: f64) -> Result<ProcessParams, JobFileError> {
+fn parse_timing(op: &Map<String, Value>, scale: f64, tool: &JobTool, kind: OperationKind) -> Result<ProcessParams, JobFileError> {
     let mut params = Map::new();
     if let Some(timing) = optional(op, "timing") {
         let timing = object(timing, "timing").map_err(from_cli)?;
@@ -4183,7 +4192,33 @@ fn parse_timing(op: &Map<String, Value>, scale: f64) -> Result<ProcessParams, Jo
     copy_height(&mut params, op, "cut_height", scale)?;
     let value = if params.is_empty() { None } else { Some(Value::Object(params)) };
     // `parse_params` fills the same defaults as `ProcessTiming::new`: pierce on, post off, delays 0.
-    parse_params(value.as_ref()).map_err(from_cli)
+    let mut parsed = parse_params(value.as_ref()).map_err(from_cli)?;
+    parsed = apply_operation_power(op, tool, kind, parsed)?;
+    Ok(parsed)
+}
+
+/// `power` is the IR fraction 0..1. Required on a kerf (laser or torch) operation except a
+/// laser raster, whose image already sets per-move power. Rejected on a diameter tool and on a raster.
+fn apply_operation_power(
+    map: &Map<String, Value>,
+    tool: &JobTool,
+    kind: OperationKind,
+    params: ProcessParams,
+) -> Result<ProcessParams, JobFileError> {
+    let kerf = tool.diameter().is_none();
+    match optional(map, "power") {
+        Some(_) if matches!(kind, OperationKind::LaserRaster) => Err(JobFileError::invalid("power is not valid on a laser raster")),
+        Some(_) if !kerf => Err(JobFileError::invalid("power is only valid on a laser or torch operation")),
+        Some(value) => {
+            let power = as_f64(value, "power").map_err(from_cli)?;
+            if !(power.is_finite() && (0.0..=1.0).contains(&power)) {
+                return Err(JobFileError::invalid("power must be in 0..=1"));
+            }
+            params.power(Some(power)).map_err(|err| JobFileError::Invalid { message: err.to_string() })
+        }
+        None if kerf && !matches!(kind, OperationKind::LaserRaster) => Err(JobFileError::invalid("power is required on a laser or torch operation")),
+        None => Ok(params),
+    }
 }
 
 fn copy_delay(params: &mut Map<String, Value>, timing: &Map<String, Value>, from: &str, to: &str) -> Result<(), JobFileError> {
@@ -4676,6 +4711,52 @@ mod tests {
     }
 
     #[test]
+    fn kerf_operations_require_power_in_zero_to_one() {
+        let tools = r#"[{"id":1,"kerf":0.2}]"#;
+        let missing = r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300}}"#;
+        let err = load(&write_job("power-missing", &op_job("mm", tools, missing))).expect_err("missing");
+        assert!(err.to_string().contains("power is required on a laser or torch operation"), "{err}");
+        for (name, op) in [
+            (
+                "power-ok",
+                r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300},"power":0.2}"#,
+            ),
+            (
+                "power-zero",
+                r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300},"power":0}"#,
+            ),
+            (
+                "power-full",
+                r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300},"power":1}"#,
+            ),
+        ] {
+            load(&write_job(name, &op_job("mm", tools, op))).unwrap_or_else(|err| panic!("{name}: {err}"));
+        }
+        for (op, needle) in [
+            (
+                r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300},"power":-0.1}"#,
+                "power must be in 0..=1",
+            ),
+            (
+                r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300},"power":1.01}"#,
+                "power must be in 0..=1",
+            ),
+        ] {
+            let err = load(&write_job("power-range", &op_job("mm", tools, op))).expect_err("range");
+            assert!(err.to_string().contains(needle), "{op}: {err}");
+        }
+    }
+
+    #[test]
+    fn diameter_operations_reject_power() {
+        let tools = r#"[{"id":1,"diameter":6}]"#;
+        let op =
+            r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300},"power":0.2}"#;
+        let err = load(&write_job("power-mill", &op_job("mm", tools, op))).expect_err("mill");
+        assert!(err.to_string().contains("power is only valid on a laser or torch operation"), "{err}");
+    }
+
+    #[test]
     fn fnv1a64_known_vectors() {
         assert_eq!(hash_bytes(b""), "cbf29ce484222325");
         assert_eq!(hash_bytes(b"a"), "af63dc4c8601ec8c");
@@ -4718,7 +4799,8 @@ mod tests {
               "tool_id": 2,
               "depth": 0.2,
               "step_down": 0.2,
-              "feeds": { "cut": 500.0 }
+              "feeds": { "cut": 500.0 },
+              "power": 1
             }
           ]
         }"#;
