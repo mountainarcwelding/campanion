@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.12.1 — 2026-11-12
+
+Mach4 post and pocket start depth from DarkBiscuits (#156, #157), omitted laser power defaults to S0 instead of full scale (#168), and profile retract lifts off the cut before an XY rapid so tabs and lead-in/out none work on non-square shapes (#169). This output has not been proven on a machine.
+
 ### Added
 
 - A built-in `mach4` three-axis mill/router post writes metric output with incremental IJK (`G91.1`) and `M9`/`M30` at the end. The opt-in `dwell.decimal_seconds` setting makes read-back treat an integer `G4 P` as milliseconds and a decimal `G4 P` as seconds, matching Mach4, and the writer always emits a decimal P so Mach4 reads seconds. Existing posts keep their dwell behavior and golden output. This output has not been proven on a machine.
