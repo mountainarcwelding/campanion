@@ -15,6 +15,8 @@ The loader is `crates/cli/src/jobfile.rs`. `campanion run` loads it.
 
 The file read by `campanion ir --job` and `campanion ngc --job` is a single 2D profile, not a `campanion-job/1` job. Stock top is Z 0. Optional top-level `heights` is the same object a job file uses: `{"clearance": …, "retract": …}`. An omitted field keeps the job default, 5 mm clearance and 2 mm retract. Both values must be finite, `retract` must be above the stock top, and `clearance` must be at least `retract`.
 
+On a closed profile the cut starts at the midpoint of the longest straight edge of the compensated, travel-oriented path. When two edges share that length, the smaller rounded midpoint (x, then y) wins, then the earlier segment. A closed profile with no straight edge long enough starts at its sharpest corner. An open profile starts at the endpoint chosen by climb or conventional. The same rule is used by `campanion run` on a `campanion-job/1` profile, including when `lead_in` and `lead_out` are `none`, so `tabs.count` lands in the same places on both routes. Tabs are measured from that start along the compensated path.
+
 The program rapids to the pierce XY at the clearance height, rapids down to the retract height, and feeds down to depth. After the process turns off it rapids back to the clearance height.
 
 `profile.tabs` takes `width` and either `count` or `spacing`, with an optional `height`. `width` is the width of the bridge left on the part, measured along the part edge. On a straight edge the tool-centre gap is `width` plus the tool diameter (or the kerf). On an arc or a corner the gap is long enough that the uncut material along the part edge is at least `width`. For `side` `on`, the bridge is `width` centred on the line and the gap is `width` plus the tool diameter as well. `spacing` is the centre-to-centre distance along the compensated path and must be greater than `width` plus the tool diameter. A positive height is a bridge of that thickness: the tool feeds up, follows the compensated contour at `z + height` (lines, arcs and corners), and feeds back down. That crossing is never a rapid and never a chord that leaves the contour. When `height` is omitted or 0, the tab is the full depth of the material: feed up to the retract height, rapid across at that height, feed back down. An XY rapid below the retract height is an error. That height is above the stock top, so the rapid is strictly above Z 0.
@@ -86,7 +88,9 @@ the job file. The caller copies `source.hash` back into the JSON if it should st
 A tool has `id` (integer, unique in the file) and exactly one of `diameter` or `kerf`. Both are
 lengths in `units`, positive, and at most 1e6 mm after conversion. The same rule as the profile
 job: a diameter is a rotating cutter, a kerf is a kerf-only process, and the path offset is half
-of that value.
+of that value. Optional `name` is a short non-empty string, at most the same length as a profile
+document tool name. It is stored on the IR tool and omitted when the field is absent. An empty
+name is rejected.
 
 A diameter tool may set `cutter_sense`: `"upcut"`, `"downcut"`, or `"compression"`. Omitted,
 compensation stays the flat diameter offset used today. Sense is data for the job and the
@@ -257,6 +261,17 @@ output has not been proven on a machine.
 
 Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
 removes that remaining stock.
+
+### Profile start
+
+On a closed `profile` operation, `campanion run` starts the cut at the midpoint of the longest
+straight edge of the compensated, travel-oriented path (ties prefer the smaller rounded midpoint, x then y,
+then the earlier segment). A closed path with no such edge starts at its sharpest corner. An
+open profile starts at an endpoint. This is the same rule `campanion ir --job` and
+`campanion ngc --job` already used, and it applies when `lead_in` and `lead_out` are `none`.
+Tabs are laid out from that start. Existing jobs that omitted leads on a diameter tool now
+begin at this documented point rather than at the first vertex of the imported contour. The
+compensated loop, depths and feeds are otherwise unchanged.
 
 ### Profile tabs
 

@@ -135,8 +135,8 @@ use campanion_ir::{
 use campanion_mesh::Mesh;
 use campanion_path::{
     ChamferOp, Compensation, ControllerSide, CutDirection, CutKind, DepthEntry, DepthPlan, DepthTabs, DrillCycle, DrillOp, FaceOp, Feature, Lead,
-    Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileOp, ProfileSide, Tool as PathTool, Toolpath, apply_timing,
-    default_kerf_lead, fit_leads,
+    Move, PocketOp, PocketStrategy, Point3, ProcessEvent, ProcessTiming, ProfileOp, ProfileSide, StartPoint, Tool as PathTool, Toolpath,
+    apply_start_point, apply_timing, default_kerf_lead, fit_leads,
 };
 use campanion_post::PostDef;
 
@@ -1298,6 +1298,16 @@ fn depth_with(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64) -> R
     if !matches!(lead_in, Lead::None) || !matches!(lead_out, Lead::None) {
         return depth_with_leads(cut, contour, total, step_down, lead_in, lead_out);
     }
+    // Lead-none profiles used to keep the imported vertex. Apply the same automatic start
+    // `generate_prepared` uses when leads are present, and that `campanion ir --job` uses.
+    // Pocket walls and other lead-none callers keep their contour start.
+    let started;
+    let contour = if matches!(cut.op.kind(), OperationKind::Profile { .. }) {
+        started = apply_start_point(contour, StartPoint::Automatic, &cut.tolerance).map_err(|err| op_err(cut.op, err))?;
+        &started
+    } else {
+        contour
+    };
     let mut plan = operation_depth_plan(cut.op, total, step_down, cut.op.entry());
     // Linking rapids to the retract height and the entry feed starts there. A ramp or helix
     // planned from the stock surface would be posted from that higher Z over a length sized

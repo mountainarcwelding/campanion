@@ -1,7 +1,8 @@
 # CAMpanion
 
-An open, machine-neutral CAM (toolpath) engine in Rust, built as a companion to
-[SolidCraft](https://github.com/tangency-labs/solidcraft) with the aim of merging into it later.
+An open, machine-neutral CAM (toolpath) engine in Rust. CAMpanion is a standalone application.
+It can import STEP parts through [SolidCraft](https://github.com/tangency-labs/solidcraft)'s
+`solidcraft-cli`, but it is not part of SolidCraft.
 
 Status: early. Start with 2D path processing, then work up to multi-axis machines
 (the toolpath format is designed for up to 13 axes from the start).

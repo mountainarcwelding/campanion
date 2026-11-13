@@ -60,7 +60,7 @@ fn version_flag_exits_zero_and_prints_name() {
 #[test]
 fn help_lists_commands() {
     let stdout = success_stdout(&["--help"]).expect("help");
-    for word in ["ir", "ngc", "verify", "schema", "--job", "--version", "--mesh", "bull:3,1", "posts", "--post"] {
+    for word in ["ir", "ngc", "verify", "schema", "--job", "--version", "--mesh", "bull:3,1", "posts", "--post", "audit"] {
         assert!(stdout.contains(word), "help missing {word}: {stdout}");
     }
     assert!(stdout.contains("campanion run JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]"), "{stdout}");
@@ -82,6 +82,9 @@ fn usage_errors_exit_two() {
         vec!["verify", "file.json", "--tool", "ball:3"],
         vec!["post"],
         vec!["posts", "extra"],
+        vec!["audit"],
+        vec!["audit", "out.nc"],
+        vec!["audit", "out.nc", "--post"],
         vec!["run", "job.json", "-o", "out.ngc", "--post"],
         vec!["lathe"],
         vec!["lathe", "job.json"],

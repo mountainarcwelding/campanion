@@ -436,26 +436,37 @@ impl ProfileOp {
     }
 
     fn apply_start(&self, path: &Contour) -> Result<Contour> {
-        // An open path has to run from an endpoint. Automatic keeps that endpoint;
-        // the longest-edge rule is for a closed contour, which can be rotated.
-        if !path.is_closed() && matches!(self.start, StartPoint::Automatic) {
-            return Ok(path.clone());
-        }
-        let location = match self.start {
-            StartPoint::User(point) => curve::closest_location(path, point, &self.tolerance)?,
-            StartPoint::Automatic => automatic_start(path, &self.tolerance)?,
-        };
-        if path.is_closed() {
-            return curve::rotate_closed(path, &location, &self.tolerance);
-        }
-        let Some(start) = path.segments().first().map(|seg| seg.start()) else {
-            return Err(invalid("contour is empty"));
-        };
-        if location.point.almost_eq(start, self.tolerance.linear().max(1e-6)) {
-            Ok(path.clone())
-        } else {
-            Err(invalid(format!("open profile cannot start at ({}, {}); the start is an endpoint", location.point.x(), location.point.y())))
-        }
+        apply_start_point(path, self.start, &self.tolerance)
+    }
+}
+
+/// Choose the cut start on a compensated, travel-oriented contour.
+///
+/// A closed contour starts at the midpoint of its longest straight edge. When two edges
+/// share that length, the smaller rounded midpoint (x, then y) wins, then the earlier segment. A closed
+/// contour with no straight edge long enough starts at its sharpest corner. An open contour
+/// keeps its current start when `start` is [`StartPoint::Automatic`], and a user point is
+/// accepted only at an endpoint.
+pub fn apply_start_point(path: &Contour, start: StartPoint, tolerance: &Tolerance) -> Result<Contour> {
+    // An open path has to run from an endpoint. Automatic keeps that endpoint;
+    // the longest-edge rule is for a closed contour, which can be rotated.
+    if !path.is_closed() && matches!(start, StartPoint::Automatic) {
+        return Ok(path.clone());
+    }
+    let location = match start {
+        StartPoint::User(point) => curve::closest_location(path, point, tolerance)?,
+        StartPoint::Automatic => automatic_start(path, tolerance)?,
+    };
+    if path.is_closed() {
+        return curve::rotate_closed(path, &location, tolerance);
+    }
+    let Some(start_pt) = path.segments().first().map(|seg| seg.start()) else {
+        return Err(invalid("contour is empty"));
+    };
+    if location.point.almost_eq(start_pt, tolerance.linear().max(1e-6)) {
+        Ok(path.clone())
+    } else {
+        Err(invalid(format!("open profile cannot start at ({}, {}); the start is an endpoint", location.point.x(), location.point.y())))
     }
 }
 
@@ -1716,6 +1727,24 @@ mod tests {
     }
 
     #[test]
+    fn apply_start_point_matches_generate_on_lead_none() {
+        let part = rect(20.0, 10.0);
+        let on =
+            ProfileOp::new(tool2(), Compensation::Computed, ProfileSide::On, CutDirection::Conventional).lead_in(Lead::None).lead_out(Lead::None);
+        let profile = on.generate(&part).unwrap();
+        let prepared = apply_start_point(&part, StartPoint::Automatic, &Tolerance::default()).unwrap();
+        let start = prepared.segments().first().unwrap().start();
+        near(profile.pierce().x(), start.x(), 1e-9);
+        near(profile.pierce().y(), start.y(), 1e-9);
+
+        let outside = outside_conventional().lead_in(Lead::None).lead_out(Lead::None).generate(&part).unwrap();
+        // Same rule after the outside offset: the start sits on a long-side midpoint.
+        let on_long = (outside.pierce().x() - 10.0).abs() < LOOSE
+            && ((outside.pierce().y() + 1.0).abs() < LOOSE || (outside.pierce().y() - 11.0).abs() < LOOSE);
+        assert!(on_long, "outside pierce {:?}", outside.pierce());
+    }
+
+    #[test]
     fn open_line_offsets_by_the_radius_and_climb_reverses_it() {
         let line = Contour::try_new(
             vec![Segment::Line(Line::new(Point::new(0.0, 0.0).unwrap(), Point::new(10.0, 0.0).unwrap()).unwrap())],
@@ -2516,6 +2545,21 @@ mod tests {
         lead_stays_in_waste(path, start, travel, waste_left, lead, tolerance, departing).unwrap()
     }
 
+    fn rotate_closed_by(contour: &Contour, shift: usize, tolerance: &Tolerance) -> Contour {
+        let segs = contour.segments();
+        let n = segs.len();
+        if n == 0 {
+            return contour.clone();
+        }
+        let shift = shift % n;
+        if shift == 0 {
+            return contour.clone();
+        }
+        let mut out = segs[shift..].to_vec();
+        out.extend_from_slice(&segs[..shift]);
+        Contour::try_new(out, true, tolerance).expect("rotated contour")
+    }
+
     use proptest::prelude::*;
 
     proptest! {
@@ -2554,6 +2598,22 @@ mod tests {
                 .lead_in(lead_in)
                 .lead_out(lead_out);
             prop_assert!(op.generate_prepared(&path).is_ok());
+        }
+
+        #[test]
+        fn automatic_start_is_deterministic_and_independent_of_stored_vertex(
+            width in 8.0f64..80.0,
+            height in 8.0f64..80.0,
+            shift in 0usize..7,
+        ) {
+            let tol = Tolerance::default();
+            let base = rect(width, height);
+            let rotated = rotate_closed_by(&base, shift, &tol);
+            let first = apply_start_point(&base, StartPoint::Automatic, &tol).expect("base start");
+            let second = apply_start_point(&rotated, StartPoint::Automatic, &tol).expect("shifted start");
+            let a = first.segments().first().unwrap().start();
+            let b = second.segments().first().unwrap().start();
+            prop_assert!(a.almost_eq(b, 1e-8), "start moved from {} {} to {} {}", a.x(), a.y(), b.x(), b.y());
         }
     }
 

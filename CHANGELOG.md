@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `campanion audit FILE.nc --post ID|FILE.json` re-audits a finished G-code file against that post's rules. `run` and `post` already audit the text they write; this command is how a check such as refusing any `S` above 0 in a file that records that power was not set can be applied to an existing file. The status is 1 when the file is refused.
+- A `campanion-job/1` tool may set optional `name`, the same short string a profile document already accepted. The name is stored on the IR tool. An empty name is rejected. Existing jobs that omit the field are unchanged.
+
+### Changed
+
+- Closed profiles in a `campanion-job/1` file start at the same point as `campanion ir --job` and `campanion ngc --job`: the midpoint of the longest straight edge of the compensated, travel-oriented path (ties prefer the smaller rounded midpoint, x then y, then the earlier segment), or the sharpest corner when there is no such edge. This includes `lead_in`/`lead_out` `none`, so `tabs.count` lands in the same places on both routes. The compensated loop, depths and feeds are otherwise unchanged. Diameter-tool jobs that omitted leads previously started at the first imported vertex. See docs/job-file.md.
+- CAMpanion is documented as a standalone CAM application. It can still import STEP parts through SolidCraft's `solidcraft-cli`.
+
 ## 0.12.1 — 2026-11-12
 
 Mach4 post and pocket start depth from DarkBiscuits (#156, #157), omitted laser power defaults to S0 instead of full scale (#168), and profile retract lifts off the cut before an XY rapid so tabs and lead-in/out none work on non-square shapes (#169). This output has not been proven on a machine.

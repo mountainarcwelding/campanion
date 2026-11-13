@@ -2,11 +2,11 @@
 
 ## Goal
 An open, machine-neutral CAM engine in Rust that turns geometry into good toolpaths, starting with
-2D and working up to complex machines. It is a companion to SolidCraft now and is meant to merge
-into it later.
+2D and working up to complex machines. CAMpanion is a standalone application. It can import STEP
+parts through SolidCraft's `solidcraft-cli`.
 
 Direction (2026-10-21):
-- Rust, following SolidCraft's source rules (see `AGENTS.md`), so a merge is straightforward.
+- Rust, following SolidCraft's source rules (see `AGENTS.md`).
 - Not tied to one machine or process yet. Mill, router, plasma, laser, waterjet, drag knife and
   additive are all "processes" on the same engine.
 - Get path processing right first. Start with 2D, then 2.5D, 3-axis, 4/5-axis, turning and

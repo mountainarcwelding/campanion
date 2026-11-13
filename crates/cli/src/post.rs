@@ -2,6 +2,7 @@
 //!
 //! A `--post` value that ends in `.json` is loaded with [`campanion_post::load_post`]. Any other
 //! value is a built-in id. Posted text is read back and compared before it is written.
+//! `audit` re-applies the same post audit to a finished G-code file.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -103,6 +104,66 @@ pub(crate) fn posts_command(args: &[OsString]) -> Result<ExitCode, CliError> {
         text.push_str(&format!("{} {}\n  {}\n", post.id(), post.name(), post.description()));
     }
     crate::write_stdout(&text)
+}
+
+/// Re-audit a finished G-code file against the named post.
+///
+/// `run` and `post` already audit the text they write. This command reads an existing file so a
+/// check such as "refuse S above 0 when the file records that power was not set" can be applied
+/// to a file that was edited or posted elsewhere.
+pub(crate) fn audit_command(args: &[OsString]) -> Result<ExitCode, CliError> {
+    let args = parse_audit(args)?;
+    let text = read_text(&args.file)?;
+    let post = load_spec(&args.post)?;
+    if post.is_lathe() {
+        campanion_post::audit_lathe(&text, &post).map_err(|err| CliError::run(format!("audit `{}`: {err}", post.id())))?;
+    } else {
+        campanion_post::audit(&text, &post).map_err(|err| CliError::run(format!("audit `{}`: {err}", post.id())))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+struct AuditArgs {
+    file: PathBuf,
+    post: PathBuf,
+}
+
+fn parse_audit(args: &[OsString]) -> Result<AuditArgs, CliError> {
+    let mut file: Option<&OsStr> = None;
+    let mut post: Option<&OsStr> = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        let Some(arg) = args.get(index) else {
+            break;
+        };
+        index += 1;
+        if arg.as_os_str() == "--post" {
+            let Some(value) = args.get(index) else {
+                return Err(CliError::usage("--post needs a value"));
+            };
+            index += 1;
+            if value.is_empty() {
+                return Err(CliError::usage("--post needs a value"));
+            }
+            if post.is_some() {
+                return Err(CliError::usage("--post is already set"));
+            }
+            post = Some(value.as_os_str());
+        } else if starts_with_dash(arg) {
+            return Err(CliError::usage("unknown argument"));
+        } else if file.is_some() || arg.is_empty() {
+            return Err(CliError::usage("audit takes one G-code file"));
+        } else {
+            file = Some(arg.as_os_str());
+        }
+    }
+    let Some(file) = file else {
+        return Err(CliError::usage("audit needs a G-code file"));
+    };
+    let Some(post) = post else {
+        return Err(CliError::usage("audit needs --post ID or FILE.json"));
+    };
+    Ok(AuditArgs { file: PathBuf::from(file), post: PathBuf::from(post) })
 }
 
 pub(crate) fn post_command(args: &[OsString]) -> Result<ExitCode, CliError> {

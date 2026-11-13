@@ -100,6 +100,32 @@ fn omitted_power_posts_s0_warns_and_never_full_scale() -> Result<(), String> {
     if !err.to_string().contains("S1000 is above 0, but power was not set") {
         return Err(format!("unexpected audit error for tampered S1000: {err}"));
     }
+
+    // The same refusal is reachable from the public CLI on a finished file.
+    let good_arg = path_arg(&out)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_campanion"))
+        .args(["audit", good_arg.as_str(), "--post", "grbl_laser"])
+        .current_dir(&dir)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if output.status.code() != Some(0) {
+        return Err(format!("audit of posted S0 file failed: stderr {}", text(&output.stderr)?));
+    }
+    let bad = dir.join("tampered.nc");
+    std::fs::write(&bad, &tampered).map_err(|err| err.to_string())?;
+    let bad_arg = path_arg(&bad)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_campanion"))
+        .args(["audit", bad_arg.as_str(), "--post", "grbl_laser"])
+        .current_dir(&dir)
+        .output()
+        .map_err(|err| err.to_string())?;
+    let stderr = text(&output.stderr)?;
+    if output.status.code() != Some(1) {
+        return Err(format!("expected audit exit 1 for tampered S1000, got {:?} stderr {stderr}", output.status.code()));
+    }
+    if !stderr.contains("S1000 is above 0, but power was not set") {
+        return Err(format!("audit CLI missed the missing-power refusal: {stderr}"));
+    }
     Ok(())
 }
 

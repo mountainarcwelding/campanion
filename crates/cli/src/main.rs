@@ -4,6 +4,7 @@
 //! `run` loads a `campanion-job/1` file, imports its source, and writes toolpaths.
 //! `lathe` loads a `campanion-lathe/1` file and writes turning toolpaths.
 //! `post` writes a dialect for an IR file. `posts` lists the built-in posts.
+//! `audit` re-checks a finished G-code file against a post's rules.
 //! `verify` reports motion and process problems in an IR file, and can check an STL mesh for
 //! gouges. `view` opens the toolpath preview
 //! by launching the separate `campanion-view` program. `schema` prints the JSON Schema.
@@ -55,6 +56,7 @@ Usage:
   campanion lathe JOB -o OUT [--ir OUT.json] [--post ID|FILE.json] [--up-axis z|y|auto]
   campanion post IR.json --post ID|FILE.json [-o OUT]
   campanion posts
+  campanion audit FILE.nc --post ID|FILE.json
   campanion verify FILE [--mesh PART.stl [--tool ball:3|flat:3|bull:3,1]]
   campanion view IR.json
   campanion schema
@@ -100,6 +102,9 @@ post    Post an IR JSON file. --post is an id or a file ending in .json, same as
         -o writes a file. Omit -o to print the G-code.
         Read-back uses the default job chord tolerance, 0.01 mm. A mismatch exits 1.
 posts   List built-in post ids with their names and descriptions.
+audit   Re-audit a finished G-code file. --post is an id or a file ending in .json, same as post.
+        The status is 1 when the file is refused, including S above 0 in a file that records
+        that power was not set.
 verify  Verify an IR JSON file and print a report. The status is 1 when the report has errors.
         --mesh checks cutting moves using IR tool shapes. --tool overrides all cutters and needs --mesh.
         The tool is a radius in millimetres: ball:3, flat:3 or bull:3,1 (bull corner after the comma).
@@ -163,6 +168,7 @@ fn try_main() -> Result<ExitCode, CliError> {
         name if name == "lathe" => lathe::lathe(rest),
         name if name == "post" => post::post_command(rest),
         name if name == "posts" => post::posts_command(rest),
+        name if name == "audit" => post::audit_command(rest),
         name if name == "verify" => verify(rest),
         name if name == "view" => view(rest),
         name if name == "schema" => schema(rest),

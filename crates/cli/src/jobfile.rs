@@ -5,6 +5,8 @@
 //! The optional job-level `heights` object carries a clearance (safe) height and a retract
 //! height. Omitted heights are 5 mm and 2 mm. Explicit heights scale with `units`. The retract
 //! height is at most the clearance height, and both values are finite.
+//! A tool may set optional `name`, the same short string the profile document accepts. Omitted,
+//! the IR tool has no name. Empty names are rejected.
 //! Tool, feed and timing objects are parsed by the same functions as the profile job in `job`.
 //! Timing defaults match `campanion-path`: pierce delay runs with the process on, post delay
 //! runs with the process off, and both delays are zero when the file omits them.
@@ -1924,7 +1926,7 @@ fn parse_tools(value: &Value, scale: f64) -> Result<Vec<JobTool>, JobFileError> 
 
 fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> {
     let map = object(value, "tool").map_err(from_cli)?;
-    check_keys(map, &["id", "diameter", "kerf", "shape", "speed", "assembly", "cutter_sense", "upcut_length"], "tool").map_err(from_cli)?;
+    check_keys(map, &["id", "name", "diameter", "kerf", "shape", "speed", "assembly", "cutter_sense", "upcut_length"], "tool").map_err(from_cli)?;
     let mut scaled = map.clone();
     scaled.remove("shape");
     scaled.remove("speed");
@@ -5025,6 +5027,26 @@ mod tests {
             let err = load(&write_job(&format!("sense-bad-{index}"), &envelope("plate.dxf", tools, "[]"))).expect_err(needle);
             assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
         }
+    }
+
+    #[test]
+    fn tool_accepts_an_optional_name() {
+        let job = load(&write_job("tool-name-ok", &envelope("plate.dxf", r#"[{"id":1,"name":"ortur_LU2-10A_455nm","kerf":0.1}]"#, "[]")))
+            .expect("named kerf");
+        assert_eq!(job.tool(1).expect("tool").ir().name(), Some("ortur_LU2-10A_455nm"));
+
+        let mill =
+            load(&write_job("tool-name-mill", &envelope("plate.dxf", r#"[{"id":1,"name":"endmill-6","diameter":6}]"#, "[]"))).expect("named mill");
+        assert_eq!(mill.tool(1).expect("tool").ir().name(), Some("endmill-6"));
+
+        let omitted = load(&write_job("tool-name-omit", &envelope("plate.dxf", r#"[{"id":1,"kerf":0.1}]"#, "[]"))).expect("omit");
+        assert_eq!(omitted.tool(1).expect("tool").ir().name(), None);
+    }
+
+    #[test]
+    fn tool_rejects_an_empty_name() {
+        let err = load(&write_job("tool-name-empty", &envelope("plate.dxf", r#"[{"id":1,"name":"","kerf":0.1}]"#, "[]"))).expect_err("empty");
+        assert!(invalid_detail(&err).contains("tool name is empty"), "{err}");
     }
 
     #[test]
