@@ -933,8 +933,41 @@ impl<'a> Parser<'a> {
                 _ => return Err(invalid(format!("line {}: audit arc does not match read_back", state.line))),
             }
         }
+        check_missing_power_s_words(text)?;
         Ok(())
     }
+}
+
+/// A comment that records a defaulted (not explicit) process power.
+fn power_not_set_comment(text: &str) -> bool {
+    text.contains("power was not set") || text.contains("power missing")
+}
+
+/// First `S` word above zero, ignoring comments. Used when power was not set explicitly.
+fn first_s_above_zero(text: &str) -> Option<(usize, String)> {
+    for (index, line) in text.lines().enumerate() {
+        for word in strip_comments(line).split_whitespace() {
+            let Some(rest) = word.strip_prefix('S').or_else(|| word.strip_prefix('s')) else {
+                continue;
+            };
+            if let Ok(value) = rest.parse::<f64>() {
+                if value > 0.0 {
+                    return Some((index + 1, word.to_string()));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn check_missing_power_s_words(text: &str) -> Result<()> {
+    if !power_not_set_comment(text) {
+        return Ok(());
+    }
+    if let Some((line_no, word)) = first_s_above_zero(text) {
+        return Err(fail(line_no, format!("{word} is above 0, but power was not set")));
+    }
+    Ok(())
 }
 
 fn is_motion(move_: &ReadMove) -> bool {
@@ -1305,5 +1338,20 @@ mod tests {
         assert!(!report.spindle.on);
         let moves = crate::read_back(&text, &post).expect("read");
         crate::compare(&program, &moves, 1e-3, &post).expect("compare");
+    }
+
+    #[test]
+    fn audit_rejects_s_above_zero_when_power_was_not_set() {
+        let post = builtin("grbl_laser").expect("grbl_laser");
+        let ok = "G21\nG90\nG17\nM4 S0\n(power was not set, using S0)\nG0 X1 Y1\nM4 S0\nG1 X2 F100\nM5\nM30\n";
+        audit(ok, &post).unwrap_or_else(|err| panic!("{err}"));
+        let bad = "G21\nG90\nG17\nM4 S0\n(power was not set, using S0)\nG0 X1 Y1\nM4 S1000\nG1 X2 F100\nM5\nM30\n";
+        let err = audit(bad, &post).expect_err("s1000");
+        assert!(err.to_string().contains("S1000 is above 0, but power was not set"), "{err}");
+        let legacy = "G21\nG90\nG17\nM4 S0\n(power missing, using S1000)\nG0 X1 Y1\nM4 S1000\nG1 X2 F100\nM5\nM30\n";
+        let err = audit(legacy, &post).expect_err("legacy");
+        assert!(err.to_string().contains("S1000 is above 0, but power was not set"), "{err}");
+        let explicit = "G21\nG90\nG17\nM4 S0\nG0 X1 Y1\nM4 S200\nG1 X2 F100\nM5\nM30\n";
+        audit(explicit, &post).unwrap_or_else(|err| panic!("explicit power must still audit: {err}"));
     }
 }

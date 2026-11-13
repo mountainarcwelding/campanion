@@ -7,7 +7,7 @@
 //! time placeholders are rejected so output stays stable.
 //!
 //! `{power}` on a process line is the IR power. With `power_scale` it is written as an integer,
-//! `ir_power * power_scale`. A missing IR power is refused; it is never filled at full scale. `process_feeds.rapid_z` drops rapids that only change Z. `z_mode`
+//! `ir_power * power_scale`. A missing IR power is written as `S0` (beam off), never at full scale. `process_feeds.rapid_z` drops rapids that only change Z. `z_mode`
 //! `drop` omits Z words. `thc.on` is written on the first feed move after process on and a dwell,
 //! and `thc.off` is written before process off. `cutter_comp`, when present, writes `left` or `right`
 //! before the first feed of a path whose IR compensation is controller-side, and `off` at the end of

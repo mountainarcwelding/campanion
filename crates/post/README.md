@@ -40,7 +40,7 @@ one returns an explicit error. Their metric output and verification are unchange
 
 ## Laser power
 
-`grbl_laser` arms dynamic power with `M4 S0` and scales IR power 0..1 by `power_scale` 1000 onto `S0`..`S1000`. A vector process-on without power is refused; it is never posted at full scale. This output has not been proven on a machine.
+`grbl_laser` arms dynamic power with `M4 S0` and scales IR power 0..1 by `power_scale` 1000 onto `S0`..`S1000`. A vector process-on without power writes `S0` (beam off), comments the G-code, and warns on stderr; it is never posted at full scale. This output has not been proven on a machine.
 
 When any feed in the program carries per-move `power`, each of those feeds and arcs writes its own `S` word, including `S0` for a zero-power overscan. A missing power in that program is an error; it is never filled as `S1000`. A process-on without power then writes `M4 S0` and lets the moves set the level. Read-back records the `S` on that block, and `compare` checks it against the IR value. A post without `power_scale` refuses per-move power. This output has not been proven on a machine.
 

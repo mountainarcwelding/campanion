@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use campanion_ir::{Document, Program};
-use campanion_post::{PostDef, PostOptions, builtin, builtin_ids, compare, post_program, read_back};
+use campanion_post::{PostDef, PostOptions, audit, builtin, builtin_ids, compare, post_program, read_back};
 
 const EXAMPLES: [&str; 3] = ["sample", "curves", "dome"];
 const ROTARY_EXAMPLES: [&str; 2] = ["indexed", "wrap"];
@@ -66,6 +66,21 @@ fn lathe_posts() -> Result<Vec<&'static str>, String> {
     Ok(ids)
 }
 
+fn text_has_s_above_zero(text: &str) -> bool {
+    for line in text.lines() {
+        let body = line.split('(').next().unwrap_or(line);
+        for word in body.split_whitespace() {
+            if let Some(rest) = word.strip_prefix('S')
+                && let Ok(value) = rest.parse::<f64>()
+                && value > 0.0
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn program_sets_power(program: &Program) -> bool {
     program.toolpaths().iter().any(|path| {
         path.blocks().iter().any(|block| match block {
@@ -81,11 +96,14 @@ fn check_example(example: &str, document: &Document, ids: &[&str], update: bool,
     for id in ids {
         let post: PostDef = builtin(id).ok_or_else(|| format!("missing {id}"))?;
         if post.power_scale().is_some() && !program_sets_power(program) {
-            let err = post_program(program, &post, options).err().ok_or_else(|| format!("{example} {id}: expected a laser-power refusal"))?;
-            let message = err.to_string();
-            if !message.contains("laser power is required") {
-                return Err(format!("{example} {id}: unexpected error: {message}"));
+            let text = post_program(program, &post, options).map_err(|err| format!("{example} {id}: {err}"))?;
+            if !text.contains("power was not set, using S0") {
+                return Err(format!("{example} {id}: missing S0 default comment\n{text}"));
             }
+            if text_has_s_above_zero(&text) {
+                return Err(format!("{example} {id}: defaulted power wrote S above 0\n{text}"));
+            }
+            audit(&text, &post).map_err(|err| format!("{example} {id} audit: {err}"))?;
             continue;
         }
         let text = post_program(program, &post, options).map_err(|err| format!("{example} {id}: {err}"))?;

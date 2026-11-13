@@ -8,8 +8,8 @@
 //! Tool, feed and timing objects are parsed by the same functions as the profile job in `job`.
 //! Timing defaults match `campanion-path`: pierce delay runs with the process on, post delay
 //! runs with the process off, and both delays are zero when the file omits them.
-//! A kerf-tool operation (laser or torch) must set `power`, an IR fraction in `0..=1`.
-//! `grbl_laser` scales that onto `S0`..`S1000`. A diameter tool and a laser raster reject the field.
+//! A kerf-tool operation (laser or torch) may set `power`, an IR fraction in `0..=1`.
+//! `grbl_laser` scales that onto `S0`..`S1000`. Omitted, the post writes `S0` (beam off) instead of full power. A diameter tool and a laser raster reject the field.
 //! Each operation may set `entry`. Omitted, it is a plunge. A ramp stores `angle_deg` from the
 //! XY plane as radians on [`DepthEntry::Ramp`]. A helix stores a unit-scaled `radius` and the
 //! same angle; one turn drops `2π r tan(angle)` millimetres, which is [`DepthEntry::Helix`]'s
@@ -4197,8 +4197,9 @@ fn parse_timing(op: &Map<String, Value>, scale: f64, tool: &JobTool, kind: Opera
     Ok(parsed)
 }
 
-/// `power` is the IR fraction 0..1. Required on a kerf (laser or torch) operation except a
-/// laser raster, whose image already sets per-move power. Rejected on a diameter tool and on a raster.
+/// `power` is the IR fraction 0..1. Optional on a kerf (laser or torch) operation. Omitted, the
+/// IR leaves power unset and a `power_scale` post writes `S0`. Rejected on a diameter tool and on a
+/// raster, whose image already sets per-move power.
 fn apply_operation_power(
     map: &Map<String, Value>,
     tool: &JobTool,
@@ -4216,7 +4217,6 @@ fn apply_operation_power(
             }
             params.power(Some(power)).map_err(|err| JobFileError::Invalid { message: err.to_string() })
         }
-        None if kerf && !matches!(kind, OperationKind::LaserRaster) => Err(JobFileError::invalid("power is required on a laser or torch operation")),
         None => Ok(params),
     }
 }
@@ -4711,11 +4711,10 @@ mod tests {
     }
 
     #[test]
-    fn kerf_operations_require_power_in_zero_to_one() {
+    fn kerf_operations_accept_optional_power_in_zero_to_one() {
         let tools = r#"[{"id":1,"kerf":0.2}]"#;
         let missing = r#"{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":300}}"#;
-        let err = load(&write_job("power-missing", &op_job("mm", tools, missing))).expect_err("missing");
-        assert!(err.to_string().contains("power is required on a laser or torch operation"), "{err}");
+        load(&write_job("power-missing", &op_job("mm", tools, missing))).expect("omitted power is allowed");
         for (name, op) in [
             (
                 "power-ok",

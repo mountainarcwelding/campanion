@@ -3,7 +3,7 @@ use campanion_ir::{
     RotaryAxisKind, RotaryDirection, RotarySetup, Spindle, SpindleSpeed, Tool, TurnBinding, TurningSetup, Vec3, machine_to_part, part_to_machine,
 };
 
-use crate::{PostOptions, builtin, builtin_ids, compare, load_post, post_program, read_back};
+use crate::{PostOptions, audit, builtin, builtin_ids, compare, load_post, post_program, read_back};
 
 fn pose(x: f64, y: f64, z: f64) -> Pose {
     Pose::new(Vec3::new(x, y, z).expect("tip"), Vec3::Z).expect("pose")
@@ -1034,10 +1034,11 @@ fn grbl_laser_drops_z_and_scales_power() {
     assert_eq!(rapids, 1, "Z-only rapids stay in the file:\n{text}");
     compare(&torch_cut(Some(0.8)), &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
 
-    let err = post_program(&torch_cut(None), &post, &options()).expect_err("missing");
-    let missing = err.to_string();
-    assert!(missing.contains("laser power is required"), "{missing}");
+    let missing = post_program(&torch_cut(None), &post, &options()).expect("missing power defaults to S0");
+    assert!(missing.contains("power was not set, using S0"), "{missing}");
+    assert!(missing.contains("M4 S0"), "{missing}");
     assert!(!missing.contains("S1000"), "{missing}");
+    audit(&missing, &post).unwrap_or_else(|err| panic!("{err}\n{missing}"));
 
     let zero = ProcessParams::new().power(Some(0.0)).expect("zero");
     let off = program(vec![
@@ -1158,8 +1159,11 @@ fn per_cut_turns_a_held_spindle_off_before_each_rapid() {
     compare(&program, &read_back(&text, &plasma).expect("read"), 1e-3, &plasma).expect("compare");
 
     let laser = builtin("grbl_laser").expect("grbl_laser");
-    let err = post_program(&program, &laser, &options()).expect_err("laser power");
-    assert!(err.to_string().contains("laser power is required"), "{err}");
+    let laser_text = post_program(&program, &laser, &options()).expect("laser defaults to S0");
+    assert!(laser_text.contains("power was not set, using S0"), "{laser_text}");
+    assert!(laser_text.contains("M4 S0"), "{laser_text}");
+    assert!(!laser_text.contains("S1000"), "{laser_text}");
+    audit(&laser_text, &laser).unwrap_or_else(|err| panic!("{err}\n{laser_text}"));
 
     let mut raw = serde_json::from_str::<serde_json::Value>(include_str!("../posts/plasma.json")).expect("json");
     raw["thc"] = serde_json::json!({"on": ["(THC ON)"], "off": ["(THC OFF)"]});

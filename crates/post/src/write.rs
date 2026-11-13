@@ -242,6 +242,8 @@ struct Writer<'a> {
     /// True when any feed in the program carries per-move power. Missing power is then an error,
     /// and a process-on without power writes S0 instead of filling full scale.
     per_move_power: bool,
+    /// A missing process power has already been warned on stderr for this program.
+    warned_missing_power: bool,
     /// Power for the motion currently being written. Cleared when that motion is done.
     pending_move_power: Option<f64>,
     /// Plane after [`Self::begin_lathe`]. Each channel restores it without writing it again.
@@ -325,6 +327,7 @@ impl<'a> Writer<'a> {
             last_speed: String::new(),
             last_power: "0".to_string(),
             per_move_power: false,
+            warned_missing_power: false,
             pending_move_power: None,
             channel_plane: plane,
             channel_inverse: inverse_time,
@@ -2006,8 +2009,8 @@ impl<'a> Writer<'a> {
     }
 
     /// Process-on `{power}`. A program that uses per-move power writes `S0` when process-on omits power.
-    /// A vector program on a `power_scale` post must set process power; it is never filled at full scale.
-    fn process_on_power(&self, power: Option<f64>) -> Result<String> {
+    /// A vector program on a `power_scale` post that omits process power writes `S0`, never full scale.
+    fn process_on_power(&self, power: Option<f64>) -> Result<(String, bool)> {
         if self.per_move_power && power.is_none() {
             return format_power(self.post, Some(0.0));
         }
@@ -2074,9 +2077,16 @@ impl<'a> Writer<'a> {
                 {
                     return Ok(());
                 }
-                let power = self.process_on_power(params.power_value())?;
+                let (power, missing) = self.process_on_power(params.power_value())?;
                 self.note_on(process, &speed, &power);
                 self.arm_thc();
+                if missing {
+                    self.comment(&format!("power was not set, using S{power}"))?;
+                    if !self.warned_missing_power {
+                        self.warned_missing_power = true;
+                        eprintln!("warning: process power was not set; writing S{power} (beam off)");
+                    }
+                }
                 self.emit_process("process.on", key, &lines, &speed, &power)
             }
             Event::ProcessOff { process } => {
@@ -3340,25 +3350,31 @@ pub(crate) fn format_move_power(post: &PostDef, power: f64) -> Result<String> {
     if post.power_scale.is_none() {
         return Err(invalid("per-move power needs a post with power_scale"));
     }
-    format_power(post, Some(power))
+    let (text, missing) = format_power(post, Some(power))?;
+    debug_assert!(!missing);
+    Ok(text)
 }
 
 /// `{power}` text for a process-on line.
 ///
 /// With `power_scale`, the text is the integer `ir_power * power_scale`. A missing power is
-/// refused; it is never filled at full scale. Without a scale the raw power is written with
-/// the feed decimals, and a missing power is `0`.
-fn format_power(post: &PostDef, power: Option<f64>) -> Result<String> {
+/// written as `S0` (beam off) and flagged so the caller can comment the file and warn; it is
+/// never filled at full scale. Without a scale the raw power is written with the feed decimals,
+/// and a missing power is `0`.
+fn format_power(post: &PostDef, power: Option<f64>) -> Result<(String, bool)> {
     let Some(scale) = post.power_scale else {
-        return format_fixed(format_param(power)?, post.decimals.feed, post.trailing_zeros);
+        let text = format_fixed(format_param(power)?, post.decimals.feed, post.trailing_zeros)?;
+        return Ok((text, false));
     };
-    let Some(value) = power else {
-        return Err(invalid("laser power is required"));
+    let (value, missing) = match power {
+        Some(value) => (value, false),
+        None => (0.0, true),
     };
     if !(value.is_finite() && value >= 0.0) {
         return Err(invalid("process speed or power must be >= 0"));
     }
-    format_fixed(value * scale, 0, false)
+    let text = format_fixed(value * scale, 0, false)?;
+    Ok((text, missing))
 }
 
 /// Live-tool `{rpm}`: rounded half away from zero, written with no decimal point.

@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 //! Per-move laser S words on `grbl_laser`.
 //!
-//! Vector programs that omit process power are refused; they are never posted at full scale.
+//! Vector programs that omit process power write S0 (beam off) and never full scale.
 //! A raster sets every feed, including S0 on overscan, and never fills a missing value as S1000.
 
 use campanion_ir::{
@@ -51,6 +51,22 @@ fn raster(powers: &[(f64, f64, Option<f64>)]) -> Program {
     program(blocks)
 }
 
+fn s_words_above_zero(text: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for line in text.lines() {
+        let body = line.split('(').next().unwrap_or(line);
+        for word in body.split_whitespace() {
+            if let Some(rest) = word.strip_prefix('S')
+                && let Ok(value) = rest.parse::<f64>()
+                && value > 0.0
+            {
+                values.push(word.to_string());
+            }
+        }
+    }
+    values
+}
+
 fn motion_s_words(text: &str) -> Vec<i64> {
     let mut values = Vec::new();
     for line in text.lines() {
@@ -86,12 +102,14 @@ fn roundtrip(p: &Program) -> String {
 }
 
 #[test]
-fn vector_program_without_process_power_is_refused() {
+fn vector_program_without_process_power_writes_s0() {
     let p = raster(&[(10.0, 0.0, None)]);
-    let err = post_program(&p, &post(), &options()).expect_err("missing");
-    let message = err.to_string();
-    assert!(message.contains("laser power is required"), "{message}");
-    assert!(!message.contains("S1000"), "{message}");
+    let text = post_program(&p, &post(), &options()).expect("missing power defaults to S0");
+    assert!(text.contains("power was not set, using S0"), "{text}");
+    assert!(text.contains("M4 S0"), "{text}");
+    assert!(!text.contains("S1000"), "{text}");
+    assert!(s_words_above_zero(&text).is_empty(), "defaulted power must not write S above 0\n{text}");
+    audit(&text, &post()).expect("audit");
 }
 
 #[test]
