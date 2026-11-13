@@ -72,8 +72,8 @@ fn writer_keeps_decimal_seconds_even_when_zeroes_are_trimmed() {
     let p = program(values.into_iter().map(|seconds| ClBlock::Event(Event::Dwell { seconds })).collect());
     let text = write(&p, &post());
     let lines: Vec<_> = text.lines().filter(|l| l.starts_with("G4 ")).collect();
-    assert_eq!(lines, ["G4 P0.0", "G4 P2.0", "G4 P0.5", "G4 P1.25", "G4 P2.0"]);
-    assert_eq!(dwell_seconds(&text, &post()), [0.0, 2.0, 0.5, 1.25, 2.0]);
+    assert_eq!(lines, ["G4 P2.0", "G4 P0.5", "G4 P1.25", "G4 P2.0"]);
+    assert_eq!(dwell_seconds(&text, &post()), [2.0, 0.5, 1.25, 2.0]);
     audit(&text, &post()).expect("dwell audit");
     for trailing in [false, true] {
         let mut raw = raw_post();
@@ -87,8 +87,59 @@ fn writer_keeps_decimal_seconds_even_when_zeroes_are_trimmed() {
 }
 
 #[test]
+fn zero_duration_is_a_no_op_without_changing_surrounding_output() {
+    for seconds in [0.0, -0.0] {
+        let without = program(vec![rapid([0.0, 0.0, 5.0]), ClBlock::Event(Event::Dwell { seconds: 0.5 }), rapid([1.0, 0.0, 5.0])]);
+        let with = program(vec![
+            ClBlock::Event(Event::Dwell { seconds }),
+            rapid([0.0, 0.0, 5.0]),
+            ClBlock::Event(Event::Dwell { seconds }),
+            ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+            rapid([1.0, 0.0, 5.0]),
+            ClBlock::Event(Event::Dwell { seconds }),
+        ]);
+        assert_eq!(roundtrip(&with), roundtrip(&without));
+    }
+}
+
+#[test]
+fn positive_dwells_that_round_to_zero_fail_for_custom_precisions() {
+    for decimals in [0, 1, 3, 6] {
+        let increment = 10.0_f64.powi(-decimals);
+        for trailing in [false, true] {
+            let mut raw = raw_post();
+            raw["id"] = json!("custom-dwell-test");
+            raw["decimals"]["dwell"] = json!(decimals);
+            raw["trailing_zeros"] = json!(trailing);
+            let post = load_post(&raw.to_string()).expect("custom post");
+            for seconds in [f64::MIN_POSITIVE, 0.4999 * increment] {
+                let p = program(vec![ClBlock::Event(Event::Dwell { seconds })]);
+                let err = post_program(&p, &post, &PostOptions { arc_tolerance: 0.01 }).expect_err("rounded-zero dwell");
+                assert!(err.to_string().contains("positive dwell rounds to zero"), "{err}");
+            }
+            let p = program(vec![ClBlock::Event(Event::Dwell { seconds: 0.5001 * increment })]);
+            let text = write(&p, &post);
+            assert_eq!(dwell_seconds(&text, &post), [increment]);
+            audit(&text, &post).expect("nonzero rounded dwell");
+            assert!(!write(&program(vec![ClBlock::Event(Event::Dwell { seconds: 0.0 })]), &post).contains("G4 "));
+        }
+    }
+}
+
+#[test]
+fn legacy_posts_keep_zero_and_rounded_zero_dwells() {
+    for id in ["mach3", "grbl", "fanuc"] {
+        let post = builtin(id).expect("legacy post");
+        let text = write(&program(vec![ClBlock::Event(Event::Dwell { seconds: 0.0 }), ClBlock::Event(Event::Dwell { seconds: 1e-12 })]), &post);
+        assert_eq!(dwell_seconds(&text, &post), [0.0, 0.0], "{id}: {text}");
+        assert_eq!(text.lines().filter(|l| l.split_whitespace().any(|word| word == "G4")).count(), 2, "{id}: {text}");
+        audit(&text, &post).expect("legacy zero audit");
+    }
+}
+
+#[test]
 fn literal_spelling_controls_duration_including_glued_words_and_comments() {
-    for (word, seconds) in [("2", 0.002), ("2000", 2.0), ("2.0", 2.0), ("2.", 2.0), (".5", 0.5), ("0", 0.0), ("0.0", 0.0), ("+0002", 0.002)] {
+    for (word, seconds) in [("2", 0.002), ("2000", 2.0), ("2.0", 2.0), ("2.", 2.0), (".5", 0.5), ("+0002", 0.002)] {
         let text = format!("g04p{word}(P9.9) ; P8.8\n");
         assert_eq!(dwell_seconds(&text, &post()), [seconds], "{text}");
         audit(&text, &post()).expect("literal dwell audit");
@@ -125,6 +176,10 @@ fn custom_posts_inherit_the_setting_and_existing_units_keep_their_meaning() {
 fn malformed_dwell_blocks_fail_in_reader_and_audit() {
     for text in [
         "G4",
+        "G4 P0",
+        "G4 P0.0",
+        "G4 P-0.0",
+        "G4 P+0000.",
         "G4 P-1",
         "G4 P1 P2.0",
         "G4 G4 P2",
@@ -155,7 +210,7 @@ fn malformed_dwell_blocks_fail_in_reader_and_audit() {
     assert!(read_back(&overflow, &post()).is_err());
     assert!(audit(&overflow, &post()).is_err());
     // IR validation or writer validation must reject hostile event values.
-    for seconds in [-1.0, f64::NAN, f64::INFINITY] {
+    for seconds in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let feeds = Feeds::try_new(100.0, None, None, None, None).expect("feeds");
         if let Ok(path) = ClPath::try_new(None, None, CompensationMode::Off, feeds, None, vec![], vec![ClBlock::Event(Event::Dwell { seconds })])
             && let Ok(p) = Program::try_new(None, vec![], None, vec![path], vec![], vec![], None)
@@ -249,14 +304,14 @@ fn rotary_five_axis_and_turning_programs_are_rejected() {
 
 proptest! {
     #[test]
-    fn integer_and_decimal_p_differ_by_one_thousand(ms in 0u32..1_000_000) {
+    fn integer_and_decimal_p_differ_by_one_thousand(ms in 1u32..1_000_000) {
         let text = format!("G4 P{ms}\nG4 P{ms}.0");
         prop_assert_eq!(dwell_seconds(&text, &post()), vec![f64::from(ms) / 1000.0, f64::from(ms)]);
         prop_assert!(audit(&text, &post()).is_ok());
     }
 
     #[test]
-    fn written_dwell_rounds_to_milliseconds_without_changing_units(ticks in 0u32..1_000_000, trailing in any::<bool>()) {
+    fn written_dwell_rounds_to_milliseconds_without_changing_units(ticks in 1u32..1_000_000, trailing in any::<bool>()) {
         let mut raw = raw_post();
         raw["trailing_zeros"] = json!(trailing);
         let post = load_post(&raw.to_string()).expect("custom post");

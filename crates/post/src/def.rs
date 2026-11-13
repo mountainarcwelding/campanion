@@ -197,6 +197,8 @@ pub(crate) struct Dwell {
     pub(crate) unit: String,
     /// Literal P: a decimal point means seconds, otherwise milliseconds (Mach4).
     /// Writing always retains a decimal point. Opt-in; requires word=P and unit=s.
+    /// Zero IR delays are omitted; positive delays that round to zero are errors.
+    /// Read-back and mill audit reject literal zero dwell words.
     #[serde(default)]
     pub(crate) decimal_seconds: bool,
 }

@@ -595,8 +595,10 @@ impl<'a> Parser<'a> {
                 }
                 // P was checked for finiteness, sign and duplication above. The audit
                 // validates the block; read_back reports its decimal-sensitive duration.
-                if p_value.is_none() {
-                    return Err(fail(line_no, "dwell is missing its value"));
+                match p_value {
+                    None => return Err(fail(line_no, "dwell is missing its value")),
+                    Some(0.0) => return Err(fail(line_no, "literal-P dwell must be greater than zero")),
+                    Some(_) => {}
                 }
                 if i.is_some() || j.is_some() || k.is_some() || r.is_some() {
                     return Err(fail(line_no, "literal-P dwell does not accept arc or cycle words"));

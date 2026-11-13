@@ -3203,8 +3203,16 @@ impl<'a> Writer<'a> {
         if !(seconds.is_finite() && seconds >= 0.0) {
             return Err(invalid("dwell must be >= 0"));
         }
+        // Mach4 rejects zero dwell words. An explicit zero IR delay is a no-op,
+        // but a positive delay must not disappear through output rounding.
+        if self.post.dwell.decimal_seconds && seconds == 0.0 {
+            return Ok(());
+        }
         let value = if self.post.dwell.unit == "ms" { seconds * 1000.0 } else { seconds };
         let mut text = format_fixed(value, self.post.decimals.dwell, self.post.trailing_zeros)?;
+        if self.post.dwell.decimal_seconds && text.bytes().all(|b| b == b'0' || b == b'.') {
+            return Err(invalid("positive dwell rounds to zero at the post's dwell precision"));
+        }
         if self.post.dwell.decimal_seconds && !text.contains('.') {
             text.push_str(".0");
         }

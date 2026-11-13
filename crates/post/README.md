@@ -86,6 +86,26 @@ X/U dwell variants and variable expressions are outside this literal-P scope.
 The option defaults to false, preserving existing `s` and `ms` posts. It requires `word: P`
 and `unit: s`. Dimensional `decimal_point` does not control dwell formatting.
 
+Mach4 rejects a zero-length dwell. With `decimal_seconds: true`, the writer omits an
+explicitly zero-duration IR dwell, including negative zero. A positive duration that
+rounds to zero at `decimals.dwell` precision returns an error instead of disappearing or
+adding an invented minimum delay. For example, 0.0004 seconds cannot be posted with
+three dwell decimals. Read-back and the mill audit reject literal `G4 P0` and `G4 P0.0`.
+Posts without this option keep their existing zero-dwell behavior. The minimum usable
+positive dwell also depends on the motion controller's time slice; see the
+[Mach4 developer's explanation](https://www.machsupport.com/forum/index.php?topic=36047.0).
+
+Attended tests with Mach4 4.2.0.4322 and its Simulator motion device observed equivalent
+metric/inch endpoints, arcs and helices in all three planes, and expected tool-change,
+spindle and coolant indicators. Programs containing a zero dwell stopped with
+`Parameter number out of range`; copies removing only that dwell completed. The same
+build accepted `G4 G90 P1.0`, although the reader and audit retain the manual's stricter
+single-G-code rule. Precise dwell timing remains unverified: a single programmed
+20-second dwell took approximately 32 seconds on an external stopwatch and 31.25 seconds
+on the cycle-time display, similar to ten programmed two-second dwells. The cause is
+unresolved; dwell values are not rescaled to compensate. These observations establish
+neither physical motion/I/O acceptance nor production tool-change macro behavior.
+
 ## Modal audit
 
 `read_back`, `audit` and `audit_five` accept `G91.1` as an explicit declaration of incremental `I`/`J`/`K` arc centres, including in a custom post header or on a motion block. It does not change the `G90` positioning mode. `G90.1` is rejected with a specific diagnostic because absolute arc centres are not supported. Existing built-in post headers are unchanged; `mach4` declares `G91.1` explicitly.

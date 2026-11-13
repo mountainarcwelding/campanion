@@ -446,6 +446,9 @@ impl<'a> Parser<'a> {
             if !(seconds.is_finite() && seconds >= 0.0) {
                 return Err(invalid("dwell must be >= 0"));
             }
+            if self.post.dwell.decimal_seconds && seconds == 0.0 {
+                return Err(invalid("literal-P dwell must be greater than zero"));
+            }
             self.plane = plane;
             return Ok(Some(ReadMove::Dwell { seconds }));
         }

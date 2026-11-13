@@ -135,7 +135,7 @@ placeholders, so the same program and post always produce the same bytes. Start 
 - `modal_motion` — when true, a repeated `G0` or `G1` is left off the next line.
 - `arcs` — `mode` is `ijk` (centre offsets `I` `J` `K`), `r` (signed radius), or `lines` (chords within the chord tolerance). `max_sweep_deg` splits a longer arc (greater than 0, at most 360). `helix` writes a helix as arcs when true, and as chords when false.
 - `planes` — when true, the post can change plane. When false, an arc has to stay in the header plane.
-- `dwell` — `word` (one letter) and `unit` (`s` or `ms`). Optional `decimal_seconds: true` requires `P` and `s`: always writes decimal seconds and reads integer P as milliseconds (Mach4). See [Mach4 setup and dwell rules](crates/post/README.md#mach4).
+- `dwell` — `word` (one letter) and `unit` (`s` or `ms`). Optional `decimal_seconds: true` requires `P` and `s`: writes positive decimal seconds, omits explicit zero IR delays, rejects positive delays that round to zero, and reads integer P as milliseconds (Mach4). See [Mach4 setup and dwell rules](crates/post/README.md#mach4).
 - `process` — map from a process name (`spindle`, `torch`, `laser`, `extruder`, `knife`, `other`) to `{ "on": [lines], "off": [lines] }`. Placeholders: `{speed}`, `{power}`, `{program_name}`, `{date-free!}`.
 - `tool_change` — lines for a tool change. Placeholder: `{tool}`.
 - `coolant` — `flood`, `mist`, and `off`, each a list of lines.
