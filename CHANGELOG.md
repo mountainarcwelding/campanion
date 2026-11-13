@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## 0.12.2 — 2026-11-13
+
+`campanion audit` re-checks a finished G-code file, job-file tools may set a name, closed job-file profiles start at the same documented point as the profile-document route, and the README describes CAMpanion as a standalone application (#172). This output has not been proven on a machine.
+
 ### Added
 
 - `campanion audit FILE.nc --post ID|FILE.json` re-audits a finished G-code file against that post's rules. `run` and `post` already audit the text they write; this command is how a check such as refusing any `S` above 0 in a file that records that power was not set can be applied to an existing file. The status is 1 when the file is refused.
