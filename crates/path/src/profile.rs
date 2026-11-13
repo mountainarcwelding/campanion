@@ -837,7 +837,9 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     emit_lead(op.lead_out, exit, exit_tangent, waste_left, true, z, CutKind::LeadOut, &mut moves)?;
     let end_xy = lead_out_point(exit, exit_tangent, waste_left, op.lead_out)?;
     push(&mut moves, Move::Event(ProcessEvent::Off))?;
-    push_rapid(&mut moves, end_xy, travel_z)?;
+    // Lift at the current XY first. A combined XY+Z rapid from the cut would be a traverse
+    // through the stock when the last cut point is even slightly off `end_xy`.
+    push_clearance_rapid(&mut moves, end_xy, travel_z)?;
     Ok((Toolpath::new(moves)?, pierce))
 }
 
@@ -1077,6 +1079,19 @@ fn push_rapid(moves: &mut Vec<Move>, xy: Point, z: f64) -> Result<()> {
         return Ok(());
     }
     push(moves, Move::Rapid { to })
+}
+
+/// Rapid to `xy` at `z`, lifting at the current XY first when Z still has to change.
+///
+/// A single rapid that changes XY and Z from the cut would be a traverse through the stock
+/// whenever the last cut point is even a few ulps off `xy`.
+fn push_clearance_rapid(moves: &mut Vec<Move>, xy: Point, z: f64) -> Result<()> {
+    if let Some(prev) = last_point(moves)
+        && (prev.z() - z).abs() > 1e-15
+    {
+        push_rapid(moves, Point::new(prev.x(), prev.y())?, z)?;
+    }
+    push_rapid(moves, xy, z)
 }
 
 fn last_point(moves: &[Move]) -> Option<Point3> {
@@ -2256,7 +2271,7 @@ mod tests {
             if let Move::Rapid { to } = *mv
                 && let Some(from) = cursor
             {
-                let xy = (from.x() - to.x()).abs() > 1e-9 || (from.y() - to.y()).abs() > 1e-9;
+                let xy = (from.x() - to.x()).abs() > 1e-15 || (from.y() - to.y()).abs() > 1e-15;
                 if xy && from.z().min(to.z()) < floor - 1e-12 {
                     return true;
                 }
@@ -2539,6 +2554,24 @@ mod tests {
                 .lead_in(lead_in)
                 .lead_out(lead_out);
             prop_assert!(op.generate_prepared(&path).is_ok());
+        }
+    }
+
+    #[test]
+    fn lead_none_and_tabs_on_non_square_shapes_do_not_rapid_below_retract() {
+        let shapes = [rect(12.8, 6.0), rect(12.8, 38.1), notched_plate()];
+        for part in shapes {
+            for z in [0.0, -0.26] {
+                let mut op = ProfileOp::new(Tool::kerf(0.1), Compensation::Computed, ProfileSide::Outside, CutDirection::Climb)
+                    .z(z)
+                    .lead_in(Lead::None)
+                    .lead_out(Lead::None);
+                let profile = op.generate(&part).unwrap();
+                assert!(!xy_rapid_below(profile.toolpath().moves(), DEFAULT_RETRACT_MM), "lead none z={z}: {:?}", profile.toolpath().moves());
+                op = op.tabs(TabSpec::count(2, 0.3));
+                let profile = op.generate(&part).unwrap();
+                assert!(!xy_rapid_below(profile.toolpath().moves(), DEFAULT_RETRACT_MM), "tabs z={z}: {:?}", profile.toolpath().moves());
+            }
         }
     }
 }

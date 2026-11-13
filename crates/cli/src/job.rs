@@ -598,3 +598,86 @@ fn as_usize(value: &Value, what: &str, max: usize) -> Result<usize, CliError> {
     }
     Ok(rounded as usize)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::load;
+
+    fn doc(process: &str, tool: &str, z: f64, points: &str, extra: &str) -> String {
+        doc_side(process, tool, "outside", z, points, extra)
+    }
+
+    fn doc_side(process: &str, tool: &str, side: &str, z: f64, points: &str, extra: &str) -> String {
+        format!(
+            r#"{{
+  "name": "probe",
+  "process": "{process}",
+  "cut_feed": 300.0,
+  "tool": {tool},
+  "params": {{"power": 0.2, "speed": 10000}},
+  "profile": {{
+    "side": "{side}",
+    "direction": "climb",
+    "compensation": "computed",
+    "z": {z},
+    "lead_in": {{"type": "none"}},
+    "lead_out": {{"type": "none"}},
+    "closed": true,
+    "points": {points}{extra}
+  }}
+}}"#
+        )
+    }
+
+    const REED: &str = "[[1.0,1.0],[13.8,1.0],[13.8,28.1],[12.4,39.1],[2.4,39.1],[1.0,28.1]]";
+    const RECT: &str = "[[1.0,1.0],[13.8,1.0],[13.8,39.1],[1.0,39.1]]";
+    const SQUARE: &str = "[[0.0,0.0],[6.0,0.0],[6.0,6.0],[0.0,6.0]]";
+    const LASER: &str = r#"{"id":1,"kerf":0.1}"#;
+    const SPINDLE: &str = r#"{"id":1,"diameter":3.0}"#;
+
+    fn must_load(text: &str) {
+        load(text).unwrap_or_else(|err| panic!("{err}\n{text}"));
+    }
+
+    #[test]
+    fn evidence_lead_none_and_tabs_stay_above_the_safe_plane() {
+        must_load(&doc("laser", LASER, 0.0, SQUARE, ""));
+        must_load(&doc("laser", LASER, 0.0, RECT, ""));
+        must_load(&doc("laser", LASER, 0.0, REED, ""));
+        must_load(&doc("laser", LASER, -0.26, REED, r#", "tabs": {"count": 2, "width": 0.3}"#));
+        must_load(&doc("spindle", SPINDLE, 0.0, REED, r#", "tabs": {"count": 2, "width": 0.3}"#));
+        must_load(&doc_side("laser", LASER, "on", 0.0, REED, ""));
+        must_load(&doc_side("laser", LASER, "inside", 0.0, REED, ""));
+    }
+
+    use proptest::prelude::*;
+
+    fn ring_points(n: usize, rx: f64, ry: f64) -> String {
+        let mut pts = Vec::with_capacity(n);
+        for i in 0..n {
+            let a = (i as f64) * std::f64::consts::TAU / (n as f64);
+            pts.push(format!("[{:.9},{:.9}]", 20.0 + rx * a.cos(), 20.0 + ry * a.sin()));
+        }
+        format!("[{}]", pts.join(","))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        #[test]
+        fn random_closed_profiles_with_lead_none_or_tabs_load(
+            sides in 4usize..8,
+            rx in 8.0f64..30.0,
+            ry in 6.0f64..28.0,
+            z in -2.0f64..0.0,
+            tabs in proptest::bool::ANY,
+            laser in proptest::bool::ANY,
+        ) {
+            prop_assume!((rx - ry).abs() > 0.5 || sides != 4);
+            let points = ring_points(sides, rx, ry);
+            let (process, tool) = if laser { ("laser", LASER) } else { ("spindle", SPINDLE) };
+            let extra = if tabs { r#", "tabs": {"count": 2, "width": 0.3}"# } else { "" };
+            let text = doc(process, tool, z, &points, extra);
+            prop_assert!(load(&text).is_ok(), "{}", load(&text).err().map(|e| e.to_string()).unwrap_or_default());
+        }
+    }
+}

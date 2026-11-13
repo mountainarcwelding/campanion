@@ -7,6 +7,7 @@
 - A built-in `mach4` three-axis mill/router post writes metric output with incremental IJK (`G91.1`) and `M9`/`M30` at the end. The opt-in `dwell.decimal_seconds` setting makes read-back treat an integer `G4 P` as milliseconds and a decimal `G4 P` as seconds, matching Mach4, and the writer always emits a decimal P so Mach4 reads seconds. Existing posts keep their dwell behavior and golden output. This output has not been proven on a machine.
 - Pocket operations may set `start_depth`, a length downward from the original stock surface. Depth passes start below that Z and still end at `depth`. Omitted or 0 leaves existing output unchanged. Other operation kinds reject the field. This output has not been proven on a machine.
 - Kerf-tool (laser or torch) operations in a `campanion-job/1` file may set `power`, an IR fraction in `0..=1`. `grbl_laser` scales that onto `S0`..`S1000`. When a vector program omits process power, the post writes `S0` (beam off), comments the G-code, and warns on stderr; it is never posted at full scale. Audit refuses any `S` above 0 in a file that records that power was not set. A laser raster still takes power from the image. This output has not been proven on a machine.
+- Profile documents retract to the clearance plane at the current XY before any later XY rapid, so full-depth tabs and `lead_in`/`lead_out` `none` on non-square shapes no longer refuse with a rapid below the safe plane. This output has not been proven on a machine.
 
 ## 0.12.0 — 2026-11-12
 
