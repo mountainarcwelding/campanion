@@ -421,3 +421,4 @@ first. If upstream lands a CAM core, we contribute to it and keep only what it l
   linuxcnc_router with G38.2 probe and vacuum/dust). Processes plan approved; laser raster is next.
 - 2026-11-12: v0.10.1 is G91.1 incremental IJK, G53 mill-audit retracts, IR tool shapes for per-move verify, and inch output for three-axis mill posts (#152-#155). Laser raster is next.
 - 2026-11-12: v0.11.0 is laser raster: per-move IR power, post S words including S0 overscan, and laser_raster jobs (#159-#161). Plasma improvements are next.
+- 2026-11-12: v0.12.0 is plasma improvements: optional G41/G42, job-file leads and the small-hole rule, automatic contour side and direction, and a narrower-than-kerf refusal plus a freed-slug rapid warning (#163-#166).
