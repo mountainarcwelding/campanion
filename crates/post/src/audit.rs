@@ -950,10 +950,10 @@ fn first_s_above_zero(text: &str) -> Option<(usize, String)> {
             let Some(rest) = word.strip_prefix('S').or_else(|| word.strip_prefix('s')) else {
                 continue;
             };
-            if let Ok(value) = rest.parse::<f64>() {
-                if value > 0.0 {
-                    return Some((index + 1, word.to_string()));
-                }
+            if let Ok(value) = rest.parse::<f64>()
+                && value > 0.0
+            {
+                return Some((index + 1, word.to_string()));
             }
         }
     }
