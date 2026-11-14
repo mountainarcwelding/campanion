@@ -627,6 +627,11 @@ pub enum Event {
         /// Named parameters.
         params: BTreeMap<String, ParamValue>,
     },
+    /// Named program stop. A post template may write a cited code; otherwise this is a comment.
+    ProgramStop {
+        /// Stop name, for example `wire_stop`.
+        name: String,
+    },
     /// Wait until every channel listed on this sync id arrives.
     Sync {
         /// Sync point id.
@@ -788,6 +793,7 @@ impl Event {
                 required_name(name, "custom event name")?;
                 check_params(params)?;
             }
+            Self::ProgramStop { name } => required_name(name, "program stop name")?,
             Self::CAxis { spindle, .. } | Self::SpindleBrake { spindle, .. } => {
                 required_name(spindle, "spindle name")?;
             }

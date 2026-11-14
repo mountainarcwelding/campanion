@@ -14,7 +14,8 @@
 //! Lathe posts are rejected; lathe and mill-turn text is replayed by [`crate::audit_lathe`].
 //! Five-axis posts are replayed by [`crate::audit_five`]. Work offset
 //! stays unset when the program never writes `G54`–`G59`. Feed mode stays
-//! units per minute until `G93` or `G94`. `M2` and `M30` turn the spindle and coolant off.
+//! units per minute until `G93` or `G94`. `M0` and `M1` are program and optional stops and do not
+//! change motion or modal state. `M2` and `M30` turn the spindle and coolant off.
 //! `G41` and `G42` select cutter compensation; `G40` cancels it. A `D` word is accepted only on a
 //! `G41` or `G42` block. Compensation must be off at the end of the program (`G40`, or `M2`/`M30`).
 //! `M3` or `M4` with `S0` is running with the beam or torch off: [`SpindleState::cutting`] is false.
@@ -814,6 +815,7 @@ impl<'a> Parser<'a> {
 
     fn apply_m(&mut self, line_no: usize, code: u16) -> Result<()> {
         match code {
+            0 | 1 => {}
             2 | 30 => {
                 self.spindle.on = false;
                 self.coolant = CoolantState::Off;

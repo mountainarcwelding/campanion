@@ -1003,6 +1003,25 @@
         },
         {
           "additionalProperties": false,
+          "description": "Named program stop. A post template may write a cited code; otherwise this is a comment.",
+          "properties": {
+            "name": {
+              "description": "Stop name, for example `wire_stop`.",
+              "type": "string"
+            },
+            "type": {
+              "const": "program_stop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Wait until every channel listed on this sync id arrives.",
           "properties": {
             "id": {

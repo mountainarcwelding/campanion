@@ -1,6 +1,7 @@
 use campanion_ir::{
-    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, Event, Feeds, Head, HeadAxis, MoveRole, Plane, Pose, ProcessKind, ProcessParams, Program,
-    RotaryAxisKind, RotaryDirection, RotarySetup, Spindle, SpindleSpeed, Tool, TurnBinding, TurningSetup, Vec3, machine_to_part, part_to_machine,
+    ArcSense, ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Event, Feeds, Head, HeadAxis, MoveRole, Plane, Pose, ProcessKind,
+    ProcessParams, Program, RotaryAxisKind, RotaryDirection, RotarySetup, Spindle, SpindleSpeed, Tool, TurnBinding, TurningSetup, Vec3,
+    machine_to_part, part_to_machine,
 };
 
 use crate::{PostOptions, audit, builtin, builtin_ids, compare, load_post, post_program, read_back};
@@ -148,6 +149,7 @@ fn builtins_load_and_match_ids() {
             "plasma",
             "waterjet",
             "oxyfuel",
+            "wire_edm",
             "grbl_laser",
             "linuxcnc_lathe",
             "fanuc_lathe",
@@ -172,16 +174,19 @@ fn builtins_load_and_match_ids() {
     assert!(builtin("plasma").expect("plasma").rotary_axes().is_empty());
     assert!(builtin("waterjet").expect("waterjet").rotary_axes().is_empty());
     assert!(builtin("oxyfuel").expect("oxyfuel").rotary_axes().is_empty());
+    assert!(builtin("wire_edm").expect("wire_edm").rotary_axes().is_empty());
     assert!(builtin("grbl_laser").expect("grbl_laser").rotary_axes().is_empty());
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").process_cycle, "hold");
     assert!(!builtin("mach3").expect("mach3").cycles_per_cut());
     assert!(builtin("plasma").expect("plasma").cycles_per_cut());
     assert!(builtin("waterjet").expect("waterjet").cycles_per_cut());
     assert!(builtin("oxyfuel").expect("oxyfuel").cycles_per_cut());
+    assert!(builtin("wire_edm").expect("wire_edm").cycles_per_cut());
     assert!(builtin("grbl_laser").expect("grbl_laser").cycles_per_cut());
     assert!(builtin("plasma").expect("plasma").description().contains("process_cycle is per_cut"), "plasma description");
     assert!(builtin("waterjet").expect("waterjet").description().contains("process_cycle is per_cut"), "waterjet description");
     assert!(builtin("oxyfuel").expect("oxyfuel").description().contains("process_cycle is per_cut"), "oxyfuel description");
+    assert!(builtin("wire_edm").expect("wire_edm").description().contains("process_cycle is per_cut"), "wire_edm description");
     assert!(builtin("grbl_laser").expect("grbl_laser").description().contains("process_cycle is per_cut"), "laser description");
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").is_lathe());
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").rotary_axes().is_empty());
@@ -2260,4 +2265,119 @@ fn oxyfuel_pins_are_post_data() {
     raw["digital_out"] = serde_json::json!({});
     let err = load_post(&raw.to_string()).expect_err("missing pin");
     assert!(err.to_string().contains("digital_out.preheat_pin") || err.to_string().contains("digital_out.cutting_oxygen_pin"), "{err}");
+}
+
+fn wire_edm() -> crate::def::PostDef {
+    builtin("wire_edm").expect("wire_edm")
+}
+
+fn wire_params(power: Option<f64>) -> ProcessParams {
+    ProcessParams::new().power(power).expect("power")
+}
+
+fn wire_cut(held_through_rapid: bool) -> Program {
+    let process = ProcessKind::Other("wire_edm".into());
+    let mut blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 0.0), feed: None }),
+        ClBlock::Event(Event::Coolant { mode: CoolantMode::Flood }),
+        ClBlock::Event(Event::ProcessOn { process: process.clone(), params: wire_params(Some(0.6)) }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 0.0), feed: 200.0, role: MoveRole::Cut, power: None }),
+    ];
+    if held_through_rapid {
+        blocks.push(ClBlock::Motion(ClMotion::Rapid { to: pose(20.0, 0.0, 0.0), feed: None }));
+        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(30.0, 0.0, 0.0), feed: 200.0, role: MoveRole::Cut, power: None }));
+    } else {
+        blocks.push(ClBlock::Event(Event::ProcessOff { process: process.clone() }));
+        blocks.push(ClBlock::Event(Event::ProgramStop { name: "wire_stop".into() }));
+        blocks.push(ClBlock::Motion(ClMotion::Rapid { to: pose(20.0, 0.0, 0.0), feed: None }));
+        blocks.push(ClBlock::Event(Event::ProcessOn { process: process.clone(), params: wire_params(Some(0.4)) }));
+        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(30.0, 0.0, 0.0), feed: 120.0, role: MoveRole::Cut, power: None }));
+    }
+    blocks.push(ClBlock::Event(Event::ProcessOff { process }));
+    blocks.push(ClBlock::Event(Event::Coolant { mode: CoolantMode::Off }));
+    program(blocks)
+}
+
+fn wire_marks(text: &str) -> Vec<&'static str> {
+    let mut marks = Vec::new();
+    for line in text.lines() {
+        let stripped = without_comments(line);
+        let words: Vec<&str> = stripped.split_whitespace().collect();
+        if words.contains(&"M8") {
+            marks.push("flush-on");
+        } else if words.contains(&"M9") {
+            marks.push("flush-off");
+        } else if words.contains(&"M0") {
+            marks.push("stop");
+        } else if words.contains(&"M3") {
+            marks.push("wire-on");
+        } else if words.contains(&"M5") {
+            marks.push("wire-off");
+        } else if words.iter().any(|word| *word == "G0" || *word == "G00") {
+            marks.push("rapid");
+        } else if words.iter().any(|word| *word == "G1" || *word == "G01") {
+            marks.push("feed");
+        }
+    }
+    marks
+}
+
+fn assert_wire_invariants(marks: &[&str], text: &str) {
+    assert!(!marks.is_empty(), "{text}");
+    let mut wire = false;
+    for mark in marks {
+        match *mark {
+            "wire-on" => {
+                assert!(!wire, "doubled wire on\n{marks:?}\n{text}");
+                wire = true;
+            }
+            "wire-off" => {
+                assert!(wire, "wire off while off\n{marks:?}\n{text}");
+                wire = false;
+            }
+            "rapid" => assert!(!wire, "wire on during a rapid\n{marks:?}\n{text}"),
+            "stop" => assert!(!wire, "program stop while wire on\n{marks:?}\n{text}"),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn wire_edm_writes_on_off_flush_and_program_stop() {
+    let text = post_program(&wire_cut(false), &wire_edm(), &options()).expect("post");
+    let marks = wire_marks(&text);
+    assert_wire_invariants(&marks, &text);
+    assert!(text.contains("M3 S0.6000"), "{text}");
+    assert!(text.contains("M3 S0.4000"), "{text}");
+    assert!(marks.contains(&"flush-on"), "{text}");
+    assert!(marks.contains(&"flush-off"), "{text}");
+    assert!(marks.contains(&"stop"), "{text}");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "M0")), "{text}");
+}
+
+#[test]
+fn wire_edm_turns_the_wire_off_on_a_held_rapid() {
+    let text = post_program(&wire_cut(true), &wire_edm(), &options()).expect("post");
+    let marks = wire_marks(&text);
+    assert_wire_invariants(&marks, &text);
+    assert!(marks.windows(3).any(|w| w == ["wire-off", "rapid", "wire-on"] || w == ["feed", "wire-off", "rapid"]), "{marks:?}\n{text}");
+}
+
+#[test]
+fn wire_edm_refuses_an_unknown_auxiliary() {
+    let process = ProcessKind::Other("abrasive".into());
+    let program = program(vec![ClBlock::Event(Event::ProcessOn { process, params: ProcessParams::new() })]);
+    let err = post_program(&program, &wire_edm(), &options()).expect_err("aux");
+    assert!(err.to_string().contains("does not accept auxiliary `abrasive`"), "{err}");
+}
+
+#[test]
+fn unnamed_program_stop_is_a_comment_when_the_post_has_no_template() {
+    let program = program(vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 0.0), feed: None }),
+        ClBlock::Event(Event::ProgramStop { name: "wire_stop".into() }),
+    ]);
+    let text = post_program(&program, &linux(), &options()).expect("post");
+    assert!(text.contains("(program stop: wire_stop)"), "{text}");
+    assert!(!text.lines().any(|line| without_comments(line).split_whitespace().any(|word| word == "M0")), "{text}");
 }

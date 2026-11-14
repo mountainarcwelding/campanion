@@ -175,6 +175,7 @@ fn posts_lists_every_builtin() -> Result<(), String> {
             "plasma",
             "waterjet",
             "oxyfuel",
+            "wire_edm",
             "grbl_laser",
             "linuxcnc_lathe",
             "fanuc_lathe",

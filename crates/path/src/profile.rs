@@ -91,6 +91,10 @@ pub enum Lead {
     Arc { radius: f64 },
     /// Straight line along the normal, on the waste side. `length` is millimetres.
     Perpendicular { length: f64 },
+    /// Straight lead from a supplied point, typically a start hole, to the path (or back).
+    ///
+    /// Coordinates are millimetres in the same plane as the profile.
+    FromPoint { x: f64, y: f64 },
 }
 
 /// Where a closed profile starts cutting.
@@ -197,6 +201,8 @@ pub struct ProfileOp {
     overcut: f64,
     start: StartPoint,
     tabs: Option<TabSpec>,
+    /// When true, a tab is left as an open gap: the cut stops at the first tab and does not cross it.
+    open_tabs: bool,
     z: f64,
     /// Rapid plane, millimetres. Defaults to [`DEFAULT_CLEARANCE_MM`].
     clearance: f64,
@@ -219,6 +225,7 @@ impl ProfileOp {
             overcut: 0.0,
             start: StartPoint::Automatic,
             tabs: None,
+            open_tabs: false,
             z: 0.0,
             clearance: DEFAULT_CLEARANCE_MM,
             retract: DEFAULT_RETRACT_MM,
@@ -276,6 +283,12 @@ impl ProfileOp {
 
     pub fn tabs(mut self, tabs: TabSpec) -> Self {
         self.tabs = Some(tabs);
+        self
+    }
+
+    /// Leave tabs as open gaps. The cut stops at the first tab and does not cross it.
+    pub fn open_tabs(mut self) -> Self {
+        self.open_tabs = true;
         self
     }
 
@@ -837,16 +850,21 @@ fn emit(op: &ProfileOp, path: &Contour, tabs: &[Tab], z: f64, overcut: f64) -> R
     emit_lead(op.lead_in, start, travel, waste_left, false, z, CutKind::LeadIn, &mut moves)?;
 
     let length = path.length()?;
-    emit_tabbed_span(path, 0.0, length, z, CutKind::Cut, tabs, retract, &mut moves)?;
-    if overcut > 0.0 {
+    emit_tabbed_span(path, 0.0, length, z, CutKind::Cut, tabs, retract, op.open_tabs, &mut moves)?;
+    let stopped_at_tab = op.open_tabs && !tabs.is_empty();
+    if overcut > 0.0 && !stopped_at_tab {
         emit_span(path, 0.0, overcut, z, CutKind::Cut, &mut moves)?;
     }
 
-    let exit_s = if path.is_closed() { overcut } else { length };
-    let exit = curve::point_at_length(path, exit_s)?;
-    let exit_tangent = curve::tangent_at_length(path, exit_s)?;
-    emit_lead(op.lead_out, exit, exit_tangent, waste_left, true, z, CutKind::LeadOut, &mut moves)?;
-    let end_xy = lead_out_point(exit, exit_tangent, waste_left, op.lead_out)?;
+    let end_xy = if stopped_at_tab {
+        last_xy(&moves).ok_or_else(|| invalid("tab stop has no cut point"))?
+    } else {
+        let exit_s = if path.is_closed() { overcut } else { length };
+        let exit = curve::point_at_length(path, exit_s)?;
+        let exit_tangent = curve::tangent_at_length(path, exit_s)?;
+        emit_lead(op.lead_out, exit, exit_tangent, waste_left, true, z, CutKind::LeadOut, &mut moves)?;
+        lead_out_point(exit, exit_tangent, waste_left, op.lead_out)?
+    };
     push(&mut moves, Move::Event(ProcessEvent::Off))?;
     // Lift at the current XY first. A combined XY+Z rapid from the cut would be a traverse
     // through the stock when the last cut point is even slightly off `end_xy`.
@@ -886,19 +904,30 @@ pub(crate) fn emit_tabbed_span(
     kind: CutKind,
     tabs: &[Tab],
     retract: f64,
+    open_tabs: bool,
     moves: &mut Vec<Move>,
 ) -> Result<()> {
     if (s_to - s_from).abs() <= 1e-9 {
         return Ok(());
     }
     if s_to + 1e-9 >= s_from {
-        emit_tabbed_forward(path, s_from, s_to, z, kind, tabs, retract, moves)
+        emit_tabbed_forward(path, s_from, s_to, z, kind, tabs, retract, open_tabs, moves)
     } else {
-        emit_tabbed_backward(path, s_from, s_to, z, kind, tabs, retract, moves)
+        emit_tabbed_backward(path, s_from, s_to, z, kind, tabs, retract, open_tabs, moves)
     }
 }
 
-fn emit_tabbed_forward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, tabs: &[Tab], retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+fn emit_tabbed_forward(
+    path: &Contour,
+    s0: f64,
+    s1: f64,
+    z: f64,
+    kind: CutKind,
+    tabs: &[Tab],
+    retract: f64,
+    open_tabs: bool,
+    moves: &mut Vec<Move>,
+) -> Result<()> {
     let mut cursor = s0;
     for tab in tabs {
         let start = tab.start();
@@ -916,6 +945,9 @@ fn emit_tabbed_forward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, 
         }
         let leave = end.min(s1);
         if leave > cursor + 1e-9 {
+            if open_tabs {
+                return Ok(());
+            }
             emit_crossing(path, cursor, leave, z, tab.height(), retract, moves)?;
             cursor = leave;
         }
@@ -926,7 +958,17 @@ fn emit_tabbed_forward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, 
     Ok(())
 }
 
-fn emit_tabbed_backward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind, tabs: &[Tab], retract: f64, moves: &mut Vec<Move>) -> Result<()> {
+fn emit_tabbed_backward(
+    path: &Contour,
+    s0: f64,
+    s1: f64,
+    z: f64,
+    kind: CutKind,
+    tabs: &[Tab],
+    retract: f64,
+    open_tabs: bool,
+    moves: &mut Vec<Move>,
+) -> Result<()> {
     let mut cursor = s0;
     for tab in tabs.iter().rev() {
         let start = tab.start();
@@ -944,6 +986,9 @@ fn emit_tabbed_backward(path: &Contour, s0: f64, s1: f64, z: f64, kind: CutKind,
         }
         let leave = start.max(s1);
         if cursor > leave + 1e-9 {
+            if open_tabs {
+                return Ok(());
+            }
             emit_crossing(path, cursor, leave, z, tab.height(), retract, moves)?;
             cursor = leave;
         }
@@ -1112,6 +1157,10 @@ fn last_point(moves: &[Move]) -> Option<Point3> {
     })
 }
 
+fn last_xy(moves: &[Move]) -> Option<Point> {
+    last_point(moves).and_then(|point| Point::new(point.x(), point.y()).ok())
+}
+
 fn emit_lead(
     lead: Lead,
     contact: Point,
@@ -1124,7 +1173,7 @@ fn emit_lead(
 ) -> Result<()> {
     match lead {
         Lead::None => Ok(()),
-        Lead::Line { .. } | Lead::Perpendicular { .. } => {
+        Lead::Line { .. } | Lead::Perpendicular { .. } | Lead::FromPoint { .. } => {
             let end = if departing { lead_out_point(contact, tangent, waste_left, lead)? } else { contact };
             // A lead-in was already positioned by the rapid. Only the feed onto or off the path is emitted.
             if departing {
@@ -1158,6 +1207,7 @@ fn lead_in_point(contact: Point, tangent: Vec2, waste_left: bool, lead: Lead) ->
             let radius = positive(radius, "lead radius")?;
             Ok(tangent_arc(contact, tangent, radius, waste_left, false)?.start)
         }
+        Lead::FromPoint { x, y } => Point::new(x, y).map_err(PathError::from),
     }
 }
 
@@ -1177,6 +1227,7 @@ fn lead_out_point(contact: Point, tangent: Vec2, waste_left: bool, lead: Lead) -
             let radius = positive(radius, "lead radius")?;
             Ok(tangent_arc(contact, tangent, radius, waste_left, true)?.end)
         }
+        Lead::FromPoint { x, y } => Point::new(x, y).map_err(PathError::from),
     }
 }
 
@@ -1266,10 +1317,13 @@ fn fit_one_lead(
     }
     let min_size = kerf * MIN_SMALL_HOLE_LEAD_FRACTION;
     // Try a shrinking arc first when the request was an arc, otherwise a shrinking line.
+    if matches!(lead, Lead::FromPoint { .. }) {
+        return Ok(lead);
+    }
     let requested = match lead {
         Lead::Arc { radius } => radius,
         Lead::Line { length } | Lead::Perpendicular { length } => length,
-        Lead::None => return Ok(Lead::None),
+        Lead::None | Lead::FromPoint { .. } => return Ok(lead),
     };
     if requested.is_finite() && requested > min_size {
         let mut lo = min_size;
@@ -1299,6 +1353,7 @@ fn fit_one_lead(
 fn scale_lead(lead: Lead, size: f64) -> Lead {
     match lead {
         Lead::None => Lead::None,
+        Lead::FromPoint { x, y } => Lead::FromPoint { x, y },
         Lead::Line { .. } => Lead::Line { length: size },
         Lead::Perpendicular { .. } => Lead::Perpendicular { length: size },
         Lead::Arc { .. } => Lead::Arc { radius: size },
@@ -1317,7 +1372,7 @@ fn lead_stays_in_waste(
     let tip = if departing { lead_out_point(contact, tangent, waste_left, lead)? } else { lead_in_point(contact, tangent, waste_left, lead)? };
     match lead {
         Lead::None => Ok(true),
-        Lead::Line { .. } | Lead::Perpendicular { .. } => point_in_waste(path, tip, contact, waste_left, tolerance),
+        Lead::FromPoint { .. } | Lead::Line { .. } | Lead::Perpendicular { .. } => point_in_waste(path, tip, contact, waste_left, tolerance),
         Lead::Arc { radius } => {
             let arc = tangent_arc(contact, tangent, radius, waste_left, departing)?;
             let mid = quarter_mid(&arc)?;
@@ -1359,7 +1414,7 @@ fn waste_is_interior(path: &Contour, waste_left: bool, tolerance: &Tolerance) ->
 /// Length along the contour that tabs must stay clear of, for this lead.
 fn lead_span(lead: Lead) -> Result<f64> {
     match lead {
-        Lead::None => Ok(0.0),
+        Lead::None | Lead::FromPoint { .. } => Ok(0.0),
         Lead::Line { length } | Lead::Perpendicular { length } => positive(length, "lead length"),
         Lead::Arc { radius } => Ok(positive(radius, "lead radius")? * std::f64::consts::FRAC_PI_2),
     }
@@ -2632,6 +2687,98 @@ mod tests {
                 let profile = op.generate(&part).unwrap();
                 assert!(!xy_rapid_below(profile.toolpath().moves(), DEFAULT_RETRACT_MM), "tabs z={z}: {:?}", profile.toolpath().moves());
             }
+        }
+    }
+
+    fn min_cut_distance(contour: &Contour, profile: &Profile) -> f64 {
+        let mut min = f64::INFINITY;
+        for mv in profile.toolpath().moves() {
+            let point = match *mv {
+                Move::Linear { to, kind: CutKind::Cut } | Move::Arc { to, kind: CutKind::Cut, .. } => Point::new(to.x(), to.y()).unwrap(),
+                _ => continue,
+            };
+            let distance = contour.segments().iter().map(|seg| seg.distance_to_point(point)).fold(f64::INFINITY, f64::min);
+            min = min.min(distance);
+        }
+        min
+    }
+
+    fn first_rapid_xy(moves: &[Move]) -> Option<(f64, f64)> {
+        for mv in moves {
+            if let Move::Rapid { to } = *mv {
+                return Some((to.x(), to.y()));
+            }
+        }
+        None
+    }
+
+    fn wire_op(width: f64, hole: Point) -> ProfileOp {
+        ProfileOp::new(Tool::kerf(width), Compensation::Computed, ProfileSide::Outside, CutDirection::Climb)
+            .z(0.0)
+            .heights(0.0, 0.0)
+            .lead_in(Lead::FromPoint { x: hole.x(), y: hole.y() })
+            .lead_out(Lead::FromPoint { x: hole.x(), y: hole.y() })
+            .start(StartPoint::User(hole))
+    }
+
+    #[test]
+    fn from_point_lead_starts_at_the_supplied_hole() {
+        let hole = Point::new(-5.0, 5.0).unwrap();
+        let shape = rect(20.0, 10.0);
+        let width = 0.25 + 2.0 * 0.1;
+        let profile = wire_op(width, hole).generate(&shape).unwrap();
+        let (x, y) = first_rapid_xy(profile.toolpath().moves()).expect("rapid");
+        near(x, -5.0, 1e-9);
+        near(y, 5.0, 1e-9);
+        near(min_cut_distance(&shape, &profile), 0.25 / 2.0 + 0.1, LOOSE);
+        for mv in profile.toolpath().moves() {
+            if let Move::Rapid { to } | Move::Linear { to, .. } | Move::Arc { to, .. } = *mv {
+                near(to.z(), 0.0, 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn open_tabs_stop_at_the_first_tab_without_an_xy_rapid() {
+        let hole = Point::new(-5.0, 5.0).unwrap();
+        let shape = rect(20.0, 10.0);
+        let width = 0.25 + 2.0 * 0.1;
+        let profile = wire_op(width, hole).lead_out(Lead::None).tabs(TabSpec::count(1, 2.0)).open_tabs().generate(&shape).unwrap();
+        assert_eq!(profile.tabs().len(), 1);
+        let mut off = false;
+        for mv in profile.toolpath().moves() {
+            match *mv {
+                Move::Event(ProcessEvent::Off) => off = true,
+                Move::Rapid { to } if off && (to.x() + 5.0).abs() > 1e-6 && (to.y() - 5.0).abs() > 1e-6 => {
+                    panic!("open tab crossed with a rapid to {},{}", to.x(), to.y());
+                }
+                Move::Linear { kind: CutKind::Cut, .. } | Move::Arc { kind: CutKind::Cut, .. } if off => {
+                    panic!("open tab continued cutting after process off");
+                }
+                _ => {}
+            }
+        }
+        assert!(off, "expected process off at the tab: {:?}", profile.toolpath().moves());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        #[test]
+        fn wire_offset_is_radius_plus_the_named_gap(
+            diameter in 0.05f64..1.0,
+            gap in 0.0f64..0.4,
+            width in 30.0f64..80.0,
+            height in 16.0f64..50.0,
+        ) {
+            prop_assume!(width / 2.0 > diameter / 2.0 + gap + 2.0);
+            prop_assume!(height / 2.0 > diameter / 2.0 + gap + 2.0);
+            let hole = Point::new(-5.0, height / 2.0).unwrap();
+            let shape = rect(width, height);
+            let kerf = diameter + 2.0 * gap;
+            let profile = wire_op(kerf, hole).generate(&shape).unwrap();
+            let expected = diameter / 2.0 + gap;
+            let actual = min_cut_distance(&shape, &profile);
+            prop_assert!((actual - expected).abs() < LOOSE, "offset {actual} != {expected} (d={diameter} gap={gap})");
         }
     }
 }

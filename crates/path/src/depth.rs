@@ -930,7 +930,7 @@ fn cross_gap(pen: &mut Pen, cut: &TabCut, s_from: f64, s_to: f64) -> Result<()> 
     if cut.full {
         emit_crossing(&cut.contour, s_from, s_to, z, None, cut.retract, &mut moves)?;
     } else if z + 1e-9 >= cut.tab_top {
-        emit_tabbed_span(&cut.contour, s_from, s_to, z, CutKind::LeadIn, &[], cut.retract, &mut moves)?;
+        emit_tabbed_span(&cut.contour, s_from, s_to, z, CutKind::LeadIn, &[], cut.retract, false, &mut moves)?;
     } else {
         let lift = cut.tab_top - z;
         emit_crossing(&cut.contour, s_from, s_to, z, Some(lift), cut.retract, &mut moves)?;
@@ -941,7 +941,7 @@ fn cross_gap(pen: &mut Pen, cut: &TabCut, s_from: f64, s_to: f64) -> Result<()> 
 fn cut_pass(pen: &mut Pen, cut: &TabCut, s_from: f64, s_to: f64, z: f64) -> Result<()> {
     let mut moves = Vec::new();
     let tabs: &[Tab] = if cut.applies(z) { &cut.tabs } else { &[] };
-    emit_tabbed_span(&cut.contour, s_from, s_to, z, CutKind::Cut, tabs, cut.retract, &mut moves)?;
+    emit_tabbed_span(&cut.contour, s_from, s_to, z, CutKind::Cut, tabs, cut.retract, false, &mut moves)?;
     play(pen, &moves)
 }
 

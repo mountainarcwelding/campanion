@@ -697,6 +697,8 @@ pub struct JobTool {
     /// Spindle speed in rpm. `None` when the file omits `tools[].speed`.
     speed: Option<f64>,
     assembly: Option<ToolAssembly>,
+    /// Wire diameter in millimetres when the tool is a wire. `None` for other tools.
+    wire: Option<f64>,
 }
 
 impl JobTool {
@@ -732,6 +734,16 @@ impl JobTool {
     /// Holder and head envelope. `None` when the file omits `assembly`.
     pub fn assembly(&self) -> Option<&ToolAssembly> {
         self.assembly.as_ref()
+    }
+
+    /// Wire diameter in millimetres. `None` when the tool is not a wire.
+    pub fn wire_diameter(&self) -> Option<f64> {
+        self.wire
+    }
+
+    /// True when the tool was declared with `wire`.
+    pub fn is_wire(&self) -> bool {
+        self.wire.is_some()
     }
 
     /// Router flute helix. `None` when the file omits `cutter_sense`.
@@ -1026,6 +1038,39 @@ pub struct Operation {
     preheat: bool,
     /// Shortest allowed pierce delay, in seconds, when `preheat` is true.
     min_preheat: Option<f64>,
+    /// Spark gap for the first pass of a wire profile, in millimetres.
+    spark_gap: Option<f64>,
+    /// Supplied start hole for a wire profile, millimetres.
+    start_hole: Option<(f64, f64)>,
+    /// Later wire passes, each with its own spark gap, toward the finish.
+    skims: Vec<WireSkim>,
+    /// Flood flush on a wire profile. False when omitted.
+    flush: bool,
+}
+
+/// One skim pass on a wire profile. `spark_gap` is required; feeds and power are optional.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WireSkim {
+    spark_gap: f64,
+    cut_feed: Option<f64>,
+    power: Option<f64>,
+}
+
+impl WireSkim {
+    /// Spark gap for this pass, millimetres.
+    pub fn spark_gap(&self) -> f64 {
+        self.spark_gap
+    }
+
+    /// Optional cut feed for this pass, millimetres per minute.
+    pub fn cut_feed(&self) -> Option<f64> {
+        self.cut_feed
+    }
+
+    /// Optional process power for this pass, an IR fraction in `0..=1`.
+    pub fn power(&self) -> Option<f64> {
+        self.power
+    }
 }
 
 /// How a surface aims the tool, then clamps it toward +Z.
@@ -1320,6 +1365,26 @@ impl Operation {
     /// Shortest allowed pierce delay, in seconds, when [`Self::preheat`] is true.
     pub fn min_preheat(&self) -> Option<f64> {
         self.min_preheat
+    }
+
+    /// Spark gap on the first wire pass, millimetres.
+    pub fn spark_gap(&self) -> Option<f64> {
+        self.spark_gap
+    }
+
+    /// Start hole for a wire profile, millimetres.
+    pub fn start_hole(&self) -> Option<(f64, f64)> {
+        self.start_hole
+    }
+
+    /// Skim passes after the first wire pass.
+    pub fn skims(&self) -> &[WireSkim] {
+        &self.skims
+    }
+
+    /// True when the wire profile asked for flood flush.
+    pub fn flush(&self) -> bool {
+        self.flush
     }
 
     /// Machine A/B index in degrees. `None` when the file omits `index_deg`.
@@ -1957,7 +2022,8 @@ fn parse_tools(value: &Value, scale: f64) -> Result<Vec<JobTool>, JobFileError> 
 
 fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> {
     let map = object(value, "tool").map_err(from_cli)?;
-    check_keys(map, &["id", "name", "diameter", "kerf", "shape", "speed", "assembly", "cutter_sense", "upcut_length"], "tool").map_err(from_cli)?;
+    check_keys(map, &["id", "name", "diameter", "kerf", "wire", "shape", "speed", "assembly", "cutter_sense", "upcut_length"], "tool")
+        .map_err(from_cli)?;
     let mut scaled = map.clone();
     scaled.remove("shape");
     scaled.remove("speed");
@@ -1966,6 +2032,23 @@ fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> 
     scaled.remove("upcut_length");
     scale_key(&mut scaled, "diameter", scale)?;
     scale_key(&mut scaled, "kerf", scale)?;
+    scale_key(&mut scaled, "wire", scale)?;
+    if optional(&scaled, "wire").is_some() {
+        if optional(&scaled, "diameter").is_some() || optional(&scaled, "kerf").is_some() {
+            return Err(JobFileError::invalid("tool has both a wire and a diameter or kerf"));
+        }
+        if optional(map, "shape").is_some() {
+            return Err(JobFileError::invalid("shape is not valid on a wire tool"));
+        }
+        if optional(map, "assembly").is_some() {
+            return Err(JobFileError::invalid("assembly is not valid on a wire tool"));
+        }
+        if optional(map, "cutter_sense").is_some() || optional(map, "upcut_length").is_some() {
+            return Err(JobFileError::invalid("cutter_sense is not valid on a wire tool"));
+        }
+        let wire = scaled.remove("wire").ok_or_else(|| JobFileError::invalid("wire tool"))?;
+        scaled.insert("kerf".into(), wire);
+    }
     let parsed = parse_tool(&Value::Object(scaled)).map_err(from_cli)?;
     parsed.path_tool().compensation_distance().map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
     let shape = parse_tool_shape(optional(map, "shape"), parsed.ir().diameter(), scale)?;
@@ -1982,7 +2065,8 @@ fn parse_tool_value(value: &Value, scale: f64) -> Result<JobTool, JobFileError> 
         .map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
     let ir =
         if optional(map, "shape").is_some() { ir.with_shape(ir_shape(shape)).map_err(|err| JobFileError::invalid(err.to_string()))? } else { ir };
-    Ok(JobTool { id: parsed.ir().id(), path_tool, ir, shape, speed, assembly })
+    let wire = optional(map, "wire").map(|value| as_f64(value, "wire").map_err(from_cli)).transpose()?.map(|value| value * scale);
+    Ok(JobTool { id: parsed.ir().id(), path_tool, ir, shape, speed, assembly, wire })
 }
 
 /// Resolve one physical cutter per tool ID before planning or writing any output.
@@ -2523,6 +2607,10 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "abrasive",
             "preheat",
             "min_preheat",
+            "spark_gap",
+            "start_hole",
+            "skims",
+            "flush",
             "pierce_type",
         ],
         "operation",
@@ -2635,6 +2723,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     {
         return Err(op_invalid(&name, "preheat delay is shorter than min_preheat"));
     }
+    let (spark_gap, start_hole, skims, flush) = parse_wire_profile(map, &name, &kind, tool, abrasive, preheat, scale)?;
     let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
     let (lead_in, lead_out) = if matches!(kind, OperationKind::Profile { .. }) {
         (parse_profile_lead(optional(map, "lead_in"), scale)?, parse_profile_lead(optional(map, "lead_out"), scale)?)
@@ -2647,6 +2736,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         return Err(op_invalid(&name, "controller compensation cannot be combined with stock_to_leave.wall"));
     }
     let onion_skin = parse_onion_skin(map, kind, depth, step_down, finish.as_ref(), start_depth, scale)?;
+    if tool.is_wire() {
+        check_wire_operation(&name, depth, step_down, &stock_to_leave, finish.as_ref(), entry, &params, compensation, onion_skin.is_some())?;
+    }
     Ok(Operation {
         name,
         kind,
@@ -2690,6 +2782,10 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         abrasive,
         preheat,
         min_preheat,
+        spark_gap,
+        start_hole,
+        skims,
+        flush,
     })
 }
 
@@ -2828,6 +2924,10 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         abrasive: false,
         preheat: false,
         min_preheat: None,
+        spark_gap: None,
+        start_hole: None,
+        skims: Vec::new(),
+        flush: false,
     })
 }
 
@@ -3076,6 +3176,10 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         abrasive: false,
         preheat: false,
         min_preheat: None,
+        spark_gap: None,
+        start_hole: None,
+        skims: Vec::new(),
+        flush: false,
     })
 }
 
@@ -3211,6 +3315,10 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         abrasive: false,
         preheat: false,
         min_preheat: None,
+        spark_gap: None,
+        start_hole: None,
+        skims: Vec::new(),
+        flush: false,
     })
 }
 
@@ -3317,6 +3425,10 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         abrasive: false,
         preheat: false,
         min_preheat: None,
+        spark_gap: None,
+        start_hole: None,
+        skims: Vec::new(),
+        flush: false,
     })
 }
 
@@ -3449,6 +3561,10 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         abrasive: false,
         preheat: false,
         min_preheat: None,
+        spark_gap: None,
+        start_hole: None,
+        skims: Vec::new(),
+        flush: false,
     })
 }
 
@@ -3582,6 +3698,10 @@ fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools
         abrasive: false,
         preheat: false,
         min_preheat: None,
+        spark_gap: None,
+        start_hole: None,
+        skims: Vec::new(),
+        flush: false,
     })
 }
 
@@ -4040,6 +4160,7 @@ fn scale_lead(lead: Lead, scale: f64) -> Result<Lead, JobFileError> {
         Lead::Line { length } => Ok(Lead::Line { length: scale_lead_length(length, scale, "lead length")? }),
         Lead::Perpendicular { length } => Ok(Lead::Perpendicular { length: scale_lead_length(length, scale, "lead length")? }),
         Lead::Arc { radius } => Ok(Lead::Arc { radius: scale_lead_length(radius, scale, "lead radius")? }),
+        Lead::FromPoint { x, y } => Ok(Lead::FromPoint { x: x * scale, y: y * scale }),
     }
 }
 
@@ -4276,6 +4397,9 @@ fn parse_abrasive(value: Option<&Value>, name: &str, kind: &OperationKind, tool:
     if tool.diameter().is_some() {
         return Err(op_invalid(name, "abrasive is only valid on a kerf tool"));
     }
+    if tool.is_wire() {
+        return Err(op_invalid(name, "a wire profile cannot be combined with abrasive or preheat"));
+    }
     as_bool(value, "abrasive").map_err(from_cli)
 }
 
@@ -4293,6 +4417,9 @@ fn parse_preheat(
             }
             if tool.diameter().is_some() {
                 return Err(op_invalid(name, "preheat is only valid on a kerf tool"));
+            }
+            if tool.is_wire() {
+                return Err(op_invalid(name, "a wire profile cannot be combined with abrasive or preheat"));
             }
             as_bool(value, "preheat").map_err(from_cli)?
         }
@@ -4323,6 +4450,180 @@ fn parse_min_preheat(value: &Value) -> Result<f64, JobFileError> {
         return Err(JobFileError::invalid(format!("min_preheat is larger than {MAX_DELAY_S} s")));
     }
     Ok(seconds)
+}
+
+fn parse_wire_profile(
+    map: &Map<String, Value>,
+    name: &str,
+    kind: &OperationKind,
+    tool: &JobTool,
+    abrasive: bool,
+    preheat: bool,
+    scale: f64,
+) -> Result<(Option<f64>, Option<(f64, f64)>, Vec<WireSkim>, bool), JobFileError> {
+    let has_wire_keys = optional(map, "spark_gap").is_some()
+        || optional(map, "start_hole").is_some()
+        || optional(map, "skims").is_some()
+        || optional(map, "flush").is_some();
+    if !tool.is_wire() {
+        if has_wire_keys {
+            return Err(op_invalid(name, "spark_gap, start_hole, skims and flush are only valid on a wire tool"));
+        }
+        return Ok((None, None, Vec::new(), false));
+    }
+    if !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(op_invalid(name, "a wire tool is only valid on a profile"));
+    }
+    if abrasive || preheat {
+        return Err(op_invalid(name, "a wire profile cannot be combined with abrasive or preheat"));
+    }
+    if optional(map, "lead_in").is_some() || optional(map, "lead_out").is_some() {
+        return Err(op_invalid(name, "a wire profile uses start_hole as the lead, not lead_in or lead_out"));
+    }
+    if optional(map, "pierce_type").is_some() {
+        return Err(op_invalid(name, "pierce_type is not valid on a wire profile"));
+    }
+    let Some(gap_value) = optional(map, "spark_gap") else {
+        return Err(op_invalid(name, "spark_gap is required on a wire profile"));
+    };
+    let spark_gap = parse_spark_gap(gap_value, scale, "spark_gap")?;
+    let start_hole = match optional(map, "start_hole") {
+        Some(value) => Some(parse_start_hole(value, scale)?),
+        None => return Err(op_invalid(name, "start_hole is required on a wire profile")),
+    };
+    let skims = parse_skims(optional(map, "skims"), spark_gap, scale)?;
+    if let Some(spec) = optional(map, "tabs") {
+        refuse_multiple_wire_tabs(spec, name)?;
+    }
+    let flush = match optional(map, "flush") {
+        Some(value) => as_bool(value, "flush").map_err(from_cli)?,
+        None => false,
+    };
+    Ok((Some(spark_gap), start_hole, skims, flush))
+}
+
+fn check_wire_operation(
+    name: &str,
+    depth: f64,
+    step_down: f64,
+    stock: &StockToLeave,
+    finish: Option<&Finish>,
+    entry: DepthEntry,
+    params: &ProcessParams,
+    compensation: Compensation,
+    has_onion: bool,
+) -> Result<(), JobFileError> {
+    if !matches!(entry, DepthEntry::Plunge) {
+        return Err(op_invalid(name, "a wire profile cannot use a ramp or helix entry"));
+    }
+    if finish.is_some() {
+        return Err(op_invalid(name, "finish is not valid on a wire profile"));
+    }
+    if stock.wall() != 0.0 || stock.floor() != 0.0 {
+        return Err(op_invalid(name, "stock_to_leave is not valid on a wire profile"));
+    }
+    if has_onion {
+        return Err(op_invalid(name, "onion_skin is not valid on a wire profile"));
+    }
+    if !matches!(compensation, Compensation::Computed) {
+        return Err(op_invalid(name, "a wire profile uses computed compensation"));
+    }
+    if step_down + 1e-12 < depth {
+        return Err(op_invalid(name, "a wire profile cannot have multiple Z passes"));
+    }
+    if params.pierce_height_z().is_some() || params.cut_height_z().is_some() {
+        return Err(op_invalid(name, "pierce_height and cut_height are not valid on a wire profile"));
+    }
+    let _ = depth;
+    Ok(())
+}
+
+fn parse_spark_gap(value: &Value, scale: f64, what: &str) -> Result<f64, JobFileError> {
+    let gap = as_f64(value, what).map_err(from_cli)? * scale;
+    if !gap.is_finite() {
+        return Err(JobFileError::invalid(format!("{what} must be finite")));
+    }
+    if gap < 0.0 {
+        return Err(JobFileError::invalid(format!("{what} must be at least 0")));
+    }
+    cap_under(gap, MAX_MM, what)
+}
+
+fn parse_start_hole(value: &Value, scale: f64) -> Result<(f64, f64), JobFileError> {
+    let map = object(value, "start_hole").map_err(from_cli)?;
+    check_keys(map, &["x", "y"], "start_hole").map_err(from_cli)?;
+    let x = as_f64(require(map, "x").map_err(from_cli)?, "start_hole x").map_err(from_cli)? * scale;
+    let y = as_f64(require(map, "y").map_err(from_cli)?, "start_hole y").map_err(from_cli)? * scale;
+    if !x.is_finite() || !y.is_finite() {
+        return Err(JobFileError::invalid("start_hole coordinates must be finite"));
+    }
+    let x = cap_abs(x, MAX_MM, "start_hole x")?;
+    let y = cap_abs(y, MAX_MM, "start_hole y")?;
+    Ok((x, y))
+}
+
+fn cap_abs(value: f64, max: f64, what: &str) -> Result<f64, JobFileError> {
+    if value.abs() > max {
+        return Err(JobFileError::invalid(format!("{what} is outside ±{max} mm")));
+    }
+    Ok(value)
+}
+
+fn parse_skims(value: Option<&Value>, first_gap: f64, scale: f64) -> Result<Vec<WireSkim>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let list = value.as_array().ok_or_else(|| JobFileError::invalid("skims must be an array"))?;
+    if list.len() > 32 {
+        return Err(JobFileError::invalid("skims has more than 32 passes"));
+    }
+    let mut out = Vec::with_capacity(list.len());
+    let mut previous = first_gap;
+    for (index, item) in list.iter().enumerate() {
+        let map = object(item, "skim").map_err(from_cli)?;
+        check_keys(map, &["spark_gap", "feeds", "power"], "skim").map_err(from_cli)?;
+        let Some(gap_value) = optional(map, "spark_gap") else {
+            return Err(JobFileError::invalid(format!("skims[{index}] must name spark_gap")));
+        };
+        let spark_gap = parse_spark_gap(gap_value, scale, "spark_gap")?;
+        if spark_gap >= previous - 1e-12 {
+            return Err(JobFileError::invalid("skim spark_gap must be smaller than the previous pass"));
+        }
+        let cut_feed = match optional(map, "feeds") {
+            Some(feeds) => {
+                let feeds_map = object(feeds, "feeds").map_err(from_cli)?;
+                check_keys(feeds_map, &["cut"], "feeds").map_err(from_cli)?;
+                Some(cap_feed(scale_f64(require(feeds_map, "cut").map_err(from_cli)?, scale, "cut feed")?)?)
+            }
+            None => None,
+        };
+        let power = match optional(map, "power") {
+            Some(value) => Some(parse_power_fraction(value)?),
+            None => None,
+        };
+        previous = spark_gap;
+        out.push(WireSkim { spark_gap, cut_feed, power });
+    }
+    Ok(out)
+}
+
+fn parse_power_fraction(value: &Value) -> Result<f64, JobFileError> {
+    let power = as_f64(value, "power").map_err(from_cli)?;
+    if !power.is_finite() || !(0.0..=1.0).contains(&power) {
+        return Err(JobFileError::invalid("power must be a finite number in 0..=1"));
+    }
+    Ok(power)
+}
+
+fn refuse_multiple_wire_tabs(value: &Value, name: &str) -> Result<(), JobFileError> {
+    let map = object(value, "tabs").map_err(from_cli)?;
+    if let Some(count) = optional(map, "count") {
+        let count = as_f64(count, "tabs.count").map_err(from_cli)?;
+        if (count - 1.0).abs() > 1e-9 {
+            return Err(op_invalid(name, "a wire profile may have at most one tab"));
+        }
+    }
+    Ok(())
 }
 
 fn apply_pierce_type(map: &Map<String, Value>, tool: &JobTool, kind: OperationKind, params: ProcessParams) -> Result<ProcessParams, JobFileError> {
@@ -5247,6 +5548,98 @@ mod tests {
         let err = load(&write_job("of-mix", &kerf_profile_text(r#""kerf":1.0"#, r#", "abrasive": true, "preheat": true, "min_preheat": 5"#)))
             .expect_err("mix");
         assert!(invalid_detail(&err).contains("preheat cannot be combined with abrasive"), "{err}");
+    }
+
+    fn wire_profile_text(extra: &str) -> String {
+        kerf_profile_text(r#""wire":0.25"#, &format!(r#", "spark_gap": 0.1, "start_hole": {{"x": -5, "y": 5}}{extra}"#))
+    }
+
+    #[test]
+    fn profile_accepts_a_wire_tool_with_named_gaps_and_a_start_hole() {
+        let job = load(&write_job(
+            "wire-ok",
+            &wire_profile_text(r#", "skims": [{"spark_gap": 0.05, "feeds": {"cut": 200}, "power": 0.4}], "flush": true"#),
+        ))
+        .expect("ok");
+        let tool = job.tool(1).expect("tool");
+        assert!(tool.is_wire());
+        near(tool.wire_diameter().expect("wire"), 0.25);
+        near(tool.path_tool().compensation_distance().expect("half kerf"), 0.125);
+        let op = &job.operations()[0];
+        near(op.spark_gap().expect("gap"), 0.1);
+        assert_eq!(op.start_hole(), Some((-5.0, 5.0)));
+        assert!(op.flush());
+        assert_eq!(op.skims().len(), 1);
+        near(op.skims()[0].spark_gap(), 0.05);
+        near(op.skims()[0].cut_feed().expect("feed"), 200.0);
+        near(op.skims()[0].power().expect("power"), 0.4);
+
+        let inch = load(&write_job(
+            "wire-inch",
+            r#"{"format":"campanion-job/1","source":{"path":"plate.dxf","hash":"cbf29ce484222325"},"units":"inch","tools":[{"id":1,"wire":0.01}],"operations":[{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":0.25,"step_down":0.25,"feeds":{"cut":10},"spark_gap":0.002,"start_hole":{"x":-0.2,"y":0.1}}]}"#,
+        ))
+        .expect("inch");
+        let scale = 25.4;
+        near(inch.tool(1).expect("tool").wire_diameter().expect("wire"), 0.01 * scale);
+        near(inch.operations()[0].spark_gap().expect("gap"), 0.002 * scale);
+        let hole = inch.operations()[0].start_hole().expect("hole");
+        near(hole.0, -0.2 * scale);
+        near(hole.1, 0.1 * scale);
+    }
+
+    #[test]
+    fn profile_rejects_invalid_wire_fields() {
+        let cases = [
+            (r#""wire":0.25, "kerf":0.3"#, "", "tool has both a wire and a diameter or kerf"),
+            (r#""wire":0.25, "diameter":6"#, "", "tool has both a wire and a diameter or kerf"),
+            (r#""wire":0.25"#, r#""#, "spark_gap is required on a wire profile"),
+            (r#""wire":0.25"#, r#", "spark_gap": 0.1"#, "start_hole is required on a wire profile"),
+            (
+                r#""kerf":1.0"#,
+                r#", "spark_gap": 0.1, "start_hole": {"x": -5, "y": 5}"#,
+                "spark_gap, start_hole, skims and flush are only valid on a wire tool",
+            ),
+            (r#""wire":0.25"#, r#", "spark_gap": 0.1, "start_hole": {"x": -5, "y": 5}, "skims": [{"power": 0.4}]"#, "skims[0] must name spark_gap"),
+            (
+                r#""wire":0.25"#,
+                r#", "spark_gap": 0.1, "start_hole": {"x": -5, "y": 5}, "skims": [{"spark_gap": 0.1}]"#,
+                "skim spark_gap must be smaller than the previous pass",
+            ),
+            (
+                r#""wire":0.25"#,
+                r#", "spark_gap": 0.1, "start_hole": {"x": -5, "y": 5}, "skims": [{"spark_gap": 0.2}]"#,
+                "skim spark_gap must be smaller than the previous pass",
+            ),
+            (
+                r#""wire":0.25"#,
+                r#", "spark_gap": 0.1, "start_hole": {"x": -5, "y": 5}, "tabs": {"count": 2, "width": 1}"#,
+                "a wire profile may have at most one tab",
+            ),
+            (
+                r#""wire":0.25"#,
+                r#", "spark_gap": 0.1, "start_hole": {"x": -5, "y": 5}, "lead_in": {"type": "none"}"#,
+                "a wire profile uses start_hole as the lead, not lead_in or lead_out",
+            ),
+            (
+                r#""wire":0.25"#,
+                r#", "spark_gap": 0.1, "start_hole": {"x": -5, "y": 5}, "preheat": true, "min_preheat": 5"#,
+                "a wire profile cannot be combined with abrasive or preheat",
+            ),
+        ];
+        for (index, (tool, extra, needle)) in cases.iter().enumerate() {
+            let err = load(&write_job(&format!("wire-bad-{index}"), &kerf_profile_text(tool, extra))).expect_err(needle);
+            assert!(invalid_detail(&err).contains(needle), "{needle}: {err}");
+        }
+        let err = load(&write_job(
+            "wire-zpass",
+            &envelope(
+                "plate.dxf",
+                r#"[{"id":1,"wire":0.25}]"#,
+                r#"[{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":2,"step_down":1,"feeds":{"cut":300},"spark_gap":0.1,"start_hole":{"x":-5,"y":5}}]"#,
+            ),
+        ))
+        .expect_err("z");
+        assert!(invalid_detail(&err).contains("a wire profile cannot have multiple Z passes"), "{err}");
     }
 
     #[test]

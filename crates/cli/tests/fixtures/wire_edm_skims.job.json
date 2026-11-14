@@ -1,0 +1,21 @@
+{
+  "format": "campanion-job/1",
+  "source": { "path": "plate.dxf", "hash": "8467d98c7724fb00" },
+  "units": "mm",
+  "tools": [ { "id": 1, "wire": 0.25 } ],
+  "operations": [ {
+    "name": "plate",
+    "type": "profile",
+    "layers": ["PLATE"],
+    "side": "outside",
+    "tool_id": 1,
+    "depth": 10.0,
+    "step_down": 10.0,
+    "feeds": { "cut": 200, "plunge": 200 },
+    "power": 0.6,
+    "spark_gap": 0.10,
+    "start_hole": { "x": -5, "y": 20 },
+    "skims": [ { "spark_gap": 0.05, "feeds": { "cut": 120 }, "power": 0.4 } ],
+    "flush": true
+  } ]
+}

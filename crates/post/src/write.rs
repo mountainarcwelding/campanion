@@ -2120,6 +2120,7 @@ impl<'a> Writer<'a> {
             Event::Coolant { mode } => self.coolant(*mode),
             Event::Comment { text } => self.comment(text),
             Event::Probe { toward, feed } => self.write_probe(toward.as_ref(), *feed),
+            Event::ProgramStop { name } => self.write_program_stop(name),
             Event::Custom { name, .. } => self.comment(&format!("custom {}", sanitize(name))),
             Event::Sync { id } => {
                 if self.multi_channel {
@@ -2282,6 +2283,13 @@ impl<'a> Writer<'a> {
         self.push_feed(&mut words, Some(feed), true)?;
         self.linear = None;
         self.emit_words(&words)
+    }
+
+    fn write_program_stop(&mut self, name: &str) -> Result<()> {
+        if let Some(lines) = self.post.program_stop.as_ref().and_then(|stops| stops.get(name)) {
+            return self.templates(&format!("program_stop.{name}"), lines, &[]);
+        }
+        if name.is_empty() { self.comment("program stop") } else { self.comment(&format!("program stop: {}", sanitize(name))) }
     }
 
     fn pin_text(&self, key: &str) -> String {

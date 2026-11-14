@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+A LinuxCNC-style `wire_edm` post writes 2-axis wire EDM paths: a kerf-sized offset of wire radius plus the spark gap named by each pass, a lead from a supplied start hole, tabs, skim passes, and wire off on rapids. This output has not been proven on a machine.
+
+### Added
+
+- A built-in `wire_edm` post, beside `plasma`, `waterjet` and `oxyfuel`, for LinuxCNC-style 2-axis wire EDM. The wire is `Other` process `wire_edm` and uses the LinuxCNC spindle-control words `M3 S{power}` / `M5`. Flush is coolant flood `M8` / `M9`. Named program stop `wire_stop` is `M0`. Codes are from the LinuxCNC M-code manual. `process_cycle` is `per_cut`, so the wire is off on every rapid. The post stores no upper guide. Mill and five-axis audit accept `M0` and `M1` as program and optional stops that do not change motion or modal state. This output has not been proven on a machine.
+- A `campanion-job/1` profile may set tool field `wire` (the wire diameter) together with `spark_gap` and `start_hole`. The compensated path sits the wire radius plus that pass's spark gap off the contour. The lead starts at the supplied start hole. Optional `skims` are further profiles, each of which must name a strictly smaller `spark_gap`; feeds and power on a skim are optional. Optional `flush` writes flood coolant around the operation and leaves it on through rapids. A tab leaves the slug attached: the path stops at the tab, the wire turns off, and `wire_stop` is written. The path stays at Z=0. Spark gaps, feeds and the wire diameter are job data, not machine defaults. 4-axis UV / an upper guide, and a second-control dialect, are out of scope.
+
 ## 0.14.0 — 2026-11-13
 
 A LinuxCNC-style `oxyfuel` post writes preheat and cutting-oxygen events for a single vertical torch (#176). This output has not been proven on a machine.

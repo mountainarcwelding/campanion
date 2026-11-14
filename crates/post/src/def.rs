@@ -24,7 +24,9 @@
 //!
 //! `probe` is optional. `code` is `G38.2` or `G38.3`. A Probe event with a contact pose and a
 //! feed writes that code, the tip, and `F`. Without `probe`, the event stays a comment. A missing
-//! pose or feed is an error when `probe` is set. `auxiliaries`, when set, lists the Other names
+//! pose or feed is an error when `probe` is set. `program_stop` maps a stop name to one or more
+//! lines, typically LinuxCNC `M0`. Without that template, a ProgramStop event stays a comment.
+//! `auxiliaries`, when set, lists the Other names
 //! the post accepts; any other name is an error, and there is no `process.other` fallback. When
 //! `auxiliaries` is omitted, Other still uses `process.other`. `digital_out` supplies `{pin}` for
 //! the `vacuum`, `dust`, `abrasive`, `preheat` and `cutting_oxygen` templates. `vacuum_pin` defaults to 0 and `dust_pin` defaults to 1.
@@ -138,6 +140,9 @@ pub struct PostDef {
     /// Straight-probe code. Absent leaves a Probe event as a comment.
     #[serde(default)]
     pub(crate) probe: Option<ProbeOutput>,
+    /// Named program-stop templates. Absent leaves a ProgramStop event as a comment.
+    #[serde(default)]
+    pub(crate) program_stop: Option<BTreeMap<String, Vec<String>>>,
     /// Torch-height control. `on` follows the pierce dwell. `off` precedes process off.
     #[serde(default)]
     pub(crate) thc: Option<ThcWords>,
@@ -811,6 +816,7 @@ impl PostDef {
         if let Some(probe) = &mut self.probe {
             check_probe(probe)?;
         }
+        check_program_stop(&self)?;
         check_process(&self)?;
         check_auxiliaries(&self)?;
         if let Some(thc) = &self.thc {
@@ -1489,6 +1495,23 @@ fn check_digital_out(out: &DigitalOut) -> Result<()> {
 
 fn check_pin(field_name: &str, pin: u32) -> Result<()> {
     if pin > 999 { Err(field(field_name, "must be 0..=999")) } else { Ok(()) }
+}
+
+fn check_program_stop(post: &PostDef) -> Result<()> {
+    let Some(stops) = &post.program_stop else {
+        return Ok(());
+    };
+    if stops.len() > 32 {
+        return Err(field("program_stop", "at most 32 names"));
+    }
+    for (name, lines) in stops {
+        check_token("program_stop", name, 64).map_err(|_| field("program_stop", format!("invalid name `{name}`")))?;
+        if lines.is_empty() {
+            return Err(field(format!("program_stop.{name}"), "needs at least one line"));
+        }
+        check_templates(&format!("program_stop.{name}"), lines, HEADER_KEYS)?;
+    }
+    Ok(())
 }
 
 fn check_probe(probe: &mut ProbeOutput) -> Result<()> {
