@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-Mach4 posts omit explicit zero-length dwells and refuse a positive delay that would round to `G4 P0` (#171). A LinuxCNC-style `waterjet` post writes jet and abrasive events for straight cuts. This output has not been proven on a machine.
+## 0.13.0 — 2026-11-13
+
+Mach4 posts omit explicit zero-length dwells and refuse a positive delay that would round to `G4 P0` (#171). A LinuxCNC-style `waterjet` post writes jet and abrasive events for straight cuts (#174). This output has not been proven on a machine.
 
 ### Added
 
