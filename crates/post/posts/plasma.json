@@ -30,6 +30,7 @@
     "knife": { "on": ["M3 S{speed}"], "off": ["M5"] },
     "other": { "on": ["M3 S{speed}"], "off": ["M5"] }
   },
+  "auxiliaries": [],
   "tool_change": ["T{tool} M6"],
   "cutter_comp": { "left": ["G41"], "right": ["G42"], "off": ["G40"] },
   "coolant": { "flood": ["M8"], "mist": ["M7"], "off": ["M9"] },

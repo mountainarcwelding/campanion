@@ -64,6 +64,7 @@ const HAAS_JSON: &str = include_str!("../posts/haas.json");
 const HAAS_UMC_JSON: &str = include_str!("../posts/haas_umc.json");
 const HAAS_UMC_TCPC_JSON: &str = include_str!("../posts/haas_umc_tcpc.json");
 const PLASMA_JSON: &str = include_str!("../posts/plasma.json");
+const WATERJET_JSON: &str = include_str!("../posts/waterjet.json");
 const GRBL_LASER_JSON: &str = include_str!("../posts/grbl_laser.json");
 const LINUXCNC_LATHE_JSON: &str = include_str!("../posts/linuxcnc_lathe.json");
 const FANUC_LATHE_JSON: &str = include_str!("../posts/fanuc_lathe.json");
@@ -86,6 +87,7 @@ pub fn builtin_ids() -> &'static [&'static str] {
         "haas_umc",
         "haas_umc_tcpc",
         "plasma",
+        "waterjet",
         "grbl_laser",
         "linuxcnc_lathe",
         "fanuc_lathe",
@@ -110,6 +112,7 @@ pub fn builtin(id: &str) -> Option<PostDef> {
         "haas_umc" => HAAS_UMC_JSON,
         "haas_umc_tcpc" => HAAS_UMC_TCPC_JSON,
         "plasma" => PLASMA_JSON,
+        "waterjet" => WATERJET_JSON,
         "grbl_laser" => GRBL_LASER_JSON,
         "linuxcnc_lathe" => LINUXCNC_LATHE_JSON,
         "fanuc_lathe" => FANUC_LATHE_JSON,

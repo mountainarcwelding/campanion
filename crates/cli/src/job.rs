@@ -32,7 +32,9 @@
 use std::path::Path;
 
 use campanion_geom::{Contour, Line, Point, Segment, Tolerance};
-use campanion_ir::{CompensationMode, Document, Feeds, Import, ProcessKind, ProcessParams, Tool, VerifyOptions, hold_spindle, verify_with};
+use campanion_ir::{
+    CompensationMode, Document, Feeds, Import, ParamValue, ProcessKind, ProcessParams, Tool, VerifyOptions, hold_spindle, verify_with,
+};
 use campanion_path::{Compensation, ControllerSide, CutDirection, Lead, ProfileOp, ProfileSide, TabSpec, Tool as PathTool};
 use serde_json::{Map, Value};
 
@@ -278,6 +280,7 @@ pub(crate) fn parse_params(value: Option<&Value>) -> Result<ProcessParams, CliEr
             "post_process_on_during_delay",
             "pierce_height",
             "cut_height",
+            "pierce_type",
         ],
         "params",
     )?;
@@ -296,7 +299,29 @@ pub(crate) fn parse_params(value: Option<&Value>) -> Result<ProcessParams, CliEr
     if let Some(z) = optional(map, "cut_height") {
         params = params.cut_height(Some(as_f64(z, "cut_height")?))?;
     }
+    if let Some(kind) = optional(map, "pierce_type") {
+        params = set_pierce_type(params, as_str(kind, "pierce_type")?)?;
+    }
     Ok(params)
+}
+
+/// Pierce type names from the processes plan. A dialect may cite further names later.
+pub(crate) const PIERCE_TYPES: &[&str] = &["stationary", "wiggle", "low_pressure"];
+
+pub(crate) fn set_pierce_type(params: ProcessParams, name: &str) -> Result<ProcessParams, CliError> {
+    if !PIERCE_TYPES.contains(&name) {
+        return Err(CliError::invalid("pierce_type must be stationary, wiggle, or low_pressure"));
+    }
+    let mut extra = params.extra_params().clone();
+    extra.insert("pierce_type".to_string(), ParamValue::text(name)?);
+    Ok(params.extra(extra)?)
+}
+
+pub(crate) fn pierce_type_of(params: &ProcessParams) -> Option<String> {
+    match params.extra_params().get("pierce_type") {
+        Some(ParamValue::Text(name)) => Some(name.clone()),
+        _ => None,
+    }
 }
 
 fn apply_delay(params: ProcessParams, map: &Map<String, Value>, delay_key: &str, toggle_key: &str, pierce: bool) -> Result<ProcessParams, CliError> {

@@ -2291,6 +2291,7 @@ impl<'a> Writer<'a> {
         match key {
             "vacuum" => out.vacuum_pin.to_string(),
             "dust" => out.dust_pin.to_string(),
+            "abrasive" => out.abrasive_pin.map(|pin| pin.to_string()).unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -2324,7 +2325,8 @@ impl<'a> Writer<'a> {
         }
         self.thc_before_off()?;
         let active = std::mem::take(&mut self.on);
-        for item in &active {
+        // Last-on first-off, so an auxiliary such as abrasive stops before the jet.
+        for item in active.iter().rev() {
             let lines = self.lines_for_key(&item.key, false)?;
             self.emit_process("process.off", &item.key, &lines, &item.speed, &item.power)?;
         }

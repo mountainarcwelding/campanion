@@ -259,6 +259,32 @@ has a contact pose and a feed as `G38.2`. Pin numbers are post parameters (`digi
 defaults 0 and 1). A mill job posted with that dialect still uses the spindle templates. This
 output has not been proven on a machine.
 
+### Waterjet
+
+A kerf `profile` may set `abrasive` (boolean). When true, `campanion run` writes an `Other`
+process named `abrasive` after the pierce sequence (process on, optional pierce dwell, optional
+plunge to cut height) and turns it off before the jet (`Torch`) turns off. The `waterjet` post
+writes the jet as LinuxCNC spindle-control words `M3 S1` / `M5`
+(https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m3-m5) and abrasive as immediate
+digital outputs `M64 Pn` / `M65 Pn`
+(https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65). `digital_out.abrasive_pin`
+is a post parameter that defaults to 0; it is not a machine pin assignment. A post that lists
+accepted auxiliaries refuses any other `Other` name. Omitted `abrasive` writes no abrasive events,
+so a pure-water cut stays jet-only. Height-control words on the post stay empty until a manual
+cites them. This output has not been proven on a machine.
+
+Optional `pierce_type` on a kerf profile is one of `stationary`, `wiggle`, or `low_pressure`.
+The name is stored on the process parameters and written as a G-code comment
+(`pierce type: stationary`). No further pierce codes are emitted, because no cited dialect
+defines them yet. Unknown names are refused. Diameter tools and non-profile operations reject
+`abrasive` and `pierce_type`.
+
+The compensated path sits half a kerf off the contour, same as other kerf profiles. Leads stay
+on the scrap side the operation named. `process_cycle` `per_cut` keeps the jet and abrasive off
+on every rapid: abrasive off, then jet off, then travel, then jet on, then abrasive on. A pierce
+dwell is written only when the IR already has one at that cut. Feeds, delays and kerf width in
+an example job are example values, not machine data.
+
 Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
 removes that remaining stock.
 
