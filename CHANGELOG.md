@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-A LinuxCNC-style `wire_edm` post writes 2-axis wire EDM paths: a kerf-sized offset of wire radius plus the spark gap named by each pass, a lead from a supplied start hole, tabs, skim passes, and wire off on rapids. This output has not been proven on a machine.
+## 0.15.0 — 2026-11-13
+
+A LinuxCNC-style `wire_edm` post writes 2-axis wire EDM paths: a kerf-sized offset of wire radius plus the spark gap named by each pass, a lead from a supplied start hole, tabs, skim passes, and wire off on rapids (#178). This output has not been proven on a machine.
 
 ### Added
 
