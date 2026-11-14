@@ -1476,18 +1476,39 @@ fn restore_process_params(doc: Document, params: &ProcessParams) -> Result<Docum
 
 fn decorate_kerf_process(doc: Document, cut: &Cut<'_>) -> Result<Document, CliError> {
     let abrasive = cut.op.abrasive();
+    let preheat = cut.op.preheat();
     let pierce = pierce_type_of(cut.op.params());
-    if !abrasive && pierce.is_none() {
+    if preheat {
+        if !cut.op.params().pierce_process_on_during_delay() {
+            return Err(CliError::invalid("preheat requires pierce_process_on_during_delay"));
+        }
+        let min = cut.op.min_preheat().ok_or_else(|| CliError::invalid("min_preheat is required when preheat is true"))?;
+        if cut.op.params().pierce_delay_s() + 1e-12 < min {
+            return Err(CliError::invalid("preheat delay is shorter than min_preheat"));
+        }
+    }
+    if !abrasive && !preheat && pierce.is_none() {
         return Ok(doc);
     }
-    insert_kerf_events(doc, abrasive, pierce.as_deref())
+    insert_kerf_events(
+        doc,
+        KerfDecorate { abrasive, preheat, min_preheat: cut.op.min_preheat(), pierce_delay_s: cut.op.params().pierce_delay_s(), pierce_type: pierce },
+    )
 }
 
-fn insert_kerf_events(doc: Document, abrasive: bool, pierce_type: Option<&str>) -> Result<Document, CliError> {
+struct KerfDecorate {
+    abrasive: bool,
+    preheat: bool,
+    min_preheat: Option<f64>,
+    pierce_delay_s: f64,
+    pierce_type: Option<String>,
+}
+
+fn insert_kerf_events(doc: Document, decorate: KerfDecorate) -> Result<Document, CliError> {
     let program = doc.program();
     let mut toolpaths = Vec::with_capacity(program.toolpaths().len());
     for path in program.toolpaths() {
-        let blocks = stitch_kerf_events(path.blocks(), abrasive, pierce_type);
+        let blocks = stitch_kerf_events(path.blocks(), &decorate);
         toolpaths.push(index::rebuild(path, blocks)?);
     }
     let rebuilt = Program::try_new(
@@ -1502,31 +1523,113 @@ fn insert_kerf_events(doc: Document, abrasive: bool, pierce_type: Option<&str>) 
     Ok(Document::new(rebuilt)?)
 }
 
-fn stitch_kerf_events(blocks: &[ClBlock], abrasive: bool, pierce_type: Option<&str>) -> Vec<ClBlock> {
-    let mut out = Vec::with_capacity(blocks.len().saturating_add(8));
+fn aux_on(name: &str) -> ClBlock {
+    ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other(name.into()), params: ProcessParams::new() })
+}
+
+fn aux_off(name: &str) -> ClBlock {
+    ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other(name.into()) })
+}
+
+fn comment(text: String) -> ClBlock {
+    ClBlock::Event(Event::Comment { text })
+}
+
+fn close_oxy(out: &mut Vec<ClBlock>, oxygen_on: &mut bool, preheat_on: &mut bool) {
+    if *oxygen_on {
+        out.push(aux_off("cutting_oxygen"));
+        *oxygen_on = false;
+    }
+    if *preheat_on {
+        out.push(aux_off("preheat"));
+        *preheat_on = false;
+    }
+}
+
+fn resume_oxy(out: &mut Vec<ClBlock>, decorate: &KerfDecorate, oxygen_on: &mut bool, preheat_on: &mut bool) {
+    if let Some(min) = decorate.min_preheat {
+        out.push(comment(format!("min preheat: {}", format_seconds(min))));
+    }
+    out.push(aux_on("preheat"));
+    *preheat_on = true;
+    if decorate.pierce_delay_s > 0.0 {
+        out.push(ClBlock::Event(Event::Dwell { seconds: decorate.pierce_delay_s }));
+    }
+    out.push(aux_on("cutting_oxygen"));
+    *oxygen_on = true;
+}
+
+fn format_seconds(seconds: f64) -> String {
+    if (seconds - seconds.round()).abs() <= 1e-9 { format!("{}", seconds.round() as i64) } else { format!("{seconds}") }
+}
+
+fn stitch_kerf_events(blocks: &[ClBlock], decorate: &KerfDecorate) -> Vec<ClBlock> {
+    let mut out = Vec::with_capacity(blocks.len().saturating_add(16));
     let mut pending_abrasive = false;
     let mut abrasive_on = false;
+    let mut preheat_on = false;
+    let mut oxygen_on = false;
+    let mut pending_resume = false;
     for block in blocks {
         match block {
             ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, .. }) => {
-                if let Some(kind) = pierce_type {
-                    out.push(ClBlock::Event(Event::Comment { text: format!("pierce type: {kind}") }));
+                pending_resume = false;
+                if let Some(kind) = decorate.pierce_type.as_deref() {
+                    out.push(comment(format!("pierce type: {kind}")));
+                }
+                if decorate.preheat
+                    && let Some(min) = decorate.min_preheat
+                {
+                    out.push(comment(format!("min preheat: {}", format_seconds(min))));
                 }
                 out.push(block.clone());
-                if abrasive {
+                if decorate.abrasive {
                     pending_abrasive = true;
+                }
+                if decorate.preheat {
+                    out.push(aux_on("preheat"));
+                    preheat_on = true;
+                    if decorate.pierce_delay_s > 0.0 {
+                    } else {
+                        out.push(aux_on("cutting_oxygen"));
+                        oxygen_on = true;
+                    }
                 }
             }
             ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }) => {
+                close_oxy(&mut out, &mut oxygen_on, &mut preheat_on);
+                pending_resume = false;
                 if abrasive_on {
-                    out.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("abrasive".into()) }));
+                    out.push(aux_off("abrasive"));
                     abrasive_on = false;
                 }
                 pending_abrasive = false;
                 out.push(block.clone());
             }
+            ClBlock::Event(Event::Dwell { .. }) if preheat_on && !oxygen_on => {
+                out.push(block.clone());
+                out.push(aux_on("cutting_oxygen"));
+                oxygen_on = true;
+            }
+            ClBlock::Motion(motion) if is_rapid(motion) && (preheat_on || oxygen_on || pending_resume) => {
+                close_oxy(&mut out, &mut oxygen_on, &mut preheat_on);
+                if decorate.preheat {
+                    pending_resume = true;
+                }
+                out.push(block.clone());
+            }
+            ClBlock::Motion(motion) if pending_resume && !is_rapid(motion) => {
+                resume_oxy(&mut out, decorate, &mut oxygen_on, &mut preheat_on);
+                pending_resume = false;
+                if decorate.abrasive && !abrasive_on && is_kerf_cut(motion) {
+                    out.push(aux_on("abrasive"));
+                    abrasive_on = true;
+                    pending_abrasive = false;
+                }
+                out.push(block.clone());
+            }
             ClBlock::Motion(motion) if pending_abrasive && is_kerf_cut(motion) => {
-                out.push(ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("abrasive".into()), params: ProcessParams::new() }));
+                out.push(aux_on("abrasive"));
                 abrasive_on = true;
                 pending_abrasive = false;
                 out.push(block.clone());
@@ -1534,10 +1637,15 @@ fn stitch_kerf_events(blocks: &[ClBlock], abrasive: bool, pierce_type: Option<&s
             _ => out.push(block.clone()),
         }
     }
+    close_oxy(&mut out, &mut oxygen_on, &mut preheat_on);
     if abrasive_on {
-        out.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("abrasive".into()) }));
+        out.push(aux_off("abrasive"));
     }
     out
+}
+
+fn is_rapid(motion: &ClMotion) -> bool {
+    matches!(motion, ClMotion::Rapid { .. })
 }
 
 fn is_kerf_cut(motion: &ClMotion) -> bool {

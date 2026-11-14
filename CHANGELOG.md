@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+A LinuxCNC-style `oxyfuel` post writes preheat and cutting-oxygen events for a single vertical torch. This output has not been proven on a machine.
+
+### Added
+
+- A built-in `oxyfuel` post, beside `plasma` and `waterjet`, for LinuxCNC-style straight oxy-fuel cuts. The cutting flame is a Torch process and uses the LinuxCNC spindle-control words `M3 S1` / `M5`. Named `Other` processes `preheat` and `cutting_oxygen` are immediate digital outputs `M64 Pn` / `M65 Pn`. `digital_out.preheat_pin` and `digital_out.cutting_oxygen_pin` are post parameters that default to 0 and 1; they are not machine pin assignments. Height-control words stay empty. `process_cycle` is `per_cut`, so cutting oxygen turns off before preheat, and preheat before the torch, on a rapid. Codes are from the LinuxCNC M-code manual. This output has not been proven on a machine.
+- A kerf `profile` in a `campanion-job/1` file may set `preheat`. When true, `campanion run` writes `preheat` on, the existing pierce dwell, then `cutting_oxygen` on, and turns cutting oxygen off before preheat before the torch. `min_preheat` is required with `preheat` and is the shortest allowed pierce delay, in seconds. A shorter delay is a code-generation error. The job-stated minimum is written as a G-code comment, and the dwell is recorded in the golden. Bevel waits for the tilt step. Several torches wait for a cited channel-wait code.
+
 ## 0.13.0 — 2026-11-13
 
 Mach4 posts omit explicit zero-length dwells and refuse a positive delay that would round to `G4 P0` (#171). A LinuxCNC-style `waterjet` post writes jet and abrasive events for straight cuts (#174). This output has not been proven on a machine.

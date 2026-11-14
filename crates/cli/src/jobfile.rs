@@ -15,6 +15,10 @@
 //! A kerf profile may set `abrasive`. When true, `campanion run` writes an `Other` process named
 //! `abrasive` after the pierce sequence and turns it off before the jet. The `waterjet` post
 //! emits that as `M64` / `M65`. Omitted, no abrasive events are written. A kerf profile may also
+//! set `preheat`. When true, `campanion run` writes named `Other` processes `preheat` and
+//! `cutting_oxygen` around the pierce dwell: preheat on, dwell, cutting oxygen on, then cutting
+//! oxygen off and preheat off before the torch. `min_preheat` is required with `preheat` and is
+//! the shortest allowed pierce delay, in seconds. A shorter delay is refused. A kerf profile may also
 //! set `pierce_type`: `stationary`, `wiggle`, or `low_pressure`. That name is stored on the
 //! process parameters and posted as a comment; no dialect-specific pierce codes are invented.
 //! Both fields are rejected on a diameter tool and on every non-profile operation.
@@ -1018,6 +1022,10 @@ pub struct Operation {
     raster: Option<LaserRasterGeom>,
     /// Named abrasive auxiliary on a kerf profile. False when the file omits `abrasive`.
     abrasive: bool,
+    /// Named preheat and cutting-oxygen auxiliaries on a kerf profile. False when omitted.
+    preheat: bool,
+    /// Shortest allowed pierce delay, in seconds, when `preheat` is true.
+    min_preheat: Option<f64>,
 }
 
 /// How a surface aims the tool, then clamps it toward +Z.
@@ -1302,6 +1310,16 @@ impl Operation {
     /// True when the profile asked for the abrasive auxiliary.
     pub fn abrasive(&self) -> bool {
         self.abrasive
+    }
+
+    /// True when the profile asked for the preheat and cutting-oxygen auxiliaries.
+    pub fn preheat(&self) -> bool {
+        self.preheat
+    }
+
+    /// Shortest allowed pierce delay, in seconds, when [`Self::preheat`] is true.
+    pub fn min_preheat(&self) -> Option<f64> {
+        self.min_preheat
     }
 
     /// Machine A/B index in degrees. `None` when the file omits `index_deg`.
@@ -2503,6 +2521,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "scanning_offset",
             "grey_map",
             "abrasive",
+            "preheat",
+            "min_preheat",
             "pierce_type",
         ],
         "operation",
@@ -2606,6 +2626,15 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale, tool, kind)?;
     let abrasive = parse_abrasive(optional(map, "abrasive"), &name, &kind, tool)?;
+    let (preheat, min_preheat) = parse_preheat(map, &name, &kind, tool, abrasive)?;
+    if preheat && !params.pierce_process_on_during_delay() {
+        return Err(op_invalid(&name, "preheat requires pierce_process_on_during_delay"));
+    }
+    if let Some(min) = min_preheat
+        && params.pierce_delay_s() + 1e-12 < min
+    {
+        return Err(op_invalid(&name, "preheat delay is shorter than min_preheat"));
+    }
     let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
     let (lead_in, lead_out) = if matches!(kind, OperationKind::Profile { .. }) {
         (parse_profile_lead(optional(map, "lead_in"), scale)?, parse_profile_lead(optional(map, "lead_out"), scale)?)
@@ -2659,6 +2688,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         tool_axis: None,
         raster: None,
         abrasive,
+        preheat,
+        min_preheat,
     })
 }
 
@@ -2795,6 +2826,8 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         tool_axis,
         raster: None,
         abrasive: false,
+        preheat: false,
+        min_preheat: None,
     })
 }
 
@@ -3041,6 +3074,8 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         tool_axis: None,
         raster: None,
         abrasive: false,
+        preheat: false,
+        min_preheat: None,
     })
 }
 
@@ -3174,6 +3209,8 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         tool_axis: None,
         raster: None,
         abrasive: false,
+        preheat: false,
+        min_preheat: None,
     })
 }
 
@@ -3278,6 +3315,8 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         tool_axis: None,
         raster: None,
         abrasive: false,
+        preheat: false,
+        min_preheat: None,
     })
 }
 
@@ -3408,6 +3447,8 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         tool_axis: None,
         raster: None,
         abrasive: false,
+        preheat: false,
+        min_preheat: None,
     })
 }
 
@@ -3539,6 +3580,8 @@ fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools
         tool_axis: None,
         raster: Some(LaserRasterGeom { image: image.to_string(), origin, width, height, angle, step, overscan, scanning_offset, map: map_kind }),
         abrasive: false,
+        preheat: false,
+        min_preheat: None,
     })
 }
 
@@ -4234,6 +4277,52 @@ fn parse_abrasive(value: Option<&Value>, name: &str, kind: &OperationKind, tool:
         return Err(op_invalid(name, "abrasive is only valid on a kerf tool"));
     }
     as_bool(value, "abrasive").map_err(from_cli)
+}
+
+fn parse_preheat(
+    map: &Map<String, Value>,
+    name: &str,
+    kind: &OperationKind,
+    tool: &JobTool,
+    abrasive: bool,
+) -> Result<(bool, Option<f64>), JobFileError> {
+    let preheat = match optional(map, "preheat") {
+        Some(value) => {
+            if !matches!(kind, OperationKind::Profile { .. }) {
+                return Err(op_invalid(name, "preheat is only valid on a profile"));
+            }
+            if tool.diameter().is_some() {
+                return Err(op_invalid(name, "preheat is only valid on a kerf tool"));
+            }
+            as_bool(value, "preheat").map_err(from_cli)?
+        }
+        None => false,
+    };
+    let min_preheat = match optional(map, "min_preheat") {
+        Some(value) => {
+            if !preheat {
+                return Err(op_invalid(name, "min_preheat is only valid with preheat"));
+            }
+            Some(parse_min_preheat(value)?)
+        }
+        None if preheat => return Err(op_invalid(name, "min_preheat is required when preheat is true")),
+        None => None,
+    };
+    if preheat && abrasive {
+        return Err(op_invalid(name, "preheat cannot be combined with abrasive"));
+    }
+    Ok((preheat, min_preheat))
+}
+
+fn parse_min_preheat(value: &Value) -> Result<f64, JobFileError> {
+    let seconds = as_f64(value, "min_preheat").map_err(from_cli)?;
+    if seconds < 0.0 {
+        return Err(JobFileError::invalid("min_preheat must be at least 0"));
+    }
+    if seconds > MAX_DELAY_S {
+        return Err(JobFileError::invalid(format!("min_preheat is larger than {MAX_DELAY_S} s")));
+    }
+    Ok(seconds)
 }
 
 fn apply_pierce_type(map: &Map<String, Value>, tool: &JobTool, kind: OperationKind, params: ProcessParams) -> Result<ProcessParams, JobFileError> {
@@ -5128,6 +5217,36 @@ mod tests {
 
         let err = load(&write_job("wj-type", &kerf_profile_text(r#""kerf":1.0"#, r#", "pierce_type": "unknown""#))).expect_err("type");
         assert!(invalid_detail(&err).contains("pierce_type must be stationary, wiggle, or low_pressure"), "{err}");
+    }
+
+    #[test]
+    fn profile_accepts_preheat_and_min_preheat_on_a_kerf() {
+        let job =
+            load(&write_job("of-ok", &kerf_profile_text(r#""kerf":1.0"#, r#", "preheat": true, "min_preheat": 5, "timing": { "pierce_delay": 8 }"#)))
+                .expect("ok");
+        assert!(job.operations()[0].preheat());
+        assert_eq!(job.operations()[0].min_preheat(), Some(5.0));
+        assert_eq!(job.operations()[0].params().pierce_delay_s(), 8.0);
+
+        let omitted = load(&write_job("of-omit", &kerf_profile_text(r#""kerf":1.0"#, ""))).expect("omit");
+        assert!(!omitted.operations()[0].preheat());
+        assert_eq!(omitted.operations()[0].min_preheat(), None);
+    }
+
+    #[test]
+    fn profile_rejects_invalid_preheat() {
+        let err = load(&write_job("of-mill", &kerf_profile_text(r#""diameter":6"#, r#", "preheat": true, "min_preheat": 5"#))).expect_err("mill");
+        assert!(invalid_detail(&err).contains("preheat is only valid on a kerf tool"), "{err}");
+
+        let err = load(&write_job("of-nomin", &kerf_profile_text(r#""kerf":1.0"#, r#", "preheat": true"#))).expect_err("nomin");
+        assert!(invalid_detail(&err).contains("min_preheat is required when preheat is true"), "{err}");
+
+        let err = load(&write_job("of-onlymin", &kerf_profile_text(r#""kerf":1.0"#, r#", "min_preheat": 5"#))).expect_err("onlymin");
+        assert!(invalid_detail(&err).contains("min_preheat is only valid with preheat"), "{err}");
+
+        let err = load(&write_job("of-mix", &kerf_profile_text(r#""kerf":1.0"#, r#", "abrasive": true, "preheat": true, "min_preheat": 5"#)))
+            .expect_err("mix");
+        assert!(invalid_detail(&err).contains("preheat cannot be combined with abrasive"), "{err}");
     }
 
     #[test]
