@@ -1,0 +1,21 @@
+{
+  "format": "campanion-job/1",
+  "source": { "path": "plate.dxf", "hash": "8467d98c7724fb00" },
+  "units": "mm",
+  "tools": [ { "id": 1, "kerf": 2.0 } ],
+  "operations": [ {
+    "name": "plate",
+    "type": "profile",
+    "layers": ["PLATE"],
+    "side": "outside",
+    "tool_id": 1,
+    "depth": 6.0,
+    "step_down": 6.0,
+    "feeds": { "cut": 400, "plunge": 200 },
+    "timing": { "pierce_delay": 8.0 },
+    "lead_in": { "type": "none" },
+    "lead_out": { "type": "none" },
+    "preheat": true,
+    "min_preheat": 5
+  } ]
+}

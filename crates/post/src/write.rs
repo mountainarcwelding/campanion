@@ -2292,6 +2292,8 @@ impl<'a> Writer<'a> {
             "vacuum" => out.vacuum_pin.to_string(),
             "dust" => out.dust_pin.to_string(),
             "abrasive" => out.abrasive_pin.map(|pin| pin.to_string()).unwrap_or_default(),
+            "preheat" => out.preheat_pin.map(|pin| pin.to_string()).unwrap_or_default(),
+            "cutting_oxygen" => out.cutting_oxygen_pin.map(|pin| pin.to_string()).unwrap_or_default(),
             _ => String::new(),
         }
     }

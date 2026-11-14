@@ -174,6 +174,7 @@ fn posts_lists_every_builtin() -> Result<(), String> {
             "haas_umc_tcpc",
             "plasma",
             "waterjet",
+            "oxyfuel",
             "grbl_laser",
             "linuxcnc_lathe",
             "fanuc_lathe",

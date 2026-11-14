@@ -27,8 +27,8 @@
 //! pose or feed is an error when `probe` is set. `auxiliaries`, when set, lists the Other names
 //! the post accepts; any other name is an error, and there is no `process.other` fallback. When
 //! `auxiliaries` is omitted, Other still uses `process.other`. `digital_out` supplies `{pin}` for
-//! the `vacuum`, `dust` and `abrasive` templates. `vacuum_pin` defaults to 0 and `dust_pin` defaults to 1.
-//! `abrasive_pin` is omitted unless the post sets it.
+//! the `vacuum`, `dust`, `abrasive`, `preheat` and `cutting_oxygen` templates. `vacuum_pin` defaults to 0 and `dust_pin` defaults to 1.
+//! `abrasive_pin`, `preheat_pin` and `cutting_oxygen_pin` are omitted unless the post sets them.
 //!
 //! `rotary` is optional. Without it, a program that carries a rotary angle is rejected. `axes`
 //! lists `a`, `b`, or both. The A/B word uses the dimensional formatter with `decimals`
@@ -224,7 +224,7 @@ pub(crate) struct ProbeOutput {
     pub(crate) code: String,
 }
 
-/// Immediate digital-output pins for `vacuum`, `dust` and `abrasive`.
+/// Immediate digital-output pins for `vacuum`, `dust`, `abrasive`, `preheat` and `cutting_oxygen`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DigitalOut {
@@ -237,6 +237,12 @@ pub(crate) struct DigitalOut {
     /// `P` number on the abrasive `M64` / `M65` lines. Omitted when the post has no abrasive auxiliary.
     #[serde(default)]
     pub(crate) abrasive_pin: Option<u32>,
+    /// `P` number on the preheat `M64` / `M65` lines. Omitted when the post has no preheat auxiliary.
+    #[serde(default)]
+    pub(crate) preheat_pin: Option<u32>,
+    /// `P` number on the cutting-oxygen `M64` / `M65` lines. Omitted when the post has no cutting_oxygen auxiliary.
+    #[serde(default)]
+    pub(crate) cutting_oxygen_pin: Option<u32>,
 }
 
 fn default_vacuum_pin() -> u32 {
@@ -1396,8 +1402,11 @@ fn check_process(post: &PostDef) -> Result<()> {
     }
     for (key, words) in &post.process {
         check_token("process", key, 64).map_err(|_| field("process", format!("invalid key `{key}`")))?;
-        let allowed =
-            if post.digital_out.is_some() && matches!(key.as_str(), "vacuum" | "dust" | "abrasive") { AUX_PROCESS_KEYS } else { PROCESS_KEYS };
+        let allowed = if post.digital_out.is_some() && matches!(key.as_str(), "vacuum" | "dust" | "abrasive" | "preheat" | "cutting_oxygen") {
+            AUX_PROCESS_KEYS
+        } else {
+            PROCESS_KEYS
+        };
         check_templates(&format!("process.{key}.on"), &words.on, allowed)?;
         check_templates(&format!("process.{key}.off"), &words.off, allowed)?;
     }
@@ -1423,6 +1432,12 @@ fn check_auxiliaries(post: &PostDef) -> Result<()> {
         if name == "abrasive" && post.digital_out.as_ref().is_none_or(|out| out.abrasive_pin.is_none()) {
             return Err(field("digital_out.abrasive_pin", "required when auxiliaries lists abrasive"));
         }
+        if name == "preheat" && post.digital_out.as_ref().is_none_or(|out| out.preheat_pin.is_none()) {
+            return Err(field("digital_out.preheat_pin", "required when auxiliaries lists preheat"));
+        }
+        if name == "cutting_oxygen" && post.digital_out.as_ref().is_none_or(|out| out.cutting_oxygen_pin.is_none()) {
+            return Err(field("digital_out.cutting_oxygen_pin", "required when auxiliaries lists cutting_oxygen"));
+        }
     }
     Ok(())
 }
@@ -1444,6 +1459,16 @@ fn digital_pins(post: &PostDef) -> Vec<u32> {
     {
         pins.push(pin);
     }
+    if listed("preheat")
+        && let Some(pin) = out.preheat_pin
+    {
+        pins.push(pin);
+    }
+    if listed("cutting_oxygen")
+        && let Some(pin) = out.cutting_oxygen_pin
+    {
+        pins.push(pin);
+    }
     pins
 }
 
@@ -1452,6 +1477,12 @@ fn check_digital_out(out: &DigitalOut) -> Result<()> {
     check_pin("digital_out.dust_pin", out.dust_pin)?;
     if let Some(pin) = out.abrasive_pin {
         check_pin("digital_out.abrasive_pin", pin)?;
+    }
+    if let Some(pin) = out.preheat_pin {
+        check_pin("digital_out.preheat_pin", pin)?;
+    }
+    if let Some(pin) = out.cutting_oxygen_pin {
+        check_pin("digital_out.cutting_oxygen_pin", pin)?;
     }
     Ok(())
 }

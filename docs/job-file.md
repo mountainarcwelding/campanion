@@ -285,6 +285,36 @@ on every rapid: abrasive off, then jet off, then travel, then jet on, then abras
 dwell is written only when the IR already has one at that cut. Feeds, delays and kerf width in
 an example job are example values, not machine data.
 
+### Oxy-fuel
+
+A kerf `profile` may set `preheat` (boolean). When true, `min_preheat` is required: the shortest
+allowed pierce delay, in seconds, not scaled by `units`. `campanion run` writes named `Other`
+processes `preheat` and `cutting_oxygen` around the existing pierce dwell: preheat on, dwell,
+cutting oxygen on, then cutting oxygen off and preheat off before the torch (`Torch`) turns off.
+A pierce delay shorter than `min_preheat` is refused, and `pierce_process_on_during_delay` must
+stay true (the default). The job-stated minimum is written as a G-code comment
+(`min preheat: 5`). The `oxyfuel` post writes the torch as LinuxCNC spindle-control words
+`M3 S1` / `M5`
+(https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m3-m5) and the auxiliaries as
+immediate digital outputs `M64 Pn` / `M65 Pn`
+(https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65).
+`digital_out.preheat_pin` and `digital_out.cutting_oxygen_pin` are post parameters that default
+to 0 and 1; they are not machine pin assignments. A post that lists accepted auxiliaries refuses
+any other `Other` name. Omitted `preheat` writes no preheat or cutting-oxygen events. Height-control
+words on the post stay empty until a manual cites them. Bevel is not written yet; it waits for
+the shared tilt step. Several torches are not written yet; a channel wait needs a cited dialect
+code. This output has not been proven on a machine.
+
+`preheat` cannot be combined with `abrasive`. Diameter tools and non-profile operations reject
+`preheat` and `min_preheat`.
+
+The compensated path sits half a kerf off the contour, same as other kerf profiles. Leads stay
+on the scrap side the operation named. `process_cycle` `per_cut` keeps the torch, preheat and
+cutting oxygen off on every rapid: cutting oxygen off, then preheat off, then torch off, then
+travel. When a job-file path would otherwise leave those auxiliaries on through a rapid, the
+path turns them off and writes a fresh preheat dwell before cutting oxygen returns. Feeds,
+delays and kerf width in an example job are example values, not machine data.
+
 Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
 removes that remaining stock.
 
