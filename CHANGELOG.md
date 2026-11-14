@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-Tilting kerf heads share one tool-axis path for waterjet lead and taper and oxy-fuel bevel. This output has not been proven on a machine.
+## 0.16.0 — 2026-11-13
+
+Tilting kerf heads share one tool-axis path for waterjet lead and taper and oxy-fuel bevel (#180). This output has not been proven on a machine.
 
 ### Added
 
