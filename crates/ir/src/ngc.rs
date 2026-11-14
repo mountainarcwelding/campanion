@@ -339,6 +339,10 @@ impl Writer {
                 let label = strip_parens(name);
                 if label.is_empty() { self.line("(custom)") } else { self.line(&format!("(custom {label})")) }
             }
+            Event::ProgramStop { name } => {
+                let label = strip_parens(name);
+                if label.is_empty() { self.line("(program stop)") } else { self.line(&format!("(program stop: {label})")) }
+            }
             Event::Sync { id } => self.line(&format!("(sync {id})")),
             Event::CAxis { spindle, engage } => {
                 let verb = if *engage { "engage" } else { "disengage" };

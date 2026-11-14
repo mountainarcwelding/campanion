@@ -129,8 +129,8 @@ use std::process::ExitCode;
 use campanion_geom::{BoundingBox, Containment, Contour, Orientation, Point, Region, Tolerance};
 use campanion_import::{Drawing, ImportOptions, import_dxf, import_svg};
 use campanion_ir::{
-    AssemblySegment, ClBlock, ClMotion, ClPath, CompensationMode, Document, Event, Fixture, Import, MoveRole, ProcessKind, ProcessParams, Program,
-    RotarySetup, Tool, ToolAssembly, Vec3, hold_spindle,
+    AssemblySegment, ClBlock, ClMotion, ClPath, CompensationMode, CoolantMode, Document, Event, Fixture, Import, MoveRole, ProcessKind,
+    ProcessParams, Program, RotarySetup, Tool, ToolAssembly, Vec3, hold_spindle,
 };
 use campanion_mesh::Mesh;
 use campanion_path::{
@@ -398,12 +398,14 @@ fn emit_program(
     if let Some(post) = post {
         require_spindle_speeds(job, post)?;
     }
-    let options = campanion_ir::VerifyOptions { safe_z: Some(job.clearance()), retract_z: Some(job.retract()) };
+    let (safe_z, retract_z) = if job_is_wire_only(job) { (0.0, 0.0) } else { (job.clearance(), job.retract()) };
+    let options = campanion_ir::VerifyOptions { safe_z: Some(safe_z), retract_z: Some(retract_z) };
     let report = campanion_ir::verify_with(doc.program(), &options);
     // Rotary and 3+2 programs are checked in the planning frame, before indexing. A 3-axis
     // program also blocks verifier findings that end or traverse below the retract height.
     // An XY rapid between the retract and clearance heights stays a non-blocking finding.
-    let rapid_lines = if job.rotary().is_none() && job.five_axis().is_none() { safety::blocking_rapids(&report, job.retract()) } else { Vec::new() };
+    let rapid_floor = if job_is_wire_only(job) { 0.0 } else { job.retract() };
+    let rapid_lines = if job.rotary().is_none() && job.five_axis().is_none() { safety::blocking_rapids(&report, rapid_floor) } else { Vec::new() };
     if !report.issues().is_empty() || !gouges.is_empty() || !rapid_lines.is_empty() {
         let mut err_out = io::stderr().lock();
         if !report.issues().is_empty() || !gouges.is_empty() {
@@ -685,6 +687,8 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
             let (min_x, min_y, max_x, max_y) = crate::raster::bounds(op).map_err(|err| op_err(op, err))?;
             let footprint = safety::Footprint::from_aabb(min_x, min_y, max_x, max_y, grow);
             safety::check_planar(op.name(), &paths, &footprint, job.retract())?;
+        } else if tool.is_wire() {
+            // 2-axis wire travel stays at Z=0 with the wire off. The mill retract plane does not apply.
         } else {
             let grow = tool.diameter().map_or(0.0, |diameter| diameter * 0.5);
             let footprint = safety::Footprint::from_contours(view, grow).map_err(|err| op_err(op, err))?;
@@ -963,9 +967,13 @@ fn prepend_tool_change(path: &ClPath, tool_id: u32) -> Result<ClPath, CliError> 
 
 fn import_with_params(op: &Operation, tool: &JobTool, params: ProcessParams) -> Result<Import, CliError> {
     // A diameter is a rotating cutter. A kerf is a kerf-only process, same rule as the profile job.
-    let process = match tool.path_tool() {
-        PathTool::Diameter { .. } => ProcessKind::Spindle,
-        PathTool::Kerf { .. } => ProcessKind::Torch,
+    let process = if tool.is_wire() {
+        ProcessKind::Other("wire_edm".into())
+    } else {
+        match tool.path_tool() {
+            PathTool::Diameter { .. } => ProcessKind::Spindle,
+            PathTool::Kerf { .. } => ProcessKind::Torch,
+        }
     };
     let import = Import::new(process, op.feeds().cut())?.feeds(op.feeds())?.params(params)?.tool(tool.ir().clone())?.name(op.name())?;
     let mode = match op.compensation() {
@@ -977,6 +985,9 @@ fn import_with_params(op: &Operation, tool: &JobTool, params: ProcessParams) -> 
 }
 
 fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide, slugs: &mut Vec<Contour>) -> Result<(), CliError> {
+    if cut.tool.is_wire() {
+        return wire_profile_paths(paths, cut, side, slugs);
+    }
     let radius = tool_radius(cut)?;
     let stock = cut.op.stock_to_leave();
     // Roughing stands off the wall by `wall` and stops `floor` short of the final depth.
@@ -985,6 +996,163 @@ fn profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide, s
     link_profile(paths, cut, side, radius + stock.wall(), rough, cut.op.step_down(), slugs)?;
     if let Some(finish) = cut.op.finish() {
         link_profile(paths, cut, side, radius, cut.op.depth(), finish.step_down(), slugs)?;
+    }
+    Ok(())
+}
+
+/// 2-axis wire: one guide, path at Z=0, offset = wire radius plus the spark gap named by each pass.
+fn wire_profile_paths(paths: &mut Vec<ClPath>, cut: &Cut<'_>, side: JobProfileSide, slugs: &mut Vec<Contour>) -> Result<(), CliError> {
+    let wire = cut.tool.wire_diameter().ok_or_else(|| op_err(cut.op, "wire diameter is required"))?;
+    let first_gap = cut.op.spark_gap().ok_or_else(|| op_err(cut.op, "spark_gap is required on a wire profile"))?;
+    let hole = cut.op.start_hole().ok_or_else(|| op_err(cut.op, "start_hole is required on a wire profile"))?;
+    let mut passes = vec![WirePass { spark_gap: first_gap, cut_feed: None, power: None }];
+    for skim in cut.op.skims() {
+        passes.push(WirePass { spark_gap: skim.spark_gap(), cut_feed: skim.cut_feed(), power: skim.power() });
+    }
+    let start = paths.len();
+    for pass in &passes {
+        link_wire_pass(paths, cut, side, slugs, wire, hole, pass)?;
+    }
+    decorate_wire_paths(&mut paths[start..], cut)
+}
+
+struct WirePass {
+    spark_gap: f64,
+    cut_feed: Option<f64>,
+    power: Option<f64>,
+}
+
+fn link_wire_pass(
+    paths: &mut Vec<ClPath>,
+    cut: &Cut<'_>,
+    side: JobProfileSide,
+    slugs: &mut Vec<Contour>,
+    wire: f64,
+    hole: (f64, f64),
+    pass: &WirePass,
+) -> Result<(), CliError> {
+    let width = wire + 2.0 * pass.spark_gap;
+    if !width.is_finite() || width < 0.0 {
+        return Err(op_err(cut.op, "wire offset is not finite"));
+    }
+    let tool = PathTool::Kerf { width };
+    let hole_pt = Point::new(hole.0, hole.1).map_err(|err| op_err(cut.op, err))?;
+    let lead = Lead::FromPoint { x: hole.0, y: hole.1 };
+    let tabbed = cut.op.tabs().is_some();
+    let lead_out = if tabbed { Lead::None } else { lead };
+    let mut features = Vec::with_capacity(cut.contours.len());
+    for contour in cut.contours {
+        let side = resolve_profile_side(cut, side, contour)?;
+        let mut op = ProfileOp::new(tool, cut.op.compensation(), side, cut.op.cut_direction())
+            .z(0.0)
+            .heights(0.0, 0.0)
+            .lead_in(lead)
+            .lead_out(lead_out)
+            .start(StartPoint::User(hole_pt))
+            .tolerance(cut.tolerance);
+        if let Some(spec) = cut.op.tabs() {
+            op = op.tabs(spec).open_tabs();
+        }
+        let profile = op.generate(contour).map_err(|err| op_err(cut.op, err))?;
+        if profile.tabs().len() > 1 {
+            return Err(op_err(cut.op, "a wire profile may have at most one tab"));
+        }
+        let toolpath = Toolpath::new(profile.toolpath().moves().to_vec()).map_err(|err| op_err(cut.op, err))?;
+        features.push(Feature::new(contour.clone(), toolpath));
+    }
+    link_wire_operation(paths, cut, &features, slugs, pass)
+}
+
+fn link_wire_operation(
+    paths: &mut Vec<ClPath>,
+    cut: &Cut<'_>,
+    features: &[Feature],
+    slugs: &mut Vec<Contour>,
+    pass: &WirePass,
+) -> Result<(), CliError> {
+    let origin = Point::new(0.0, 0.0).map_err(|err| op_err(cut.op, err))?;
+    let tol = cut.job.tolerance();
+    let ordered = campanion_path::order_and_link(features, origin, 0.0, &tol).map_err(|err| op_err(cut.op, err))?;
+    let timed = apply_op_timing(cut, ordered.toolpath())?;
+    let motion = import_with_params(cut.op, cut.tool, ProcessParams::new())?;
+    let mut params = cut.op.params_with_speed(cut.tool).map_err(|err| op_err(cut.op, err))?;
+    if let Some(power) = pass.power {
+        params = params.power(Some(power)).map_err(|err| op_err(cut.op, err))?;
+    }
+    let mut doc = restore_process_params(Document::from_toolpath(&timed, &motion)?, &params)?;
+    if let Some(feed) = pass.cut_feed {
+        doc = with_cut_feed(doc, feed)?;
+    }
+    let _ = slugs;
+    push_doc(paths, doc)
+}
+
+fn with_cut_feed(doc: Document, cut: f64) -> Result<Document, CliError> {
+    let program = doc.program();
+    let mut toolpaths = Vec::with_capacity(program.toolpaths().len());
+    for path in program.toolpaths() {
+        let feeds = path.feeds();
+        let feeds = campanion_ir::Feeds::try_new(cut, Some(cut), Some(cut), feeds.plunge(), feeds.retract())?;
+        let mut blocks = Vec::with_capacity(path.blocks().len());
+        for block in path.blocks() {
+            let block = match block {
+                ClBlock::Motion(ClMotion::Linear { to, role, power, .. }) => {
+                    ClBlock::Motion(ClMotion::Linear { to: *to, feed: cut, role: *role, power: *power })
+                }
+                ClBlock::Motion(ClMotion::Arc { to, plane, center, sense, role, power, .. }) => {
+                    ClBlock::Motion(ClMotion::Arc { to: *to, plane: *plane, center: *center, sense: *sense, feed: cut, role: *role, power: *power })
+                }
+                other => other.clone(),
+            };
+            blocks.push(block);
+        }
+        toolpaths.push(ClPath::try_new(
+            path.name().map(str::to_string),
+            path.tool_id(),
+            path.compensation(),
+            feeds,
+            path.pierce(),
+            path.tabs().to_vec(),
+            blocks,
+        )?);
+    }
+    let rebuilt = Program::try_new(
+        program.name().map(str::to_string),
+        program.tools().to_vec(),
+        program.machine().cloned(),
+        toolpaths,
+        program.channel_programs().to_vec(),
+        program.syncs().to_vec(),
+        program.rotary().copied(),
+    )?;
+    Ok(Document::new(rebuilt)?)
+}
+
+fn decorate_wire_paths(paths: &mut [ClPath], cut: &Cut<'_>) -> Result<(), CliError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let tabbed = cut.op.tabs().is_some();
+    let flush = cut.op.flush();
+    if !tabbed && !flush {
+        return Ok(());
+    }
+    let last = paths.len() - 1;
+    for (index, path) in paths.iter_mut().enumerate() {
+        let mut blocks = Vec::with_capacity(path.blocks().len().saturating_add(2));
+        if flush && index == 0 {
+            blocks.push(ClBlock::Event(Event::Coolant { mode: CoolantMode::Flood }));
+        }
+        for block in path.blocks() {
+            blocks.push(block.clone());
+            if tabbed && matches!(block, ClBlock::Event(Event::ProcessOff { .. })) {
+                blocks.push(ClBlock::Event(Event::ProgramStop { name: "wire_stop".into() }));
+            }
+        }
+        if flush && index == last {
+            blocks.push(ClBlock::Event(Event::Coolant { mode: CoolantMode::Off }));
+        }
+        *path = index::rebuild(path, blocks)?;
     }
     Ok(())
 }
@@ -1919,6 +2087,13 @@ fn depth_levels(op: &Operation, total: f64, step_down: f64) -> Result<Vec<f64>, 
 
 fn retract_z(job: &JobFile) -> f64 {
     job.retract()
+}
+
+/// True when every operation uses a wire tool. 2-axis wire travel stays at Z=0, so the mill
+/// retract plane is not the safe height for rapids.
+fn job_is_wire_only(job: &JobFile) -> bool {
+    let ops = job.operations();
+    !ops.is_empty() && ops.iter().all(|op| job.tool(op.tool_id()).is_some_and(JobTool::is_wire))
 }
 
 fn pocket_regions(op: &Operation, contours: &[Contour], tolerance: &Tolerance) -> Result<Vec<Region>, CliError> {

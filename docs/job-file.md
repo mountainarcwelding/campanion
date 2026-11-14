@@ -85,10 +85,12 @@ the job file. The caller copies `source.hash` back into the JSON if it should st
 
 ## Tools
 
-A tool has `id` (integer, unique in the file) and exactly one of `diameter` or `kerf`. Both are
-lengths in `units`, positive, and at most 1e6 mm after conversion. The same rule as the profile
-job: a diameter is a rotating cutter, a kerf is a kerf-only process, and the path offset is half
-of that value. Optional `name` is a short non-empty string, at most the same length as a profile
+A tool has `id` (integer, unique in the file) and exactly one of `diameter`, `kerf`, or `wire`.
+All three are lengths in `units`, positive, and at most 1e6 mm after conversion. The same rule
+as the profile job: a diameter is a rotating cutter, a kerf is a kerf-only process, and the
+path offset is half of that value. `wire` is the wire diameter for a 2-axis wire-EDM profile;
+see [Wire EDM](#wire-edm). The first-pass offset is the wire radius plus that pass's `spark_gap`.
+Optional `name` is a short non-empty string, at most the same length as a profile
 document tool name. It is stored on the IR tool and omitted when the field is absent. An empty
 name is rejected.
 
@@ -314,6 +316,40 @@ cutting oxygen off on every rapid: cutting oxygen off, then preheat off, then to
 travel. When a job-file path would otherwise leave those auxiliaries on through a rapid, the
 path turns them off and writes a fresh preheat dwell before cutting oxygen returns. Feeds,
 delays and kerf width in an example job are example values, not machine data.
+
+### Wire EDM
+
+A profile may use tool field `wire` (the wire diameter, a length scaled by `units`) instead of
+`diameter` or `kerf`. That tool is process `Other("wire_edm")`, not a torch. `spark_gap` and
+`start_hole` (`x`, `y`) are required. The compensated path sits the wire radius plus that
+pass's spark gap off the contour (equivalently, a kerf width of the diameter plus twice the
+gap). The lead starts at the supplied start hole; `lead_in` and `lead_out` are refused.
+Optional `skims` are later profiles toward the finish. Each skim must name its own `spark_gap`,
+strictly smaller than the previous pass. A skim may also set `feeds.cut` and `power`. A skim
+whose gap is omitted, or that is not smaller than the previous pass, is refused. Optional
+`flush` writes flood coolant (`M8` / `M9` on the `wire_edm` post) around the operation and
+leaves it on through rapids.
+
+At most one tab is allowed. The path stays open across that tab so the slug remains attached:
+the cut stops at the tab, the wire turns off, and a named program stop `wire_stop` is written.
+The `wire_edm` post writes that stop as `M0`
+(https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m0-m1).
+On a post with no matching template the event stays a comment. Continuing past a tab would
+need another start hole, which is out of scope.
+
+The path stays at Z=0. `depth` may record plate thickness, but there is no Z plunge into the
+plate and no multi-depth step-down. The 2-axis path stores no upper guide. 4-axis UV is a
+later step. `finish`, `stock_to_leave`, `onion_skin`, ramps, helices, controller compensation,
+`pierce_type`, `abrasive` and `preheat` are refused on a wire profile.
+
+The `wire_edm` post writes the wire as LinuxCNC spindle-control words `M3 S{power}` / `M5`
+(https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m3-m5) and flush as coolant
+`M8` / `M9`
+(https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m7-m9).
+Power is taken from the process power. A post that lists accepted auxiliaries refuses any
+other `Other` name. `process_cycle` `per_cut` keeps the wire off on every rapid. Spark gaps,
+feeds, power and the wire diameter in an example job are example values, not machine data.
+This output has not been proven on a machine.
 
 Roughing leaves `wall` stock on the walls and `floor` stock above the floor. The finish pass
 removes that remaining stock.

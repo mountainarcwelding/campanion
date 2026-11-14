@@ -429,6 +429,7 @@ fn verify_event(event: &Event, bound_spindle: Option<&str>, open: &mut Vec<Proce
         | Event::Coolant { .. }
         | Event::Comment { .. }
         | Event::Custom { .. }
+        | Event::ProgramStop { .. }
         | Event::Sync { .. }
         | Event::CAxis { .. }
         | Event::SpindleBrake { .. }

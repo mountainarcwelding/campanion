@@ -1,0 +1,136 @@
+{
+  "id": "wire_edm",
+  "name": "LinuxCNC 2-axis wire",
+  "description": "LinuxCNC-style 2-axis wire EDM in millimetres. Absolute moves, cutter compensation and tool length cancelled, path blend G64 P0.05 as on the plasma post, not a measured machine setting. The wire is Other process wire_edm: on is M3 S{power} and off is M5, the LinuxCNC spindle-control words, with power taken from the process power. Flush is coolant flood M8 / off M9. Named program stop wire_stop is M0. Any other Other name is refused. Arcs use IJK and helices are lines. process_cycle is per_cut, so the wire is off on every rapid. No upper guide and no rotary axis. Not proven on a machine.",
+  "units": "mm",
+  "line_numbers": {
+    "enabled": true,
+    "start": 10,
+    "step": 10,
+    "prefix": "N"
+  },
+  "decimals": {
+    "linear": 4,
+    "feed": 4,
+    "dwell": 3
+  },
+  "trailing_zeros": true,
+  "header": [
+    "({program_name})",
+    "G21",
+    "G90",
+    "G17",
+    "G40",
+    "G49",
+    "G64 P0.05"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": {
+    "mode": "ijk",
+    "max_sweep_deg": 360,
+    "helix": false
+  },
+  "planes": true,
+  "dwell": {
+    "word": "P",
+    "unit": "s"
+  },
+  "process_cycle": "per_cut",
+  "process": {
+    "spindle": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "torch": {
+      "on": [
+        "M3 S1"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "laser": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "extruder": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "knife": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "wire_edm": {
+      "on": [
+        "M3 S{power}"
+      ],
+      "off": [
+        "M5"
+      ]
+    }
+  },
+  "auxiliaries": [
+    "wire_edm"
+  ],
+  "tool_change": [
+    "T{tool} M6"
+  ],
+  "cutter_comp": {
+    "left": [
+      "G41"
+    ],
+    "right": [
+      "G42"
+    ],
+    "off": [
+      "G40"
+    ]
+  },
+  "coolant": {
+    "flood": [
+      "M8"
+    ],
+    "mist": [
+      "M7"
+    ],
+    "off": [
+      "M9"
+    ]
+  },
+  "comments": {
+    "style": "paren"
+  },
+  "program_end": [
+    "M2"
+  ],
+  "max_line_length": 256,
+  "axis_letters": "XYZ",
+  "references": [
+    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m3-m5",
+    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m7-m9",
+    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m0-m1"
+  ],
+  "program_stop": {
+    "wire_stop": [
+      "M0"
+    ]
+  }
+}

@@ -544,6 +544,7 @@ impl<'a> Parser<'a> {
         }
         for code in &parsed.m {
             match *code {
+                0 | 1 => {}
                 2 | 30 => {
                     self.spindle.on = false;
                     self.coolant = CoolantState::Off;
