@@ -36,7 +36,9 @@ one returns an explicit error. Their metric output and verification are unchange
 
 `hold` is the mill default. A spindle process-on that repeats the speed already running writes nothing, so one `M3` stays in effect across rapids and later operations. The matching `M5` is the process-off after the retract above the stock.
 
-`per_cut` writes every process-on. When any process is still on and the next motion is a rapid (`G0`), the writer emits `thc.off` and that process's off lines before the rapid, then the on lines again before the next feed. Speed and power come from the process-on that is still in effect. A pierce dwell is written only when the IR already has a dwell at that cut. Plasma and `grbl_laser` set `per_cut`, so a torch or beam stays off through G0 travel even when the IR process is `spindle`.
+`per_cut` writes every process-on. When any process is still on and the next motion is a rapid (`G0`), the writer emits `thc.off` and that process's off lines before the rapid, then the on lines again before the next feed. Speed and power come from the process-on that is still in effect. A pierce dwell is written only when the IR already has a dwell at that cut. Plasma, `waterjet` and `grbl_laser` set `per_cut`, so a torch, jet or beam stays off through G0 travel even when the IR process is `spindle`. When more than one process is on, off lines are written last-on-first-off (abrasive, then jet) and on lines are written in the original order.
+
+`waterjet` is the millimetre LinuxCNC dialect for straight cutting. The jet uses spindle-control words `M3 S1` / `M5` (https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m3-m5), the same pattern as `plasma`. Named `Other` process `abrasive` is `M64 Pn` / `M65 Pn` (https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65). `digital_out.abrasive_pin` defaults to 0 as a post parameter, not a machine assignment. `thc` lists stay empty until a manual cites height-control codes. This output has not been proven on a machine.
 
 ## Laser power
 

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+Mach4 posts omit explicit zero-length dwells and refuse a positive delay that would round to `G4 P0` (#171). A LinuxCNC-style `waterjet` post writes jet and abrasive events for straight cuts. This output has not been proven on a machine.
+
+### Added
+
+- A built-in `waterjet` post, beside `plasma`, for LinuxCNC-style straight waterjet cuts. The jet is a Torch process and uses the LinuxCNC spindle-control words `M3 S1` / `M5`. Named `Other` process `abrasive` is an immediate digital output `M64 Pn` / `M65 Pn`. `digital_out.abrasive_pin` is a post parameter that defaults to 0; it is not a machine pin assignment. Height-control words stay empty. `process_cycle` is `per_cut`, so abrasive turns off before the jet on a rapid, and the jet turns on before abrasive on the next feed. Codes are from the LinuxCNC M-code manual. This output has not been proven on a machine.
+- A kerf `profile` in a `campanion-job/1` file may set `abrasive`. When true, `campanion run` writes the abrasive auxiliary after the pierce sequence and turns it off before the jet. Omitted, no abrasive events are written. Optional `pierce_type` is `stationary`, `wiggle`, or `low_pressure` and is posted as a comment; no dialect-specific pierce codes are invented.
+
+### Changed
+
+- With `dwell.decimal_seconds` (the Mach4 post), an explicit zero-duration IR dwell emits no block, and a positive duration that rounds to zero at the post's dwell precision is refused. Read-back and mill audit reject literal `G4 P0` and `G4 P0.0`. Posts without this option keep their existing zero-dwell behavior (#171).
+- When `process_cycle` is `per_cut` and more than one process is on, the writer turns them off in last-on-first-off order before a rapid, and back on in the original order before the next feed.
+- The `plasma` post lists `auxiliaries` (none). An `Other` name such as `abrasive` is refused instead of falling back to `process.other`.
+
 ## 0.12.2 — 2026-11-13
 
 `campanion audit` re-checks a finished G-code file, job-file tools may set a name, closed job-file profiles start at the same documented point as the profile-document route, and the README describes CAMpanion as a standalone application (#172). This output has not been proven on a machine.

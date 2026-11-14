@@ -1,0 +1,137 @@
+{
+  "id": "waterjet",
+  "name": "LinuxCNC waterjet",
+  "description": "LinuxCNC-style waterjet in millimetres. Absolute moves, cutter compensation and tool length cancelled, path blend G64 P0.05 as on the plasma post, not a measured machine setting. Controller left or right compensation writes G41 or G42 before the first feed and G40 at the end; computed compensation stays on the already-offset path. The jet is a Torch process: on is M3 S1 and off is M5, the same LinuxCNC spindle-control words as plasma. Named Other process abrasive is M64 Pn / M65 Pn; digital_out.abrasive_pin is a post parameter that defaults to 0, not a machine assignment. Any other Other name is refused. The pierce delay is the path dwell (G4 P in seconds). Arcs use IJK and helices are written as lines. thc.on and thc.off stay empty until a manual cites height-control codes. process_cycle is per_cut: abrasive off then jet off before a rapid, jet on then abrasive on before the next feed. A pierce dwell is written only when the IR has one at that cut. No rotary axis. Not proven on a machine.",
+  "units": "mm",
+  "line_numbers": {
+    "enabled": true,
+    "start": 10,
+    "step": 10,
+    "prefix": "N"
+  },
+  "decimals": {
+    "linear": 4,
+    "feed": 4,
+    "dwell": 3
+  },
+  "trailing_zeros": true,
+  "header": [
+    "({program_name})",
+    "G21",
+    "G90",
+    "G17",
+    "G40",
+    "G49",
+    "G64 P0.05"
+  ],
+  "footer": [],
+  "modal_motion": true,
+  "arcs": {
+    "mode": "ijk",
+    "max_sweep_deg": 360,
+    "helix": false
+  },
+  "planes": true,
+  "dwell": {
+    "word": "P",
+    "unit": "s"
+  },
+  "thc": {
+    "on": [],
+    "off": []
+  },
+  "process_cycle": "per_cut",
+  "process": {
+    "spindle": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "torch": {
+      "on": [
+        "M3 S1"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "laser": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "extruder": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "knife": {
+      "on": [
+        "M3 S{speed}"
+      ],
+      "off": [
+        "M5"
+      ]
+    },
+    "abrasive": {
+      "on": [
+        "M64 P{pin}"
+      ],
+      "off": [
+        "M65 P{pin}"
+      ]
+    }
+  },
+  "auxiliaries": [
+    "abrasive"
+  ],
+  "digital_out": {
+    "abrasive_pin": 0
+  },
+  "tool_change": [
+    "T{tool} M6"
+  ],
+  "cutter_comp": {
+    "left": [
+      "G41"
+    ],
+    "right": [
+      "G42"
+    ],
+    "off": [
+      "G40"
+    ]
+  },
+  "coolant": {
+    "flood": [
+      "M8"
+    ],
+    "mist": [
+      "M7"
+    ],
+    "off": [
+      "M9"
+    ]
+  },
+  "comments": {
+    "style": "paren"
+  },
+  "program_end": [
+    "M2"
+  ],
+  "max_line_length": 256,
+  "axis_letters": "XYZ",
+  "references": [
+    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m3-m5",
+    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65"
+  ]
+}

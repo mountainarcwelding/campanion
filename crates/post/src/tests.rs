@@ -146,6 +146,7 @@ fn builtins_load_and_match_ids() {
             "haas_umc",
             "haas_umc_tcpc",
             "plasma",
+            "waterjet",
             "grbl_laser",
             "linuxcnc_lathe",
             "fanuc_lathe",
@@ -168,12 +169,15 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("fanuc").expect("fanuc").rotary_axes(), vec![RotaryAxisKind::A]);
     assert_eq!(builtin("haas").expect("haas").rotary_axes(), vec![RotaryAxisKind::A]);
     assert!(builtin("plasma").expect("plasma").rotary_axes().is_empty());
+    assert!(builtin("waterjet").expect("waterjet").rotary_axes().is_empty());
     assert!(builtin("grbl_laser").expect("grbl_laser").rotary_axes().is_empty());
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").process_cycle, "hold");
     assert!(!builtin("mach3").expect("mach3").cycles_per_cut());
     assert!(builtin("plasma").expect("plasma").cycles_per_cut());
+    assert!(builtin("waterjet").expect("waterjet").cycles_per_cut());
     assert!(builtin("grbl_laser").expect("grbl_laser").cycles_per_cut());
     assert!(builtin("plasma").expect("plasma").description().contains("process_cycle is per_cut"), "plasma description");
+    assert!(builtin("waterjet").expect("waterjet").description().contains("process_cycle is per_cut"), "waterjet description");
     assert!(builtin("grbl_laser").expect("grbl_laser").description().contains("process_cycle is per_cut"), "laser description");
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").is_lathe());
     assert!(builtin("linuxcnc_lathe").expect("linuxcnc_lathe").rotary_axes().is_empty());
@@ -1809,4 +1813,231 @@ fn linuxcnc_router_pin_numbers_and_g38_3_are_post_data() {
     raw["digital_out"]["vacuum_pin"] = serde_json::json!(1000);
     let err = load_post(&raw.to_string()).expect_err("pin");
     assert!(err.to_string().contains("digital_out.vacuum_pin"), "{err}");
+}
+
+fn waterjet() -> crate::def::PostDef {
+    builtin("waterjet").expect("waterjet")
+}
+
+fn abrasive_cut(held_through_rapid: bool) -> Program {
+    let mut blocks = vec![
+        ClBlock::Motion(ClMotion::Rapid { to: pose(0.0, 0.0, 5.0), feed: None }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params: torch_params(None) }),
+        ClBlock::Event(Event::Dwell { seconds: 0.5 }),
+        ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("abrasive".into()), params: ProcessParams::new() }),
+        ClBlock::Motion(ClMotion::Linear { to: pose(10.0, 0.0, 0.0), feed: 1000.0, role: MoveRole::Cut, power: None }),
+    ];
+    if held_through_rapid {
+        blocks.push(ClBlock::Motion(ClMotion::Rapid { to: pose(20.0, 0.0, 5.0), feed: None }));
+        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(30.0, 0.0, 0.0), feed: 1000.0, role: MoveRole::Cut, power: None }));
+    } else {
+        blocks.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("abrasive".into()) }));
+        blocks.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }));
+        blocks.push(ClBlock::Motion(ClMotion::Rapid { to: pose(20.0, 0.0, 5.0), feed: None }));
+        blocks.push(ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, params: torch_params(None) }));
+        blocks.push(ClBlock::Event(Event::Dwell { seconds: 0.5 }));
+        blocks.push(ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("abrasive".into()), params: ProcessParams::new() }));
+        blocks.push(ClBlock::Motion(ClMotion::Linear { to: pose(30.0, 0.0, 0.0), feed: 1000.0, role: MoveRole::Cut, power: None }));
+    }
+    blocks.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("abrasive".into()) }));
+    blocks.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }));
+    program(blocks)
+}
+
+/// Jet, abrasive, dwell, feed and rapid marks in program order.
+fn waterjet_marks(text: &str) -> Vec<&'static str> {
+    let mut marks = Vec::new();
+    for line in text.lines() {
+        let stripped = without_comments(line);
+        let words: Vec<&str> = stripped.split_whitespace().collect();
+        if words.contains(&"M64") {
+            marks.push("abrasive-on");
+        } else if words.contains(&"M65") {
+            marks.push("abrasive-off");
+        } else if words.contains(&"M3") {
+            marks.push("jet-on");
+        } else if words.contains(&"M5") {
+            marks.push("jet-off");
+        } else if words.iter().any(|word| word.starts_with('G') && (*word == "G4" || *word == "G04")) {
+            marks.push("dwell");
+        } else if words.iter().any(|word| *word == "G0" || *word == "G00") {
+            marks.push("rapid");
+        } else if words.iter().any(|word| *word == "G1" || *word == "G01") {
+            marks.push("feed");
+        }
+    }
+    marks
+}
+
+fn assert_waterjet_invariants(marks: &[&str], text: &str) {
+    assert!(!marks.is_empty(), "{text}");
+    let mut jet = false;
+    let mut abrasive = false;
+    for mark in marks {
+        match *mark {
+            "jet-on" => {
+                assert!(
+                    !jet,
+                    "doubled jet on
+{marks:?}
+{text}"
+                );
+                jet = true;
+            }
+            "jet-off" => {
+                assert!(
+                    !abrasive,
+                    "abrasive still on at jet off
+{marks:?}
+{text}"
+                );
+                assert!(
+                    jet,
+                    "jet off while off
+{marks:?}
+{text}"
+                );
+                jet = false;
+            }
+            "abrasive-on" => {
+                assert!(
+                    jet,
+                    "abrasive on while jet off
+{marks:?}
+{text}"
+                );
+                assert!(
+                    !abrasive,
+                    "doubled abrasive on
+{marks:?}
+{text}"
+                );
+                abrasive = true;
+            }
+            "abrasive-off" => {
+                assert!(
+                    abrasive,
+                    "abrasive off while off
+{marks:?}
+{text}"
+                );
+                abrasive = false;
+            }
+            "rapid" => {
+                assert!(
+                    !jet && !abrasive,
+                    "process on during rapid
+{marks:?}
+{text}"
+                );
+            }
+            "feed" => {
+                assert!(
+                    jet && abrasive,
+                    "cut without jet and abrasive
+{marks:?}
+{text}"
+                );
+            }
+            "dwell" => {}
+            _ => panic!("unknown mark {mark}"),
+        }
+    }
+    assert!(
+        !jet && !abrasive,
+        "process left on
+{marks:?}
+{text}"
+    );
+}
+
+#[test]
+fn waterjet_event_order_is_jet_pierce_abrasive_cut_abrasive_jet() {
+    let post = waterjet();
+    let program = abrasive_cut(false);
+    let text = post_program(&program, &post, &options()).expect("post");
+    let marks = waterjet_marks(&text);
+    assert_eq!(
+        marks,
+        [
+            "rapid",
+            "jet-on",
+            "dwell",
+            "abrasive-on",
+            "feed",
+            "abrasive-off",
+            "jet-off",
+            "rapid",
+            "jet-on",
+            "dwell",
+            "abrasive-on",
+            "feed",
+            "abrasive-off",
+            "jet-off",
+        ],
+        "{text}"
+    );
+    assert_waterjet_invariants(&marks, &text);
+    assert!(word_line(&text, "M64").split_whitespace().any(|word| word == "P0"), "{text}");
+    assert!(word_line(&text, "M65").split_whitespace().any(|word| word == "P0"), "{text}");
+    assert!(text.contains("M3 S1"), "{text}");
+    compare(&program, &read_back(&text, &post).expect("read"), 1e-3, &post).expect("compare");
+    audit(&text, &post).expect("audit");
+}
+
+#[test]
+fn waterjet_per_cut_stops_abrasive_before_the_jet_on_a_held_rapid() {
+    let post = waterjet();
+    let program = abrasive_cut(true);
+    let text = post_program(&program, &post, &options()).expect("post");
+    let marks = waterjet_marks(&text);
+    assert_eq!(
+        marks,
+        [
+            "rapid",
+            "jet-on",
+            "dwell",
+            "abrasive-on",
+            "feed",
+            "abrasive-off",
+            "jet-off",
+            "rapid",
+            "jet-on",
+            "abrasive-on",
+            "feed",
+            "abrasive-off",
+            "jet-off",
+        ],
+        "{text}"
+    );
+    assert_waterjet_invariants(&marks, &text);
+    // Resume after a rapid does not invent a pierce dwell.
+    let dwells = text.lines().filter(|line| without_comments(line).split_whitespace().any(|word| word == "G4")).count();
+    assert_eq!(dwells, 1, "{text}");
+    audit(&text, &post).expect("audit");
+}
+
+#[test]
+fn waterjet_refuses_an_unknown_auxiliary() {
+    let program = program(vec![ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("vacuum".into()), params: ProcessParams::new() })]);
+    let err = post_program(&program, &waterjet(), &options()).expect_err("vacuum");
+    let text = err.to_string();
+    assert!(text.contains("post `waterjet` does not accept auxiliary `vacuum`"), "{text}");
+    assert!(text.contains("accepted: abrasive"), "{text}");
+}
+
+#[test]
+fn waterjet_abrasive_pin_is_post_data() {
+    let mut raw: serde_json::Value = serde_json::from_str(include_str!("../posts/waterjet.json")).expect("json");
+    raw["digital_out"]["abrasive_pin"] = serde_json::json!(3);
+    let post = load_post(&raw.to_string()).expect("post");
+    let program = abrasive_cut(false);
+    let text = post_program(&program, &post, &options()).expect("post");
+    assert!(text.lines().any(|line| line.split_whitespace().any(|word| word == "M64") && line.split_whitespace().any(|word| word == "P3")), "{text}");
+    raw["digital_out"]["abrasive_pin"] = serde_json::json!(1000);
+    let err = load_post(&raw.to_string()).expect_err("pin");
+    assert!(err.to_string().contains("digital_out.abrasive_pin"), "{err}");
+    raw["digital_out"] = serde_json::json!({});
+    let err = load_post(&raw.to_string()).expect_err("missing pin");
+    assert!(err.to_string().contains("digital_out.abrasive_pin"), "{err}");
 }

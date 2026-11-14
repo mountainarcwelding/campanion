@@ -27,7 +27,8 @@
 //! pose or feed is an error when `probe` is set. `auxiliaries`, when set, lists the Other names
 //! the post accepts; any other name is an error, and there is no `process.other` fallback. When
 //! `auxiliaries` is omitted, Other still uses `process.other`. `digital_out` supplies `{pin}` for
-//! the `vacuum` and `dust` templates. `vacuum_pin` defaults to 0 and `dust_pin` defaults to 1.
+//! the `vacuum`, `dust` and `abrasive` templates. `vacuum_pin` defaults to 0 and `dust_pin` defaults to 1.
+//! `abrasive_pin` is omitted unless the post sets it.
 //!
 //! `rotary` is optional. Without it, a program that carries a rotary angle is rejected. `axes`
 //! lists `a`, `b`, or both. The A/B word uses the dimensional formatter with `decimals`
@@ -223,7 +224,7 @@ pub(crate) struct ProbeOutput {
     pub(crate) code: String,
 }
 
-/// Immediate digital-output pins for `vacuum` and `dust`.
+/// Immediate digital-output pins for `vacuum`, `dust` and `abrasive`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DigitalOut {
@@ -233,6 +234,9 @@ pub(crate) struct DigitalOut {
     /// `P` number on the dust `M64` / `M65` lines. Default 1.
     #[serde(default = "default_dust_pin")]
     pub(crate) dust_pin: u32,
+    /// `P` number on the abrasive `M64` / `M65` lines. Omitted when the post has no abrasive auxiliary.
+    #[serde(default)]
+    pub(crate) abrasive_pin: Option<u32>,
 }
 
 fn default_vacuum_pin() -> u32 {
@@ -956,11 +960,11 @@ impl PostDef {
         }
     }
 
-    /// True when `value` is `vacuum_pin` or `dust_pin`.
+    /// True when `value` is a pin for an auxiliary this post lists.
     pub(crate) fn digital_pin(&self, value: f64) -> bool {
-        let Some(out) = &self.digital_out else {
+        if self.digital_out.is_none() {
             return false;
-        };
+        }
         if !(value.is_finite() && value >= 0.0) {
             return false;
         }
@@ -969,7 +973,7 @@ impl PostDef {
             return false;
         }
         let pin = rounded as u32;
-        pin == out.vacuum_pin || pin == out.dust_pin
+        digital_pins(self).contains(&pin)
     }
 }
 
@@ -1392,7 +1396,8 @@ fn check_process(post: &PostDef) -> Result<()> {
     }
     for (key, words) in &post.process {
         check_token("process", key, 64).map_err(|_| field("process", format!("invalid key `{key}`")))?;
-        let allowed = if post.digital_out.is_some() && matches!(key.as_str(), "vacuum" | "dust") { AUX_PROCESS_KEYS } else { PROCESS_KEYS };
+        let allowed =
+            if post.digital_out.is_some() && matches!(key.as_str(), "vacuum" | "dust" | "abrasive") { AUX_PROCESS_KEYS } else { PROCESS_KEYS };
         check_templates(&format!("process.{key}.on"), &words.on, allowed)?;
         check_templates(&format!("process.{key}.off"), &words.off, allowed)?;
     }
@@ -1415,13 +1420,39 @@ fn check_auxiliaries(post: &PostDef) -> Result<()> {
         if !post.process.contains_key(name) {
             return Err(field("auxiliaries", format!("`{name}` has no process template")));
         }
+        if name == "abrasive" && post.digital_out.as_ref().is_none_or(|out| out.abrasive_pin.is_none()) {
+            return Err(field("digital_out.abrasive_pin", "required when auxiliaries lists abrasive"));
+        }
     }
     Ok(())
+}
+
+fn digital_pins(post: &PostDef) -> Vec<u32> {
+    let Some(out) = &post.digital_out else {
+        return Vec::new();
+    };
+    let listed = |name: &str| post.auxiliaries.as_ref().is_none_or(|names| names.iter().any(|item| item == name));
+    let mut pins = Vec::new();
+    if listed("vacuum") {
+        pins.push(out.vacuum_pin);
+    }
+    if listed("dust") {
+        pins.push(out.dust_pin);
+    }
+    if listed("abrasive")
+        && let Some(pin) = out.abrasive_pin
+    {
+        pins.push(pin);
+    }
+    pins
 }
 
 fn check_digital_out(out: &DigitalOut) -> Result<()> {
     check_pin("digital_out.vacuum_pin", out.vacuum_pin)?;
     check_pin("digital_out.dust_pin", out.dust_pin)?;
+    if let Some(pin) = out.abrasive_pin {
+        check_pin("digital_out.abrasive_pin", pin)?;
+    }
     Ok(())
 }
 

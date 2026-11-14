@@ -20,7 +20,7 @@
 //! `M3` or `M4` with `S0` is running with the beam or torch off: [`SpindleState::cutting`] is false.
 //! A post with `probe` treats its `G38.2` or `G38.3` as a non-motion: position and motion mode
 //! stay put, and `F` on that block updates the modal feed. A post with `digital_out` accepts
-//! `M64` and `M65` when `P` is `vacuum_pin` or `dust_pin`. Other posts still reject those words.
+//! `M64` and `M65` when `P` is a declared auxiliary pin (`vacuum_pin`, `dust_pin`, or `abrasive_pin`). Other posts still reject those words.
 
 use campanion_ir::{ArcSense, Plane, RotaryAxisKind};
 

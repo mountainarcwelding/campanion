@@ -12,6 +12,12 @@
 //! runs with the process off, and both delays are zero when the file omits them.
 //! A kerf-tool operation (laser or torch) may set `power`, an IR fraction in `0..=1`.
 //! `grbl_laser` scales that onto `S0`..`S1000`. Omitted, the post writes `S0` (beam off) instead of full power. A diameter tool and a laser raster reject the field.
+//! A kerf profile may set `abrasive`. When true, `campanion run` writes an `Other` process named
+//! `abrasive` after the pierce sequence and turns it off before the jet. The `waterjet` post
+//! emits that as `M64` / `M65`. Omitted, no abrasive events are written. A kerf profile may also
+//! set `pierce_type`: `stationary`, `wiggle`, or `low_pressure`. That name is stored on the
+//! process parameters and posted as a comment; no dialect-specific pierce codes are invented.
+//! Both fields are rejected on a diameter tool and on every non-profile operation.
 //! Each operation may set `entry`. Omitted, it is a plunge. A ramp stores `angle_deg` from the
 //! XY plane as radians on [`DepthEntry::Ramp`]. A helix stores a unit-scaled `radius` and the
 //! same angle; one turn drops `2π r tan(angle)` millimetres, which is [`DepthEntry::Helix`]'s
@@ -161,7 +167,7 @@ use serde_json::{Map, Number, Value};
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::job::{
     as_bool, as_f64, as_str, as_u32, check_keys, object, optional, parse_compensation, parse_feeds, parse_lead, parse_params, parse_side, parse_tabs,
-    parse_tool, require, required_name,
+    parse_tool, require, required_name, set_pierce_type,
 };
 
 /// On-disk tag this build reads. Minor tags are not accepted: unknown fields already fail the load.
@@ -1010,6 +1016,8 @@ pub struct Operation {
     tool_axis: Option<ToolAxis>,
     /// Raster placement. `None` except on a laser raster.
     raster: Option<LaserRasterGeom>,
+    /// Named abrasive auxiliary on a kerf profile. False when the file omits `abrasive`.
+    abrasive: bool,
 }
 
 /// How a surface aims the tool, then clamps it toward +Z.
@@ -1289,6 +1297,11 @@ impl Operation {
     /// Pierce and post delays, their toggles, and any pierce or cut height.
     pub fn params(&self) -> &ProcessParams {
         &self.params
+    }
+
+    /// True when the profile asked for the abrasive auxiliary.
+    pub fn abrasive(&self) -> bool {
+        self.abrasive
     }
 
     /// Machine A/B index in degrees. `None` when the file omits `index_deg`.
@@ -2489,6 +2502,8 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "overscan",
             "scanning_offset",
             "grey_map",
+            "abrasive",
+            "pierce_type",
         ],
         "operation",
     )
@@ -2590,6 +2605,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     let entry = parse_entry(optional(map, "entry"), scale)?;
     let feeds = parse_operation_feeds(require(map, "feeds").map_err(from_cli)?, scale)?;
     let params = parse_timing(map, scale, tool, kind)?;
+    let abrasive = parse_abrasive(optional(map, "abrasive"), &name, &kind, tool)?;
     let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
     let (lead_in, lead_out) = if matches!(kind, OperationKind::Profile { .. }) {
         (parse_profile_lead(optional(map, "lead_in"), scale)?, parse_profile_lead(optional(map, "lead_out"), scale)?)
@@ -2642,6 +2658,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         compensation,
         tool_axis: None,
         raster: None,
+        abrasive,
     })
 }
 
@@ -2777,6 +2794,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         compensation: Compensation::Computed,
         tool_axis,
         raster: None,
+        abrasive: false,
     })
 }
 
@@ -3022,6 +3040,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
+        abrasive: false,
     })
 }
 
@@ -3154,6 +3173,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
+        abrasive: false,
     })
 }
 
@@ -3257,6 +3277,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
+        abrasive: false,
     })
 }
 
@@ -3386,6 +3407,7 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         compensation: Compensation::Computed,
         tool_axis: None,
         raster: None,
+        abrasive: false,
     })
 }
 
@@ -3516,6 +3538,7 @@ fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools
         compensation: Compensation::Computed,
         tool_axis: None,
         raster: Some(LaserRasterGeom { image: image.to_string(), origin, width, height, angle, step, overscan, scanning_offset, map: map_kind }),
+        abrasive: false,
     })
 }
 
@@ -4196,7 +4219,34 @@ fn parse_timing(op: &Map<String, Value>, scale: f64, tool: &JobTool, kind: Opera
     // `parse_params` fills the same defaults as `ProcessTiming::new`: pierce on, post off, delays 0.
     let mut parsed = parse_params(value.as_ref()).map_err(from_cli)?;
     parsed = apply_operation_power(op, tool, kind, parsed)?;
+    parsed = apply_pierce_type(op, tool, kind, parsed)?;
     Ok(parsed)
+}
+
+fn parse_abrasive(value: Option<&Value>, name: &str, kind: &OperationKind, tool: &JobTool) -> Result<bool, JobFileError> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    if !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(op_invalid(name, "abrasive is only valid on a profile"));
+    }
+    if tool.diameter().is_some() {
+        return Err(op_invalid(name, "abrasive is only valid on a kerf tool"));
+    }
+    as_bool(value, "abrasive").map_err(from_cli)
+}
+
+fn apply_pierce_type(map: &Map<String, Value>, tool: &JobTool, kind: OperationKind, params: ProcessParams) -> Result<ProcessParams, JobFileError> {
+    match optional(map, "pierce_type") {
+        Some(_) if matches!(kind, OperationKind::LaserRaster) => Err(JobFileError::invalid("pierce_type is not valid on a laser raster")),
+        Some(_) if tool.diameter().is_some() => Err(JobFileError::invalid("pierce_type is only valid on a laser or torch operation")),
+        Some(_) if !matches!(kind, OperationKind::Profile { .. }) => Err(JobFileError::invalid("pierce_type is only valid on a profile")),
+        Some(value) => {
+            let name = as_str(value, "pierce_type").map_err(from_cli)?;
+            set_pierce_type(params, name).map_err(from_cli)
+        }
+        None => Ok(params),
+    }
 }
 
 /// `power` is the IR fraction 0..1. Optional on a kerf (laser or torch) operation. Omitted, the
@@ -4616,6 +4666,7 @@ enum DotFold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::pierce_type_of;
     use campanion_ir::{Document, Program, SolutionPolicy, Vec3};
     use campanion_path::{ControllerSide, Tool as PathTool};
     use proptest::prelude::*;
@@ -5047,6 +5098,36 @@ mod tests {
     fn tool_rejects_an_empty_name() {
         let err = load(&write_job("tool-name-empty", &envelope("plate.dxf", r#"[{"id":1,"name":"","kerf":0.1}]"#, "[]"))).expect_err("empty");
         assert!(invalid_detail(&err).contains("tool name is empty"), "{err}");
+    }
+
+    fn kerf_profile_text(tool_extra: &str, extra: &str) -> String {
+        envelope(
+            "plate.dxf",
+            &format!(r#"[{{"id":1,{tool_extra}}}]"#),
+            &format!(
+                r#"[{{"name":"cut","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{{"cut":300}}{extra}}}]"#
+            ),
+        )
+    }
+
+    #[test]
+    fn profile_accepts_abrasive_and_pierce_type_on_a_kerf() {
+        let job = load(&write_job("wj-ok", &kerf_profile_text(r#""kerf":1.0"#, r#", "abrasive": true, "pierce_type": "stationary""#))).expect("ok");
+        assert!(job.operations()[0].abrasive());
+        assert_eq!(pierce_type_of(job.operations()[0].params()).as_deref(), Some("stationary"));
+
+        let omitted = load(&write_job("wj-omit", &kerf_profile_text(r#""kerf":1.0"#, ""))).expect("omit");
+        assert!(!omitted.operations()[0].abrasive());
+        assert_eq!(pierce_type_of(omitted.operations()[0].params()), None);
+    }
+
+    #[test]
+    fn profile_rejects_abrasive_and_unknown_pierce_type() {
+        let err = load(&write_job("wj-mill", &kerf_profile_text(r#""diameter":6"#, r#", "abrasive": true"#))).expect_err("mill");
+        assert!(invalid_detail(&err).contains("abrasive is only valid on a kerf tool"), "{err}");
+
+        let err = load(&write_job("wj-type", &kerf_profile_text(r#""kerf":1.0"#, r#", "pierce_type": "unknown""#))).expect_err("type");
+        assert!(invalid_detail(&err).contains("pierce_type must be stationary, wiggle, or low_pressure"), "{err}");
     }
 
     #[test]

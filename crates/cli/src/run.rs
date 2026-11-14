@@ -142,7 +142,7 @@ use campanion_post::PostDef;
 
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::index::{self, IndexedOp};
-use crate::job::read_text;
+use crate::job::{pierce_type_of, read_text};
 use crate::jobfile::{self, Finish, JobFile, JobProfileSide, JobTool, Operation, OperationKind};
 use crate::plane::{self, ViewFrame};
 use crate::report;
@@ -1418,6 +1418,7 @@ fn link_operation(paths: &mut Vec<ClPath>, cut: &Cut<'_>, features: &[Feature], 
     let motion = import_with_params(cut.op, cut.tool, ProcessParams::new())?;
     let params = cut.op.params_with_speed(cut.tool).map_err(|err| op_err(cut.op, err))?;
     let doc = restore_process_params(Document::from_toolpath(&timed, &motion)?, &params)?;
+    let doc = decorate_kerf_process(doc, cut)?;
     push_doc(paths, doc)
 }
 
@@ -1471,6 +1472,81 @@ fn restore_process_params(doc: Document, params: &ProcessParams) -> Result<Docum
         program.rotary().copied(),
     )?;
     Ok(Document::new(rebuilt)?)
+}
+
+fn decorate_kerf_process(doc: Document, cut: &Cut<'_>) -> Result<Document, CliError> {
+    let abrasive = cut.op.abrasive();
+    let pierce = pierce_type_of(cut.op.params());
+    if !abrasive && pierce.is_none() {
+        return Ok(doc);
+    }
+    insert_kerf_events(doc, abrasive, pierce.as_deref())
+}
+
+fn insert_kerf_events(doc: Document, abrasive: bool, pierce_type: Option<&str>) -> Result<Document, CliError> {
+    let program = doc.program();
+    let mut toolpaths = Vec::with_capacity(program.toolpaths().len());
+    for path in program.toolpaths() {
+        let blocks = stitch_kerf_events(path.blocks(), abrasive, pierce_type);
+        toolpaths.push(index::rebuild(path, blocks)?);
+    }
+    let rebuilt = Program::try_new(
+        program.name().map(str::to_string),
+        program.tools().to_vec(),
+        program.machine().cloned(),
+        toolpaths,
+        program.channel_programs().to_vec(),
+        program.syncs().to_vec(),
+        program.rotary().copied(),
+    )?;
+    Ok(Document::new(rebuilt)?)
+}
+
+fn stitch_kerf_events(blocks: &[ClBlock], abrasive: bool, pierce_type: Option<&str>) -> Vec<ClBlock> {
+    let mut out = Vec::with_capacity(blocks.len().saturating_add(8));
+    let mut pending_abrasive = false;
+    let mut abrasive_on = false;
+    for block in blocks {
+        match block {
+            ClBlock::Event(Event::ProcessOn { process: ProcessKind::Torch, .. }) => {
+                if let Some(kind) = pierce_type {
+                    out.push(ClBlock::Event(Event::Comment { text: format!("pierce type: {kind}") }));
+                }
+                out.push(block.clone());
+                if abrasive {
+                    pending_abrasive = true;
+                }
+            }
+            ClBlock::Event(Event::ProcessOff { process: ProcessKind::Torch }) => {
+                if abrasive_on {
+                    out.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("abrasive".into()) }));
+                    abrasive_on = false;
+                }
+                pending_abrasive = false;
+                out.push(block.clone());
+            }
+            ClBlock::Motion(motion) if pending_abrasive && is_kerf_cut(motion) => {
+                out.push(ClBlock::Event(Event::ProcessOn { process: ProcessKind::Other("abrasive".into()), params: ProcessParams::new() }));
+                abrasive_on = true;
+                pending_abrasive = false;
+                out.push(block.clone());
+            }
+            _ => out.push(block.clone()),
+        }
+    }
+    if abrasive_on {
+        out.push(ClBlock::Event(Event::ProcessOff { process: ProcessKind::Other("abrasive".into()) }));
+    }
+    out
+}
+
+fn is_kerf_cut(motion: &ClMotion) -> bool {
+    match motion {
+        ClMotion::Linear { role, .. } | ClMotion::Arc { role, .. } | ClMotion::Helix { role, .. } => {
+            matches!(role, MoveRole::Cut | MoveRole::LeadIn | MoveRole::LeadOut)
+        }
+        ClMotion::Rapid { .. } | ClMotion::Thread { .. } => false,
+    }
 }
 
 fn inside_offset_error(cut: &Cut<'_>, side: ProfileSide) -> &'static str {
