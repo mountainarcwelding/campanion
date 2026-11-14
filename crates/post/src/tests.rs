@@ -172,8 +172,8 @@ fn builtins_load_and_match_ids() {
     assert_eq!(builtin("fanuc").expect("fanuc").rotary_axes(), vec![RotaryAxisKind::A]);
     assert_eq!(builtin("haas").expect("haas").rotary_axes(), vec![RotaryAxisKind::A]);
     assert!(builtin("plasma").expect("plasma").rotary_axes().is_empty());
-    assert!(builtin("waterjet").expect("waterjet").rotary_axes().is_empty());
-    assert!(builtin("oxyfuel").expect("oxyfuel").rotary_axes().is_empty());
+    assert_eq!(builtin("waterjet").expect("waterjet").rotary_axes(), vec![RotaryAxisKind::A, RotaryAxisKind::B]);
+    assert_eq!(builtin("oxyfuel").expect("oxyfuel").rotary_axes(), vec![RotaryAxisKind::A, RotaryAxisKind::B]);
     assert!(builtin("wire_edm").expect("wire_edm").rotary_axes().is_empty());
     assert!(builtin("grbl_laser").expect("grbl_laser").rotary_axes().is_empty());
     assert_eq!(builtin("linuxcnc").expect("linuxcnc").process_cycle, "hold");

@@ -1,0 +1,8 @@
+{
+  "reference": "Example citation for tests only. Not a measured machine or a published chart.",
+  "taper": [
+    { "requested_deg": 0.0, "head_deg": 0.0 },
+    { "requested_deg": 10.0, "head_deg": 9.0 },
+    { "requested_deg": 20.0, "head_deg": 18.0 }
+  ]
+}

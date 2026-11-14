@@ -16,6 +16,7 @@ mod error;
 mod gouge;
 mod index;
 mod job;
+mod kertilt;
 mod lathe;
 mod live_mill;
 mod machine;

@@ -1587,6 +1587,7 @@ fn link_operation(paths: &mut Vec<ClPath>, cut: &Cut<'_>, features: &[Feature], 
     let params = cut.op.params_with_speed(cut.tool).map_err(|err| op_err(cut.op, err))?;
     let doc = restore_process_params(Document::from_toolpath(&timed, &motion)?, &params)?;
     let doc = decorate_kerf_process(doc, cut)?;
+    let doc = crate::kertilt::apply(doc, cut.job, cut.op)?;
     push_doc(paths, doc)
 }
 

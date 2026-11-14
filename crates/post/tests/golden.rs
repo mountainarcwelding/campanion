@@ -31,13 +31,20 @@ fn posts_for(program: &Program, rotary_only: bool) -> Result<Vec<&'static str>, 
     let mut ids = Vec::new();
     for id in builtin_ids() {
         let post = builtin(id).ok_or_else(|| format!("missing {id}"))?;
-        if post.is_lathe() || post.has_five_axis() {
+        // waterjet and oxyfuel can post 3-axis jobs and optional continuous five-axis.
+        // Keep the existing 3-axis goldens in this loop; linuxcnc_5ax stays skipped.
+        if post.is_lathe() || (post.has_five_axis() && *id != "waterjet" && *id != "oxyfuel") {
             continue;
         }
         let include = if rotary_only {
-            match program.rotary() {
-                Some(setup) => post.rotary_axes().contains(&setup.axis()),
-                None => false,
+            // Waterjet and oxy-fuel list A/B for tilting kerf heads, not mill wrap or 3+1 examples.
+            if *id == "waterjet" || *id == "oxyfuel" {
+                false
+            } else {
+                match program.rotary() {
+                    Some(setup) => post.rotary_axes().contains(&setup.axis()),
+                    None => false,
+                }
             }
         } else {
             true

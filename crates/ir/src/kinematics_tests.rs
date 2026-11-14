@@ -6,6 +6,9 @@ const TABLE_TABLE_AC: &str = include_str!("../kinematics/table_table_ac.json");
 const TABLE_TABLE_BC: &str = include_str!("../kinematics/table_table_bc.json");
 const HEAD_TABLE_BC: &str = include_str!("../kinematics/head_table_bc.json");
 const HEAD_HEAD_AC: &str = include_str!("../kinematics/head_head_ac.json");
+// Illustrative gantry head for tilting kerf tools. The ±60° limits and 80 mm
+// pivot are example values used in tests; they are not measured machine data.
+const GANTRY_HEAD_AB: &str = include_str!("../kinematics/gantry_head_ab.json");
 
 fn load(text: &str) -> Kinematics {
     Kinematics::from_json(text).expect("kinematics")
@@ -111,13 +114,30 @@ fn examples_load_with_their_joints() {
     assert_eq!(head.rotaries[1].carrier, Carrier::Head);
     assert_eq!(head.rotaries[1].pivot, pt(0.0, 40.0, 120.0));
     assert_eq!(head.spindle_axis, Vec3::Z);
+
+    // Example gantry head: B about Y, then A about X. Limits and pivot are example values.
+    let gantry = load(GANTRY_HEAD_AB);
+    assert_eq!(gantry.name, "gantry_head_ab");
+    assert_eq!(gantry.rotaries[0].letter, 'B');
+    assert_eq!(gantry.rotaries[0].carrier, Carrier::Head);
+    assert_eq!(gantry.rotaries[0].axis, Vec3::Y);
+    assert_eq!(gantry.rotaries[0].pivot, pt(0.0, 0.0, 80.0));
+    let b_limits = gantry.rotaries[0].limits.expect("example B limits");
+    assert_eq!((b_limits.min_deg(), b_limits.max_deg()), (-60.0, 60.0));
+    assert_eq!(gantry.rotaries[1].letter, 'A');
+    assert_eq!(gantry.rotaries[1].carrier, Carrier::Head);
+    assert_eq!(gantry.rotaries[1].axis, Vec3::X);
+    assert_eq!(gantry.rotaries[1].pivot, pt(0.0, 0.0, 80.0));
+    let a_limits = gantry.rotaries[1].limits.expect("example A limits");
+    assert_eq!((a_limits.min_deg(), a_limits.max_deg()), (-60.0, 60.0));
+    assert_eq!(gantry.spindle_axis, Vec3::Z);
 }
 
 #[test]
 fn zero_angles_are_the_identity_pose() {
     let xyz = pt(5.0, 6.0, 7.0);
     let tool_length = 10.0;
-    for text in [TABLE_TABLE_AC, TABLE_TABLE_BC, HEAD_TABLE_BC, HEAD_HEAD_AC] {
+    for text in [TABLE_TABLE_AC, TABLE_TABLE_BC, HEAD_TABLE_BC, HEAD_HEAD_AC, GANTRY_HEAD_AB] {
         let kin = load(text);
         let pose = kin.forward(&joints(xyz, [0.0, 0.0]), tool_length).expect("forward");
         close(pose.tip, pt(5.0, 6.0, -3.0));
@@ -349,11 +369,13 @@ fn unknown_fields_are_rejected() {
 
 #[test]
 fn inverse_roundtrip_on_each_example() {
-    let cases: [(&str, [[f64; 2]; 3]); 4] = [
+    let cases: [(&str, [[f64; 2]; 3]); 5] = [
         (TABLE_TABLE_AC, [[0.0, 0.0], [90.0, 0.0], [25.0, -40.0]]),
         (TABLE_TABLE_BC, [[20.0, -15.0], [-10.0, 40.0], [90.0, 10.0]]),
         (HEAD_TABLE_BC, [[0.0, 0.0], [45.0, 90.0], [-30.0, -45.0]]),
         (HEAD_HEAD_AC, [[0.0, 0.0], [90.0, 90.0], [20.0, -30.0]]),
+        // Example gantry-head angles stay inside the example ±60° limits.
+        (GANTRY_HEAD_AB, [[0.0, 0.0], [20.0, -15.0], [45.0, 30.0]]),
     ];
     let places = [Vec3::ZERO, pt(10.0, -20.0, 30.0), pt(5.0, 6.0, 7.0)];
     let lengths = [0.0, 15.0, 40.0];
@@ -621,7 +643,7 @@ fn rigid_gap(left: Rigid, right: Rigid) -> f64 {
 
 #[test]
 fn a_kinematics_file_without_a_model_omits_the_key() {
-    for text in [TABLE_TABLE_AC, TABLE_TABLE_BC, HEAD_TABLE_BC, HEAD_HEAD_AC] {
+    for text in [TABLE_TABLE_AC, TABLE_TABLE_BC, HEAD_TABLE_BC, HEAD_HEAD_AC, GANTRY_HEAD_AB] {
         let kin = load(text);
         assert!(kin.model.is_none());
         let json = serde_json::to_string(&kin).expect("json");
@@ -802,4 +824,58 @@ proptest::proptest! {
         let prefix = kin.link_world(&joints(pt(x, y, z), [b_deg, 0.0]), "table").expect("outer only");
         proptest::prop_assert!(rigid_gap(on_b, prefix) <= 1e-9, "B is the outer table joint");
     }
+}
+
+#[test]
+fn gantry_head_ab_forward_inverse_roundtrip() {
+    // Example values only: a 30° tilt about Y stays inside the example ±60° B travel.
+    let kin = load(GANTRY_HEAD_AB);
+    assert_inverse_contains(&kin, pt(10.0, -5.0, 8.0), [30.0, 0.0], 0.0);
+    assert_inverse_contains(&kin, pt(10.0, -5.0, 8.0), [0.0, -25.0], 12.0);
+    assert_inverse_contains(&kin, pt(0.0, 0.0, 20.0), [-40.0, 15.0], 5.0);
+}
+
+#[test]
+fn gantry_head_ab_example_limits_reject_an_axis_beyond_sixty_degrees() {
+    // The ±60° travel on A and B is an example value in gantry_head_ab.json, not a real machine.
+    let kin = load(GANTRY_HEAD_AB);
+    let inside = 50.0_f64.to_radians();
+    let pose_inside = ToolPose { tip: pt(1.0, 2.0, 3.0), axis: pt(inside.sin(), 0.0, inside.cos()) };
+    kin.inverse(&pose_inside, 0.0, [0.0, 0.0]).expect("50° is inside the example ±60° limits");
+
+    let outside = 70.0_f64.to_radians();
+    let axis = pt(outside.sin(), 0.0, outside.cos());
+    let pose = ToolPose { tip: pt(1.0, 2.0, 3.0), axis };
+    let err = kin.inverse(&pose, 0.0, [0.0, 0.0]).expect_err("70° is outside the example ±60° limits");
+    let message = err.to_string();
+    assert!(message.contains("outside the rotary limits"), "{message}");
+}
+
+#[test]
+fn gantry_head_ab_singular_cone_holds_angles_near_z() {
+    // Near +Z the two-joint head is singular. The path solver's default 1° cone is the same
+    // check used on the other example machines. A 6° seed about Y is inside the example ±60° limits.
+    use super::{Choice, DEFAULT_SINGULAR_CONE_DEG, FiveAxisSetup, SolutionPolicy, solve_path};
+    let kin = load(GANTRY_HEAD_AB);
+    let tip = pt(4.0, 5.0, 6.0);
+    let tilted = |deg: f64| {
+        let rad = deg.to_radians();
+        pt(rad.sin(), 0.0, rad.cos())
+    };
+    let outside = ToolPose { tip, axis: tilted(6.0) };
+    let inside = ToolPose { tip, axis: tilted(0.4) };
+    let seed = kin.choose(&outside, 0.0, Choice::Nearest([0.0, 0.0])).expect("seed");
+    let setup = FiveAxisSetup { kinematics: kin.clone(), policy: SolutionPolicy::Nearest };
+    let solved = solve_path(&setup, &[outside, inside], Some(seed), DEFAULT_SINGULAR_CONE_DEG).expect("path");
+    assert_eq!(solved.len(), 2);
+    for index in 0..2 {
+        let delta = (solved[1].angles[index] - solved[0].angles[index]).abs();
+        assert!(delta < 180.0, "joint {index} jumped {delta}° across the singular cone");
+    }
+    let back = kin.forward(&solved[1], 0.0).expect("forward");
+    let dx = back.axis.x() - inside.axis.x();
+    let dy = back.axis.y() - inside.axis.y();
+    let dz = back.axis.z() - inside.axis.z();
+    let axis_deg = (dx * dx + dy * dy + dz * dz).sqrt().asin().to_degrees();
+    assert!(axis_deg <= DEFAULT_SINGULAR_CONE_DEG + 1e-6, "axis left the cone by {axis_deg}°");
 }

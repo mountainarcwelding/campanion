@@ -966,6 +966,44 @@ impl Finish {
 /// `operations[].speed`; [`Self::resolved_speed`] then uses the tool's speed.
 /// [`Self::plane`] is the tilted work plane. `None` means the file omitted `plane`.
 /// [`Self::tabs`] is set on a profile that leaves bridges. Other kinds store `None`.
+/// Requested lead and taper on a kerf profile, in degrees.
+///
+/// `lead_deg` is the tilt along travel, toward the feed when positive.
+/// `requested_taper_deg` is the tilt across the wall, toward the waste when positive
+/// (oxy-fuel bevel uses this). When a cited chart remaps taper, [`Self::head_taper_deg`]
+/// is the head angle and the requested value is unchanged. The core never supplies a chart.
+/// Head travel limits come from the kinematics file the job names, not from this object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KerfTilt {
+    lead_deg: f64,
+    requested_taper_deg: f64,
+    head_taper_deg: f64,
+    chart_path: Option<String>,
+    chart_reference: Option<String>,
+}
+
+impl KerfTilt {
+    /// Tilt along travel, in degrees. Positive is toward the feed. Not scaled by `units`.
+    pub fn lead_deg(&self) -> f64 {
+        self.lead_deg
+    }
+
+    /// Requested taper (or bevel) across the wall, in degrees, as the job named it.
+    pub fn requested_taper_deg(&self) -> f64 {
+        self.requested_taper_deg
+    }
+
+    /// Head taper after an optional cited chart. Equal to the requested value when no chart is set.
+    pub fn head_taper_deg(&self) -> f64 {
+        self.head_taper_deg
+    }
+
+    /// Citation from the optional chart file. `None` when the job did not name a chart.
+    pub fn chart_reference(&self) -> Option<&str> {
+        self.chart_reference.as_deref()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     name: String,
@@ -1046,6 +1084,8 @@ pub struct Operation {
     skims: Vec<WireSkim>,
     /// Flood flush on a wire profile. False when omitted.
     flush: bool,
+    /// Lead and taper on a kerf profile. `None` when the file omits `tilt`.
+    tilt: Option<KerfTilt>,
 }
 
 /// One skim pass on a wire profile. `spark_gap` is required; feeds and power are optional.
@@ -1385,6 +1425,11 @@ impl Operation {
     /// True when the wire profile asked for flood flush.
     pub fn flush(&self) -> bool {
         self.flush
+    }
+
+    /// Requested lead and taper on a kerf profile. `None` when the file omits `tilt`.
+    pub fn tilt(&self) -> Option<&KerfTilt> {
+        self.tilt.as_ref()
     }
 
     /// Machine A/B index in degrees. `None` when the file omits `index_deg`.
@@ -1744,7 +1789,8 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         return Err(JobFileError::invalid("kinematics and rotary cannot be combined"));
     }
     let mut tools = parse_tools(require(map, "tools").map_err(from_cli)?, scale)?;
-    let operations = parse_operations(require(map, "operations").map_err(from_cli)?, scale, &tools)?;
+    let mut operations = parse_operations(require(map, "operations").map_err(from_cli)?, scale, &tools)?;
+    resolve_tilt_charts(job_path, &mut operations)?;
     if rotary.is_none()
         && let Some(operation) = operations.iter().find(|operation| operation.index_deg().is_some())
     {
@@ -1769,6 +1815,20 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         && kinematics.is_none()
     {
         return Err(JobFileError::invalid(format!("operation `{}`: tool_axis needs a kinematics file", operation.name())));
+    }
+    if let Some(operation) = operations.iter().find(|operation| operation.tilt().is_some()) {
+        if kinematics.is_none() {
+            return Err(JobFileError::invalid(format!("operation `{}`: tilt needs a kinematics file", operation.name())));
+        }
+        if operation.plane().is_some() {
+            return Err(JobFileError::invalid(format!("operation `{}`: tilt cannot be combined with plane", operation.name())));
+        }
+        if operation.index_deg().is_some() {
+            return Err(JobFileError::invalid(format!("operation `{}`: tilt cannot be combined with index_deg", operation.name())));
+        }
+        if operation.tool_axis().is_some() {
+            return Err(JobFileError::invalid(format!("operation `{}`: tilt cannot be combined with tool_axis", operation.name())));
+        }
     }
     if let Some(kinematics) = &kinematics {
         for operation in &operations {
@@ -2611,6 +2671,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "start_hole",
             "skims",
             "flush",
+            "tilt",
             "pierce_type",
         ],
         "operation",
@@ -2635,6 +2696,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
     }
     if optional(map, "tool_axis").is_some() && !matches!(kind, OperationKind::Surface) {
         return Err(JobFileError::invalid("tool_axis is only valid on a surface"));
+    }
+    if optional(map, "tilt").is_some() && !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(op_invalid(&name, "tilt is only valid on a kerf profile"));
     }
     let dwell = parse_dwell(optional(map, "dwell"), kind)?;
     let plane = take_plane(&name, map, &kind, index_deg.is_some(), scale)?;
@@ -2724,6 +2788,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         return Err(op_invalid(&name, "preheat delay is shorter than min_preheat"));
     }
     let (spark_gap, start_hole, skims, flush) = parse_wire_profile(map, &name, &kind, tool, abrasive, preheat, scale)?;
+    let tilt = parse_kerf_tilt(map, &name, &kind, tool, index_deg.is_some())?;
     let tabs = if matches!(kind, OperationKind::Profile { .. }) { parse_profile_tabs(optional(map, "tabs"), depth, scale)? } else { None };
     let (lead_in, lead_out) = if matches!(kind, OperationKind::Profile { .. }) {
         (parse_profile_lead(optional(map, "lead_in"), scale)?, parse_profile_lead(optional(map, "lead_out"), scale)?)
@@ -2786,6 +2851,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         start_hole,
         skims,
         flush,
+        tilt,
     })
 }
 
@@ -2928,6 +2994,7 @@ fn finish_surface(name: String, map: &Map<String, Value>, scale: f64, tools: &[J
         start_hole: None,
         skims: Vec::new(),
         flush: false,
+        tilt: None,
     })
 }
 
@@ -3180,6 +3247,7 @@ fn finish_rough(name: String, map: &Map<String, Value>, scale: f64, tools: &[Job
         start_hole: None,
         skims: Vec::new(),
         flush: false,
+        tilt: None,
     })
 }
 
@@ -3319,6 +3387,7 @@ fn finish_waterline(name: String, map: &Map<String, Value>, scale: f64, tools: &
         start_hole: None,
         skims: Vec::new(),
         flush: false,
+        tilt: None,
     })
 }
 
@@ -3429,6 +3498,7 @@ fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobT
         start_hole: None,
         skims: Vec::new(),
         flush: false,
+        tilt: None,
     })
 }
 
@@ -3565,6 +3635,7 @@ fn finish_rotary(name: String, map: &Map<String, Value>, scale: f64, tools: &[Jo
         start_hole: None,
         skims: Vec::new(),
         flush: false,
+        tilt: None,
     })
 }
 
@@ -3702,6 +3773,7 @@ fn finish_laser_raster(name: String, map: &Map<String, Value>, scale: f64, tools
         start_hole: None,
         skims: Vec::new(),
         flush: false,
+        tilt: None,
     })
 }
 
@@ -4500,6 +4572,171 @@ fn parse_wire_profile(
         None => false,
     };
     Ok((Some(spark_gap), start_hole, skims, flush))
+}
+
+fn parse_kerf_tilt(
+    map: &Map<String, Value>,
+    name: &str,
+    kind: &OperationKind,
+    tool: &JobTool,
+    has_index: bool,
+) -> Result<Option<KerfTilt>, JobFileError> {
+    let Some(value) = optional(map, "tilt") else {
+        return Ok(None);
+    };
+    if !matches!(kind, OperationKind::Profile { .. }) {
+        return Err(op_invalid(name, "tilt is only valid on a kerf profile"));
+    }
+    if tool.is_wire() {
+        return Err(op_invalid(name, "tilt is not valid on a wire tool"));
+    }
+    if tool.diameter().is_some() {
+        return Err(op_invalid(name, "tilt is only valid on a kerf tool"));
+    }
+    if has_index {
+        return Err(op_invalid(name, "tilt cannot be combined with index_deg"));
+    }
+    let tilt_map = object(value, "tilt").map_err(from_cli)?;
+    check_keys(tilt_map, &["lead_deg", "taper_deg", "chart"], "tilt").map_err(from_cli)?;
+    if optional(tilt_map, "lead_deg").is_none() && optional(tilt_map, "taper_deg").is_none() {
+        return Err(op_invalid(name, "tilt needs lead_deg or taper_deg"));
+    }
+    let lead_deg = parse_tilt_angle(optional(tilt_map, "lead_deg"), "lead_deg")?;
+    let taper_deg = parse_tilt_angle(optional(tilt_map, "taper_deg"), "taper_deg")?;
+    let chart_path = match optional(tilt_map, "chart") {
+        Some(value) => {
+            let path = as_str(value, "tilt.chart").map_err(from_cli)?;
+            if path.is_empty() {
+                return Err(op_invalid(name, "tilt.chart: path is empty"));
+            }
+            Some(path.to_string())
+        }
+        None => None,
+    };
+    Ok(Some(KerfTilt { lead_deg, requested_taper_deg: taper_deg, head_taper_deg: taper_deg, chart_path, chart_reference: None }))
+}
+
+fn parse_tilt_angle(value: Option<&Value>, what: &str) -> Result<f64, JobFileError> {
+    let Some(value) = value else {
+        return Ok(0.0);
+    };
+    let degrees = as_f64(value, what).map_err(from_cli)?;
+    if !degrees.is_finite() || degrees <= -90.0 || degrees >= 90.0 {
+        return Err(JobFileError::invalid(format!("{what} must be in (-90, 90) degrees")));
+    }
+    Ok(degrees)
+}
+
+fn resolve_tilt_charts(job_path: &Path, operations: &mut [Operation]) -> Result<(), JobFileError> {
+    for operation in operations {
+        let Some(tilt) = operation.tilt.as_mut() else {
+            continue;
+        };
+        let Some(relative) = tilt.chart_path.clone() else {
+            continue;
+        };
+        let chart = load_tilt_chart(job_path, &relative)?;
+        tilt.head_taper_deg = remap_taper(tilt.requested_taper_deg, &chart)?;
+        tilt.chart_reference = Some(chart.reference);
+    }
+    Ok(())
+}
+
+struct TiltChart {
+    reference: String,
+    /// Sorted unique (`requested_deg`, `head_deg`) pairs from the cited file.
+    entries: Vec<(f64, f64)>,
+}
+
+fn load_tilt_chart(job_path: &Path, relative: &str) -> Result<TiltChart, JobFileError> {
+    let dir = job_path.parent().unwrap_or(Path::new(""));
+    let path = dir.join(relative);
+    let text = read_tilt_chart(&path)?;
+    let value: Value = serde_json::from_str(&text).map_err(|err| JobFileError::invalid(format!("tilt.chart: {err}")))?;
+    let map = object(&value, "tilt.chart").map_err(from_cli)?;
+    check_keys(map, &["reference", "taper"], "tilt.chart").map_err(from_cli)?;
+    let Some(reference_value) = optional(map, "reference") else {
+        return Err(JobFileError::invalid("tilt.chart: a measured chart needs a citation in `reference`"));
+    };
+    let reference = as_str(reference_value, "tilt.chart.reference").map_err(from_cli)?.trim();
+    if reference.is_empty() {
+        return Err(JobFileError::invalid("tilt.chart: a measured chart needs a citation in `reference`"));
+    }
+    let taper_value = require(map, "taper").map_err(from_cli)?;
+    let list = taper_value.as_array().ok_or_else(|| JobFileError::invalid("tilt.chart: taper must be an array"))?;
+    if list.is_empty() {
+        return Err(JobFileError::invalid("tilt.chart: taper needs at least one cited entry"));
+    }
+    if list.len() > 4096 {
+        return Err(JobFileError::invalid("tilt.chart: taper has too many entries"));
+    }
+    let mut entries = Vec::new();
+    for (index, item) in list.iter().enumerate() {
+        let entry = object(item, &format!("tilt.chart.taper[{index}]")).map_err(from_cli)?;
+        check_keys(entry, &["requested_deg", "head_deg"], "tilt.chart.taper entry").map_err(from_cli)?;
+        let requested = as_f64(require(entry, "requested_deg").map_err(from_cli)?, "requested_deg").map_err(from_cli)?;
+        let head = as_f64(require(entry, "head_deg").map_err(from_cli)?, "head_deg").map_err(from_cli)?;
+        if !requested.is_finite() {
+            return Err(JobFileError::invalid(format!("tilt.chart: taper[{index}].requested_deg must be finite")));
+        }
+        if !head.is_finite() || head <= -90.0 || head >= 90.0 {
+            return Err(JobFileError::invalid(format!("tilt.chart: taper[{index}].head_deg must be in (-90, 90) degrees")));
+        }
+        entries.push((requested, head));
+    }
+    entries.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+    for pair in entries.windows(2) {
+        if (pair[1].0 - pair[0].0).abs() <= 1e-12 {
+            return Err(JobFileError::invalid("tilt.chart: requested_deg values must be unique"));
+        }
+    }
+    Ok(TiltChart { reference: reference.to_string(), entries })
+}
+
+fn read_tilt_chart(path: &Path) -> Result<String, JobFileError> {
+    let file = File::open(path).map_err(|err| JobFileError::invalid(format!("tilt.chart: {}: {err}", path.display())))?;
+    if let Ok(meta) = file.metadata()
+        && meta.len() > MAX_JSON_BYTES as u64
+    {
+        return Err(JobFileError::invalid(format!("tilt.chart: {} is larger than {MAX_JSON_BYTES} bytes", path.display())));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| JobFileError::invalid(format!("tilt.chart: {}: {err}", path.display())))?;
+    if bytes.len() > MAX_JSON_BYTES {
+        return Err(JobFileError::invalid(format!("tilt.chart: {} is larger than {MAX_JSON_BYTES} bytes", path.display())));
+    }
+    String::from_utf8(bytes).map_err(|_| JobFileError::invalid(format!("tilt.chart: {} is not valid UTF-8", path.display())))
+}
+
+fn remap_taper(requested: f64, chart: &TiltChart) -> Result<f64, JobFileError> {
+    let first = chart.entries[0].0;
+    let last = chart.entries[chart.entries.len() - 1].0;
+    if requested < first - 1e-12 || requested > last + 1e-12 {
+        return Err(JobFileError::invalid(format!("tilt.chart: requested taper {requested} deg is outside the cited table [{first}, {last}] deg")));
+    }
+    for window in chart.entries.windows(2) {
+        let (x0, y0) = window[0];
+        let (x1, y1) = window[1];
+        if requested < x0 - 1e-12 {
+            break;
+        }
+        if (requested - x0).abs() <= 1e-12 {
+            return Ok(y0);
+        }
+        if requested <= x1 + 1e-12 {
+            if (requested - x1).abs() <= 1e-12 {
+                return Ok(y1);
+            }
+            let t = (requested - x0) / (x1 - x0);
+            return Ok(y0 + t * (y1 - y0));
+        }
+    }
+    if (requested - last).abs() <= 1e-12 {
+        return Ok(chart.entries[chart.entries.len() - 1].1);
+    }
+    Err(JobFileError::invalid(format!("tilt.chart: requested taper {requested} deg is outside the cited table [{first}, {last}] deg")))
 }
 
 fn check_wire_operation(
@@ -8616,6 +8853,110 @@ mod tests {
         write_beside(&path, "table_table_bc.kin.json", &kin);
         let err = load(&path).expect_err("kinematics");
         assert!(invalid_detail(&err).contains("nest cannot be combined with kinematics"), "{err}");
+    }
+
+    fn gantry_kinematics() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/gantry_head_ab.kin.json");
+        fs::read_to_string(path).expect("example gantry kinematics")
+    }
+
+    fn example_taper_chart() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/example_taper_chart.json");
+        fs::read_to_string(path).expect("example taper chart")
+    }
+
+    fn tilt_job(name: &str, extra_op: &str, extra_job: &str, chart: Option<&str>) -> PathBuf {
+        let mut text = kerf_profile_text(r#""kerf":1.0"#, extra_op);
+        text = text.replacen(r#""units":"mm""#, &format!(r#""units":"mm","kinematics":"gantry_head_ab.kin.json"{extra_job}"#), 1);
+        let path = write_job(name, &text);
+        write_beside(&path, "gantry_head_ab.kin.json", &gantry_kinematics());
+        if let Some(chart) = chart {
+            write_beside(&path, "example_taper_chart.json", chart);
+        }
+        path
+    }
+
+    #[test]
+    fn profile_accepts_tilt_on_a_kerf_with_kinematics() {
+        let job = load(&tilt_job("tilt-ok", r#", "tilt": { "lead_deg": 2, "taper_deg": 10 }"#, "", None)).expect("ok");
+        let tilt = job.operations()[0].tilt().expect("tilt");
+        assert!((tilt.lead_deg() - 2.0).abs() < 1e-12);
+        assert!((tilt.requested_taper_deg() - 10.0).abs() < 1e-12);
+        assert!((tilt.head_taper_deg() - 10.0).abs() < 1e-12);
+        assert!(tilt.chart_reference().is_none());
+    }
+
+    #[test]
+    fn profile_remaps_taper_from_a_cited_example_chart() {
+        // The 9° head angle at a requested 10° is an example entry, not a measured machine.
+        let job = load(&tilt_job(
+            "tilt-chart",
+            r#", "tilt": { "lead_deg": 0, "taper_deg": 10, "chart": "example_taper_chart.json" }"#,
+            "",
+            Some(&example_taper_chart()),
+        ))
+        .expect("chart");
+        let tilt = job.operations()[0].tilt().expect("tilt");
+        assert!((tilt.requested_taper_deg() - 10.0).abs() < 1e-12);
+        assert!((tilt.head_taper_deg() - 9.0).abs() < 1e-12);
+        assert!(tilt.chart_reference().expect("ref").contains("Example citation for tests only"));
+
+        let mid = load(&tilt_job(
+            "tilt-chart-mid",
+            r#", "tilt": { "taper_deg": 15, "chart": "example_taper_chart.json" }"#,
+            "",
+            Some(&example_taper_chart()),
+        ))
+        .expect("mid");
+        assert!((mid.operations()[0].tilt().expect("tilt").head_taper_deg() - 13.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn profile_rejects_an_uncited_or_out_of_table_chart() {
+        let no_ref = r#"{ "taper": [{ "requested_deg": 0, "head_deg": 0 }, { "requested_deg": 10, "head_deg": 9 }] }"#;
+        let err = load(&tilt_job("tilt-noref", r#", "tilt": { "taper_deg": 5, "chart": "example_taper_chart.json" }"#, "", Some(no_ref)))
+            .expect_err("noref");
+        assert!(invalid_detail(&err).contains("needs a citation in `reference`"), "{err}");
+
+        let empty_ref = r#"{ "reference": "  ", "taper": [{ "requested_deg": 0, "head_deg": 0 }, { "requested_deg": 10, "head_deg": 9 }] }"#;
+        let err = load(&tilt_job("tilt-emptyref", r#", "tilt": { "taper_deg": 5, "chart": "example_taper_chart.json" }"#, "", Some(empty_ref)))
+            .expect_err("emptyref");
+        assert!(invalid_detail(&err).contains("needs a citation in `reference`"), "{err}");
+
+        let err = load(&tilt_job(
+            "tilt-outside",
+            r#", "tilt": { "taper_deg": 25, "chart": "example_taper_chart.json" }"#,
+            "",
+            Some(&example_taper_chart()),
+        ))
+        .expect_err("outside");
+        assert!(invalid_detail(&err).contains("outside the cited table"), "{err}");
+    }
+
+    #[test]
+    fn profile_rejects_invalid_tilt() {
+        let err = load(&write_job("tilt-nokin", &kerf_profile_text(r#""kerf":1.0"#, r#", "tilt": { "taper_deg": 10 }"#))).expect_err("nokin");
+        assert!(invalid_detail(&err).contains("tilt needs a kinematics file"), "{err}");
+
+        let mill = kerf_profile_text(r#""diameter":6"#, r#", "tilt": { "taper_deg": 10 }"#).replacen(
+            r#""units":"mm""#,
+            r#""units":"mm","kinematics":"gantry_head_ab.kin.json""#,
+            1,
+        );
+        let path = write_job("tilt-mill", &mill);
+        write_beside(&path, "gantry_head_ab.kin.json", &gantry_kinematics());
+        let err = load(&path).expect_err("mill");
+        assert!(invalid_detail(&err).contains("tilt is only valid on a kerf tool"), "{err}");
+
+        let empty = kerf_profile_text(r#""kerf":1.0"#, r#", "tilt": {}"#).replacen(
+            r#""units":"mm""#,
+            r#""units":"mm","kinematics":"gantry_head_ab.kin.json""#,
+            1,
+        );
+        let path = write_job("tilt-empty", &empty);
+        write_beside(&path, "gantry_head_ab.kin.json", &gantry_kinematics());
+        let err = load(&path).expect_err("empty");
+        assert!(invalid_detail(&err).contains("tilt needs lead_deg or taper_deg"), "{err}");
     }
 }
 
