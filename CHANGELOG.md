@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+Tilting kerf heads share one tool-axis path for waterjet lead and taper and oxy-fuel bevel. This output has not been proven on a machine.
+
+### Added
+
+- A kerf `profile` may set `tilt` with `lead_deg` (along travel, toward the feed when positive) and `taper_deg` (across the wall, toward the waste when positive). Oxy-fuel bevel uses `taper_deg`. The path stores the requested angles as a comment and as the commanded tool axis. An optional `tilt.chart` is a user-supplied JSON table that remaps only the requested taper to a head angle and must include a `reference` citation. The core never supplies a chart. Head travel limits come from the kinematics file the job names. `examples/gantry_head_ab.kin.json` is an illustrative two-joint gantry head; its ±60° limits and 80 mm pivot are example values, not measured machine data. The `waterjet` and `oxyfuel` posts write continuous five-axis A/B with inverse-time `G93` / `G94` when the program has kinematics. `five_axis.retract` is empty because no machine retract is cited. `chord_tol` 0.005 and `axis_tol_deg` 0.1 are post parameters, not measured settings. A post without continuous five-axis output, including `plasma`, refuses a tilted path. This output has not been proven on a machine.
+
 ## 0.15.0 — 2026-11-13
 
 A LinuxCNC-style `wire_edm` post writes 2-axis wire EDM paths: a kerf-sized offset of wire radius plus the spark gap named by each pass, a lead from a supplied start hole, tabs, skim passes, and wire off on rapids (#178). This output has not been proven on a machine.

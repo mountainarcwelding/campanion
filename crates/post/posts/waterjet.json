@@ -1,7 +1,7 @@
 {
   "id": "waterjet",
   "name": "LinuxCNC waterjet",
-  "description": "LinuxCNC-style waterjet in millimetres. Absolute moves, cutter compensation and tool length cancelled, path blend G64 P0.05 as on the plasma post, not a measured machine setting. Controller left or right compensation writes G41 or G42 before the first feed and G40 at the end; computed compensation stays on the already-offset path. The jet is a Torch process: on is M3 S1 and off is M5, the same LinuxCNC spindle-control words as plasma. Named Other process abrasive is M64 Pn / M65 Pn; digital_out.abrasive_pin is a post parameter that defaults to 0, not a machine assignment. Any other Other name is refused. The pierce delay is the path dwell (G4 P in seconds). Arcs use IJK and helices are written as lines. thc.on and thc.off stay empty until a manual cites height-control codes. process_cycle is per_cut: abrasive off then jet off before a rapid, jet on then abrasive on before the next feed. A pierce dwell is written only when the IR has one at that cut. No rotary axis. Not proven on a machine.",
+  "description": "LinuxCNC-style waterjet in millimetres. Absolute moves, cutter compensation and tool length cancelled, path blend G64 P0.05 as on the plasma post, not a measured setting. G41/G42 then G40 for controller compensation; computed stays on the offset path. Jet is Torch M3 S1 / M5. Named Other abrasive is M64 Pn / M65 Pn; digital_out.abrasive_pin defaults to 0, a post parameter, not a machine assignment. Other Other names are refused. Pierce delay is the path dwell (G4 P seconds). IJK arcs; helices as lines. thc words stay empty until a manual cites them. process_cycle is per_cut: abrasive then jet off before a rapid, jet then abrasive on before the next feed. A pierce dwell is written only when the IR has one. Optional continuous five-axis A/B when the program has kinematics: G93/G94, empty retract (none cited), chord_tol 0.005 and axis_tol_deg 0.1 as post parameters, not measured settings. Not proven on a machine.",
   "units": "mm",
   "line_numbers": {
     "enabled": true,
@@ -132,6 +132,34 @@
   "axis_letters": "XYZ",
   "references": [
     "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m3-m5",
-    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65"
-  ]
+    "https://linuxcnc.org/docs/stable/html/gcode/m-code.html#mcode:m62-m65",
+    "https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g93-g94"
+  ],
+  "rotary": {
+    "axes": [
+      "a",
+      "b"
+    ],
+    "decimals": 3,
+    "feed_mode": "inverse_time",
+    "inverse_time_on": "G93",
+    "inverse_time_off": "G94"
+  },
+  "five_axis": {
+    "mode": "machine",
+    "decimals": 3,
+    "retract": [],
+    "index": [
+      "G0 {rotaries}"
+    ],
+    "on": [],
+    "off": [],
+    "continuous": {
+      "feed": "inverse_time",
+      "inverse_time_on": "G93",
+      "inverse_time_off": "G94",
+      "chord_tol": 0.005,
+      "axis_tol_deg": 0.1
+    }
+  }
 }

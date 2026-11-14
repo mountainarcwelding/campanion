@@ -8,6 +8,8 @@ const TABLE_TABLE_AC: &str = include_str!("../kinematics/table_table_ac.json");
 const TABLE_TABLE_BC: &str = include_str!("../kinematics/table_table_bc.json");
 const HEAD_TABLE_BC: &str = include_str!("../kinematics/head_table_bc.json");
 const HEAD_HEAD_AC: &str = include_str!("../kinematics/head_head_ac.json");
+// Illustrative gantry head. The ±60° limits are example values, not a real machine.
+const GANTRY_HEAD_AB: &str = include_str!("../kinematics/gantry_head_ab.json");
 const B_HEAD: &str = r#"{
   "name": "b_head",
   "rotaries": [{
@@ -36,6 +38,8 @@ fn machines() -> Vec<MachineSpec> {
         MachineSpec { label: "head-table", text: HEAD_TABLE_BC, tilt: 1, spin: Some(0), tilt_min: -110.0, tilt_max: 110.0 },
         MachineSpec { label: "head-head", text: HEAD_HEAD_AC, tilt: 1, spin: Some(0), tilt_min: -170.0, tilt_max: 170.0 },
         MachineSpec { label: "mill-turn B head", text: B_HEAD, tilt: 0, spin: None, tilt_min: -170.0, tilt_max: 170.0 },
+        // Example ±60° A/B travel; planar cone paths stay well inside those example limits.
+        MachineSpec { label: "gantry-head", text: GANTRY_HEAD_AB, tilt: 0, spin: None, tilt_min: -60.0, tilt_max: 60.0 },
     ]
 }
 

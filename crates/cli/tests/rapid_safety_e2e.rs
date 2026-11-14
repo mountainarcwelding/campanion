@@ -56,7 +56,10 @@ fn mill_post_ids() -> Result<Vec<String>, String> {
             continue;
         };
         let lower = id.to_ascii_lowercase();
-        if lower.contains("lathe") || lower.contains("2ch") {
+        // Waterjet and oxy-fuel list A/B for tilting kerf heads. They are not mill five-axis
+        // posts; posting every example through them would run the inverse on mill 5-axis jobs.
+        // Their 3-axis and kerf-tilt coverage lives in their own e2e and post goldens.
+        if lower.contains("lathe") || lower.contains("2ch") || lower == "waterjet" || lower == "oxyfuel" {
             continue;
         }
         ids.push(id.to_string());
@@ -136,7 +139,15 @@ fn examples_reject_no_low_rapid() -> Result<(), String> {
 
 fn skipped_golden(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    !lower.ends_with(".nc") || lower.contains("lathe") || lower.contains("turn") || lower.contains("2ch") || lower.contains("millturn")
+    !lower.ends_with(".nc")
+        || lower.contains("lathe")
+        || lower.contains("turn")
+        || lower.contains("2ch")
+        || lower.contains("millturn")
+        // Machine-mode five-axis XYZ is the gauge point, not the tool tip, so a rapid at
+        // retract can show a negative Z word. These goldens are checked in kerf_tilt_e2e.
+        || lower.contains("waterjet_taper")
+        || lower.contains("oxyfuel_bevel")
 }
 
 fn scan_dir(dir: &Path) -> Result<(), String> {

@@ -303,9 +303,9 @@ immediate digital outputs `M64 Pn` / `M65 Pn`
 `digital_out.preheat_pin` and `digital_out.cutting_oxygen_pin` are post parameters that default
 to 0 and 1; they are not machine pin assignments. A post that lists accepted auxiliaries refuses
 any other `Other` name. Omitted `preheat` writes no preheat or cutting-oxygen events. Height-control
-words on the post stay empty until a manual cites them. Bevel is not written yet; it waits for
-the shared tilt step. Several torches are not written yet; a channel wait needs a cited dialect
-code. This output has not been proven on a machine.
+words on the post stay empty until a manual cites them. Bevel uses the shared `tilt` object
+(`taper_deg` is the wall angle toward the waste). Several torches are not written yet; a channel
+wait needs a cited dialect code. This output has not been proven on a machine.
 
 `preheat` cannot be combined with `abrasive`. Diameter tools and non-profile operations reject
 `preheat` and `min_preheat`.
@@ -316,6 +316,34 @@ cutting oxygen off on every rapid: cutting oxygen off, then preheat off, then to
 travel. When a job-file path would otherwise leave those auxiliaries on through a rapid, the
 path turns them off and writes a fresh preheat dwell before cutting oxygen returns. Feeds,
 delays and kerf width in an example job are example values, not machine data.
+
+### Tilting kerf heads
+
+A kerf `profile` may set `tilt` with `lead_deg` (along travel) and `taper_deg` (across the
+wall). At least one of those fields is required; an omitted field is 0. Angles are degrees, not
+scaled by `units`, and must lie in `(-90, 90)`. A positive lead leans toward the feed. A
+positive taper leans toward the waste (the scrap side the operation named: left of travel for
+climb, right for conventional). Oxy-fuel bevel uses `taper_deg`. The path stores the requested
+angles in a comment (`requested lead …, requested taper …`) and as the commanded tool axis on
+each move. Plunge and retract travel along that axis.
+
+`tilt` needs a top-level `kinematics` file. Head travel limits come from that file, not from
+the job or the core. `examples/gantry_head_ab.kin.json` is an illustrative gantry head (B about
+Y, then A about X); its pivots and ±60° limits are example values used in tests, not measured
+machine data. `tilt` is refused on a wire or diameter tool, on a non-profile, and together with
+`plane`, `index_deg`, `wrap`, `rotary`, or `tool_axis`. A post without continuous five-axis
+output, including `plasma`, refuses a tilted path (`has no continuous five-axis output`). The
+`waterjet` and `oxyfuel` posts write A/B with inverse-time `G93` / `G94`
+(https://linuxcnc.org/docs/stable/html/gcode/g-code.html#gcode:g93-g94) when the program has
+kinematics. `five_axis.retract` is empty because no machine retract is cited. `chord_tol` 0.005
+and `axis_tol_deg` 0.1 are post parameters, not measured settings. This output has not been
+proven on a machine.
+
+Optional `tilt.chart` is a path, relative to the job file, to a JSON table the user supplies.
+The file must include a non-empty `reference` citation and a `taper` array of
+`{ "requested_deg", "head_deg" }` entries. The core remaps only the requested taper, exactly or
+by linear interpolation between cited entries, and refuses a value outside the table or a file
+without a citation. Lead is never taken from the chart. The core never supplies a chart.
 
 ### Wire EDM
 

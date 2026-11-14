@@ -11,6 +11,8 @@
 //! part-frame tip are properties of the coordinates, checked by the audit tests.
 //!
 //! A `decimal_point` post must put a decimal point on `A`, `B`, and `C` as well as on `X` `Y` `Z`.
+//! A post with `digital_out` accepts `M64` and `M65` when `P` is a declared auxiliary pin, the
+//! same rule as [`crate::audit`]. Those codes do not change motion or modal state.
 
 use campanion_ir::{ArcSense, Plane};
 
@@ -567,6 +569,14 @@ impl<'a> Parser<'a> {
                 7 => self.coolant = CoolantState::Mist,
                 8 => self.coolant = CoolantState::Flood,
                 9 => self.coolant = CoolantState::Off,
+                64 | 65 => {
+                    let Some(pin) = parsed.p else {
+                        return Err(fail(line_no, "digital output needs a P word"));
+                    };
+                    if !self.post.digital_pin(pin) {
+                        return Err(fail(line_no, "digital output P is not a declared pin"));
+                    }
+                }
                 other => return Err(fail(line_no, format!("unsupported M{other}"))),
             }
         }

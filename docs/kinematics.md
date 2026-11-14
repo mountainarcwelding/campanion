@@ -3,6 +3,9 @@
 A kinematics file describes one or two rotary joints and the spindle direction at zero head angles. Angles are degrees. A rotation is right-handed about the joint axis. Lengths are millimetres.
 
 The files in `crates/ir/kinematics/` are illustrative examples. They are not a description of any real machine.
+`gantry_head_ab.json` is a two-joint gantry head (B about Y, then A about X) for tilting kerf tools.
+Its pivots and travel limits are example values used in tests; they are not measured machine data.
+The same file is copied as `examples/gantry_head_ab.kin.json` for job-file examples.
 
 Load a kinematics file with `Kinematics::from_json`. A program may store that model on `five_axis` with a `SolutionPolicy`: `nearest`, `first_positive` or `first_negative`. `SolutionPolicy::choice` maps the policy onto `Choice`. A program cannot store both a rotary setup and five-axis kinematics.
 
