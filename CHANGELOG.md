@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-A LinuxCNC-style `oxyfuel` post writes preheat and cutting-oxygen events for a single vertical torch. This output has not been proven on a machine.
+## 0.14.0 — 2026-11-13
+
+A LinuxCNC-style `oxyfuel` post writes preheat and cutting-oxygen events for a single vertical torch (#176). This output has not been proven on a machine.
 
 ### Added
 
