@@ -1492,7 +1492,7 @@ impl App {
         ui.separator();
         ui.label(RichText::new("Console").strong().size(13.0));
         egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-            ui.label(RichText::new("Not connected. Machine I/O is not available in this layout preview.").color(theme::MUTED).size(11.0).monospace());
+            ui.label(RichText::new("Not connected. Machine I/O is not available in this GUI preview.").color(theme::MUTED).size(11.0).monospace());
         });
     }
 
