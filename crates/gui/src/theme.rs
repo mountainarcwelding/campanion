@@ -1,4 +1,4 @@
-//! Dark, low-contrast colours used by the layout preview.
+//! Dark, low-contrast colours used by the graphical workspace.
 //!
 //! The palette follows the approved mockups: a professional dark shell, a blue accent for the
 //! active tab, and orange for user overrides.

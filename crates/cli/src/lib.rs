@@ -123,8 +123,9 @@ verify  Verify an IR JSON file and print a report. The status is 1 when the repo
 view    Open the toolpath preview (the campanion-view program) for an IR JSON file.
         --stock FILE.json draws the height map from --stock-out. S toggles that surface.
         --machine draws boxes and cylinders from the kinematics model. M toggles that sketch.
-gui     Open the layout preview (the campanion-gui program). FILE may be IR JSON, a job file, or G-code.
-        This is an early shell: menus, navigation and viewports. It does not talk to a machine.
+gui     Open the graphical workspace preview (the campanion-gui program). FILE may be a job file,
+        a part, IR JSON, or G-code. CAMpanion is primarily command-line driven; the GUI is still
+        in development. It can generate toolpaths and export G-code. It does not talk to a machine.
 schema  Print the JSON Schema for campanion-ir/1.
 
 --job FILE

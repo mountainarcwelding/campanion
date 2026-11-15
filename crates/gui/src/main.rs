@@ -1,4 +1,4 @@
-//! Window entry for the CAMpanion layout preview.
+//! Window entry for the CAMpanion graphical workspace preview.
 //!
 //! `campanion-gui [FILE] [--screenshot DIR]` opens the shell. FILE may be IR JSON, a job file, or
 //! G-code. `--screenshot DIR` writes PNG previews of the main views and exits. The window never
