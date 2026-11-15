@@ -190,11 +190,14 @@ On a cutting workspace you can import a DXF, SVG, STEP or STL part, open and sav
 `campanion-job/1` files, place a 2D part (drag or typed offset and rotation), edit profile
 operations, generate toolpaths, choose a post, preview G-code and export `.ngc` / `.gcode`.
 Open, Import, Save As and Export use a system file chooser when one is available, or a typed
-path (relative paths and `~` are accepted). Properties show only fields for the selected
-process. Backend warnings and refusals (for example an omitted laser power posting as S0, a
-slot narrower than the kerf, or an SVG whose page units are ambiguous) are shown in the UI.
-Feeds, power and sizes stay empty until you enter them; the program does not invent machine
-limits or material defaults.
+path (relative paths and `~` are accepted). Machine → Machine profiles… edits user machine
+profiles (work area, heads, and a per-head material library) stored in the config directory;
+see [docs/machine-profile.md](docs/machine-profile.md). A job may name a profile and head.
+Properties show only fields for the selected head's process. Backend warnings and refusals
+(for example an omitted laser power posting as S0, a slot narrower than the kerf, an SVG
+whose page units are ambiguous, or a toolpath outside the entered work area) are shown in
+the UI. Feeds, power and sizes stay empty until you enter them; the program does not invent
+machine limits or material defaults.
 
 The CLI remains the primary way to run CAMpanion (`campanion run`, `campanion post`, and the
 other commands above).

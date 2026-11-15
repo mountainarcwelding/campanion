@@ -10,6 +10,7 @@ pub mod app;
 pub mod edit;
 pub mod fields;
 pub mod files;
+pub mod machines;
 pub mod session;
 pub mod theme;
 pub mod viewport;

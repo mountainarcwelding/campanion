@@ -160,6 +160,12 @@ pub struct JobSession {
     pub placement_y: String,
     /// Placement rotation, degrees counter-clockwise, as typed.
     pub placement_rotate: String,
+    /// User machine profile id (file stem), when the job names one.
+    pub machine_profile: String,
+    /// Explicit profile path, used when `machine_profile` is empty.
+    pub machine_path: String,
+    /// Selected head id on that profile.
+    pub machine_head: String,
     pub dirty: bool,
     pub messages: Vec<SessionMessage>,
 }
@@ -183,6 +189,9 @@ impl JobSession {
             placement_x: String::new(),
             placement_y: String::new(),
             placement_rotate: String::new(),
+            machine_profile: String::new(),
+            machine_path: String::new(),
+            machine_head: String::new(),
             dirty: false,
             messages: Vec::new(),
         }
@@ -282,6 +291,11 @@ fn session_from_job(path: &Path, value: Value, job: &JobFile) -> JobSession {
         if placement.rotate_deg() != 0.0 {
             session.placement_rotate = format_number(placement.rotate_deg());
         }
+    }
+    if let Some(machine) = job.machine() {
+        session.machine_profile = machine.profile.clone().unwrap_or_default();
+        session.machine_path = machine.path.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+        session.machine_head = machine.head.clone().unwrap_or_default();
     }
     if let Some(first) = session.operations.first() {
         session.selected = Some(TreeSelection::Operation(0));
@@ -474,7 +488,35 @@ fn job_value_of(session: &JobSession) -> Result<Value, String> {
         }
         Err(err) => return Err(err),
     }
+    match machine_value(session) {
+        Some(value) => {
+            obj.insert("machine".into(), value);
+        }
+        None => {
+            obj.remove("machine");
+        }
+    }
     Ok(root)
+}
+
+fn machine_value(session: &JobSession) -> Option<Value> {
+    if !session.machine_profile.is_empty() {
+        let mut map = serde_json::Map::new();
+        map.insert("profile".into(), Value::String(session.machine_profile.clone()));
+        if !session.machine_head.is_empty() {
+            map.insert("head".into(), Value::String(session.machine_head.clone()));
+        }
+        return Some(Value::Object(map));
+    }
+    if !session.machine_path.is_empty() {
+        let mut map = serde_json::Map::new();
+        map.insert("path".into(), Value::String(session.machine_path.clone()));
+        if !session.machine_head.is_empty() {
+            map.insert("head".into(), Value::String(session.machine_head.clone()));
+        }
+        return Some(Value::Object(map));
+    }
+    None
 }
 
 fn placement_value(session: &JobSession) -> Result<Option<Value>, String> {
