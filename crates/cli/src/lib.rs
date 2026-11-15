@@ -22,6 +22,7 @@ mod live_mill;
 mod machine;
 mod nest;
 mod plane;
+mod profiles;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
 mod jobfile;
@@ -57,6 +58,7 @@ pub use jobfile::{
     DEFAULT_JOB_CHORD_MM, FORMAT_TAG, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, hash_bytes, load, parse,
     source_path,
 };
+pub use profiles::{JobMachineRef, MachineFile, MachineHead, MaterialEntry, ProfileStore, WorkArea, parse_profile, profile_to_json};
 
 const HELP: &str = "\
 Usage:

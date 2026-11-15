@@ -100,6 +100,24 @@ before this key existed. `placement` is not valid on an STL source.
 
 `campanion run` honours `placement` when it plans a DXF, SVG or STEP job.
 
+## User machine profile
+
+Optional `machine` names a user machine profile. This is not the lathe `machine.model` block
+described under [Machine](#machine).
+
+```json
+"machine": { "profile": "shop-laser", "head": "laser" }
+```
+
+`profile` is the file stem of a `campanion-machine/1` file in the user config `machines`
+directory (see [docs/machine-profile.md](machine-profile.md)). `path` may be used instead of
+`profile` to point at an explicit file; the two cannot both be set. `head` is the head id on
+that profile and may be omitted (the first head is used). `machine.model` is rejected here.
+Unknown keys are rejected.
+
+When the named profile has a `work_area`, planning refuses a toolpath that leaves those
+user-entered limits. A missing profile is also a refusal.
+
 ## Tools
 
 A tool has `id` (integer, unique in the file) and exactly one of `diameter`, `kerf`, or `wire`.
