@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use campanion_ir::Document;
 use campanion_view::{Scene, StrokeKind, find_system_font};
-use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Stroke, Vec2};
+use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Layout, RichText, Stroke, Vec2};
 
 use crate::edit::{self, SessionClipboard, SessionSnapshot};
 use crate::fields::{self, ProcessFields};
@@ -28,6 +28,10 @@ use crate::{
 
 const WINDOW_SIZE: [f32; 2] = [1600.0, 900.0];
 const MAX_RECENT: usize = 8;
+const WORKSPACE_CARD_WIDTH: f32 = 112.0;
+const RIBBON_TAB_ROW: f32 = 30.0;
+const RIBBON_GROUP_ROW: f32 = 58.0;
+const RIBBON_HEIGHT: f32 = RIBBON_TAB_ROW + RIBBON_GROUP_ROW + 10.0;
 
 /// Arguments accepted by the window after the binary has parsed its flags.
 pub struct Launch {
@@ -672,6 +676,8 @@ impl App {
         self.screenshot = Some(ScreenshotJob {
             dir,
             plan: vec![
+                (Workspace::ThermalJet, ModeTab::Process, "cutting-process.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "cutting-setup.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Operations, "cutting-operations.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Export, "cutting-export.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Run, "cutting-run.png".to_string()),
@@ -856,8 +862,11 @@ impl App {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         egui::Panel::top("menu").frame(bar_frame()).show(ui, |ui| {
-            ui.set_height(24.0);
+            ui.set_height(28.0);
             egui::MenuBar::new().ui(ui, |ui| {
+                ui.add_space(4.0);
+                draw_wordmark(ui);
+                ui.add_space(10.0);
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
                         self.apply_document_new();
@@ -980,54 +989,262 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        // Workspace card on the left, CAM stage tabs beside it, grouped commands under the
+        // tabs, pinned STOP on the right. This follows the same chrome corners as SolidCraft
+        // (workspace left, mode tabs, then tool groups) without sharing any of its code.
         egui::Panel::top("toolbar").frame(bar_frame()).show(ui, |ui| {
-            ui.set_height(44.0);
-            ui.horizontal_centered(|ui| {
-                ui.add_space(8.0);
-                draw_wordmark(ui);
-                ui.add_space(16.0);
+            ui.set_height(RIBBON_HEIGHT);
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                self.workspace_selector(ui);
+                ui.add_space(6.0);
                 ui.separator();
-                ui.add_space(8.0);
-                let tabs: Vec<ModeTab> = self.state.workspace.tabs().to_vec();
-                let current = self.state.tab;
-                for tab in tabs {
-                    let selected = tab == current;
-                    let text = RichText::new(tab.label()).strong().size(14.0);
-                    let button = if selected {
-                        egui::Button::new(text.color(Color32::WHITE)).fill(theme::ACCENT)
-                    } else {
-                        egui::Button::new(text.color(theme::MUTED)).fill(Color32::TRANSPARENT)
-                    };
-                    if ui.add(button).clicked() {
-                        let _ = self.state.set_tab(tab);
-                    }
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(10.0);
-                    let stop = egui::Button::new(RichText::new("STOP").strong().color(Color32::WHITE).size(15.0))
-                        .fill(theme::STOP)
-                        .min_size(Vec2::new(88.0, 30.0));
-                    if ui.add(stop).clicked() {
-                        self.state.stop_run();
-                    }
-                    ui.add_space(8.0);
-                    self.workspace_selector(ui);
-                    ui.label(RichText::new("Workspace").color(theme::MUTED).size(12.0));
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.set_height(RIBBON_HEIGHT - 4.0);
+                    ui.horizontal(|ui| {
+                        ui.set_height(RIBBON_TAB_ROW);
+                        self.stage_tabs(ui);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            self.stop_button(ui);
+                        });
+                    });
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.set_height(RIBBON_GROUP_ROW);
+                        self.command_groups(ui);
+                    });
                 });
             });
         });
     }
 
     fn workspace_selector(&mut self, ui: &mut egui::Ui) {
-        let current = self.state.workspace.label().to_string();
-        egui::ComboBox::from_id_salt("workspace").selected_text(current).width(180.0).show_ui(ui, |ui| {
+        let height = ui.available_height().max(RIBBON_HEIGHT - 8.0);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(WORKSPACE_CARD_WIDTH, height), egui::Sense::click());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, CornerRadius::same(4), theme::WIDGET);
+        let stroke = if response.hovered() { theme::ACCENT_HOVER } else { theme::BORDER };
+        painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+        let text_color = ui.visuals().text_color();
+        painter.text(
+            rect.center() - Vec2::new(0.0, 10.0),
+            Align2::CENTER_CENTER,
+            self.state.workspace.short_label(),
+            FontId::proportional(13.0),
+            text_color,
+        );
+        painter.text(rect.center() + Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, "Workspace ▾", FontId::proportional(11.0), theme::MUTED);
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        egui::Popup::from_toggle_button_response(&response).width(320.0).show(|ui| {
+            ui.label(RichText::new("WORKSPACE").color(theme::MUTED).size(11.0).strong());
+            ui.add_space(6.0);
             for workspace in Workspace::all() {
-                if ui.selectable_label(self.state.workspace == workspace, workspace.label()).clicked() {
+                let selected = self.state.workspace == workspace;
+                let heading = if selected { format!("{}  (current)", workspace.label()) } else { workspace.label().to_string() };
+                if ui.selectable_label(selected, RichText::new(heading).strong().size(13.0)).clicked() {
                     self.state.set_workspace(workspace);
+                    ui.close();
                 }
+                ui.label(RichText::new(workspace.description()).color(theme::MUTED).size(11.0));
+                ui.add_space(6.0);
             }
             ui.add_enabled(false, egui::Button::new(format!("{} (planned)", parked_label(ParkedWorkspace::Custom))));
         });
+    }
+
+    fn stage_tabs(&mut self, ui: &mut egui::Ui) {
+        let tabs: Vec<ModeTab> = self.state.workspace.tabs().to_vec();
+        let current = self.state.tab;
+        for tab in tabs {
+            let selected = tab == current;
+            let text = if selected {
+                RichText::new(tab.label()).strong().size(14.0).color(Color32::WHITE)
+            } else {
+                RichText::new(tab.label()).size(14.0).color(theme::MUTED)
+            };
+            let button = if selected { egui::Button::new(text).fill(theme::ACCENT) } else { egui::Button::new(text).fill(Color32::TRANSPARENT) };
+            if ui.add(button).clicked() {
+                let _ = self.state.set_tab(tab);
+            }
+        }
+    }
+
+    fn stop_button(&mut self, ui: &mut egui::Ui) {
+        let stop =
+            egui::Button::new(RichText::new("STOP").strong().color(Color32::WHITE).size(15.0)).fill(theme::STOP).min_size(Vec2::new(88.0, 30.0));
+        if ui.add(stop).clicked() {
+            self.state.stop_run();
+        }
+    }
+
+    fn command_groups(&mut self, ui: &mut egui::Ui) {
+        match self.state.tab {
+            ModeTab::Process => {
+                ribbon_group(ui, "Process", |ui| {
+                    let processes: Vec<SubProcess> = self.state.workspace.sub_processes().to_vec();
+                    for process in processes {
+                        let selected = self.state.process == Some(process);
+                        if ribbon_command(ui, process.label(), selected).clicked() {
+                            self.apply_sub_process(process);
+                        }
+                    }
+                    for planned in self.state.workspace.planned_sub_processes() {
+                        ui.add_enabled(false, ribbon_command_widget(planned.label(), false));
+                    }
+                });
+            }
+            ModeTab::Setup => {
+                ribbon_group(ui, "Source", |ui| {
+                    if ribbon_command(ui, "Import part", false).clicked() {
+                        self.request_import();
+                    }
+                    if ribbon_command(ui, "Open job", false).clicked() {
+                        self.request_open();
+                    }
+                });
+            }
+            ModeTab::Operations => {
+                ribbon_group(ui, "Tools", |ui| {
+                    if ribbon_command(ui, "Add tool", false).clicked() {
+                        self.add_session_tool();
+                    }
+                });
+                ribbon_group_separator(ui);
+                ribbon_group(ui, "Operations", |ui| {
+                    if ribbon_command(ui, "Add profile", false).clicked() {
+                        self.add_session_profile();
+                    }
+                });
+                ribbon_group_separator(ui);
+                ribbon_group(ui, "Toolpaths", |ui| {
+                    if ribbon_command(ui, "Generate toolpaths", false).clicked() {
+                        self.generate_paths();
+                    }
+                });
+            }
+            ModeTab::Orient => {
+                ribbon_group(ui, "Orient", |ui| {
+                    if ribbon_command(ui, "Lay flat on face", false).clicked() {
+                        self.state.status = "Lay flat is a placeholder in this preview".to_string();
+                    }
+                    if ribbon_command(ui, "Auto orient", false).clicked() {
+                        self.state.status = "Auto orient is a placeholder in this preview".to_string();
+                    }
+                    if ribbon_command(ui, "Reset", false).clicked() {
+                        self.state.reset_orient();
+                    }
+                });
+            }
+            ModeTab::Supports => {
+                ribbon_group(ui, "Generate", |ui| {
+                    if ribbon_command(ui, "Auto Generate", false).clicked() {
+                        self.state.status = "Auto Generate is a placeholder in this preview".to_string();
+                    }
+                    if ribbon_command(ui, "Scaffold", false).clicked() {
+                        self.state.status = "Scaffold generation is a placeholder in this preview".to_string();
+                    }
+                });
+                ribbon_group_separator(ui);
+                ribbon_group(ui, "Supports", |ui| {
+                    if ribbon_command(ui, "Add Support", false).clicked() {
+                        self.state.status = "Add Support is a placeholder in this preview".to_string();
+                    }
+                    if ribbon_command(ui, "Delete", false).clicked() {
+                        self.state.status = "Delete is a placeholder in this preview".to_string();
+                    }
+                    if ribbon_command(ui, "Select Region", false).clicked() {
+                        self.state.status = "Select Region is a placeholder in this preview".to_string();
+                    }
+                    if ribbon_command(ui, "No-Support Zone", false).clicked() {
+                        self.state.status = "No-support zones are a placeholder in this preview".to_string();
+                    }
+                });
+            }
+            ModeTab::Slice => {
+                ribbon_group(ui, "Layers", |ui| {
+                    if ribbon_command(ui, "Layer up", false).clicked() {
+                        let _ = self.state.step_layer(1);
+                    }
+                    if ribbon_command(ui, "Layer down", false).clicked() {
+                        let _ = self.state.step_layer(-1);
+                    }
+                });
+            }
+            ModeTab::Export => {
+                if matches!(self.state.workspace, Workspace::Resin | Workspace::Fdm) {
+                    ribbon_group(ui, "Export", |ui| {
+                        if ribbon_command(ui, "Export File", false).clicked() {
+                            self.export_gcode();
+                        }
+                    });
+                } else {
+                    ribbon_group(ui, "Toolpaths", |ui| {
+                        if ribbon_command(ui, "Generate toolpaths", false).clicked() {
+                            self.generate_paths();
+                        }
+                        if ribbon_command(ui, "Preview G-code", false).clicked() {
+                            self.preview_gcode();
+                        }
+                    });
+                    ribbon_group_separator(ui);
+                    ribbon_group(ui, "Export", |ui| {
+                        if ribbon_command(ui, "Export File", false).clicked() {
+                            self.export_gcode();
+                        }
+                    });
+                }
+            }
+            ModeTab::Run => {
+                ribbon_group(ui, "Run", |ui| {
+                    ui.add_enabled_ui(self.state.can_start(), |ui| {
+                        if ribbon_command(ui, "Start", false).clicked() {
+                            let _ = self.state.start_run();
+                        }
+                    });
+                    ui.add_enabled_ui(self.state.can_pause() || self.state.run == RunPhase::Paused, |ui| {
+                        let label = if self.state.run == RunPhase::Paused { "Resume" } else { "Pause" };
+                        if ribbon_command(ui, label, false).clicked() {
+                            if self.state.run == RunPhase::Paused {
+                                let _ = self.state.resume_run();
+                            } else {
+                                let _ = self.state.pause_run();
+                            }
+                        }
+                    });
+                });
+            }
+        }
+    }
+
+    fn apply_sub_process(&mut self, process: SubProcess) {
+        let _ = self.state.set_process(process);
+        if let Some(id) = suggested_post_for_process(process.label())
+            && (self.session.post_id.is_empty() || suggested_post_for_process_ids().contains(&self.session.post_id.as_str()))
+        {
+            self.session.post_id = id.to_string();
+        }
+    }
+
+    fn add_session_tool(&mut self) {
+        let kind = default_tool_kind(self.state.process, self.state.workspace);
+        let id = crate::session::next_tool_id(&self.session.tools);
+        self.session.tools.push(ToolDraft { id, name: String::new(), kind, size: String::new() });
+        self.session.selected = Some(TreeSelection::Tool(self.session.tools.len() - 1));
+        self.mark_dirty();
+    }
+
+    fn add_session_profile(&mut self) {
+        let tool_id = self.session.tools.first().map(|tool| tool.id).unwrap_or(1);
+        let name = crate::session::next_operation_name(&self.session.operations, "profile");
+        self.session.operations.push(OpDraft::new_profile(name, tool_id));
+        self.session.selected = Some(TreeSelection::Operation(self.session.operations.len() - 1));
+        self.mark_dirty();
     }
 
     fn preview_banner(&mut self, ui: &mut egui::Ui) {
@@ -1215,11 +1432,7 @@ impl App {
                 self.tree_context_menu(response);
             }
             if ui.button("Add tool").clicked() {
-                let kind = default_tool_kind(self.state.process, self.state.workspace);
-                let id = crate::session::next_tool_id(&self.session.tools);
-                self.session.tools.push(ToolDraft { id, name: String::new(), kind, size: String::new() });
-                self.session.selected = Some(TreeSelection::Tool(self.session.tools.len() - 1));
-                self.mark_dirty();
+                self.add_session_tool();
             }
         });
         ui.collapsing("Operations", |ui| {
@@ -1238,11 +1451,7 @@ impl App {
                 ui.label(RichText::new("No operations yet").color(theme::MUTED).size(12.0));
             }
             if ui.button("Add profile").clicked() {
-                let tool_id = self.session.tools.first().map(|tool| tool.id).unwrap_or(1);
-                let name = crate::session::next_operation_name(&self.session.operations, "profile");
-                self.session.operations.push(OpDraft::new_profile(name, tool_id));
-                self.session.selected = Some(TreeSelection::Operation(self.session.operations.len() - 1));
-                self.mark_dirty();
+                self.add_session_profile();
             }
         });
         ui.add_space(8.0);
@@ -1507,12 +1716,7 @@ impl App {
         for process in processes {
             let selected = self.state.process == Some(process);
             if ui.selectable_label(selected, process.label()).clicked() {
-                let _ = self.state.set_process(process);
-                if let Some(id) = suggested_post_for_process(process.label())
-                    && (self.session.post_id.is_empty() || suggested_post_for_process_ids().contains(&self.session.post_id.as_str()))
-                {
-                    self.session.post_id = id.to_string();
-                }
+                self.apply_sub_process(process);
             }
         }
         for planned in self.state.workspace.planned_sub_processes() {
@@ -2049,6 +2253,34 @@ fn screenshot_ir_candidates() -> Vec<PathBuf> {
     }
     out.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../cli/tests/golden/sample.ir.json"));
     out
+}
+
+fn ribbon_command(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    ui.add(ribbon_command_widget(label, selected))
+}
+
+fn ribbon_command_widget(label: &str, selected: bool) -> egui::Button<'static> {
+    let text =
+        if selected { RichText::new(label.to_owned()).strong().size(12.0).color(Color32::WHITE) } else { RichText::new(label.to_owned()).size(12.0) };
+    let button = if selected { egui::Button::new(text).fill(theme::ACCENT) } else { egui::Button::new(text) };
+    button.min_size(Vec2::new(72.0, 32.0))
+}
+
+fn ribbon_group(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            add_contents(ui);
+        });
+        ui.add_space(2.0);
+        ui.label(RichText::new(title).color(theme::MUTED).size(11.0));
+    });
+}
+
+fn ribbon_group_separator(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, RIBBON_GROUP_ROW - 10.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, theme::BORDER);
+    ui.add_space(8.0);
 }
 
 fn draw_wordmark(ui: &mut egui::Ui) {

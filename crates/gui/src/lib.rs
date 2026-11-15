@@ -607,6 +607,30 @@ impl Workspace {
         }
     }
 
+    /// Compact name for the workspace card on the left of the ribbon.
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Workspace::MillRoute => "Mill/Route",
+            Workspace::Turning => "Turning",
+            Workspace::ThermalJet => "Thermal/Jet",
+            Workspace::WireCutting => "Wire Cutting",
+            Workspace::Resin => "Resin",
+            Workspace::Fdm => "FDM",
+        }
+    }
+
+    /// One-line summary shown in the workspace menu. Matches the family doc comments.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Workspace::MillRoute => "Milling and routing",
+            Workspace::Turning => "Lathe work",
+            Workspace::ThermalJet => "Laser, plasma, waterjet and oxy-fuel",
+            Workspace::WireCutting => "Wire EDM",
+            Workspace::Resin => "Vat photopolymerization / SLA",
+            Workspace::Fdm => "Fused deposition",
+        }
+    }
+
     /// Toolbar tabs for this family. The first entry is the landing tab.
     pub fn tabs(self) -> &'static [ModeTab] {
         match self {
@@ -831,6 +855,20 @@ mod tests {
     fn custom_is_parked_and_not_selectable() {
         assert!(!Workspace::all().iter().any(|workspace| workspace.label().contains("Custom")));
         let _ = ParkedWorkspace::Custom;
+    }
+
+    #[test]
+    fn workspace_short_labels_and_descriptions() {
+        for workspace in Workspace::all() {
+            assert!(!workspace.short_label().is_empty());
+            assert!(!workspace.description().is_empty());
+            assert!(workspace.short_label().chars().count() <= workspace.label().chars().count());
+        }
+        assert_eq!(Workspace::ThermalJet.short_label(), "Thermal/Jet");
+        assert_eq!(Workspace::ThermalJet.label(), "Thermal/Jet Cutting");
+        assert_eq!(Workspace::Resin.short_label(), "Resin");
+        assert_eq!(Workspace::Resin.label(), "Resin (SLA)");
+        assert_eq!(Workspace::ThermalJet.description(), "Laser, plasma, waterjet and oxy-fuel");
     }
 
     #[test]
