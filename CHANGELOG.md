@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+## 0.18.0 — 2026-11-15
+
 The graphical workspace can now open a part or job, edit operations, generate toolpaths and
-export G-code through the existing backend. CAMpanion is still primarily command-line driven;
-the GUI is a work in progress and has not been machine-tested.
+export G-code through the existing backend (#185). CAMpanion is still primarily command-line
+driven; the GUI is a work in progress and has not been machine-tested.
+
+### Added
+
+- `campanion-gui` can open or import a 2D part (DXF/SVG) or a `campanion-job/1` file, add tools and profile operations, generate toolpaths in the viewport, choose a post, preview G-code, and export `.ngc` / `.gcode` through the same planner the CLI uses. Material values stay blank until the user enters them. Backend warnings and refusals (omitted laser power posting `S0`, a slot narrower than the kerf) are shown in the UI. A banner, the status bar, and Help > About state that this is a preview: CAMpanion is primarily command-line driven and the GUI is still in development. The Run tab, STOP, and all machine I/O stay inert. Resin and FDM remain placeholders. Per-contour kerf and lead-in overrides are not in the job format and stay as a labeled placeholder. `examples/laser_rect.svg` and `examples/laser_rect.job.json` are a small laser job that posts with `grbl_laser`.
 
 ## 0.17.0 — 2026-11-15
 
