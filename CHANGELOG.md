@@ -19,8 +19,8 @@ machine-tested.
   set placement. The GUI can drag the part in the viewport or type the same offsets, and `campanion
   run` applies the transform when planning.
 - Tools and operations can be copied, pasted and duplicated (Ctrl+C, Ctrl+V, Ctrl+D, and the Edit
-  menu). Delete (Delete, the context menu, and Edit → Delete) refuses a tool that an operation still
-  uses. Ctrl+Z undoes those edits.
+  menu). Delete (Delete, the context menu, and Edit → Delete) removes a tool, an operation, or the
+  imported part, and refuses a tool that an operation still uses. Ctrl+Z undoes those edits.
 
 ### Changed
 
