@@ -238,7 +238,11 @@ dependencies = [
 name = "campanion-gui"
 version = "0.17.0"
 dependencies = [
+ "campanion-cli",
+ "campanion-geom",
+ "campanion-import",
  "campanion-ir",
+ "campanion-path",
  "campanion-view",
  "eframe",
  "image",

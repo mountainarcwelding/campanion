@@ -180,29 +180,42 @@ struct Cut<'a> {
     job: &'a JobFile,
 }
 
-pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
-    let args = parse_run(args)?;
-    let post = match &args.post {
-        Some(spec) => Some(crate::post::load_spec(spec)?),
-        None => None,
-    };
-    let job = jobfile::load(&args.job).map_err(show)?;
-    if args.nest_out.is_some() && job.nest().is_none() {
-        return Err(CliError::run("--nest-out needs a job with sheet and nest"));
-    }
-    let source = jobfile::source_path(&job);
+/// Planned toolpaths and the notices collected while building them.
+pub struct PlannedProgram {
+    /// Machine-neutral program.
+    pub document: Document,
+    /// Non-fatal notices that `campanion run` prints as `campanion: warning: ...`.
+    pub warnings: Vec<String>,
+    /// Notes written to stderr without the warning prefix (stock peaks, nest summary).
+    pub notes: Vec<String>,
+    /// Gouge findings from an STL job. Empty for a 2D drawing.
+    pub gouges: Vec<report::GougeNote>,
+    /// Nesting placement report, when the job asked for one.
+    pub nest_report: Option<crate::nest::Report>,
+    /// Implicit drawing stock used when the model is on and the job omits `stock`.
+    pub implicit_stock: Option<(campanion_mesh::Vec3, campanion_mesh::Vec3)>,
+}
+
+/// Import the job source and build the IR program, without writing G-code.
+pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedProgram, CliError> {
+    let source = jobfile::source_path(job);
+    let mut warnings = Vec::new();
     if job.source().is_stl() {
         let bytes = read_bytes(&source)?;
-        warn_if_changed(&job, &bytes)?;
+        if jobfile::source_changed(job, &bytes) {
+            warnings.push(source_changed_message(job, &bytes));
+        }
         let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
-        let doc = build_surface(&job, &mesh)?;
-        let gouges = crate::gouge::check_job(&job, &mesh, doc.program())?;
-        crate::collision::check_job(&job, Some(&mesh), doc.program())?;
-        apply_stock(&job, Some(&mesh), doc.program(), None, &args)?;
-        return emit_program(&args, &job, doc, &gouges, post.as_ref(), None);
+        let doc = build_surface(job, &mesh)?;
+        let gouges = crate::gouge::check_job(job, &mesh, doc.program())?;
+        crate::collision::check_job(job, Some(&mesh), doc.program())?;
+        let notes = stock_messages(job, Some(&mesh), doc.program(), None)?;
+        return Ok(PlannedProgram { document: doc, warnings, notes, gouges, nest_report: None, implicit_stock: None });
     }
     let text = read_text(&source)?;
-    warn_if_changed(&job, text.as_bytes())?;
+    if jobfile::source_changed(job, text.as_bytes()) {
+        warnings.push(source_changed_message(job, text.as_bytes()));
+    }
     let is_svg = source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
     let is_step = job.source().is_step();
     let options = ImportOptions::new(job.tolerance());
@@ -213,7 +226,7 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
         };
         let cli = step::find_cli().ok_or_else(step::missing_cli_error)?;
         // `face` is already in the frame `--up-axis` produces. Y up is turned inside SolidCraft.
-        let dxf = step::face_to_dxf(&cli, &source, face, args.up_axis)?;
+        let dxf = step::face_to_dxf(&cli, &source, face, up_axis)?;
         import_dxf(&dxf, &options)
     } else if is_svg {
         import_svg(&text, &options)
@@ -230,57 +243,97 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
     };
     if drawing.skipped_entities() > 0 {
         let kinds = drawing.skipped_types().iter().map(|(name, count)| format!("{name} x{count}")).collect::<Vec<_>>().join(", ");
-        warn(&format!("skipped {format} entities: {kinds}"))?;
+        warnings.push(format!("skipped {format} entities: {kinds}"));
     }
-    let (doc, nest_report) = build(&job, &drawing)?;
+    let (doc, nest_report) = build(job, &drawing)?;
+    let mut notes = Vec::new();
     if let Some(report) = nest_report.as_ref()
         && !report.summary.is_empty()
     {
-        let mut err_out = io::stderr().lock();
-        write_all(&mut err_out, &report.summary)?;
-        err_out.flush()?;
+        notes.push(report.summary.clone());
     }
-    crate::collision::check_job(&job, None, doc.program())?;
-    let implicit = if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(&job, &drawing)?) } else { None };
-    apply_stock(&job, None, doc.program(), implicit, &args)?;
-    emit_program(&args, &job, doc, &[], post.as_ref(), nest_report.as_ref())
+    crate::collision::check_job(job, None, doc.program())?;
+    let implicit_stock = if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(job, &drawing)?) } else { None };
+    notes.extend(stock_messages(job, None, doc.program(), implicit_stock)?);
+    Ok(PlannedProgram { document: doc, warnings, notes, gouges: Vec::new(), nest_report, implicit_stock })
 }
 
-/// Replay the program when the stock model is on, and print the STL leftover summary.
+pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
+    let args = parse_run(args)?;
+    let post = match &args.post {
+        Some(spec) => Some(crate::post::load_spec(spec)?),
+        None => None,
+    };
+    let job = jobfile::load(&args.job).map_err(show)?;
+    if args.nest_out.is_some() && job.nest().is_none() {
+        return Err(CliError::run("--nest-out needs a job with sheet and nest"));
+    }
+    let planned = plan_loaded_job(&job, args.up_axis)?;
+    for warning in &planned.warnings {
+        warn(warning)?;
+    }
+    for note in &planned.notes {
+        let mut err_out = io::stderr().lock();
+        write_all(&mut err_out, note)?;
+        if !note.ends_with('\n') {
+            writeln!(err_out)?;
+        }
+        err_out.flush()?;
+    }
+    write_stock_outputs(&job, planned.document.program(), &planned, &args)?;
+    emit_program(&args, &job, planned.document, &planned.gouges, post.as_ref(), planned.nest_report.as_ref())
+}
+
+/// Replay the stock model when it is on. Messages are returned; nothing is written to a file.
 ///
-/// The summary is written before verify, so a later gouge still leaves the line on stderr.
-/// A rapid or holder hit returns an error and the caller writes nothing.
-fn apply_stock(
+/// A rapid or holder hit returns an error.
+fn stock_messages(
     job: &JobFile,
     part: Option<&Mesh>,
     program: &Program,
     implicit: Option<(campanion_mesh::Vec3, campanion_mesh::Vec3)>,
-    args: &RunArgs,
-) -> Result<(), CliError> {
-    let asked = args.stock_report.is_some() || args.stock_out.is_some() || args.stock_snapshots.is_some();
-    if asked && !job.stock_model_enabled() {
-        return Err(CliError::run("stock model is off; --stock-report and --stock-out need it"));
-    }
-    let want = crate::stock::StockWant { csv: args.stock_report.is_some(), file: args.stock_out.is_some(), snapshot_every: args.stock_snapshots };
+) -> Result<Vec<String>, CliError> {
+    let want = crate::stock::StockWant { csv: false, file: false, snapshot_every: None };
     let Some(check) = crate::stock::check_job_with(job, part, program, implicit, want)? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    let mut err_out = io::stderr().lock();
+    let mut messages = Vec::new();
     if let Some(report) = check.leftover {
-        writeln!(
-            err_out,
+        messages.push(format!(
             "stock: max leftover {:.3} mm, mean leftover {:.3} mm, model gouges {}",
             report.max_leftover, report.mean_leftover, report.model_gouges
-        )?;
+        ));
     }
     for peak in &check.peaks {
-        writeln!(
-            err_out,
+        messages.push(format!(
             "stock: operation `{}` peak MRR {:.3} mm^3/min, peak engagement {:.1} deg",
             peak.name, peak.peak_mrr, peak.peak_engagement
-        )?;
+        ));
     }
-    err_out.flush()?;
+    Ok(messages)
+}
+
+/// Write `--stock-report` / `--stock-out` when requested. Planning already printed the summary.
+fn write_stock_outputs(job: &JobFile, program: &Program, planned: &PlannedProgram, args: &RunArgs) -> Result<(), CliError> {
+    let asked = args.stock_report.is_some() || args.stock_out.is_some() || args.stock_snapshots.is_some();
+    if !asked {
+        return Ok(());
+    }
+    if !job.stock_model_enabled() {
+        return Err(CliError::run("stock model is off; --stock-report and --stock-out need it"));
+    }
+    let part_mesh;
+    let part = if job.source().is_stl() {
+        let bytes = read_bytes(&jobfile::source_path(job))?;
+        part_mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
+        Some(&part_mesh)
+    } else {
+        None
+    };
+    let want = crate::stock::StockWant { csv: args.stock_report.is_some(), file: args.stock_out.is_some(), snapshot_every: args.stock_snapshots };
+    let Some(check) = crate::stock::check_job_with(job, part, program, planned.implicit_stock, want)? else {
+        return Ok(());
+    };
     if let Some(path) = &args.stock_report {
         let csv = check.csv.unwrap_or_default();
         write_output(path, &csv)?;
@@ -313,11 +366,16 @@ fn drawing_stock_bounds(job: &JobFile, drawing: &Drawing) -> Result<(campanion_m
     Ok((campanion_mesh::Vec3::new(stock.min_x, stock.min_y, -stock.deepest), campanion_mesh::Vec3::new(stock.max_x, stock.max_y, 0.0)))
 }
 
+#[allow(dead_code)]
 fn warn_if_changed(job: &JobFile, bytes: &[u8]) -> Result<(), CliError> {
     if jobfile::source_changed(job, bytes) {
-        warn(&format!("source {} changed: stored hash {}, file hash {}", job.source().path(), job.source().hash(), jobfile::hash_bytes(bytes),))?;
+        warn(&source_changed_message(job, bytes))?;
     }
     Ok(())
+}
+
+fn source_changed_message(job: &JobFile, bytes: &[u8]) -> String {
+    format!("source {} changed: stored hash {}, file hash {}", job.source().path(), job.source().hash(), jobfile::hash_bytes(bytes))
 }
 
 /// STL is not text. The hash is these bytes, and the drawing importers are not used.
@@ -387,6 +445,28 @@ fn build_surface(job: &JobFile, mesh: &Mesh) -> Result<Document, CliError> {
     finish_program(job, groups, None, &sweep)
 }
 
+/// Verify issues and retract-height rapid refusals that make `campanion run` exit 1.
+pub fn blocking_findings(job: &JobFile, doc: &Document, gouges: &[report::GougeNote]) -> Vec<String> {
+    let (safe_z, retract_z) = if job_is_wire_only(job) { (0.0, 0.0) } else { (job.clearance(), job.retract()) };
+    let options = campanion_ir::VerifyOptions { safe_z: Some(safe_z), retract_z: Some(retract_z) };
+    let report = campanion_ir::verify_with(doc.program(), &options);
+    // Rotary and 3+2 programs are checked in the planning frame, before indexing. A 3-axis
+    // program also blocks verifier findings that end or traverse below the retract height.
+    // An XY rapid between the retract and clearance heights stays a non-blocking finding.
+    let rapid_floor = if job_is_wire_only(job) { 0.0 } else { job.retract() };
+    let rapid_lines = if job.rotary().is_none() && job.five_axis().is_none() { safety::blocking_rapids(&report, rapid_floor) } else { Vec::new() };
+    let mut lines = Vec::new();
+    if !report.issues().is_empty() || !gouges.is_empty() {
+        for line in report::format_report_and_gouges(&report, gouges).lines() {
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    lines.extend(rapid_lines);
+    lines
+}
+
 fn emit_program(
     args: &RunArgs,
     job: &JobFile,
@@ -398,12 +478,10 @@ fn emit_program(
     if let Some(post) = post {
         require_spindle_speeds(job, post)?;
     }
+    // Keep the CLI report bytes identical to the previous writer. The GUI uses `blocking_findings`.
     let (safe_z, retract_z) = if job_is_wire_only(job) { (0.0, 0.0) } else { (job.clearance(), job.retract()) };
     let options = campanion_ir::VerifyOptions { safe_z: Some(safe_z), retract_z: Some(retract_z) };
     let report = campanion_ir::verify_with(doc.program(), &options);
-    // Rotary and 3+2 programs are checked in the planning frame, before indexing. A 3-axis
-    // program also blocks verifier findings that end or traverse below the retract height.
-    // An XY rapid between the retract and clearance heights stays a non-blocking finding.
     let rapid_floor = if job_is_wire_only(job) { 0.0 } else { job.retract() };
     let rapid_lines = if job.rotary().is_none() && job.five_axis().is_none() { safety::blocking_rapids(&report, rapid_floor) } else { Vec::new() };
     if !report.issues().is_empty() || !gouges.is_empty() || !rapid_lines.is_empty() {
@@ -923,7 +1001,7 @@ fn import_for(op: &Operation, tool: &JobTool) -> Result<Import, CliError> {
 }
 
 /// A spindle-on template that substitutes `{speed}` needs a rpm on every diameter-tool operation.
-fn require_spindle_speeds(job: &JobFile, post: &PostDef) -> Result<(), CliError> {
+pub(crate) fn require_spindle_speeds(job: &JobFile, post: &PostDef) -> Result<(), CliError> {
     if !post.spindle_on_needs_speed() {
         return Ok(());
     }
