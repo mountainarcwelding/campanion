@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+An early graphical layout preview: menus, workspaces, mode tabs and viewports, with no machine I/O.
+
+### Added
+
+- `campanion-gui` (also `campanion gui`) opens a dark-themed layout shell. The workspace selector chooses Mill/Route, Turning, Thermal/Jet Cutting, Wire Cutting, Resin (SLA) or FDM; Custom stays parked. Mode tabs follow the prep stages for each family, with a Run tab after Export and a STOP button that stays on every tab. The centre viewport can open a `campanion-ir` file and show the toolpath using the existing preview model, with G-code text beside it on the Export tab when a sibling `.ngc` or `.gcode` file is present. Resin Orient, Supports, Slice and Export, and the Run tab, are layout placeholders. The window does not open a serial port or move a machine. This is an early layout preview.
+
+
 ## 0.16.0 — 2026-11-13
 
 Tilting kerf heads share one tool-axis path for waterjet lead and taper and oxy-fuel bevel (#180). This output has not been proven on a machine.

@@ -176,6 +176,23 @@ rotary legend are hidden. There is no screenshot of the half-section; the window
 Labels need a system font (DejaVu, Liberation or Noto are found
 automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
 
+## GUI layout preview
+
+`campanion-gui` is an early layout shell: menus, workspaces, mode tabs, a process tree, a
+viewport, a properties column, a timeline, and a Run tab. It does not talk to a machine.
+Open an IR file (the `--ir` output of `campanion run`) to show the toolpath in the centre
+viewport, and a sibling `.ngc` / `.gcode` file of the same name, or a G-code file itself, in
+the Export preview.
+
+```sh
+cargo run -p campanion-gui
+cargo run -p campanion-gui -- out.json
+# or, with both programs on PATH or in the same directory:
+campanion gui out.json
+```
+
+This is a layout preview, not a finished CAM interface.
+
 ## Roadmap and contributing
 
 See [docs/plan.md](docs/plan.md) for the roadmap and [CONTRIBUTING.md](CONTRIBUTING.md) for how to help.

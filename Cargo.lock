@@ -235,6 +235,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "campanion-gui"
+version = "0.16.0"
+dependencies = [
+ "campanion-ir",
+ "campanion-view",
+ "eframe",
+ "image",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "campanion-import"
 version = "0.16.0"
 dependencies = [

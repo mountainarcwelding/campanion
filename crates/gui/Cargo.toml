@@ -1,0 +1,28 @@
+[package]
+name = "campanion-gui"
+description = "Early layout preview for the CAMpanion graphical workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "campanion_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "campanion-gui"
+path = "src/main.rs"
+
+[dependencies]
+campanion-ir.workspace = true
+campanion-view = { path = "../view" }
+thiserror.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
