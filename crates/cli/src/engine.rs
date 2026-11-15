@@ -52,6 +52,8 @@ pub struct ImportedPart {
     pub skipped_entities: usize,
     /// Skipped entity types and counts.
     pub skipped_types: Vec<(String, usize)>,
+    /// Importer notices such as an SVG whose scale is in CSS pixels.
+    pub warnings: Vec<String>,
 }
 
 /// Options for [`plan_job`].
@@ -128,6 +130,7 @@ pub fn import_part(path: &Path) -> Result<ImportedPart, CliError> {
                 layers: Vec::new(),
                 skipped_entities: 0,
                 skipped_types: Vec::new(),
+                warnings: Vec::new(),
             })
         }
         SourceKind::Step => {
@@ -140,17 +143,20 @@ pub fn import_part(path: &Path) -> Result<ImportedPart, CliError> {
                 layers: Vec::new(),
                 skipped_entities: 0,
                 skipped_types: Vec::new(),
+                warnings: Vec::new(),
             })
         }
         SourceKind::Dxf | SourceKind::Svg => {
             let text = read_text(path)?;
             let bytes = text.as_bytes();
             let options = ImportOptions::new(default_tolerance());
+            let kind_name = if kind == SourceKind::Svg { "SVG" } else { "DXF" };
             let drawing = if kind == SourceKind::Svg { import_svg(&text, &options) } else { import_dxf(&text, &options) }
-                .map_err(|err| CliError::run(err.to_string()))?;
+                .map_err(|err| CliError::run(format!("Could not import {kind_name} {}: {err}", path.display())))?;
             let layers = layer_summaries(&drawing);
             let skipped_entities = drawing.skipped_entities();
             let skipped_types = drawing.skipped_types().to_vec();
+            let warnings = drawing.warnings().to_vec();
             Ok(ImportedPart {
                 path: path.to_path_buf(),
                 hash: jobfile::hash_bytes(bytes),
@@ -159,6 +165,7 @@ pub fn import_part(path: &Path) -> Result<ImportedPart, CliError> {
                 layers,
                 skipped_entities,
                 skipped_types,
+                warnings,
             })
         }
     }

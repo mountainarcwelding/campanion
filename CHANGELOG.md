@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+The graphical workspace uses a native file chooser, imports typical SVG files without silently
+guessing a scale, can place a part in the job, and filters properties to the active process.
+CAMpanion is still primarily command-line driven; the GUI is a work in progress and has not been
+machine-tested.
+
+### Added
+
+- File → Open, Import part, Save As, and Export G-code use a native chooser (`rfd` with the
+  xdg-desktop-portal backend on Linux, so the release binary does not need an extra GTK install).
+  When no chooser is available, a typed-path box shows the current directory and accepts relative
+  paths and `~`. File → Enter path… opens that fallback on demand.
+- A `campanion-job/1` file may set optional `placement` (`x`, `y`, `rotate_deg`) for a DXF, SVG or
+  STEP source. Values are in file units; rotation is counterclockwise about the drawing bounds
+  centre, then the translation is applied. Omitted placement is the identity. An STL source may not
+  set placement. The GUI can drag the part in the viewport or type the same offsets, and `campanion
+  run` applies the transform when planning.
+- Tools and operations can be copied, pasted and duplicated (Ctrl+C, Ctrl+V, Ctrl+D, and the Edit
+  menu). Delete (Delete, the context menu, and Edit → Delete) refuses a tool that an operation still
+  uses. Ctrl+Z undoes those edits.
+
+### Changed
+
+- SVG import accepts typical Inkscape and LightBurn files (groups, transforms, `px` or unitless
+  page size, hidden elements skipped). When page units are ambiguous, a warning is shown and the
+  existing CSS-pixel scale (`96px` = `1in`) is kept; the importer does not silently treat user
+  units as millimetres. Import failures are prefixed so the GUI can show them clearly.
+- Properties show only fields that belong to the active process. A laser job no longer offers wire
+  diameter, pierce delay, or other process-foreign settings. Cut direction `auto` is preserved in
+  the job file and shown as `auto`, not as climb.
+- Export names from `*.job.json` and `*.ir.json` no longer keep a leftover `.job` or `.ir` stem.
+  The 2D viewport waits for a usable pane size before fitting, and refits if the pane is resized
+  unless the user has zoomed or panned. `campanion-gui --screenshot DIR FILE` plans and posts the
+  opened job. Screenshot completion is printed once.
+
 ## 0.18.0 — 2026-11-15
 
 The graphical workspace can now open a part or job, edit operations, generate toolpaths and

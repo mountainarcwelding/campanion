@@ -83,6 +83,23 @@ the part changed and the toolpaths should be generated again.
 hash. `with_updated_hash` returns a new in-memory job with the digest stored. It does not write
 the job file. The caller copies `source.hash` back into the JSON if it should stick.
 
+## Placement
+
+Optional `placement` is a rigid transform of the source drawing, applied after import and before
+operations (and before nest, when both are set):
+
+```json
+"placement": { "x": 10.0, "y": 5.0, "rotate_deg": 90.0 }
+```
+
+`x` and `y` are translations in the job `units` (stored as millimetres when the job is loaded).
+`rotate_deg` is a counter-clockwise rotation in degrees about the drawing's bounding-box centre,
+applied before the translation. Each key may be omitted and defaults to 0. Unknown keys are
+rejected. The field itself may be omitted; that is identity and matches every job written
+before this key existed. `placement` is not valid on an STL source.
+
+`campanion run` honours `placement` when it plans a DXF, SVG or STEP job.
+
 ## Tools
 
 A tool has `id` (integer, unique in the file) and exactly one of `diameter`, `kerf`, or `wire`.

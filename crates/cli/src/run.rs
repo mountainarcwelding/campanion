@@ -234,6 +234,7 @@ pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedPr
         import_dxf(&text, &options)
     }
     .map_err(show)?;
+    let mut drawing = drawing;
     let format = if is_step {
         "STEP"
     } else if is_svg {
@@ -241,6 +242,14 @@ pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedPr
     } else {
         "DXF"
     };
+    for warning in drawing.warnings() {
+        warnings.push(warning.clone());
+    }
+    if let Some(placement) = job.placement()
+        && !placement.is_identity()
+    {
+        drawing = campanion_import::place_drawing(&drawing, placement.x(), placement.y(), placement.rotate_deg(), &job.tolerance()).map_err(show)?;
+    }
     if drawing.skipped_entities() > 0 {
         let kinds = drawing.skipped_types().iter().map(|(name, count)| format!("{name} x{count}")).collect::<Vec<_>>().join(", ");
         warnings.push(format!("skipped {format} entities: {kinds}"));

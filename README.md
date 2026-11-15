@@ -187,11 +187,14 @@ finished CAM interface. It does not talk to a machine. The Run tab, STOP, and al
 stay inert. Resin (SLA) tabs and FDM remain placeholders.
 
 On a cutting workspace you can import a DXF, SVG, STEP or STL part, open and save
-`campanion-job/1` files, edit profile operations, generate toolpaths, choose a post, preview
-G-code and export `.ngc` / `.gcode`. Backend warnings and refusals (for example an omitted
-laser power posting as S0, or a slot narrower than the kerf) are shown in the UI. Feeds,
-power and sizes stay empty until you enter them; the program does not invent machine limits
-or material defaults.
+`campanion-job/1` files, place a 2D part (drag or typed offset and rotation), edit profile
+operations, generate toolpaths, choose a post, preview G-code and export `.ngc` / `.gcode`.
+Open, Import, Save As and Export use a system file chooser when one is available, or a typed
+path (relative paths and `~` are accepted). Properties show only fields for the selected
+process. Backend warnings and refusals (for example an omitted laser power posting as S0, a
+slot narrower than the kerf, or an SVG whose page units are ambiguous) are shown in the UI.
+Feeds, power and sizes stay empty until you enter them; the program does not invent machine
+limits or material defaults.
 
 The CLI remains the primary way to run CAMpanion (`campanion run`, `campanion post`, and the
 other commands above).

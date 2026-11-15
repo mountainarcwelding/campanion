@@ -32,9 +32,11 @@ pub fn import_svg(text: &str, options: &ImportOptions) -> Result<Drawing> {
     if root.tag_name().name() != "svg" {
         return Err(invalid(format!("root element is '{}', expected svg", root.tag_name().name())));
     }
-    let mut import = Import::new(options, page_affine(root)?);
+    let (affine, warnings) = page_affine(root)?;
+    let mut import = Import::new(options, affine);
     import.walk(root, Affine::IDENTITY)?;
-    import.finish()
+    let drawing = import.finish()?;
+    Ok(drawing.with_warnings(warnings))
 }
 
 struct Layers {
@@ -81,6 +83,9 @@ impl Import {
 
     fn walk(&mut self, node: roxmltree::Node, parent: Affine) -> Result<()> {
         if !node.is_element() {
+            return Ok(());
+        }
+        if is_hidden(node) {
             return Ok(());
         }
         match node.tag_name().name() {
@@ -339,23 +344,77 @@ fn check_mm(value: f64) -> Result<()> {
 /// Page map: translate the viewBox origin, scale into millimetres, then flip Y.
 ///
 /// `x' = sx * (x - origin_x)`, `y' = height_mm - sy * (y - origin_y)`.
-fn page_affine(root: roxmltree::Node) -> Result<Affine> {
-    let width = optional_mm(root, "width")?;
-    let height = optional_mm(root, "height")?;
+/// When width/height have no physical unit, CSS pixels are used and a warning is returned.
+fn page_affine(root: roxmltree::Node) -> Result<(Affine, Vec<String>)> {
+    let width = optional_page_length(root, "width")?;
+    let height = optional_page_length(root, "height")?;
     let view_box = parse_view_box(root)?;
+    let physical = width.as_ref().is_some_and(|item| item.physical) || height.as_ref().is_some_and(|item| item.physical);
     let (sx, sy, origin_x, origin_y, height_mm) = match (width, height, view_box) {
-        (Some(width_mm), Some(height_mm), Some(view_box)) => (width_mm / view_box.w, height_mm / view_box.h, view_box.x, view_box.y, height_mm),
+        (Some(width), Some(height), Some(view_box)) if width.physical && height.physical => {
+            (width.mm / view_box.w, height.mm / view_box.h, view_box.x, view_box.y, height.mm)
+        }
+        (Some(width), _, Some(view_box)) if width.physical => {
+            let scale = width.mm / view_box.w;
+            (scale, scale, view_box.x, view_box.y, view_box.h * scale)
+        }
+        (_, Some(height), Some(view_box)) if height.physical => {
+            let scale = height.mm / view_box.h;
+            (scale, scale, view_box.x, view_box.y, height.mm)
+        }
+        (Some(width), Some(height), Some(view_box)) => (width.mm / view_box.w, height.mm / view_box.h, view_box.x, view_box.y, height.mm),
         (_, _, Some(view_box)) => {
             let scale = PX_MM;
             (scale, scale, view_box.x, view_box.y, view_box.h * scale)
         }
-        (_, height_mm, None) => (PX_MM, PX_MM, 0.0, 0.0, height_mm.unwrap_or(0.0)),
+        (_, height, None) => (PX_MM, PX_MM, 0.0, 0.0, height.map(|item| item.mm).unwrap_or(0.0)),
     };
     if ![sx, sy, origin_x, origin_y, height_mm].into_iter().all(f64::is_finite) {
         return Err(invalid("svg scale is not finite"));
     }
-    let affine = Affine::new([sx, 0.0, 0.0, -sy, -sx * origin_x, height_mm + sy * origin_y]);
-    finite_affine(affine)
+    let affine = finite_affine(Affine::new([sx, 0.0, 0.0, -sy, -sx * origin_x, height_mm + sy * origin_y]))?;
+    let mut warnings = Vec::new();
+    if !physical {
+        let mut text = "SVG width/height has no physical unit (mm, cm, in, pt or pc); user units were converted as CSS pixels (96 px = 1 in). If this drawing is in millimetres, set width and height in mm.".to_string();
+        if let Some(units) = root.attribute((INKSCAPE, "document-units")).filter(|item| !item.is_empty()) {
+            text.push_str(&format!(" Inkscape document-units is '{units}', which was not used as the scale."));
+        }
+        warnings.push(text);
+    }
+    Ok((affine, warnings))
+}
+
+struct PageLength {
+    mm: f64,
+    physical: bool,
+}
+
+fn optional_page_length(node: roxmltree::Node, name: &str) -> Result<Option<PageLength>> {
+    let Some(text) = node.attribute(name) else {
+        return Ok(None);
+    };
+    let length = parse_length(text)?;
+    let physical = matches!(
+        length.unit,
+        svgtypes::LengthUnit::In | svgtypes::LengthUnit::Cm | svgtypes::LengthUnit::Mm | svgtypes::LengthUnit::Pt | svgtypes::LengthUnit::Pc
+    );
+    let mm = length.number * mm_per_unit(length.unit, text)?;
+    if mm.is_finite() { Ok(Some(PageLength { mm, physical })) } else { Err(invalid(format!("length '{text}' is not finite"))) }
+}
+
+fn is_hidden(node: roxmltree::Node) -> bool {
+    if node.attribute("display").is_some_and(|value| value.trim().eq_ignore_ascii_case("none")) {
+        return true;
+    }
+    let Some(style) = node.attribute("style") else {
+        return false;
+    };
+    style.split(';').any(|part| {
+        let Some((key, value)) = part.split_once(':') else {
+            return false;
+        };
+        key.trim().eq_ignore_ascii_case("display") && value.trim().eq_ignore_ascii_case("none")
+    })
 }
 
 fn parse_view_box(root: roxmltree::Node) -> Result<Option<svgtypes::ViewBox>> {
@@ -370,19 +429,6 @@ fn parse_view_box(root: roxmltree::Node) -> Result<Option<svgtypes::ViewBox>> {
         return Err(invalid("viewBox width and height must be positive"));
     }
     Ok(Some(view_box))
-}
-
-fn optional_mm(node: roxmltree::Node, name: &str) -> Result<Option<f64>> {
-    match node.attribute(name) {
-        Some(text) => Ok(Some(length_mm(text)?)),
-        None => Ok(None),
-    }
-}
-
-fn length_mm(text: &str) -> Result<f64> {
-    let length = parse_length(text)?;
-    let mm = length.number * mm_per_unit(length.unit, text)?;
-    if mm.is_finite() { Ok(mm) } else { Err(invalid(format!("length '{text}' is not finite"))) }
 }
 
 fn mm_per_unit(unit: svgtypes::LengthUnit, text: &str) -> Result<f64> {
@@ -1205,5 +1251,47 @@ mod tests {
         let height = bounds.max().y() - bounds.min().y();
         assert!(width > 32.0, "width {width}");
         assert!(height > 8.0, "height {height}");
+    }
+
+    #[test]
+    fn millimetre_page_has_no_unit_warning() {
+        let svg = r#"<svg width="100mm" height="50mm" viewBox="0 0 100 50"><rect x="10" y="10" width="20" height="10"/></svg>"#;
+        let drawing = super::import_svg(svg, &ImportOptions::new(Tolerance::default())).expect("import");
+        assert!(drawing.warnings().is_empty(), "{:?}", drawing.warnings());
+    }
+
+    #[test]
+    fn lightburn_like_px_page_warns_and_keeps_css_pixel_scale() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48" viewBox="0 0 96 48"><g transform="translate(0,0)"><rect x="0" y="0" width="96" height="48"/></g></svg>"#;
+        let drawing = super::import_svg(svg, &ImportOptions::new(Tolerance::default())).expect("import");
+        assert_eq!(drawing.warnings().len(), 1, "{:?}", drawing.warnings());
+        assert!(drawing.warnings()[0].contains("CSS pixels"), "{}", drawing.warnings()[0]);
+        assert!(drawing.warnings()[0].contains("set width and height in mm"), "{}", drawing.warnings()[0]);
+        let bounds = drawing.contours()[0].contour().bounding_box().expect("bounds");
+        // 96 user units * (25.4/96) mm/px = 25.4 mm wide
+        assert!((bounds.max().x() - bounds.min().x() - 25.4).abs() < 1e-6, "width {}", bounds.max().x() - bounds.min().x());
+    }
+
+    #[test]
+    fn inkscape_like_px_export_warns_and_keeps_groups_and_transforms() {
+        let svg = r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+     width="80px" height="40px" viewBox="0 0 80 40" inkscape:document-units="mm">
+  <g inkscape:groupmode="layer" inkscape:label="Cut" transform="translate(10,5)">
+    <path d="M 0 0 L 20 0 L 20 10 L 0 10 Z"/>
+  </g>
+  <g style="display:none"><rect x="0" y="0" width="80" height="40"/></g>
+</svg>"#;
+        let drawing = super::import_svg(svg, &ImportOptions::new(Tolerance::default())).expect("import");
+        assert_eq!(drawing.contours().len(), 1, "hidden group must be skipped");
+        assert_eq!(drawing.contours()[0].layer(), "Cut");
+        assert!(drawing.warnings().iter().any(|item| item.contains("CSS pixels") && item.contains("document-units")), "{:?}", drawing.warnings());
+        let bounds = drawing.contours()[0].contour().bounding_box().expect("bounds");
+        // user units 20x10, translated by (10,5), flipped Y, scaled by PX_MM
+        let px = 25.4 / 96.0;
+        let width = bounds.max().x() - bounds.min().x();
+        let height = bounds.max().y() - bounds.min().y();
+        assert!((width - 20.0 * px).abs() < 1e-6, "width {width}");
+        assert!((height - 10.0 * px).abs() < 1e-6, "height {height}");
     }
 }

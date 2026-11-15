@@ -10,7 +10,7 @@ use campanion_cli::{
     suggested_post,
 };
 use campanion_geom::Segment;
-use campanion_import::Drawing;
+use campanion_import::{Drawing, place_drawing};
 use campanion_ir::Document;
 use campanion_path::{Compensation, ControllerSide, CutDirection, Lead, Tool as PathTool};
 use campanion_view::{Scene, Stroke, StrokeKind, tessellate_arc};
@@ -150,6 +150,14 @@ pub struct JobSession {
     pub selected: Option<TreeSelection>,
     /// Built-in post id or a `.json` post path. Empty until the user picks one.
     pub post_id: String,
+    /// Untransformed source drawing, when a 2D part is loaded.
+    pub source_drawing: Option<Drawing>,
+    /// Placement X, millimetres, as typed.
+    pub placement_x: String,
+    /// Placement Y, millimetres, as typed.
+    pub placement_y: String,
+    /// Placement rotation, degrees counter-clockwise, as typed.
+    pub placement_rotate: String,
     pub dirty: bool,
     pub messages: Vec<SessionMessage>,
 }
@@ -169,6 +177,10 @@ impl JobSession {
             operations: Vec::new(),
             selected: None,
             post_id: String::new(),
+            source_drawing: None,
+            placement_x: String::new(),
+            placement_y: String::new(),
+            placement_rotate: String::new(),
             dirty: false,
             messages: Vec::new(),
         }
@@ -196,10 +208,8 @@ pub fn open_job_text(path: &Path, text: &str) -> Result<(JobSession, Option<Impo
         Ok(part) => {
             session.layers = part.layers.clone();
             session.source_kind = Some(part.kind);
-            if part.skipped_entities > 0 {
-                let kinds = part.skipped_types.iter().map(|(name, count)| format!("{name} x{count}")).collect::<Vec<_>>().join(", ");
-                session.messages.push(warning(format!("skipped source entities: {kinds}")));
-            }
+            session.source_drawing = part.drawing.clone();
+            attach_import_messages(&mut session, &part);
             Some(part)
         }
         Err(err) => {
@@ -217,22 +227,33 @@ pub fn session_from_import(part: &ImportedPart) -> JobSession {
     session.source_hash = Some(part.hash.clone());
     session.source_kind = Some(part.kind);
     session.layers = part.layers.clone();
+    session.source_drawing = part.drawing.clone();
     session.dirty = true;
     if part.kind == SourceKind::Step {
         session.messages.push(note(
             "STEP import is recorded. A job must name a face, and planning uses solidcraft-cli, the same way as campanion run.".to_string(),
         ));
     }
+    attach_import_messages(&mut session, part);
+    session
+}
+
+fn attach_import_messages(session: &mut JobSession, part: &ImportedPart) {
+    for text in &part.warnings {
+        session.messages.push(warning(text.clone()));
+    }
     if part.skipped_entities > 0 {
         let kinds = part.skipped_types.iter().map(|(name, count)| format!("{name} x{count}")).collect::<Vec<_>>().join(", ");
         session.messages.push(warning(format!("skipped source entities: {kinds}")));
     }
-    session
 }
 
 /// Import a part file (DXF, SVG, STEP or STL).
 pub fn import_part_file(path: &Path) -> Result<ImportedPart, String> {
-    import_part(path).map_err(|err| err.to_string())
+    import_part(path).map_err(|err| {
+        let text = err.to_string();
+        if text.starts_with("Could not import") { text } else { format!("Could not import {}: {text}", path.display()) }
+    })
 }
 
 fn session_from_job(path: &Path, value: Value, job: &JobFile) -> JobSession {
@@ -243,7 +264,23 @@ fn session_from_job(path: &Path, value: Value, job: &JobFile) -> JobSession {
     session.source_path = Some(campanion_cli::source_path(job));
     session.source_hash = Some(job.source().hash().to_string());
     session.tools = job.tools().iter().map(tool_draft_from).collect();
-    session.operations = job.operations().iter().map(op_draft_from).collect();
+    session.operations = job
+        .operations()
+        .iter()
+        .enumerate()
+        .map(|(index, op)| {
+            let original =
+                session.original_json.as_ref().and_then(|value| value.get("operations")).and_then(Value::as_array).and_then(|ops| ops.get(index));
+            op_draft_from(op, original)
+        })
+        .collect();
+    if let Some(placement) = job.placement() {
+        session.placement_x = format_number(placement.x());
+        session.placement_y = format_number(placement.y());
+        if placement.rotate_deg() != 0.0 {
+            session.placement_rotate = format_number(placement.rotate_deg());
+        }
+    }
     if let Some(first) = session.operations.first() {
         session.selected = Some(TreeSelection::Operation(0));
         let _ = first;
@@ -262,7 +299,7 @@ fn tool_draft_from(tool: &campanion_cli::JobTool) -> ToolDraft {
     }
 }
 
-fn op_draft_from(op: &campanion_cli::Operation) -> OpDraft {
+fn op_draft_from(op: &campanion_cli::Operation, original: Option<&Value>) -> OpDraft {
     let (kind, side) = match op.kind() {
         campanion_cli::OperationKind::Profile { side } => ("profile", profile_side_label(side)),
         campanion_cli::OperationKind::Pocket => ("pocket", ""),
@@ -298,7 +335,7 @@ fn op_draft_from(op: &campanion_cli::Operation) -> OpDraft {
         lead_in_size: lead_in.1,
         lead_out: lead_out.0,
         lead_out_size: lead_out.1,
-        direction: direction_label(op.cut_direction()).to_string(),
+        direction: direction_draft(op, original).to_string(),
         compensation: compensation_label(op.compensation()).to_string(),
         pierce_delay: pierce,
         post_delay: post,
@@ -319,6 +356,13 @@ fn direction_label(direction: CutDirection) -> &'static str {
         CutDirection::Climb => "climb",
         CutDirection::Conventional => "conventional",
     }
+}
+
+fn direction_draft(op: &campanion_cli::Operation, original: Option<&Value>) -> &'static str {
+    if original.and_then(|value| value.get("direction")).and_then(Value::as_str) == Some("auto") {
+        return "auto";
+    }
+    direction_label(op.cut_direction())
 }
 
 fn compensation_label(compensation: Compensation) -> &'static str {
@@ -419,7 +463,62 @@ fn job_value_of(session: &JobSession) -> Result<Value, String> {
         operations.push(operation_value(op, original, &session.units)?);
     }
     obj.insert("operations".into(), Value::Array(operations));
+    match placement_value(session) {
+        Ok(Some(value)) => {
+            obj.insert("placement".into(), value);
+        }
+        Ok(None) => {
+            obj.remove("placement");
+        }
+        Err(err) => return Err(err),
+    }
     Ok(root)
+}
+
+fn placement_value(session: &JobSession) -> Result<Option<Value>, String> {
+    let (x, y, rotate) = parse_placement_mm(session)?;
+    if x == 0.0 && y == 0.0 && rotate == 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({
+        "x": to_file_units(x, &session.units),
+        "y": to_file_units(y, &session.units),
+        "rotate_deg": rotate,
+    })))
+}
+
+/// Parse the typed placement fields, millimetres and degrees. Empty fields are zero.
+pub fn parse_placement_mm(session: &JobSession) -> Result<(f64, f64, f64), String> {
+    Ok((
+        parse_optional_number(&session.placement_x, "placement X")?,
+        parse_optional_number(&session.placement_y, "placement Y")?,
+        parse_optional_number(&session.placement_rotate, "placement rotate_deg")?,
+    ))
+}
+
+fn parse_optional_number(text: &str, what: &str) -> Result<f64, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(0.0);
+    }
+    let value: f64 = trimmed.parse().map_err(|_| format!("{what} is not a number"))?;
+    if !value.is_finite() {
+        return Err(format!("{what} must be finite"));
+    }
+    Ok(value)
+}
+
+/// The source drawing after the session placement is applied.
+pub fn placed_drawing(session: &JobSession) -> Result<Option<Drawing>, String> {
+    let Some(drawing) = session.source_drawing.as_ref() else {
+        return Ok(None);
+    };
+    let (x, y, rotate) = parse_placement_mm(session)?;
+    if x == 0.0 && y == 0.0 && rotate == 0.0 {
+        return Ok(Some(drawing.clone()));
+    }
+    let tolerance = campanion_geom::Tolerance::default();
+    place_drawing(drawing, x, y, rotate, &tolerance).map(Some).map_err(|err| err.to_string())
 }
 
 fn source_object(session: &JobSession) -> Result<Value, String> {
@@ -899,5 +998,52 @@ mod tests {
         let err = job_json_of(&session).expect_err("feed");
         assert!(err.contains("cut feed"));
         assert!(err.contains("does not fill in"));
+    }
+
+    #[test]
+    fn auto_direction_is_preserved_on_open_and_save() {
+        let dir = temp_dir("campanion-gui-session-auto-dir");
+        fs::write(dir.join("part.svg"), PART_SVG).expect("svg");
+        let hash = fnv1a64(PART_SVG.as_bytes());
+        let job = format!(
+            r#"{{"format":"campanion-job/1","source":{{"path":"part.svg","hash":"{hash}"}},"units":"mm","tools":[{{"id":1,"kerf":0.1}}],"operations":[{{"name":"outline","type":"profile","layers":["0"],"side":"outside","tool_id":1,"depth":0.26,"step_down":0.26,"feeds":{{"cut":300}},"direction":"auto"}}]}}"#
+        );
+        let path = dir.join("job.json");
+        fs::write(&path, &job).expect("job");
+        let (session, _) = open_job_file(&path).expect("open");
+        assert_eq!(session.operations[0].direction, "auto");
+        let saved = job_json_of(&session).expect("save");
+        let value: Value = serde_json::from_str(&saved).expect("json");
+        assert_eq!(value["operations"][0]["direction"], "auto");
+    }
+
+    #[test]
+    fn placement_is_written_and_reloaded() {
+        let dir = temp_dir("campanion-gui-session-placement");
+        fs::write(dir.join("part.svg"), PART_SVG).expect("svg");
+        let imported = import_part_file(&dir.join("part.svg")).expect("import");
+        let mut session = session_from_import(&imported);
+        session.job_path = Some(dir.join("job.json"));
+        session.tools.push(ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: "0.1".to_string() });
+        let mut op = OpDraft::new_profile("outline", 1);
+        op.layers = vec![imported.layers[0].name.clone()];
+        op.side = "outside".to_string();
+        op.depth = "0.26".to_string();
+        op.step_down = "0.26".to_string();
+        op.cut_feed = "300".to_string();
+        session.operations.push(op);
+        session.placement_x = "10".to_string();
+        session.placement_y = "5".to_string();
+        session.placement_rotate = "90".to_string();
+        let saved = job_json_of(&session).expect("save");
+        let value: Value = serde_json::from_str(&saved).expect("json");
+        assert_eq!(value["placement"]["x"], 10.0);
+        assert_eq!(value["placement"]["y"], 5.0);
+        assert_eq!(value["placement"]["rotate_deg"], 90.0);
+        fs::write(dir.join("job.json"), saved).expect("write");
+        let (reopened, _) = open_job_file(&dir.join("job.json")).expect("reopen");
+        assert_eq!(reopened.placement_x, "10");
+        assert_eq!(reopened.placement_y, "5");
+        assert_eq!(reopened.placement_rotate, "90");
     }
 }

@@ -54,7 +54,8 @@ pub use engine::{
 };
 pub use error::CliError;
 pub use jobfile::{
-    DEFAULT_JOB_CHORD_MM, FORMAT_TAG, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, hash_bytes, load, parse, source_path,
+    DEFAULT_JOB_CHORD_MM, FORMAT_TAG, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, hash_bytes, load, parse,
+    source_path,
 };
 
 const HELP: &str = "\

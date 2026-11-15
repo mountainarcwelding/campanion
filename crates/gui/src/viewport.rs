@@ -21,8 +21,20 @@ pub struct Viewport {
     pub projection: Projection,
     /// Whether a fit has been applied for the current viewport size.
     pub fitted: bool,
+    /// True after the user pans or zooms, so a later layout change does not steal the view.
+    pub user_adjusted: bool,
+    /// Last rect size a fit was computed for.
+    pub last_size: Option<[f32; 2]>,
     /// Draw rapid moves as dashed lines.
     pub show_rapids: bool,
+}
+
+/// Result of drawing the viewport for one frame.
+pub struct ViewportOutput {
+    /// Widget response.
+    pub response: egui::Response,
+    /// World-space delta, millimetres, from a left-drag that should move the part.
+    pub part_delta: Option<[f64; 2]>,
 }
 
 impl Viewport {
@@ -33,12 +45,17 @@ impl Viewport {
             playback: Playback::new(scene.total_length),
             projection: Projection::Top,
             fitted: false,
+            user_adjusted: false,
+            last_size: None,
             show_rapids: true,
         }
     }
 
     /// Fit the path into `rect`.
     pub fn fit(&mut self, scene: &Scene, rect: Rect) {
+        if rect.width() < 32.0 || rect.height() < 32.0 {
+            return;
+        }
         let bounds = projected_bounds(scene, self.projection).or(scene.bounds);
         if let Some(bounds) = bounds {
             self.view = View::fit(bounds, f64::from(rect.width()), f64::from(rect.height()), FIT_MARGIN_PX);
@@ -46,17 +63,27 @@ impl Viewport {
             self.view = View { center: [0.0, 0.0], scale: 1.0 };
         }
         self.fitted = true;
+        self.last_size = Some([rect.width(), rect.height()]);
     }
 }
 
 /// Draw the toolpath into `ui` and handle zoom, pan and fit.
-pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>) -> egui::Response {
+///
+/// Left-drag moves the part when `allow_part_drag` is set. Shift+left-drag, Alt+left-drag, or
+/// middle-drag pans the view.
+pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>, allow_part_drag: bool) -> ViewportOutput {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::VIEWPORT);
+    let mut part_delta = None;
 
     if let Some(scene) = scene {
-        if !viewport.fitted || response.double_clicked() {
+        let size = [rect.width(), rect.height()];
+        let size_changed = viewport.last_size.is_none_or(|prev| (prev[0] - size[0]).abs() > 0.5 || (prev[1] - size[1]).abs() > 0.5);
+        if response.double_clicked() {
+            viewport.user_adjusted = false;
+            viewport.fit(scene, rect);
+        } else if !viewport.fitted || (size_changed && !viewport.user_adjusted) {
             viewport.fit(scene, rect);
         }
         if response.hovered() {
@@ -66,13 +93,30 @@ pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>) -
                 let screen = [f64::from(pointer.x - rect.left()), f64::from(pointer.y - rect.top())];
                 let factor = (1.0 + f64::from(zoom) * SCROLL_ZOOM).max(0.1);
                 viewport.view.zoom_at(factor, screen, f64::from(rect.width()), f64::from(rect.height()));
+                viewport.user_adjusted = true;
             }
         }
-        if response.dragged() {
+        let pan_request = response.dragged_by(egui::PointerButton::Middle)
+            || (response.dragged_by(egui::PointerButton::Primary) && ui.input(|input| input.modifiers.shift || input.modifiers.alt))
+            || (response.dragged_by(egui::PointerButton::Primary) && !allow_part_drag);
+        if pan_request {
             let delta = response.drag_delta();
             viewport.view.pan(f64::from(delta.x), f64::from(delta.y));
+            viewport.user_adjusted = true;
+        } else if allow_part_drag && response.dragged_by(egui::PointerButton::Primary) {
+            let delta = response.drag_delta();
+            let width = f64::from(rect.width());
+            let height = f64::from(rect.height());
+            let before = viewport.view.to_world([0.0, 0.0], width, height);
+            let after = viewport.view.to_world([f64::from(delta.x), f64::from(delta.y)], width, height);
+            let dx = after[0] - before[0];
+            let dy = after[1] - before[1];
+            if dx.is_finite() && dy.is_finite() && (dx * dx + dy * dy) > 0.0 {
+                part_delta = Some([dx, dy]);
+            }
         }
         if ui.input(|input| input.key_pressed(egui::Key::F)) {
+            viewport.user_adjusted = false;
             viewport.fit(scene, rect);
         }
         draw_grid(&painter, &viewport.view, rect, viewport.projection);
@@ -101,7 +145,7 @@ pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>) -
         );
     }
 
-    response
+    ViewportOutput { response, part_delta }
 }
 
 fn draw_stroke(painter: &egui::Painter, view: &View, rect: Rect, stroke: &Stroke, show_rapids: bool, projection: Projection) {
