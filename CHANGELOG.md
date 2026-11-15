@@ -6,7 +6,7 @@
 
 The graphical workspace uses a native file chooser, imports typical SVG files without silently
 guessing a scale, can place a part in the job, and filters properties to the active process
-(#188). CAMpanion is still primarily command-line driven; the GUI is a work in progress and has
+(#188, #190). CAMpanion is still primarily command-line driven; the GUI is a work in progress and has
 not been machine-tested.
 
 ### Added
