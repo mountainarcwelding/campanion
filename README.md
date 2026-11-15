@@ -184,7 +184,9 @@ automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
 CAMpanion is primarily command-line driven. `campanion-gui` is still in development: a preview
 of the workspace that can already run a 2D cutting job through the existing backend, not a
 finished CAM interface. It does not talk to a machine. The Run tab, STOP, and all machine I/O
-stay inert. Resin (SLA) tabs and FDM remain placeholders.
+stay inert. Resin (SLA) tabs and FDM remain placeholders. The workspace selector sits at the
+top-left of the ribbon, the CAM stage tabs are beside it, and tool and operation actions are
+grouped under the selected tab.
 
 On a cutting workspace you can import a DXF, SVG, STEP or STL part, open and save
 `campanion-job/1` files, place a 2D part (drag or typed offset and rotation), edit profile

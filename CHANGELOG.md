@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## 0.18.2 — 2026-11-15
+
+The graphical workspace now puts the workspace selector, CAM stage tabs, and
+tool controls in the same corners as SolidCraft, so switching between the two
+is less disorienting. CAMpanion is still primarily command-line driven; the GUI
+is a work in progress and has not been machine-tested.
+
+### Changed
+
+- The workspace selector sits in a card at the top-left of the ribbon, with the
+  CAM stage tabs (Process, Setup, Operations, Export, and Run on cutting
+  workspaces; Orient, Supports, Slice, Export, and Run on resin; Orient, Slice,
+  Export, and Run on FDM) immediately to its right. Tool and operation actions
+  are grouped under the selected tab. The CAMpanion wordmark is in the
+  application bar. The pinned STOP button stays on the right of every tab. The
+  CLI-first banner, lockout rules, file dialogs, placement, editing, and
+  process-filtered properties are unchanged.
+
 ## 0.18.1 — 2026-11-15
 
 The graphical workspace uses a native file chooser, imports typical SVG files without silently
