@@ -1579,6 +1579,7 @@ pub struct JobFile {
     sheet: Option<Sheet>,
     nest: Option<Nest>,
     placement: Option<Placement>,
+    machine: Option<crate::profiles::JobMachineRef>,
 }
 
 impl JobFile {
@@ -1688,6 +1689,13 @@ impl JobFile {
     pub fn placement(&self) -> Option<Placement> {
         self.placement
     }
+
+    /// User machine profile reference. `None` when the file omits `machine`.
+    ///
+    /// This is not the lathe `machine.model` block.
+    pub fn machine(&self) -> Option<&crate::profiles::JobMachineRef> {
+        self.machine.as_ref()
+    }
 }
 
 struct Body {
@@ -1707,6 +1715,7 @@ struct Body {
     sheet: Option<Sheet>,
     nest: Option<Nest>,
     placement: Option<Placement>,
+    machine: Option<crate::profiles::JobMachineRef>,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -1739,6 +1748,7 @@ pub fn parse(text: &str, path: &Path) -> Result<JobFile, JobFileError> {
         sheet: body.sheet,
         nest: body.nest,
         placement: body.placement,
+        machine: body.machine,
     })
 }
 
@@ -1829,6 +1839,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
             "sheet",
             "nest",
             "placement",
+            "machine",
         ],
         "job",
     )
@@ -1922,6 +1933,10 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     if placement.is_some() && source.is_stl() {
         return Err(JobFileError::invalid("placement is only supported on DXF, SVG and STEP sources"));
     }
+    let machine = match optional(map, "machine") {
+        Some(value) => Some(crate::profiles::parse_job_machine_ref(value).map_err(JobFileError::invalid)?),
+        None => None,
+    };
     let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
     Ok(Body {
         source,
@@ -1940,6 +1955,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         sheet,
         nest,
         placement,
+        machine,
     })
 }
 

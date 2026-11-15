@@ -210,6 +210,7 @@ pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedPr
         let gouges = crate::gouge::check_job(job, &mesh, doc.program())?;
         crate::collision::check_job(job, Some(&mesh), doc.program())?;
         let notes = stock_messages(job, Some(&mesh), doc.program(), None)?;
+        crate::profiles::validate_job_machine(job, doc.program())?;
         return Ok(PlannedProgram { document: doc, warnings, notes, gouges, nest_report: None, implicit_stock: None });
     }
     let text = read_text(&source)?;
@@ -264,6 +265,7 @@ pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedPr
     crate::collision::check_job(job, None, doc.program())?;
     let implicit_stock = if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(job, &drawing)?) } else { None };
     notes.extend(stock_messages(job, None, doc.program(), implicit_stock)?);
+    crate::profiles::validate_job_machine(job, doc.program())?;
     Ok(PlannedProgram { document: doc, warnings, notes, gouges: Vec::new(), nest_report, implicit_stock })
 }
 
