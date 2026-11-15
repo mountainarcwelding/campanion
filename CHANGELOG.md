@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+The graphical workspace can now open a part or job, edit operations, generate toolpaths and
+export G-code through the existing backend. CAMpanion is still primarily command-line driven;
+the GUI is a work in progress and has not been machine-tested.
+
 ## 0.17.0 — 2026-11-15
 
 An early graphical layout preview: menus, workspaces, mode tabs and viewports, with no machine I/O (#183).
+CAMpanion is primarily command-line driven; this GUI was a layout preview and is still in development.
 
 ### Added
 

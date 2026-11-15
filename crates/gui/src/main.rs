@@ -80,10 +80,11 @@ Usage:
   campanion-gui --help
   campanion-gui --version
 
-  FILE            Optional IR JSON, job file, or G-code to open.
+  FILE            Optional job, part (DXF/SVG/STEP/STL), IR JSON, or G-code to open.
   --screenshot DIR
                   Write PNG previews of the main views into DIR and exit.
 
-This is an early layout preview: menus, navigation and viewports.
+CAMpanion is primarily command-line driven. This GUI is still in development.
+It can open a part or job, generate toolpaths and export G-code.
 It does not talk to a machine.
 ";

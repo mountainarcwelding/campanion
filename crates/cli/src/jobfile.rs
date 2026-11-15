@@ -1659,7 +1659,15 @@ struct Body {
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
 pub fn load(path: &Path) -> Result<JobFile, JobFileError> {
     let text = read_text(path)?;
-    let body = parse_text(&text, path)?;
+    parse(&text, path)
+}
+
+/// Parse a `campanion-job/1` document. Lengths in the result are millimetres.
+///
+/// `path` is stored on the result and is used to resolve a relative source path. The text is not
+/// read from that path.
+pub fn parse(text: &str, path: &Path) -> Result<JobFile, JobFileError> {
+    let body = parse_text(text, path)?;
     Ok(JobFile {
         path: path.to_path_buf(),
         source: body.source,

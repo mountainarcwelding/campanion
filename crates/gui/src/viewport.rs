@@ -95,7 +95,7 @@ pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>) -
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Open an IR file to preview the toolpath\nFile → Open job…",
+            "Import a part or open a job to begin\nFile → Import part… or File → Open job…\nCAMpanion is primarily command-line driven; this GUI is still in development",
             egui::FontId::proportional(14.0),
             theme::MUTED,
         );

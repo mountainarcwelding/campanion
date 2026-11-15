@@ -4,6 +4,9 @@ An open, machine-neutral CAM (toolpath) engine in Rust. CAMpanion is a standalon
 It can import STEP parts through [SolidCraft](https://github.com/tangency-labs/solidcraft)'s
 `solidcraft-cli`, but it is not part of SolidCraft.
 
+CAMpanion is primarily command-line driven. The graphical workspace (`campanion-gui`) is still
+in development.
+
 Status: early. Start with 2D path processing, then work up to multi-axis machines
 (the toolpath format is designed for up to 13 axes from the start).
 
@@ -176,22 +179,29 @@ rotary legend are hidden. There is no screenshot of the half-section; the window
 Labels need a system font (DejaVu, Liberation or Noto are found
 automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
 
-## GUI layout preview
+## Graphical workspace
 
-`campanion-gui` is an early layout shell: menus, workspaces, mode tabs, a process tree, a
-viewport, a properties column, a timeline, and a Run tab. It does not talk to a machine.
-Open an IR file (the `--ir` output of `campanion run`) to show the toolpath in the centre
-viewport, and a sibling `.ngc` / `.gcode` file of the same name, or a G-code file itself, in
-the Export preview.
+CAMpanion is primarily command-line driven. `campanion-gui` is still in development: a preview
+of the workspace that can already run a 2D cutting job through the existing backend, not a
+finished CAM interface. It does not talk to a machine. The Run tab, STOP, and all machine I/O
+stay inert. Resin (SLA) tabs and FDM remain placeholders.
+
+On a cutting workspace you can import a DXF, SVG, STEP or STL part, open and save
+`campanion-job/1` files, edit profile operations, generate toolpaths, choose a post, preview
+G-code and export `.ngc` / `.gcode`. Backend warnings and refusals (for example an omitted
+laser power posting as S0, or a slot narrower than the kerf) are shown in the UI. Feeds,
+power and sizes stay empty until you enter them; the program does not invent machine limits
+or material defaults.
+
+The CLI remains the primary way to run CAMpanion (`campanion run`, `campanion post`, and the
+other commands above).
 
 ```sh
 cargo run -p campanion-gui
-cargo run -p campanion-gui -- out.json
+cargo run -p campanion-gui -- examples/laser_rect.job.json
 # or, with both programs on PATH or in the same directory:
-campanion gui out.json
+campanion gui examples/laser_rect.job.json
 ```
-
-This is a layout preview, not a finished CAM interface.
 
 ## Roadmap and contributing
 

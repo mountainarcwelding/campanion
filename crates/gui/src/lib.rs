@@ -1,17 +1,23 @@
-//! Navigation and session state for the CAMpanion layout preview.
+//! Navigation and session state for the CAMpanion graphical workspace.
 //!
-//! This crate is an early shell: menus, workspaces, mode tabs and viewports. It does not talk to a
-//! machine. Toolpath display reuses [`campanion_view`] when an IR file is opened.
+//! CAMpanion is primarily command-line driven. This GUI is still in development: it can open a
+//! part or job, edit operations, generate toolpaths and export G-code through the existing
+//! backend, but it does not talk to a machine and is not a finished CAM interface.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod app;
+pub mod session;
 pub mod theme;
 pub mod viewport;
 
 use std::path::{Path, PathBuf};
 
 use campanion_view::Scene;
+
+pub use session::{
+    GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, OpDraft, SessionMessage, ToolDraft, ToolKind, TreeSelection,
+};
 
 /// Maximum size of a file the shell will open, in bytes.
 pub const MAX_OPEN_BYTES: u64 = 32 * 1024 * 1024;

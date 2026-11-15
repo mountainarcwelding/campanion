@@ -1,6 +1,6 @@
 [package]
 name = "campanion-gui"
-description = "Early layout preview for the CAMpanion graphical workspace"
+description = "Graphical workspace for CAMpanion. The program is still primarily command-line driven; this GUI is in development."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,7 +21,11 @@ path = "src/main.rs"
 
 [dependencies]
 campanion-ir.workspace = true
+campanion-geom.workspace = true
+campanion-import.workspace = true
+campanion-path.workspace = true
 campanion-view = { path = "../view" }
+campanion-cli = { path = "../cli" }
 thiserror.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "x11", "wayland"] }

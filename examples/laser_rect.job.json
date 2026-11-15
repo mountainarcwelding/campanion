@@ -1,0 +1,21 @@
+{
+  "format": "campanion-job/1",
+  "source": { "path": "laser_rect.svg", "hash": "7325d5be1c8f0420" },
+  "units": "mm",
+  "tools": [
+    { "id": 1, "kerf": 0.1 }
+  ],
+  "operations": [
+    {
+      "name": "outline",
+      "type": "profile",
+      "layers": ["0"],
+      "side": "outside",
+      "tool_id": 1,
+      "depth": 0.26,
+      "step_down": 0.26,
+      "feeds": { "cut": 300.0 },
+      "power": 0.2
+    }
+  ]
+}
