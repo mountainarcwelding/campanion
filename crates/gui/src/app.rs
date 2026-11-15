@@ -486,7 +486,16 @@ impl App {
     fn delete_selection(&mut self) {
         self.push_undo();
         match edit::delete_selection(&mut self.session) {
-            Ok(status) => self.state.status = status,
+            Ok(status) => {
+                self.state.status = status;
+                self.document = None;
+                self.state.gcode.clear();
+                if self.session.source_drawing.is_none() {
+                    self.viewport = None;
+                    self.scene = None;
+                    self.state.has_scene = false;
+                }
+            }
             Err(err) => {
                 self.undo.pop();
                 self.state.status = err;
@@ -1169,8 +1178,13 @@ impl App {
         tree_line(ui, "Material", "Not selected");
         ui.label(RichText::new("Material values stay empty until you enter them.").color(theme::MUTED).size(11.0));
         ui.separator();
-        if let Some(source) = &self.session.source_path {
-            tree_line(ui, "Source", &source.display().to_string());
+        if let Some(label) = self.session.source_path.as_ref().map(|path| path.display().to_string()) {
+            let selected = self.session.selected == Some(TreeSelection::Source);
+            let response = ui.selectable_label(selected, format!("Source: {label}"));
+            if response.clicked() {
+                self.session.selected = Some(TreeSelection::Source);
+            }
+            self.tree_context_menu(response);
         } else {
             tree_line(ui, "Source", "Not imported");
         }
@@ -1248,13 +1262,17 @@ impl App {
             Some(TreeSelection::Operation(index)) if index < self.session.operations.len() => {
                 self.operation_properties(ui, index);
             }
+            Some(TreeSelection::Source) => {
+                ui.label(RichText::new("Imported part").strong().size(13.0));
+                ui.label(RichText::new("Delete (Edit → Delete, or the Delete key) removes the part from this job. Tools and operations are kept. Ctrl+Z undoes the removal.").color(theme::MUTED).size(12.0));
+            }
             Some(TreeSelection::Layer(name)) => {
                 ui.label(format!("Layer: {name}"));
                 ui.label(RichText::new("Assign this layer to a profile in the operation properties.").color(theme::MUTED).size(12.0));
                 ui.label(RichText::new("Per-contour kerf and lead-in overrides are not in the job format yet.").color(theme::MUTED).size(11.0));
             }
             _ => {
-                ui.label(RichText::new("Select a tool or operation in the process tree.").color(theme::MUTED).size(12.0));
+                ui.label(RichText::new("Select a tool, an operation, or the imported part in the process tree.").color(theme::MUTED).size(12.0));
             }
         }
         if ui.button("Generate toolpaths").clicked() {
