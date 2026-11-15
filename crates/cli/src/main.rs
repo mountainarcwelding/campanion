@@ -60,6 +60,7 @@ Usage:
   campanion audit FILE.nc --post ID|FILE.json
   campanion verify FILE [--mesh PART.stl [--tool ball:3|flat:3|bull:3,1]]
   campanion view IR.json
+  campanion gui [FILE]
   campanion schema
   campanion --help
   campanion --version
@@ -114,6 +115,8 @@ verify  Verify an IR JSON file and print a report. The status is 1 when the repo
 view    Open the toolpath preview (the campanion-view program) for an IR JSON file.
         --stock FILE.json draws the height map from --stock-out. S toggles that surface.
         --machine draws boxes and cylinders from the kinematics model. M toggles that sketch.
+gui     Open the layout preview (the campanion-gui program). FILE may be IR JSON, a job file, or G-code.
+        This is an early shell: menus, navigation and viewports. It does not talk to a machine.
 schema  Print the JSON Schema for campanion-ir/1.
 
 --job FILE
@@ -172,6 +175,7 @@ fn try_main() -> Result<ExitCode, CliError> {
         name if name == "audit" => post::audit_command(rest),
         name if name == "verify" => verify(rest),
         name if name == "view" => view(rest),
+        name if name == "gui" => gui(rest),
         name if name == "schema" => schema(rest),
         _ => Err(CliError::usage("unknown command")),
     }
@@ -273,7 +277,19 @@ fn view(args: &[OsString]) -> Result<ExitCode, CliError> {
     if args.first().is_none_or(|path| path.is_empty()) {
         return Err(CliError::usage("view needs an IR JSON file"));
     }
-    let program = find_viewer()?;
+    launch_sidecar(
+        "campanion-view",
+        args,
+        "campanion view needs the campanion-view program next to campanion or on PATH (cargo build -p campanion-view)",
+    )
+}
+
+fn gui(args: &[OsString]) -> Result<ExitCode, CliError> {
+    launch_sidecar("campanion-gui", args, "campanion gui needs the campanion-gui program next to campanion or on PATH (cargo build -p campanion-gui)")
+}
+
+fn launch_sidecar(file_stem: &str, args: &[OsString], missing: &str) -> Result<ExitCode, CliError> {
+    let program = find_sidecar(file_stem, missing)?;
     let status = Command::new(&program)
         .args(args)
         .stdin(Stdio::inherit())
@@ -285,8 +301,8 @@ fn view(args: &[OsString]) -> Result<ExitCode, CliError> {
 }
 
 /// Same directory as this executable, then `PATH`. No GUI crates are linked into this binary.
-fn find_viewer() -> Result<PathBuf, CliError> {
-    let file_name = format!("campanion-view{}", env::consts::EXE_SUFFIX);
+fn find_sidecar(file_stem: &str, missing: &str) -> Result<PathBuf, CliError> {
+    let file_name = format!("{file_stem}{}", env::consts::EXE_SUFFIX);
     if let Ok(exe) = env::current_exe()
         && let Some(dir) = exe.parent()
     {
@@ -303,7 +319,7 @@ fn find_viewer() -> Result<PathBuf, CliError> {
             }
         }
     }
-    Err(CliError::run("campanion view needs the campanion-view program next to campanion or on PATH (cargo build -p campanion-view)"))
+    Err(CliError::run(missing))
 }
 
 fn exit_code_of(status: ExitStatus) -> ExitCode {
