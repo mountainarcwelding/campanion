@@ -22,10 +22,12 @@ mod chain;
 mod dxf;
 #[allow(dead_code)]
 mod ellipse;
+mod place;
 mod svg;
 mod units;
 
 pub use dxf::import_dxf;
+pub use place::place_drawing;
 pub use svg::import_svg;
 
 use std::fmt;
@@ -81,12 +83,23 @@ pub struct Drawing {
     contours: Vec<ImportedContour>,
     skipped_entities: usize,
     skipped_types: Vec<(String, usize)>,
+    warnings: Vec<String>,
 }
 
 impl Drawing {
     pub(crate) fn new(contours: Vec<ImportedContour>, skipped_entities: usize, mut skipped_types: Vec<(String, usize)>) -> Self {
         skipped_types.sort();
-        Self { contours, skipped_entities, skipped_types }
+        Self { contours, skipped_entities, skipped_types, warnings: Vec::new() }
+    }
+
+    pub(crate) fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings = warnings;
+        self
+    }
+
+    /// Notices that are not refusals, such as an SVG whose scale is in CSS pixels.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Contours in millimetres, each tagged with its DXF layer.

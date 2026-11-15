@@ -11,10 +11,13 @@ use campanion_ir::Document;
 use campanion_view::{Scene, StrokeKind, find_system_font};
 use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Stroke, Vec2};
 
+use crate::edit::{self, SessionClipboard, SessionSnapshot};
+use crate::fields::{self, ProcessFields};
+use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_stem, resolve_user_path};
 use crate::session::{
     GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, OpDraft, ToolDraft, ToolKind, TreeSelection, export_destination,
-    generate_toolpaths, import_part_file, list_posts, open_job_file, post_session, scene_from_drawing, session_from_import,
-    suggested_post_for_process, write_gcode, write_job,
+    format_number, generate_toolpaths, import_part_file, list_posts, open_job_file, parse_placement_mm, placed_drawing, post_session,
+    scene_from_drawing, session_from_import, suggested_post_for_process, write_gcode, write_job,
 };
 use crate::theme;
 use crate::viewport::{self, Viewport};
@@ -52,6 +55,9 @@ pub fn run(launch: Launch) -> Result<(), String> {
             let mut app = App::new(has_font);
             if let Some(path) = launch.open {
                 app.open_file(&path);
+                if launch.screenshot_dir.is_some() {
+                    app.prepare_opened_file_for_screenshot();
+                }
             } else if launch.screenshot_dir.is_some() {
                 app.open_sample_for_screenshot();
             }
@@ -110,6 +116,8 @@ struct App {
     machine_profiles: bool,
     material_library: bool,
     screenshot: Option<ScreenshotJob>,
+    clipboard: Option<SessionClipboard>,
+    undo: Vec<SessionSnapshot>,
 }
 
 struct ScreenshotJob {
@@ -122,6 +130,7 @@ struct ScreenshotJob {
     sender: mpsc::Sender<Arc<egui::ColorImage>>,
     written: Vec<PathBuf>,
     error: Option<String>,
+    finished: bool,
 }
 
 impl App {
@@ -140,6 +149,8 @@ impl App {
             machine_profiles: false,
             material_library: false,
             screenshot: None,
+            clipboard: None,
+            undo: Vec::new(),
         }
     }
 
@@ -204,7 +215,7 @@ impl App {
                     session,
                     imported.as_ref().and_then(|part| part.drawing.as_ref()).map(|drawing| scene_from_drawing(drawing, DEFAULT_ARC_TOL_MM)),
                 );
-                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                if let Some(stem) = export_stem(path)
                     && self.state.export_name.is_empty()
                 {
                     self.state.export_name = stem.to_string();
@@ -234,7 +245,7 @@ impl App {
                 let display = path.display().to_string();
                 self.apply_session(session, scene);
                 self.state.remember_open(path.to_path_buf());
-                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                if let Some(stem) = export_stem(path) {
                     self.state.export_name = stem.to_string();
                 }
                 self.state.status = format!("Imported {display}");
@@ -257,13 +268,12 @@ impl App {
         self.document = None;
         self.state.gcode.clear();
         self.state.run_lines = 0;
-        if let Some(scene) = geometry {
-            self.viewport = Some(Viewport::new(&scene));
-            self.scene = Some(scene);
-            self.state.has_scene = true;
-        } else {
+        self.viewport = None;
+        self.scene = geometry;
+        self.state.has_scene = self.scene.is_some();
+        self.refresh_placed_scene();
+        if self.scene.is_none() {
             self.viewport = None;
-            self.scene = None;
             self.state.has_scene = false;
         }
         self.merge_session_messages();
@@ -272,6 +282,215 @@ impl App {
     fn merge_session_messages(&mut self) {
         if let Some(message) = self.session.messages.first() {
             self.state.status = message.text.clone();
+        }
+    }
+
+    fn push_undo(&mut self) {
+        const LIMIT: usize = 32;
+        self.undo.push(SessionSnapshot { session: self.session.clone() });
+        if self.undo.len() > LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    fn undo_last(&mut self) {
+        let Some(snapshot) = self.undo.pop() else {
+            self.state.status = "Nothing to undo".to_string();
+            return;
+        };
+        self.session = snapshot.session;
+        self.refresh_placed_scene();
+        self.state.status = "Undo".to_string();
+    }
+
+    fn refresh_placed_scene(&mut self) {
+        match placed_drawing(&self.session) {
+            Ok(Some(drawing)) => {
+                let scene = scene_from_drawing(&drawing, DEFAULT_ARC_TOL_MM);
+                if let Some(viewport) = self.viewport.as_mut() {
+                    viewport.fitted = false;
+                    viewport.user_adjusted = false;
+                    viewport.last_size = None;
+                } else {
+                    self.viewport = Some(Viewport::new(&scene));
+                }
+                self.scene = Some(scene);
+                self.state.has_scene = true;
+            }
+            Ok(None) => {}
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn apply_part_delta(&mut self, delta: [f64; 2]) {
+        match parse_placement_mm(&self.session) {
+            Ok((x, y, rotate)) => {
+                self.session.placement_x = format_number(x + delta[0]);
+                self.session.placement_y = format_number(y + delta[1]);
+                let _ = rotate;
+                self.session.dirty = true;
+                self.document = None;
+                self.state.gcode.clear();
+                self.refresh_placed_scene();
+            }
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn process_fields(&self) -> ProcessFields {
+        fields::fields_for(self.state.process, self.state.workspace)
+    }
+
+    fn request_open(&mut self) {
+        self.launch_dialog(DialogKind::Open, None);
+    }
+
+    fn request_import(&mut self) {
+        self.launch_dialog(DialogKind::Import, None);
+    }
+
+    fn request_save_as(&mut self) {
+        let name = self.session.job_path.as_ref().and_then(|path| path.file_name().and_then(|name| name.to_str())).unwrap_or("job.json").to_string();
+        self.launch_dialog(DialogKind::SaveJob, Some(&name));
+    }
+
+    fn request_export(&mut self) {
+        let _ = self.state.set_tab(ModeTab::Export);
+        let suggested = if self.state.export_name.is_empty() { "output.ngc".to_string() } else { self.state.export_name.clone() };
+        self.launch_dialog(DialogKind::ExportGcode, Some(&suggested));
+    }
+
+    fn launch_dialog(&mut self, kind: DialogKind, suggested: Option<&str>) {
+        let start = self.dialog_start_dir();
+        match files::pick_path(kind, start.as_deref(), suggested) {
+            DialogResult::Picked(path) => self.apply_dialog_path(kind, &path),
+            DialogResult::Cancelled => {}
+            DialogResult::Unavailable => {
+                self.file_dialog = Some(match kind {
+                    DialogKind::Open => FileDialogKind::Open,
+                    DialogKind::Import => FileDialogKind::Import,
+                    DialogKind::SaveJob => FileDialogKind::SaveJob,
+                    DialogKind::ExportGcode => FileDialogKind::ExportGcode,
+                });
+                self.path_text = suggested.unwrap_or("").to_string();
+                self.state.status = "No system file chooser was available; type a path.".to_string();
+            }
+        }
+    }
+
+    fn dialog_start_dir(&self) -> Option<PathBuf> {
+        if let Some(path) = self.session.job_path.as_ref().and_then(|path| path.parent()) {
+            return Some(path.to_path_buf());
+        }
+        std::env::current_dir().ok()
+    }
+
+    fn apply_dialog_path(&mut self, kind: DialogKind, path: &Path) {
+        match kind {
+            DialogKind::Open => self.open_file(path),
+            DialogKind::Import => self.import_part(path),
+            DialogKind::SaveJob => self.save_job_to(path),
+            DialogKind::ExportGcode => self.export_gcode_to(path),
+        }
+    }
+
+    fn confirm_typed_path(&mut self, kind: FileDialogKind) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        match resolve_user_path(&self.path_text, &cwd, home.as_deref()) {
+            Ok(path) => {
+                let mapped = match kind {
+                    FileDialogKind::Open => DialogKind::Open,
+                    FileDialogKind::Import => DialogKind::Import,
+                    FileDialogKind::SaveJob => DialogKind::SaveJob,
+                    FileDialogKind::ExportGcode => DialogKind::ExportGcode,
+                };
+                self.file_dialog = None;
+                self.apply_dialog_path(mapped, &path);
+            }
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn prepare_opened_file_for_screenshot(&mut self) {
+        if self.session.operations.is_empty() && self.session.source_drawing.is_none() {
+            return;
+        }
+        if self.session.post_id.is_empty() {
+            if let Some(process) = self.state.process
+                && let Some(id) = suggested_post_for_process(process.label())
+            {
+                self.session.post_id = id.to_string();
+            } else if self.session.tools.iter().any(|tool| tool.kind == ToolKind::Kerf) {
+                self.session.post_id = "grbl_laser".to_string();
+                self.state.set_workspace(Workspace::ThermalJet);
+                let _ = self.state.set_process(SubProcess::Laser);
+            }
+        }
+        self.generate_and_post();
+    }
+
+    fn show_viewport(&mut self, ui: &mut egui::Ui, caption: &str) {
+        ui.label(RichText::new(caption).color(theme::MUTED).size(11.0));
+        self.show_viewport_area(ui);
+    }
+
+    fn show_viewport_area(&mut self, ui: &mut egui::Ui) {
+        let allow_drag = self.session.source_drawing.is_some() && self.document.is_none();
+        if let Some(viewport) = self.viewport.as_mut() {
+            let output = viewport::show(ui, viewport, self.scene.as_ref(), allow_drag);
+            if let Some(delta) = output.part_delta {
+                self.apply_part_delta(delta);
+            }
+        } else {
+            placeholder_pane(ui, "Import a part or open a job to preview it.\nFile → Open… or File → Import part…");
+        }
+    }
+
+    fn copy_selection(&mut self) {
+        match edit::copy_selection(&self.session) {
+            Ok(clip) => {
+                self.clipboard = Some(clip);
+                self.state.status = "Copied".to_string();
+            }
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn paste_selection(&mut self) {
+        let Some(clip) = self.clipboard.clone() else {
+            self.state.status = "The clipboard is empty".to_string();
+            return;
+        };
+        self.push_undo();
+        match edit::paste_clipboard(&mut self.session, &clip) {
+            Ok(status) => self.state.status = status,
+            Err(err) => {
+                self.undo.pop();
+                self.state.status = err;
+            }
+        }
+    }
+
+    fn duplicate_selection(&mut self) {
+        self.push_undo();
+        match edit::duplicate_selection(&mut self.session) {
+            Ok(status) => self.state.status = status,
+            Err(err) => {
+                self.undo.pop();
+                self.state.status = err;
+            }
+        }
+    }
+
+    fn delete_selection(&mut self) {
+        self.push_undo();
+        match edit::delete_selection(&mut self.session) {
+            Ok(status) => self.state.status = status,
+            Err(err) => {
+                self.undo.pop();
+                self.state.status = err;
+            }
         }
     }
 
@@ -459,6 +678,7 @@ impl App {
             sender,
             written: Vec::new(),
             error: None,
+            finished: false,
         });
         if let Some(job) = &self.screenshot {
             let (workspace, tab, _) = &job.plan[0];
@@ -481,6 +701,11 @@ impl App {
         let mut arrange = false;
         let mut layer_up = false;
         let mut layer_down = false;
+        let mut copy = false;
+        let mut paste = false;
+        let mut duplicate = false;
+        let mut delete = false;
+        let mut undo = false;
         ctx.input(|input| {
             let cmd = input.modifiers.command;
             if cmd && input.key_pressed(egui::Key::Q) {
@@ -498,6 +723,18 @@ impl App {
             if cmd && input.key_pressed(egui::Key::E) {
                 export = true;
             }
+            if cmd && input.key_pressed(egui::Key::C) && !typing {
+                copy = true;
+            }
+            if cmd && input.key_pressed(egui::Key::V) && !typing {
+                paste = true;
+            }
+            if cmd && input.key_pressed(egui::Key::D) && !typing {
+                duplicate = true;
+            }
+            if cmd && input.key_pressed(egui::Key::Z) && !typing {
+                undo = true;
+            }
             if cmd && input.key_pressed(egui::Key::Tab) {
                 if input.modifiers.shift {
                     prev = true;
@@ -508,6 +745,9 @@ impl App {
             if !typing {
                 if input.key_pressed(egui::Key::A) {
                     arrange = true;
+                }
+                if input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace) {
+                    delete = true;
                 }
                 if input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowRight) {
                     layer_up = true;
@@ -524,14 +764,28 @@ impl App {
             self.apply_document_new();
         }
         if open {
-            self.file_dialog = Some(FileDialogKind::Open);
-            self.path_text.clear();
+            self.request_open();
         }
         if save {
             self.save_job();
         }
         if export {
-            let _ = self.state.set_tab(ModeTab::Export);
+            self.request_export();
+        }
+        if copy {
+            self.copy_selection();
+        }
+        if paste {
+            self.paste_selection();
+        }
+        if duplicate {
+            self.duplicate_selection();
+        }
+        if delete {
+            self.delete_selection();
+        }
+        if undo {
+            self.undo_last();
         }
         if next {
             self.state.next_tab();
@@ -600,9 +854,8 @@ impl App {
                         self.apply_document_new();
                         ui.close();
                     }
-                    if ui.button("Open job…").clicked() {
-                        self.file_dialog = Some(FileDialogKind::Open);
-                        self.path_text.clear();
+                    if ui.button("Open…").clicked() {
+                        self.request_open();
                         ui.close();
                     }
                     if ui.button("Save").clicked() {
@@ -610,23 +863,21 @@ impl App {
                         ui.close();
                     }
                     if ui.button("Save As…").clicked() {
-                        self.file_dialog = Some(FileDialogKind::SaveJob);
-                        self.path_text = self.session.job_path.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+                        self.request_save_as();
                         ui.close();
                     }
                     ui.separator();
                     if ui.button("Import part…").clicked() {
-                        self.file_dialog = Some(FileDialogKind::Import);
-                        self.path_text.clear();
+                        self.request_import();
                         ui.close();
                     }
                     if ui.button("Export G-code…").clicked() {
-                        let _ = self.state.set_tab(ModeTab::Export);
-                        self.file_dialog = Some(FileDialogKind::ExportGcode);
-                        match export_destination(&self.state.export_path, &self.state.export_name, &self.state.export_format) {
-                            Ok(path) => self.path_text = path.display().to_string(),
-                            Err(_) => self.path_text.clear(),
-                        }
+                        self.request_export();
+                        ui.close();
+                    }
+                    if ui.button("Enter path…").clicked() {
+                        self.file_dialog = Some(FileDialogKind::Open);
+                        self.path_text.clear();
                         ui.close();
                     }
                     ui.separator();
@@ -649,8 +900,28 @@ impl App {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Undo"));
+                    if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).clicked() {
+                        self.undo_last();
+                        ui.close();
+                    }
                     ui.add_enabled(false, egui::Button::new("Redo"));
+                    ui.separator();
+                    if ui.button("Copy").clicked() {
+                        self.copy_selection();
+                        ui.close();
+                    }
+                    if ui.button("Paste").clicked() {
+                        self.paste_selection();
+                        ui.close();
+                    }
+                    if ui.button("Duplicate").clicked() {
+                        self.duplicate_selection();
+                        ui.close();
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.delete_selection();
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Preferences…").clicked() {
                         self.preferences = true;
@@ -663,9 +934,10 @@ impl App {
                     ui.checkbox(&mut self.state.show_timeline, "Timeline");
                     ui.separator();
                     if ui.button("Reset camera").clicked() {
-                        if let (Some(scene), Some(viewport)) = (&self.scene, &mut self.viewport) {
+                        if let Some(viewport) = &mut self.viewport {
                             viewport.fitted = false;
-                            let _ = scene;
+                            viewport.user_adjusted = false;
+                            viewport.last_size = None;
                         }
                         self.state.status = "Camera reset".to_string();
                         ui.close();
@@ -852,6 +1124,27 @@ impl App {
         });
     }
 
+    fn tree_context_menu(&mut self, response: egui::Response) {
+        response.context_menu(|ui| {
+            if ui.button("Copy").clicked() {
+                self.copy_selection();
+                ui.close();
+            }
+            if ui.button("Paste").clicked() {
+                self.paste_selection();
+                ui.close();
+            }
+            if ui.button("Duplicate").clicked() {
+                self.duplicate_selection();
+                ui.close();
+            }
+            if ui.button("Delete").clicked() {
+                self.delete_selection();
+                ui.close();
+            }
+        });
+    }
+
     fn process_tree(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Process Tree").strong().size(14.0));
         ui.add_space(6.0);
@@ -901,12 +1194,14 @@ impl App {
                 let label =
                     if tool.name.is_empty() { format!("T{} {}", tool.id, tool_kind_label(tool.kind)) } else { format!("T{} {}", tool.id, tool.name) };
                 let selected = self.session.selected == Some(TreeSelection::Tool(index));
-                if ui.selectable_label(selected, label).clicked() {
+                let response = ui.selectable_label(selected, label);
+                if response.clicked() {
                     self.session.selected = Some(TreeSelection::Tool(index));
                 }
+                self.tree_context_menu(response);
             }
             if ui.button("Add tool").clicked() {
-                let kind = default_tool_kind(self.state.process);
+                let kind = default_tool_kind(self.state.process, self.state.workspace);
                 let id = crate::session::next_tool_id(&self.session.tools);
                 self.session.tools.push(ToolDraft { id, name: String::new(), kind, size: String::new() });
                 self.session.selected = Some(TreeSelection::Tool(self.session.tools.len() - 1));
@@ -919,9 +1214,11 @@ impl App {
                 let op = &self.session.operations[index];
                 let label = if op.name.is_empty() { format!("Operation {}", index + 1) } else { op.name.clone() };
                 let selected = self.session.selected == Some(TreeSelection::Operation(index));
-                if ui.selectable_label(selected, label).clicked() {
+                let response = ui.selectable_label(selected, label);
+                if response.clicked() {
                     self.session.selected = Some(TreeSelection::Operation(index));
                 }
+                self.tree_context_menu(response);
             }
             if self.session.operations.is_empty() {
                 ui.label(RichText::new("No operations yet").color(theme::MUTED).size(12.0));
@@ -943,6 +1240,7 @@ impl App {
     fn default_properties(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Properties").strong().size(14.0));
         ui.add_space(6.0);
+        self.placement_properties(ui);
         match self.session.selected.clone() {
             Some(TreeSelection::Tool(index)) if index < self.session.tools.len() => {
                 self.tool_properties(ui, index);
@@ -965,6 +1263,39 @@ impl App {
         self.show_messages(ui);
     }
 
+    fn placement_properties(&mut self, ui: &mut egui::Ui) {
+        if self.session.source_drawing.is_none() {
+            return;
+        }
+        ui.label(RichText::new("Placement").strong().size(13.0));
+        let mut changed = false;
+        changed |= self.placement_field(ui, "X (mm)", 0);
+        changed |= self.placement_field(ui, "Y (mm)", 1);
+        changed |= self.placement_field(ui, "Rotation (deg, CCW)", 2);
+        ui.label(
+            RichText::new("Drag the part in the viewport to move it. Shift-drag, Alt-drag, or middle-drag pans the view.")
+                .color(theme::MUTED)
+                .size(11.0),
+        );
+        if changed {
+            self.session.dirty = true;
+            self.document = None;
+            self.state.gcode.clear();
+            self.refresh_placed_scene();
+        }
+        ui.separator();
+    }
+
+    fn placement_field(&mut self, ui: &mut egui::Ui, label: &str, field: usize) -> bool {
+        ui.label(label);
+        let value = match field {
+            0 => &mut self.session.placement_x,
+            1 => &mut self.session.placement_y,
+            _ => &mut self.session.placement_rotate,
+        };
+        ui.add(egui::TextEdit::singleline(value).desired_width(180.0).hint_text("0")).changed()
+    }
+
     fn tool_properties(&mut self, ui: &mut egui::Ui, index: usize) {
         ui.label(RichText::new("Tool").strong().size(13.0));
         let tool = &mut self.session.tools[index];
@@ -974,10 +1305,16 @@ impl App {
         }
         ui.label("Kind");
         ui.horizontal(|ui| {
+            let kinds = self.process_fields().tool_kinds;
             let tool = &mut self.session.tools[index];
-            for (kind, label) in [(ToolKind::Kerf, "Kerf"), (ToolKind::Diameter, "Diameter"), (ToolKind::Wire, "Wire")] {
-                if ui.selectable_label(tool.kind == kind, label).clicked() {
-                    tool.kind = kind;
+            if !kinds.is_empty() && !kinds.contains(&tool.kind) {
+                tool.kind = kinds[0];
+                self.session.dirty = true;
+            }
+            for kind in kinds {
+                let label = tool_kind_label(*kind);
+                if ui.selectable_label(tool.kind == *kind, label).clicked() {
+                    tool.kind = *kind;
                     self.session.dirty = true;
                 }
             }
@@ -1000,17 +1337,20 @@ impl App {
             self.session.dirty = true;
         }
         ui.label(format!("Type: {}", self.session.operations[index].kind));
+        let fields = self.process_fields();
         if self.session.operations[index].kind == "profile" {
-            ui.label("Side");
-            ui.horizontal(|ui| {
-                for side in ["inside", "outside", "on", "auto"] {
-                    let selected = self.session.operations[index].side == side;
-                    if ui.selectable_label(selected, side).clicked() {
-                        self.session.operations[index].side = side.to_string();
-                        self.session.dirty = true;
+            if fields.side {
+                ui.label("Side");
+                ui.horizontal(|ui| {
+                    for side in ["inside", "outside", "on", "auto"] {
+                        let selected = self.session.operations[index].side == side;
+                        if ui.selectable_label(selected, side).clicked() {
+                            self.session.operations[index].side = side.to_string();
+                            self.session.dirty = true;
+                        }
                     }
-                }
-            });
+                });
+            }
             ui.label("Layers");
             let available: Vec<String> = if self.session.layers.is_empty() {
                 self.session.operations[index].layers.clone()
@@ -1043,9 +1383,17 @@ impl App {
             self.session.operations[index].tool_id = id;
             self.session.dirty = true;
         }
-        for (label, field) in
-            [("Depth (mm)", 0usize), ("Step down (mm)", 1), ("Cut feed (mm/min)", 2), ("Plunge feed (mm/min)", 3), ("Power (0..1)", 4)]
-        {
+        let op_fields: Vec<(&str, usize)> = [
+            fields.depth.then_some(("Depth (mm)", 0usize)),
+            fields.step_down.then_some(("Step down (mm)", 1)),
+            fields.cut_feed.then_some(("Cut feed (mm/min)", 2)),
+            fields.plunge_feed.then_some(("Plunge feed (mm/min)", 3)),
+            fields.power.then_some(("Power (0..1)", 4)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for (label, field) in op_fields {
             ui.label(label);
             let value = match field {
                 0 => &mut self.session.operations[index].depth,
@@ -1058,41 +1406,55 @@ impl App {
                 self.session.dirty = true;
             }
         }
-        ui.label(RichText::new("Leads (omit to use the job-file default)").color(theme::MUTED).size(11.0));
-        ui.label("Lead in");
-        self.lead_editor(ui, index, true);
-        ui.label("Lead out");
-        self.lead_editor(ui, index, false);
-        ui.label(RichText::new("Per-contour kerf and lead-in overrides are not in the job format yet.").color(theme::MUTED).size(11.0));
-        ui.label("Direction");
-        ui.horizontal(|ui| {
-            for item in ["", "climb", "conventional"] {
-                let label = if item.is_empty() { "default" } else { item };
-                let selected = self.session.operations[index].direction == item;
-                if ui.selectable_label(selected, label).clicked() {
-                    self.session.operations[index].direction = item.to_string();
-                    self.session.dirty = true;
-                }
-            }
-        });
-        ui.label("Compensation");
-        ui.horizontal(|ui| {
-            for item in ["", "computed", "controller_left", "controller_right"] {
-                let label = if item.is_empty() { "default" } else { item };
-                let selected = self.session.operations[index].compensation == item;
-                if ui.selectable_label(selected, label).clicked() {
-                    self.session.operations[index].compensation = item.to_string();
-                    self.session.dirty = true;
-                }
-            }
-        });
-        ui.label("Pierce delay (s)");
-        if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].pierce_delay).desired_width(180.0).hint_text("optional")).changed() {
-            self.session.dirty = true;
+        if fields.leads {
+            ui.label(RichText::new("Leads (omit to use the job-file default)").color(theme::MUTED).size(11.0));
+            ui.label("Lead in");
+            self.lead_editor(ui, index, true);
+            ui.label("Lead out");
+            self.lead_editor(ui, index, false);
+            ui.label(RichText::new("Per-contour kerf and lead-in overrides are not in the job format yet.").color(theme::MUTED).size(11.0));
         }
-        ui.label("Post delay (s)");
-        if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].post_delay).desired_width(180.0).hint_text("optional")).changed() {
-            self.session.dirty = true;
+        if fields.direction {
+            ui.label("Direction");
+            ui.horizontal(|ui| {
+                for item in ["", "auto", "climb", "conventional"] {
+                    let label = if item.is_empty() { "default" } else { item };
+                    let selected = self.session.operations[index].direction == item;
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.session.operations[index].direction = item.to_string();
+                        self.session.dirty = true;
+                    }
+                }
+            });
+        }
+        if fields.compensation {
+            ui.label("Compensation");
+            ui.horizontal(|ui| {
+                for item in ["", "computed", "controller_left", "controller_right"] {
+                    let label = if item.is_empty() { "default" } else { item };
+                    let selected = self.session.operations[index].compensation == item;
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.session.operations[index].compensation = item.to_string();
+                        self.session.dirty = true;
+                    }
+                }
+            });
+        }
+        if fields.pierce_delay {
+            ui.label("Pierce delay (s)");
+            if ui
+                .add(egui::TextEdit::singleline(&mut self.session.operations[index].pierce_delay).desired_width(180.0).hint_text("optional"))
+                .changed()
+            {
+                self.session.dirty = true;
+            }
+        }
+        if fields.post_delay {
+            ui.label("Post delay (s)");
+            if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].post_delay).desired_width(180.0).hint_text("optional")).changed()
+            {
+                self.session.dirty = true;
+            }
         }
     }
 
@@ -1292,11 +1654,7 @@ impl App {
         ui.columns(2, |columns| {
             if let Some(left) = columns.get_mut(0) {
                 left.label(RichText::new("Toolpath").strong().size(14.0));
-                if let Some(viewport) = self.viewport.as_mut() {
-                    viewport::show(left, viewport, self.scene.as_ref());
-                } else {
-                    placeholder_pane(left, "Open an IR file to preview the toolpath.");
-                }
+                self.show_viewport_area(left);
             }
             if let Some(right) = columns.get_mut(1) {
                 right.label(RichText::new("G-code preview").strong().size(14.0));
@@ -1497,12 +1855,7 @@ impl App {
     }
 
     fn viewport_panel(&mut self, ui: &mut egui::Ui, caption: &str) {
-        ui.label(RichText::new(caption).color(theme::MUTED).size(11.0));
-        if let Some(viewport) = self.viewport.as_mut() {
-            viewport::show(ui, viewport, self.scene.as_ref());
-        } else {
-            placeholder_pane(ui, "Open an IR file to preview the toolpath.\nFile → Open job…");
-        }
+        self.show_viewport(ui, caption);
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1516,16 +1869,13 @@ impl App {
             };
             egui::Window::new(title).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
                 ui.label(prompt);
-                ui.add(egui::TextEdit::singleline(&mut self.path_text).desired_width(420.0));
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                ui.label(RichText::new(format!("Current directory: {}", current_dir_display(&cwd))).color(theme::MUTED).size(11.0));
+                ui.label(RichText::new("Relative paths and ~ are accepted.").color(theme::MUTED).size(11.0));
+                ui.add(egui::TextEdit::singleline(&mut self.path_text).desired_width(420.0).hint_text("path/to/file"));
                 ui.horizontal(|ui| {
                     if ui.button(action).clicked() && !self.path_text.trim().is_empty() {
-                        let path = PathBuf::from(self.path_text.trim());
-                        match kind {
-                            FileDialogKind::Open => self.open_file(&path),
-                            FileDialogKind::Import => self.import_part(&path),
-                            FileDialogKind::SaveJob => self.save_job_to(&path),
-                            FileDialogKind::ExportGcode => self.export_gcode_to(&path),
-                        }
+                        self.confirm_typed_path(kind);
                     }
                     if ui.button("Cancel").clicked() {
                         self.file_dialog = None;
@@ -1595,10 +1945,13 @@ impl App {
             return;
         };
         if job.index >= job.plan.len() {
-            for path in &job.written {
-                eprintln!("campanion-gui: wrote {}", path.display());
+            if !job.finished {
+                for path in &job.written {
+                    eprintln!("campanion-gui: wrote {}", path.display());
+                }
+                job.finished = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
         if job.awaiting {
@@ -1654,12 +2007,8 @@ fn path_looks_like_job(path: &Path) -> bool {
     path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with(".job.json"))
 }
 
-fn default_tool_kind(process: Option<SubProcess>) -> ToolKind {
-    match process {
-        Some(SubProcess::WireEdm) => ToolKind::Wire,
-        Some(SubProcess::Laser | SubProcess::Plasma | SubProcess::Waterjet | SubProcess::OxyFuel) => ToolKind::Kerf,
-        _ => ToolKind::Diameter,
-    }
+fn default_tool_kind(process: Option<SubProcess>, workspace: Workspace) -> ToolKind {
+    fields::fields_for(process, workspace).tool_kinds.first().copied().unwrap_or(ToolKind::Diameter)
 }
 
 fn tool_kind_label(kind: ToolKind) -> &'static str {

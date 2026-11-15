@@ -1515,6 +1515,49 @@ impl Operation {
 ///
 /// [`Self::clearance`] and [`Self::retract`] are millimetres. They come from the optional
 /// job-level `heights` object. An omitted clearance is 5 mm and an omitted retract is 2 mm.
+/// Rigid placement of the source drawing, millimetres and degrees.
+///
+/// Rotation is applied about the drawing bounds centre, counter-clockwise, then the drawing
+/// is translated by [`Self::x`], [`Self::y`]. Omitted `placement` in a job file is identity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    x: f64,
+    y: f64,
+    rotate_deg: f64,
+}
+
+impl Placement {
+    /// No rotation and no translation.
+    #[must_use]
+    pub fn identity() -> Self {
+        Self { x: 0.0, y: 0.0, rotate_deg: 0.0 }
+    }
+
+    /// True when this placement does not move the drawing.
+    #[must_use]
+    pub fn is_identity(self) -> bool {
+        self.x == 0.0 && self.y == 0.0 && self.rotate_deg == 0.0
+    }
+
+    /// Translation along X, millimetres.
+    #[must_use]
+    pub fn x(self) -> f64 {
+        self.x
+    }
+
+    /// Translation along Y, millimetres.
+    #[must_use]
+    pub fn y(self) -> f64 {
+        self.y
+    }
+
+    /// Rotation, degrees, counter-clockwise about the drawing bounds centre.
+    #[must_use]
+    pub fn rotate_deg(self) -> f64 {
+        self.rotate_deg
+    }
+}
+
 /// [`Self::rotary`] is the 4th-axis table, when the file has one.
 /// [`Self::five_axis`] is the kinematics file and solution policy, when the file has one.
 #[derive(Clone, Debug, PartialEq)]
@@ -1535,6 +1578,7 @@ pub struct JobFile {
     stock_model: StockModelOptions,
     sheet: Option<Sheet>,
     nest: Option<Nest>,
+    placement: Option<Placement>,
 }
 
 impl JobFile {
@@ -1636,6 +1680,14 @@ impl JobFile {
     pub fn nest(&self) -> Option<&Nest> {
         self.nest.as_ref()
     }
+
+    /// Rigid placement of the source drawing. `None` when the file omits `placement`.
+    ///
+    /// Lengths are millimetres. `rotate_deg` is counter-clockwise about the drawing bounds centre,
+    /// then the drawing is translated by `x`, `y`.
+    pub fn placement(&self) -> Option<Placement> {
+        self.placement
+    }
 }
 
 struct Body {
@@ -1654,6 +1706,7 @@ struct Body {
     stock_model: StockModelOptions,
     sheet: Option<Sheet>,
     nest: Option<Nest>,
+    placement: Option<Placement>,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -1685,6 +1738,7 @@ pub fn parse(text: &str, path: &Path) -> Result<JobFile, JobFileError> {
         stock_model: body.stock_model,
         sheet: body.sheet,
         nest: body.nest,
+        placement: body.placement,
     })
 }
 
@@ -1774,6 +1828,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
             "stock_model",
             "sheet",
             "nest",
+            "placement",
         ],
         "job",
     )
@@ -1863,6 +1918,10 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     if nest.is_some() && source.is_stl() {
         return Err(JobFileError::invalid("nest is not valid on an STL source"));
     }
+    let placement = parse_placement(optional(map, "placement"), scale)?;
+    if placement.is_some() && source.is_stl() {
+        return Err(JobFileError::invalid("placement is only supported on DXF, SVG and STEP sources"));
+    }
     let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
     Ok(Body {
         source,
@@ -1880,6 +1939,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         stock_model,
         sheet,
         nest,
+        placement,
     })
 }
 
@@ -1938,6 +1998,43 @@ fn check_format(tag: &str) -> Result<(), JobFileError> {
         return Err(JobFileError::UnknownFormat { tag: tag.to_string() });
     };
     if major == FORMAT_MAJOR { Ok(()) } else { Err(JobFileError::UnsupportedVersion { found: major, supported: FORMAT_MAJOR }) }
+}
+
+fn parse_placement(value: Option<&Value>, scale: f64) -> Result<Option<Placement>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let map = object(value, "placement").map_err(from_cli)?;
+    check_keys(map, &["x", "y", "rotate_deg"], "placement").map_err(from_cli)?;
+    let x = optional_scaled(map, "x", scale)?;
+    let y = optional_scaled(map, "y", scale)?;
+    let rotate_deg = match optional(map, "rotate_deg") {
+        Some(value) => as_f64(value, "placement rotate_deg").map_err(from_cli)?,
+        None => 0.0,
+    };
+    if ![x, y, rotate_deg].into_iter().all(f64::is_finite) {
+        return Err(JobFileError::invalid("placement values must be finite"));
+    }
+    if x.abs() > MAX_MM || y.abs() > MAX_MM {
+        return Err(JobFileError::invalid(format!("placement is outside ±{MAX_MM} mm")));
+    }
+    if rotate_deg.abs() > 1.0e6 {
+        return Err(JobFileError::invalid("placement rotate_deg is outside ±1e6 degrees"));
+    }
+    Ok(Some(Placement { x, y, rotate_deg }))
+}
+
+fn optional_scaled(map: &serde_json::Map<String, Value>, key: &str, scale: f64) -> Result<f64, JobFileError> {
+    match optional(map, key) {
+        Some(value) => {
+            let number = as_f64(value, key).map_err(from_cli)?;
+            if !number.is_finite() {
+                return Err(JobFileError::invalid(format!("{key} must be finite")));
+            }
+            Ok(number * scale)
+        }
+        None => Ok(0.0),
+    }
 }
 
 fn parse_source(value: &Value) -> Result<Source, JobFileError> {
@@ -8971,3 +9068,7 @@ mod tests {
 #[cfg(test)]
 #[path = "jobfile/tool_shape_tests.rs"]
 mod tool_shape_tests;
+
+#[cfg(test)]
+#[path = "jobfile/placement_tests.rs"]
+mod placement_tests;
