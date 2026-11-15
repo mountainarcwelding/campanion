@@ -29,7 +29,9 @@ pub fn copy_selection(session: &JobSession) -> Result<SessionClipboard, String> 
             let op = session.operations.get(index).ok_or_else(|| "no operation is selected".to_string())?;
             Ok(SessionClipboard::Operation(Box::new(op.clone())))
         }
-        Some(TreeSelection::Layer(_)) => Err("a source layer cannot be copied; copy an operation instead".to_string()),
+        Some(TreeSelection::Source | TreeSelection::Layer(_)) => {
+            Err("the imported part cannot be copied; copy a tool or operation instead".to_string())
+        }
         None => Err("select a tool or operation to copy".to_string()),
     }
 }
@@ -72,11 +74,29 @@ pub fn delete_selection(session: &mut JobSession) -> Result<String, String> {
     match session.selected {
         Some(TreeSelection::Tool(index)) => delete_tool(session, index),
         Some(TreeSelection::Operation(index)) => delete_operation(session, index),
+        Some(TreeSelection::Source) => delete_source(session),
         Some(TreeSelection::Layer(ref name)) => {
-            Err(format!("source layer `{name}` cannot be deleted from the part; remove it from an operation instead"))
+            Err(format!("source layer `{name}` cannot be deleted from the part; remove the imported part instead"))
         }
-        None => Err("select a tool or operation to delete".to_string()),
+        None => Err("select a tool, operation, or the imported part to delete".to_string()),
     }
+}
+
+fn delete_source(session: &mut JobSession) -> Result<String, String> {
+    if session.source_path.is_none() && session.source_drawing.is_none() {
+        return Err("no part is imported".to_string());
+    }
+    session.source_path = None;
+    session.source_hash = None;
+    session.source_kind = None;
+    session.source_drawing = None;
+    session.layers.clear();
+    session.placement_x.clear();
+    session.placement_y.clear();
+    session.placement_rotate.clear();
+    session.selected = None;
+    session.dirty = true;
+    Ok("Removed the imported part".to_string())
 }
 
 fn delete_tool(session: &mut JobSession, index: usize) -> Result<String, String> {
@@ -105,7 +125,7 @@ fn delete_operation(session: &mut JobSession, index: usize) -> Result<String, St
 /// user can see the reason).
 #[must_use]
 pub fn can_edit_selection(session: &JobSession) -> bool {
-    matches!(session.selected, Some(TreeSelection::Tool(_) | TreeSelection::Operation(_)))
+    matches!(session.selected, Some(TreeSelection::Source | TreeSelection::Tool(_) | TreeSelection::Operation(_)))
 }
 
 fn unique_name(base: &str, taken: &[&str]) -> String {
@@ -171,5 +191,23 @@ mod tests {
         assert!(names[1].starts_with("outline"));
         assert!(names[2].starts_with("outline"));
         assert_eq!(std::collections::BTreeSet::from_iter(names.iter()).len(), 3);
+    }
+
+    #[test]
+    fn delete_imported_part_clears_source_and_keeps_tools() {
+        let mut session = session_with_tool_and_op();
+        session.source_path = Some(std::path::PathBuf::from("part.svg"));
+        session.source_hash = Some("abc".to_string());
+        session.layers.push(campanion_cli::LayerSummary { name: "0".to_string(), contour_count: 1 });
+        session.placement_x = "10".to_string();
+        session.selected = Some(TreeSelection::Source);
+        let status = delete_selection(&mut session).expect("delete part");
+        assert!(status.contains("Removed"), "{status}");
+        assert!(session.source_path.is_none());
+        assert!(session.source_drawing.is_none());
+        assert!(session.layers.is_empty());
+        assert!(session.placement_x.is_empty());
+        assert_eq!(session.tools.len(), 1);
+        assert_eq!(session.operations.len(), 1);
     }
 }

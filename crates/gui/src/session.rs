@@ -120,6 +120,8 @@ impl OpDraft {
 /// What the process tree has selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeSelection {
+    /// The imported part (the job source).
+    Source,
     /// A tool table row.
     Tool(usize),
     /// An operation.
