@@ -2,10 +2,12 @@
 
 ## [Unreleased]
 
+## 0.18.1 — 2026-11-15
+
 The graphical workspace uses a native file chooser, imports typical SVG files without silently
-guessing a scale, can place a part in the job, and filters properties to the active process.
-CAMpanion is still primarily command-line driven; the GUI is a work in progress and has not been
-machine-tested.
+guessing a scale, can place a part in the job, and filters properties to the active process
+(#188, #190). CAMpanion is still primarily command-line driven; the GUI is a work in progress and has
+not been machine-tested.
 
 ### Added
 
