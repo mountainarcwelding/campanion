@@ -1,6 +1,6 @@
 //! `run`: load a `campanion-job/1` file, import its DXF, and write toolpaths.
 //!
-//! The source path is relative to the job file. A hash mismatch is a warning on stderr; the
+//! The source path is relative to the job file, or absolute. A hash mismatch is a warning on stderr; the
 //! bytes just read are imported and the job file is not rewritten. Each operation keeps the
 //! contours on its layers. Profile sides use the same `inside` / `outside` / `on` values as the
 //! profile job. Compensation is computed here, and travel is climb. Pocket, drill and face use the
