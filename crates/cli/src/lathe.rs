@@ -1,6 +1,6 @@
 //! `lathe`: load a `campanion-lathe/1` file and write turning toolpaths.
 //!
-//! The source path is relative to the job file. `.dxf` and `.svg` are half-profiles in the
+//! The source path is relative to the job file, or absolute. `.dxf` and `.svg` are half-profiles in the
 //! drawing plane (drawing X is Z, drawing Y is the radius). `.stl` is an outside-diameter
 //! envelope. `.step` and `.stp` are sectioned through the spindle axis by `solidcraft-cli`.
 //! Units are millimetres. Feeds are millimetres per minute. Constant surface speed is
@@ -1327,17 +1327,11 @@ fn relative_path_text<'a>(value: &'a Value, what: &str) -> Result<&'a str, CliEr
         return Err(CliError::invalid(format!("{what} path has a control character")));
     }
     let path = Path::new(text);
-    if path.is_absolute() {
-        return Err(CliError::invalid(format!("{what} path must be relative to the job file")));
-    }
     let mut named = false;
     for component in path.components() {
         match component {
             Component::Normal(_) => named = true,
-            Component::CurDir | Component::ParentDir => {}
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(CliError::invalid(format!("{what} path must be relative to the job file")));
-            }
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {}
         }
     }
     if !named {
@@ -3953,6 +3947,12 @@ mod tests {
             Err(err) => err,
         };
         assert!(layer.to_string().contains("layer"), "{layer}");
+    }
+
+    #[test]
+    fn absolute_source_path_is_accepted() {
+        let source = ok_source(serde_json::json!({"path": "/tmp/campanion-abs/shaft.dxf"}));
+        assert_eq!(source.path, "/tmp/campanion-abs/shaft.dxf");
     }
 
     fn close(actual: f64, expected: f64) -> bool {

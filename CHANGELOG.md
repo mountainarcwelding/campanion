@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## 0.19.1 — 2026-11-15
+
+Generate toolpaths after importing a part from another folder, or before the job
+is saved. CAMpanion is still primarily command-line driven; the GUI is a work in
+progress and has not been machine-tested.
+
+### Fixed
+
+- Importing an SVG or DXF from an arbitrary folder and clicking Generate no longer
+  fails with "source path must be relative to the job file". Unsaved jobs plan
+  from the absolute path already in memory. On Save, the job stores a path
+  relative to the job file when one can be formed (including `..`); otherwise it
+  stores the absolute path. The job format and CLI accept either form.
+
 ## 0.19.0 — 2026-11-15
 
 User machine profiles live in the config directory, with one or more heads and a per-head

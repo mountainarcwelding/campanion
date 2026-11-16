@@ -582,15 +582,50 @@ fn source_object(session: &JobSession) -> Result<Value, String> {
     Ok(Value::Object(map))
 }
 
-/// Path written into the job file: a file name when the job and part share a directory.
+/// Path written into the job file.
+///
+/// When the job has been saved, this prefers a path relative to the job directory
+/// (including `..` when the part sits in a nearby folder). If no relative path can
+/// be formed, or the job has not been saved yet, the source path is stored as given,
+/// which for a GUI import is typically absolute.
 pub fn stored_source_path(job_path: Option<&Path>, source: &Path) -> String {
     if let Some(job) = job_path
-        && let (Some(job_dir), Some(name)) = (job.parent(), source.file_name())
-        && source.parent().is_some_and(|parent| parent == job_dir)
+        && let Some(job_dir) = job.parent()
+        && let Some(relative) = relative_to(source, job_dir)
     {
-        return name.to_string_lossy().into_owned();
+        return relative.to_string_lossy().into_owned();
     }
     source.to_string_lossy().into_owned()
+}
+
+/// Lexical relative path from `base_dir` to `source`.
+///
+/// Both paths must be absolute and share a root (or prefix on Windows). The result
+/// names a file; a path that would be empty is rejected.
+fn relative_to(source: &Path, base_dir: &Path) -> Option<PathBuf> {
+    if !source.is_absolute() || !base_dir.is_absolute() {
+        return None;
+    }
+    let source_comps: Vec<_> = source.components().collect();
+    let base_comps: Vec<_> = base_dir.components().collect();
+    if source_comps.first() != base_comps.first() {
+        return None;
+    }
+    let common = source_comps.iter().zip(&base_comps).take_while(|(a, b)| a == b).count();
+    if common == 0 {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for _ in common..base_comps.len() {
+        relative.push("..");
+    }
+    for component in &source_comps[common..] {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() || source.file_name().is_none() {
+        return None;
+    }
+    Some(relative)
 }
 
 fn tool_value(tool: &ToolDraft, _units: &str) -> Result<Value, String> {
@@ -946,7 +981,55 @@ mod tests {
         let job = Path::new("/work/job.json");
         let source = Path::new("/work/part.svg");
         assert_eq!(stored_source_path(Some(job), source), "part.svg");
-        assert_eq!(stored_source_path(Some(job), Path::new("/other/part.svg")), "/other/part.svg");
+        assert_eq!(stored_source_path(Some(job), Path::new("/other/part.svg")), "../other/part.svg");
+        assert_eq!(stored_source_path(Some(job), Path::new("/work/nested/part.svg")), "nested/part.svg");
+        assert_eq!(stored_source_path(None, Path::new("/other/part.svg")), "/other/part.svg");
+    }
+
+    fn laser_session(imported: &ImportedPart) -> JobSession {
+        let mut session = session_from_import(imported);
+        session.tools.push(ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: "0.1".to_string() });
+        let mut op = OpDraft::new_profile("outline", 1);
+        op.layers = vec![imported.layers[0].name.clone()];
+        op.side = "outside".to_string();
+        op.depth = "0.26".to_string();
+        op.step_down = "0.26".to_string();
+        op.cut_feed = "300".to_string();
+        session.operations.push(op);
+        session.post_id = "grbl_laser".to_string();
+        session
+    }
+
+    #[test]
+    fn generate_toolpaths_from_unsaved_job_with_absolute_source() {
+        let downloads = temp_dir("campanion-gui-unsaved-abs-source");
+        fs::write(downloads.join("part.svg"), PART_SVG).expect("svg");
+        let imported = import_part_file(&downloads.join("part.svg")).expect("import");
+        assert!(imported.path.is_absolute(), "{:?}", imported.path);
+        let session = laser_session(&imported);
+        assert!(session.job_path.is_none());
+        let stored = stored_source_path(session.job_path.as_deref(), &imported.path);
+        assert!(Path::new(&stored).is_absolute(), "{stored}");
+        generate_toolpaths(&session).expect("plan unsaved job from an absolute source");
+    }
+
+    #[test]
+    fn generate_toolpaths_when_job_and_part_are_in_different_folders() {
+        let parts = temp_dir("campanion-gui-parts-dir");
+        let jobs = temp_dir("campanion-gui-jobs-dir");
+        fs::write(parts.join("part.svg"), PART_SVG).expect("svg");
+        let imported = import_part_file(&parts.join("part.svg")).expect("import");
+        let mut session = laser_session(&imported);
+        session.job_path = Some(jobs.join("job.json"));
+        let stored = stored_source_path(session.job_path.as_deref(), &imported.path);
+        assert!(!Path::new(&stored).is_absolute(), "{stored}");
+        assert!(stored.ends_with("part.svg"), "{stored}");
+        generate_toolpaths(&session).expect("plan job saved beside a part in another folder");
+        write_job(&jobs.join("job.json"), &session).expect("save");
+        let saved = fs::read_to_string(jobs.join("job.json")).expect("read");
+        assert!(saved.contains(&stored), "{saved}");
+        let (reopened, _) = open_job_file(&jobs.join("job.json")).expect("reopen");
+        generate_toolpaths(&reopened).expect("plan reopened job");
     }
 
     #[test]

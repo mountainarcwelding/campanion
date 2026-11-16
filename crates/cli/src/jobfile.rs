@@ -314,7 +314,7 @@ impl fmt::Display for Units {
     }
 }
 
-/// Part file the job was built from. `path` is relative to the job file.
+/// Part file the job was built from. `path` is relative to the job file, or absolute.
 ///
 /// [`Self::face`] is set for a STEP part: a point on the planar face whose outline and holes
 /// become the 2D geometry. The point is millimetres in model coordinates and is never scaled
@@ -532,7 +532,7 @@ pub enum NestPartGeom {
     },
     /// Bounds of a DXF or SVG. `layers` is `None` for every layer. This part reserves space and is not cut.
     Source {
-        /// Path relative to the job file.
+        /// Path relative to the job file, or absolute.
         path: String,
         /// FNV-1a 64 of the drawing bytes.
         hash: String,
@@ -664,7 +664,7 @@ impl CollisionSettings {
 /// An STL fixture or a solid box, in the part frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FixtureKind {
-    /// Triangle mesh. `path` is relative to the job file. `hash` is FNV-1a 64 of the raw bytes.
+    /// Triangle mesh. `path` is relative to the job file, or absolute. `hash` is FNV-1a 64 of the raw bytes.
     Stl { path: String, hash: String },
     /// Axis-aligned box. Coordinates are millimetres.
     Box { min: Vec3, max: Vec3 },
@@ -1779,19 +1779,21 @@ pub fn with_updated_hash(job: &JobFile, bytes: &[u8]) -> JobFile {
     updated
 }
 
-/// Job-file directory joined with the relative source path. `.` and `..` are folded lexically.
+/// Resolved source path: an absolute `source.path` is used as written; a relative path is
+/// joined to the job-file directory. `.` and `..` are folded lexically.
 /// The filesystem is not consulted, so a missing part still yields a path.
 #[must_use]
 pub fn source_path(job: &JobFile) -> PathBuf {
     join_job_path(job, &job.source.path)
 }
 
-/// Job-file directory joined with a relative path. Same folding as [`source_path`].
+/// Job-file directory joined with a relative path, or the path itself when it is absolute.
+/// Same folding as [`source_path`].
 #[must_use]
-pub fn join_job_path(job: &JobFile, relative: &str) -> PathBuf {
+pub fn join_job_path(job: &JobFile, path: &str) -> PathBuf {
     let joined = match job.path.parent() {
-        Some(dir) => dir.join(relative),
-        None => PathBuf::from(relative),
+        Some(dir) => dir.join(path),
+        None => PathBuf::from(path),
     };
     fold_dots(&joined)
 }
@@ -2109,17 +2111,11 @@ fn check_source_path(text: &str) -> Result<(), JobFileError> {
         return Err(JobFileError::invalid("source path has a control character"));
     }
     let path = Path::new(text);
-    if path.is_absolute() {
-        return Err(JobFileError::invalid("source path must be relative to the job file"));
-    }
     let mut named = false;
     for component in path.components() {
         match component {
             Component::Normal(_) => named = true,
-            Component::CurDir | Component::ParentDir => {}
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(JobFileError::invalid("source path must be relative to the job file"));
-            }
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {}
         }
     }
     if !named {
@@ -6329,6 +6325,18 @@ mod tests {
     }
 
     #[test]
+    fn absolute_source_path_is_used_as_written() {
+        let text = envelope(
+            "/tmp/campanion-abs/plate.dxf",
+            r#"[{"id":1,"diameter":6}]"#,
+            r#"[{"name":"a","type":"profile","layers":["L"],"side":"outside","tool_id":1,"depth":1,"step_down":1,"feeds":{"cut":1}}]"#,
+        );
+        let job = parse(&text, Path::new("/work/jobs/job.json")).expect("absolute source");
+        assert_eq!(job.source().path(), "/tmp/campanion-abs/plate.dxf");
+        assert_eq!(source_path(&job), PathBuf::from("/tmp/campanion-abs/plate.dxf"));
+    }
+
+    #[test]
     fn rejects_bad_format_tools_and_operations() {
         let missing = load(Path::new("campanion-jobfile-missing.json"));
         assert!(matches!(missing, Err(JobFileError::Io { .. })), "{missing:?}");
@@ -6354,7 +6362,6 @@ mod tests {
         assert!(err.to_string().contains("missing format tag"), "{err}");
 
         let cases = [
-            (envelope("/tmp/plate.dxf", "[]", "[]"), "relative"),
             (envelope("..", "[]", "[]"), "name a file"),
             (envelope("plate.dxf", "[]", "[]").replace(EMPTY_HASH, "abc"), "16 hex"),
             (envelope("plate.dxf", r#"[{"id":1,"diameter":6,"kerf":1}]"#, "[]"), "both diameter and kerf"),

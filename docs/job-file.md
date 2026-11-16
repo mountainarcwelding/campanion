@@ -51,10 +51,14 @@ lengths are millimetres and feeds are millimetres per minute.
 ```
 
 The source format is chosen by extension: `.svg` is read as SVG, `.step`/`.stp` as STEP (see below), `.stl` as a triangle mesh (see below), anything else as DXF.
-`path` is relative to the directory that contains the job file. Absolute paths, a path with no
-file name (`.` or `..` alone), and control characters are rejected. `..` components are allowed.
-`source_path` joins the job directory and folds `.` and `..` lexically. It does not look at the
-filesystem, so a missing part still has a path.
+`path` is relative to the directory that contains the job file, or an absolute path.
+A path with no file name (`.` or `..` alone) and control characters are rejected.
+`..` components are allowed in a relative path. Prefer a relative path when the job
+and the part share a common directory (including a parent reached with `..`); the GUI
+stores an absolute path when no relative path can be formed, and for unsaved jobs.
+`source_path` uses an absolute path as written, or joins a relative path to the job
+directory, and folds `.` and `..` lexically. It does not look at the filesystem, so a
+missing part still has a path.
 
 `hash` is 16 hexadecimal digits. Uppercase is accepted and stored as lowercase.
 
@@ -1182,7 +1186,7 @@ Hostile numbers and sizes fail the load instead of being passed on:
 | `hash_bytes(bytes)` | 16-digit lowercase FNV-1a 64. |
 | `source_changed(job, bytes)` | `true` when the digest differs from the stored hash. |
 | `with_updated_hash(job, bytes)` | New job whose stored hash is the digest of `bytes`. |
-| `source_path(job)` | Job directory joined with `source.path`. |
+| `source_path(job)` | An absolute `source.path` as written, otherwise the job directory joined with `source.path`. |
 
 `JobFileError` is `Io`, `TooLarge`, `Json`, `Invalid`, `UnknownFormat` or `UnsupportedVersion`.
 
@@ -1292,7 +1296,7 @@ Direct spindle speed is revolutions per minute.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `format` | yes | Exactly `campanion-lathe/1`. `campanion-lathe/2` is an unsupported major. Anything else is an unknown tag. |
-| `source` | yes | Half-profile. `path` is relative to the job file, the same rules as a mill job (no absolute path, 1 to 4096 bytes). |
+| `source` | yes | Half-profile. `path` is relative to the job file or absolute, the same rules as a mill job (1 to 4096 bytes). |
 | `units` | yes | Only `mm`. |
 | `stock` | yes | Bar or tube, plus `front_allowance`. |
 | `spindle` | yes | `max_rpm`, positive and at most 100000. That value is the constant-surface-speed cap. Optional `c_axis` (boolean, default false). `true` builds spindle `main` with C axis id 0. |
