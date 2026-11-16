@@ -14,6 +14,7 @@ use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Layout, R
 use crate::edit::{self, SessionClipboard, SessionSnapshot};
 use crate::fields::{self, ProcessFields};
 use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_stem, resolve_user_path};
+use crate::machines::{self, MachinesUi};
 use crate::session::{
     GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, OpDraft, ToolDraft, ToolKind, TreeSelection, export_destination,
     format_number, generate_toolpaths, import_part_file, list_posts, open_job_file, parse_placement_mm, placed_drawing, post_session,
@@ -117,9 +118,9 @@ struct App {
     path_text: String,
     about: bool,
     preferences: bool,
-    machine_profiles: bool,
-    material_library: bool,
+    machines: Option<MachinesUi>,
     screenshot: Option<ScreenshotJob>,
+    profile_store: campanion_cli::ProfileStore,
     clipboard: Option<SessionClipboard>,
     undo: Vec<SessionSnapshot>,
 }
@@ -150,11 +151,11 @@ impl App {
             path_text: String::new(),
             about: false,
             preferences: false,
-            machine_profiles: false,
-            material_library: false,
+            machines: None,
             screenshot: None,
             clipboard: None,
             undo: Vec::new(),
+            profile_store: campanion_cli::ProfileStore::from_env().unwrap_or_else(|_| campanion_cli::ProfileStore::from_dir(PathBuf::from("."))),
         }
     }
 
@@ -281,6 +282,9 @@ impl App {
             self.state.has_scene = false;
         }
         self.merge_session_messages();
+        if !self.session.machine_profile.is_empty() || !self.session.machine_path.is_empty() {
+            self.apply_machine_selection();
+        }
     }
 
     fn merge_session_messages(&mut self) {
@@ -685,6 +689,8 @@ impl App {
                 (Workspace::Resin, ModeTab::Supports, "resin-supports.png".to_string()),
                 (Workspace::Resin, ModeTab::Slice, "resin-slice.png".to_string()),
                 (Workspace::Resin, ModeTab::Export, "resin-export.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Operations, "machines-manager.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Operations, "job-machine-picker.png".to_string()),
             ],
             index: 0,
             frames_waited: 0,
@@ -701,6 +707,32 @@ impl App {
             let tab = *tab;
             self.state.set_workspace(workspace);
             let _ = self.state.set_tab(tab);
+        }
+    }
+
+    fn prepare_screenshot_frame(&mut self, name: Option<&str>) {
+        let machine_shot = name == Some("machines-manager.png") || name == Some("job-machine-picker.png");
+        if !machine_shot {
+            self.machines = None;
+            return;
+        }
+        let Some(job) = self.screenshot.as_ref() else {
+            return;
+        };
+        let store = campanion_cli::ProfileStore::from_dir(job.dir.join("config"));
+        let example = machines::screenshot_example("Example shop laser (example values)");
+        if store.save("example-shop-laser", &example).is_ok() {
+            self.profile_store = store.clone();
+            self.session.machine_profile = "example-shop-laser".to_string();
+            self.session.machine_head = "laser".to_string();
+            self.apply_machine_selection();
+            if name == Some("machines-manager.png") {
+                let mut manager = MachinesUi::open(store);
+                manager.select_profile("example-shop-laser");
+                self.machines = Some(manager);
+            } else {
+                self.machines = None;
+            }
         }
     }
 
@@ -969,12 +1001,12 @@ impl App {
                     }
                 });
                 ui.menu_button("Machine", |ui| {
-                    if ui.button("Machine profiles…").clicked() {
-                        self.machine_profiles = true;
+                    if ui.button("Machines…").clicked() {
+                        self.open_machines_manager();
                         ui.close();
                     }
                     if ui.button("Material library…").clicked() {
-                        self.material_library = true;
+                        self.open_machines_manager();
                         ui.close();
                     }
                 });
@@ -1106,6 +1138,12 @@ impl App {
                     }
                     if ribbon_command(ui, "Open job", false).clicked() {
                         self.request_open();
+                    }
+                });
+                ribbon_group_separator(ui);
+                ribbon_group(ui, "Machine", |ui| {
+                    if ribbon_command(ui, "Machines…", false).clicked() {
+                        self.open_machines_manager();
                     }
                 });
             }
@@ -1350,6 +1388,99 @@ impl App {
         });
     }
 
+    fn open_machines_manager(&mut self) {
+        match MachinesUi::open_user() {
+            Ok(ui) => self.machines = Some(ui),
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn apply_machine_selection(&mut self) {
+        match machines::session_profile(&self.profile_store, &self.session) {
+            Ok(Some((profile, head))) => {
+                if let Some((workspace, process)) = machines::process_from_id(&head.process) {
+                    self.state.set_workspace(workspace);
+                    let _ = self.state.set_process(process);
+                }
+                if self.session.post_id.is_empty()
+                    && let Some(post) = campanion_cli::effective_post(&profile, &head)
+                {
+                    self.session.post_id = post;
+                }
+                self.session.dirty = true;
+            }
+            Ok(None) => {}
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn machine_job_picker(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Machine").strong().size(13.0));
+        let listed = self.profile_store.list().ok().unwrap_or_default();
+        ui.horizontal(|ui| {
+            let current = if self.session.machine_profile.is_empty() { "Not selected".to_string() } else { self.session.machine_profile.clone() };
+            ui.label("Profile");
+            egui::ComboBox::from_id_salt("job-machine-profile").selected_text(current).show_ui(ui, |ui| {
+                if ui.selectable_label(self.session.machine_profile.is_empty(), "Not selected").clicked() {
+                    self.session.machine_profile.clear();
+                    self.session.machine_head.clear();
+                    self.session.dirty = true;
+                }
+                for (id, _) in &listed {
+                    if ui.selectable_label(self.session.machine_profile == *id, id).clicked() {
+                        self.session.machine_profile = id.clone();
+                        self.session.machine_path.clear();
+                        self.session.machine_head.clear();
+                        self.apply_machine_selection();
+                    }
+                }
+            });
+            if ui.button("Manage…").clicked() {
+                self.open_machines_manager();
+            }
+        });
+        if !self.session.machine_profile.is_empty() {
+            match machines::session_profile(&self.profile_store, &self.session) {
+                Ok(Some((profile, selected))) => {
+                    let head_ids: Vec<String> = profile.heads.iter().map(|head| head.id.clone()).collect();
+                    let selected_id = selected.id.clone();
+                    let materials = profile.heads.iter().find(|head| head.id == selected_id).map(|head| head.materials.clone()).unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.label("Head");
+                        let current_head = if self.session.machine_head.is_empty() { selected_id.clone() } else { self.session.machine_head.clone() };
+                        egui::ComboBox::from_id_salt("job-machine-head").selected_text(current_head).show_ui(ui, |ui| {
+                            for id in &head_ids {
+                                let is_sel = self.session.machine_head == *id || (self.session.machine_head.is_empty() && *id == selected_id);
+                                if ui.selectable_label(is_sel, id).clicked() {
+                                    self.session.machine_head = id.clone();
+                                    self.apply_machine_selection();
+                                }
+                            }
+                        });
+                    });
+                    if !materials.is_empty() {
+                        ui.label("Material");
+                        for entry in materials {
+                            if ui.button(&entry.name).clicked() {
+                                match machines::apply_material(&mut self.session, &entry) {
+                                    Ok(status) => self.state.status = status,
+                                    Err(err) => self.state.status = err,
+                                }
+                            }
+                        }
+                    } else {
+                        ui.label(RichText::new("No materials in this head. Add them in Machine → Machines…").color(theme::MUTED).size(11.0));
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    ui.label(RichText::new(err).color(theme::MUTED).size(11.0));
+                }
+            }
+        }
+        ui.label(RichText::new("Material values stay empty until you enter them.").color(theme::MUTED).size(11.0));
+    }
+
     fn tree_context_menu(&mut self, response: egui::Response) {
         response.context_menu(|ui| {
             if ui.button("Copy").clicked() {
@@ -1374,9 +1505,8 @@ impl App {
     fn process_tree(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Process Tree").strong().size(14.0));
         ui.add_space(6.0);
+        self.machine_job_picker(ui);
         if matches!(self.state.workspace, Workspace::Resin | Workspace::Fdm) {
-            tree_line(ui, "Machine", "Not selected");
-            tree_line(ui, if self.state.workspace == Workspace::Resin { "Resin" } else { "Material" }, "Not selected");
             ui.separator();
             ui.collapsing("Models", |ui| {
                 ui.label(RichText::new("No model imported").color(theme::MUTED).size(12.0));
@@ -1390,10 +1520,6 @@ impl App {
             }
             return;
         }
-        tree_line(ui, "Machine", "Not selected");
-        tree_line(ui, "Heads", "Not selected");
-        tree_line(ui, "Material", "Not selected");
-        ui.label(RichText::new("Material values stay empty until you enter them.").color(theme::MUTED).size(11.0));
         ui.separator();
         if let Some(label) = self.session.source_path.as_ref().map(|path| path.display().to_string()) {
             let selected = self.session.selected == Some(TreeSelection::Source);
@@ -2122,14 +2248,20 @@ impl App {
             ui.label("The program never ships default power, speed or material values.");
             ui.label("Further preferences will land with the full GUI.");
         });
-        show_placeholder_window(ctx, "Machine profiles", &mut self.machine_profiles, |ui| {
-            ui.label("Machine profiles are not wired in this preview.");
-            ui.label("A later step will let a machine carry several heads, each with its own library.");
-        });
-        show_placeholder_window(ctx, "Material library", &mut self.material_library, |ui| {
-            ui.label("The material library is not wired in this preview.");
-            ui.label("Every value will be entered by the user. The program will not ship defaults.");
-        });
+        if self.machines.is_some() {
+            let mut open = true;
+            egui::Window::new("Machines").open(&mut open).default_size([960.0, 680.0]).min_size([720.0, 480.0]).resizable(true).show(ctx, |ui| {
+                if let Some(manager) = self.machines.as_mut() {
+                    manager.show(ui);
+                }
+            });
+            if !open {
+                self.machines = None;
+                if let Ok(store) = campanion_cli::ProfileStore::from_env() {
+                    self.profile_store = store;
+                }
+            }
+        }
     }
 
     fn tick_screenshots(&mut self, ctx: &egui::Context) {
@@ -2159,9 +2291,11 @@ impl App {
                 }
             }
         }
+        let shot_name = self.screenshot.as_ref().and_then(|job| job.plan.get(job.index).map(|(_, _, name)| name.clone()));
         if let Some((workspace, tab)) = switch_to {
             self.state.set_workspace(workspace);
             let _ = self.state.set_tab(tab);
+            self.prepare_screenshot_frame(shot_name.as_deref());
         }
         let Some(job) = self.screenshot.as_mut() else {
             return;

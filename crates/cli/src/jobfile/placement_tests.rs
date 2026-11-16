@@ -67,3 +67,21 @@ fn stl_source_rejects_placement() {
     let error = parse_job(&value).expect_err("stl").to_string();
     assert!(error.contains("placement is only supported"), "{error}");
 }
+
+#[test]
+fn job_machine_profile_is_parsed() {
+    let mut value = base();
+    value["machine"] = serde_json::json!({"profile": "shop-laser", "head": "laser"});
+    let job = parse_job(&value).expect("parse");
+    let machine = job.machine().expect("machine");
+    assert_eq!(machine.profile.as_deref(), Some("shop-laser"));
+    assert_eq!(machine.head.as_deref(), Some("laser"));
+}
+
+#[test]
+fn job_machine_model_is_rejected_on_a_cutting_job() {
+    let mut value = base();
+    value["machine"] = serde_json::json!({"model": "haas_st20y"});
+    let error = parse_job(&value).expect_err("model").to_string();
+    assert!(error.contains("machine.model is only valid on a lathe job"), "{error}");
+}
