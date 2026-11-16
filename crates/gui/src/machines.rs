@@ -4,7 +4,8 @@
 //! material values.
 
 use campanion_cli::{
-    JobMachineRef, MachineFile, MachineHead, MaterialEntry, ProfileStore, WorkArea, effective_post, load_path, profile_to_json, selected_head,
+    JobMachineRef, MachineFile, MachineHead, MachineKind, MaterialEntry, PowerValue, ProfileStore, WorkArea, effective_post, kind_from_process,
+    load_path, profile_to_json, selected_head,
 };
 use eframe::egui::{self, RichText};
 
@@ -492,13 +493,17 @@ impl ProfileDraft {
         }
         let work_area = parse_work_area(self)?;
         let heads: Result<Vec<_>, _> = self.heads.iter().map(HeadDraft::to_head).collect();
+        let heads = heads?;
         Ok(MachineFile {
             name: self.name.trim().to_string(),
             units: if self.units == "inch" { "inch".to_string() } else { "mm".to_string() },
+            kind: MachineKind::Gantry,
+            bed: work_area.and_then(bed_from_draft_area),
+            screen: None,
             work_area,
             controller: nonempty(&self.controller),
             post: nonempty(&self.post),
-            heads: heads?,
+            heads,
         })
     }
 }
@@ -544,8 +549,12 @@ impl HeadDraft {
         Ok(MachineHead {
             id: self.id.trim().to_string(),
             name: self.name.trim().to_string(),
+            kind: kind_from_process(&self.process),
             process: self.process.clone(),
             post: nonempty(&self.post),
+            offset: None,
+            safe_z: None,
+            max_power: None,
             materials: materials?,
         })
     }
@@ -578,7 +587,7 @@ impl MaterialDraft {
             step_down: fmt_opt(entry.step_down),
             cut_feed: fmt_opt(entry.cut_feed),
             plunge_feed: fmt_opt(entry.plunge_feed),
-            power: fmt_opt(entry.power),
+            power: entry.power.map(|power| format_number(power.value)).unwrap_or_default(),
             pierce_delay: fmt_opt(entry.pierce_delay),
             post_delay: fmt_opt(entry.post_delay),
         }
@@ -597,11 +606,28 @@ impl MaterialDraft {
             step_down: parse_opt(&self.step_down, "step_down")?,
             cut_feed: parse_opt(&self.cut_feed, "cut_feed")?,
             plunge_feed: parse_opt(&self.plunge_feed, "plunge_feed")?,
-            power: parse_opt(&self.power, "power")?,
+            power: parse_draft_power(&self.power)?,
+            passes: None,
             pierce_delay: parse_opt(&self.pierce_delay, "pierce_delay")?,
             post_delay: parse_opt(&self.post_delay, "post_delay")?,
         })
     }
+}
+
+fn parse_draft_power(text: &str) -> Result<Option<PowerValue>, String> {
+    let Some(value) = parse_opt(text, "power")? else {
+        return Ok(None);
+    };
+    // The current manager still types a single number. Values in 0..=1 are the v1 fraction
+    // and are stored as percent; values above 1 are already percent.
+    if (0.0..=1.0).contains(&value) { Ok(Some(PowerValue::from_v1_fraction(value))) } else { Ok(Some(PowerValue::percent(value))) }
+}
+
+fn bed_from_draft_area(area: WorkArea) -> Option<campanion_cli::BedSize> {
+    let (Some(x_min), Some(x_max), Some(y_min), Some(y_max)) = (area.x_min, area.x_max, area.y_min, area.y_max) else {
+        return None;
+    };
+    Some(campanion_cli::BedSize { x: x_max - x_min, y: y_max - y_min, z: None })
 }
 
 fn fmt_opt(value: Option<f64>) -> String {
@@ -661,8 +687,9 @@ pub fn apply_material(session: &mut JobSession, entry: &MaterialEntry) -> Result
     if let Some(value) = entry.plunge_feed {
         op.plunge_feed = format_number(value);
     }
-    if let Some(value) = entry.power {
-        op.power = format_number(value);
+    if let Some(power) = entry.power {
+        // Session power is still the planner fraction until the job format lands in this work.
+        op.power = format_number(power.to_fraction(None).map_err(|err| err)?);
     }
     if let Some(value) = entry.pierce_delay {
         op.pierce_delay = format_number(value);
@@ -718,11 +745,18 @@ pub fn screenshot_example(name: &str) -> MachineFile {
         work_area: Some(WorkArea { x_min: Some(0.0), x_max: Some(600.0), y_min: Some(0.0), y_max: Some(400.0), z_min: None, z_max: None }),
         controller: Some("grbl".to_string()),
         post: Some("grbl_laser".to_string()),
+        kind: MachineKind::Gantry,
+        bed: Some(campanion_cli::BedSize { x: 600.0, y: 400.0, z: None }),
+        screen: None,
         heads: vec![MachineHead {
             id: "laser".to_string(),
             name: "CO2".to_string(),
+            kind: "laser".to_string(),
             process: "laser".to_string(),
             post: Some("grbl_laser".to_string()),
+            offset: None,
+            safe_z: None,
+            max_power: None,
             materials: vec![MaterialEntry {
                 name: "Example: 3 mm acrylic (example values)".to_string(),
                 kerf: Some(0.15),
@@ -732,7 +766,8 @@ pub fn screenshot_example(name: &str) -> MachineFile {
                 step_down: Some(3.0),
                 cut_feed: Some(300.0),
                 plunge_feed: None,
-                power: Some(0.8),
+                power: Some(PowerValue::percent(80.0)),
+                passes: None,
                 pierce_delay: None,
                 post_delay: None,
             }],
@@ -751,8 +786,13 @@ mod tests {
         session.tools.push(ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: String::new() });
         session.operations.push(OpDraft::new_profile("outline", 1));
         session.selected = Some(TreeSelection::Operation(0));
-        let entry =
-            MaterialEntry { name: "acrylic".to_string(), kerf: Some(0.2), cut_feed: Some(250.0), power: Some(0.5), ..MaterialEntry::default() };
+        let entry = MaterialEntry {
+            name: "acrylic".to_string(),
+            kerf: Some(0.2),
+            cut_feed: Some(250.0),
+            power: Some(PowerValue::percent(50.0)),
+            ..MaterialEntry::default()
+        };
         apply_material(&mut session, &entry).expect("apply");
         assert_eq!(session.operations[0].cut_feed, "250");
         assert_eq!(session.operations[0].power, "0.5");

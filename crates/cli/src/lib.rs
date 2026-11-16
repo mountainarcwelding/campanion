@@ -59,8 +59,9 @@ pub use jobfile::{
     source_path,
 };
 pub use profiles::{
-    JobMachineRef, MachineFile, MachineHead, MaterialEntry, PROCESS_IDS, ProfileStore, WorkArea, effective_post, load_job_ref, load_path,
-    parse_profile, profile_to_json, selected_head, valid_profile_id,
+    BedSize, FORMAT_TAG_V1, HeadOffset, JobMachineRef, JobType, MachineFile, MachineHead, MachineKind, MaterialEntry, PROCESS_IDS, PowerUnit,
+    PowerValue, ProfileStore, WorkArea, effective_post, job_type_for, kind_from_process, load_job_ref, load_path, parse_profile, profile_to_json,
+    selected_head, valid_profile_id,
 };
 
 const HELP: &str = "\
