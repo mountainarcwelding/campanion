@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use campanion_cli::{
-    FORMAT_TAG, ImportedPart, JobFile, LayerSummary, PlanOptions, SourceKind, builtin_posts, import_part, parse_job, plan_job, post_job,
-    suggested_post,
+    FORMAT_TAG, FORMAT_TAG_V2, ImportedPart, JobFile, LayerSummary, PlanOptions, SourceKind, builtin_posts, import_part, parse_job, plan_job,
+    post_job, suggested_post,
 };
 use campanion_geom::Segment;
 use campanion_import::{Drawing, place_drawing};
@@ -137,6 +137,9 @@ pub struct JobSession {
     pub job_path: Option<PathBuf>,
     /// Original JSON, used to preserve fields the GUI does not edit.
     pub original_json: Option<Value>,
+    /// Parsed job as opened from disk. Used to plan and post v2 / multi-part jobs
+    /// until the Setup editor can represent them.
+    pub loaded_job: Option<JobFile>,
     /// Units tag as written in the file: `mm` or `inch`. Displayed values are millimetres.
     pub units: String,
     /// Part path, as stored or imported.
@@ -176,6 +179,7 @@ impl JobSession {
         Self {
             job_path: None,
             original_json: None,
+            loaded_job: None,
             units: "mm".to_string(),
             source_path: None,
             source_hash: None,
@@ -271,6 +275,7 @@ fn session_from_job(path: &Path, value: Value, job: &JobFile) -> JobSession {
     let mut session = JobSession::new();
     session.job_path = Some(path.to_path_buf());
     session.original_json = Some(value);
+    session.loaded_job = Some(job.clone());
     session.units = job.units().to_string();
     session.source_path = Some(campanion_cli::source_path(job));
     session.source_hash = Some(job.source().hash().to_string());
@@ -755,6 +760,19 @@ pub fn job_file_of(session: &JobSession) -> Result<JobFile, String> {
     parse_job(&json, &path).map_err(|err| err.to_string())
 }
 
+fn uses_loaded_job(session: &JobSession) -> bool {
+    session.loaded_job.as_ref().is_some_and(|job| job.format() == FORMAT_TAG_V2 || job.is_multi_part())
+}
+
+/// Job used for planning and posting. A loaded v2 or multi-part file is kept as-is
+/// so the current single-part editor cannot drop instances.
+fn planning_job(session: &JobSession) -> Result<JobFile, String> {
+    if uses_loaded_job(session) {
+        return session.loaded_job.clone().ok_or_else(|| "loaded job is missing".to_string());
+    }
+    job_file_of(session)
+}
+
 /// Planned program and the messages to show.
 #[derive(Debug, Clone)]
 pub struct PlannedSession {
@@ -765,7 +783,7 @@ pub struct PlannedSession {
 
 /// Generate toolpaths for the current drafts.
 pub fn generate_toolpaths(session: &JobSession) -> Result<PlannedSession, String> {
-    let job = job_file_of(session)?;
+    let job = planning_job(session)?;
     let planned = plan_job(&job, PlanOptions::default()).map_err(|err| err.to_string())?;
     let mut messages = Vec::new();
     for text in planned.warnings {
@@ -793,7 +811,7 @@ pub fn post_session(session: &JobSession, document: &Document) -> Result<(String
     if session.post_id.trim().is_empty() {
         return Err("choose a post before previewing or exporting G-code".to_string());
     }
-    let job = job_file_of(session)?;
+    let job = planning_job(session)?;
     let posted = post_job(&job, document, session.post_id.trim()).map_err(|err| err.to_string())?;
     let messages = posted.warnings.into_iter().map(warning).collect();
     Ok((posted.text, messages))
@@ -811,6 +829,12 @@ pub fn write_gcode(path: &Path, text: &str) -> Result<(), String> {
 
 /// Write a job file.
 pub fn write_job(path: &Path, session: &JobSession) -> Result<(), String> {
+    if uses_loaded_job(session) {
+        return Err(
+            "Saving a campanion-job/2 or multi-part job from the current Setup editor is not supported yet. Use the CLI, or wait for the Setup UI in a later step."
+                .to_string(),
+        );
+    }
     let json = job_json_of(session)?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()

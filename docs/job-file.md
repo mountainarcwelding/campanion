@@ -1,11 +1,15 @@
-# Job file (`campanion-job/1`)
+# Job file (`campanion-job/1` and `campanion-job/2`)
 
-A job file names a source part, a tool table, and the layer operations to run on that part.
+A job file names one or more source parts, a tool table, and the operations to run on those parts.
 It does not contain geometry and it does not contain a toolpath. A later step imports the part
 and builds paths from the operations recorded here.
 
+`campanion-job/2` is the current format. `campanion-job/1` is still loaded and is migrated in
+memory to a single part with one instance. `campanion-job/3` is an unsupported major.
+See [campanion-job/2](#campanion-job2).
+
 This is not the profile document read by `campanion ir --job` and `campanion ngc --job`. That
-document has no `format` tag. `campanion-job/1` rejects it. See [Profile document](#profile-document).
+document has no `format` tag. A job file rejects it. See [Profile document](#profile-document).
 
 Lathe work uses a different file, `campanion-lathe/1`, loaded by `campanion lathe`. See [Lathe jobs](#lathe-jobs).
 
@@ -28,8 +32,8 @@ lengths are millimetres and feeds are millimetres per minute.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `format` | yes | Exactly `campanion-job/1`. `campanion-job/2` is an unsupported major. Anything else is an unknown tag. |
-| `source` | yes | Part file. See below. |
+| `format` | yes | `campanion-job/1` or `campanion-job/2`. `campanion-job/3` is an unsupported major. Anything else is an unknown tag. |
+| `source` | yes on v1; invalid on v2 | Part file. See below. v2 uses `parts` instead. |
 | `units` | yes | `mm` or `inch`. One inch is 25.4 mm. |
 | `tolerance` | no | Linear, angular and chord tolerances. Omitted fields default to 1e-6 mm (linear), 1e-6 rad (angular) and 0.01 mm (chord). Defaults are not scaled when `units` is `inch`. |
 | `tools` | yes | Array of tools. May be empty when `operations` is empty. |
@@ -98,9 +102,12 @@ operations (and before nest, when both are set):
 
 `x` and `y` are translations in the job `units` (stored as millimetres when the job is loaded).
 `rotate_deg` is a counter-clockwise rotation in degrees about the drawing's bounding-box centre,
-applied before the translation. Each key may be omitted and defaults to 0. Unknown keys are
-rejected. The field itself may be omitted; that is identity and matches every job written
-before this key existed. `placement` is not valid on an STL source.
+applied before the translation. On a `campanion-job/2` instance, optional `mirror` (flip about
+the bounds centre in X) and `scale` (about the same centre, must be greater than zero) are also
+accepted. v1 top-level `placement` still takes only `x`, `y`, and `rotate_deg`. Each of those
+keys may be omitted and defaults to 0; omitted `mirror` is false and omitted `scale` is 1.
+Unknown keys are rejected. The field itself may be omitted; that is identity and matches every
+job written before this key existed. `placement` is not valid on an STL source.
 
 `campanion run` honours `placement` when it plans a DXF, SVG or STEP job.
 
@@ -113,14 +120,125 @@ described under [Machine](#machine).
 "machine": { "profile": "shop-laser", "head": "laser" }
 ```
 
-`profile` is the file stem of a `campanion-machine/1` file in the user config `machines`
+`profile` is the file stem of a `campanion-machine/2` file (v1 profiles are migrated on load) in the user config `machines`
 directory (see [docs/machine-profile.md](machine-profile.md)). `path` may be used instead of
 `profile` to point at an explicit file; the two cannot both be set. `head` is the head id on
 that profile and may be omitted (the first head is used). `machine.model` is rejected here.
 Unknown keys are rejected.
 
 When the named profile has a `work_area`, planning refuses a toolpath that leaves those
-user-entered limits. A missing profile is also a refusal.
+user-entered limits. A missing profile is also a refusal. On a v2 job, a part that sits
+outside the user-entered bed or work area is a warning during planning and a refusal at
+G-code export. If the profile has neither a complete bed nor a work area, that check is
+skipped; nothing is invented. A stated job `type` must match the selected head
+(`cut_route` for laser, plasma, or spindle; `print` for resin or an extruder).
+
+
+## campanion-job/2
+
+v2 replaces the single top-level `source` and `placement` with a `parts` list. A job still
+names one machine and one head today. Multi-head mixed jobs are reserved; a job that names
+`machine.heads` is refused.
+
+```json
+{
+  "format": "campanion-job/2",
+  "units": "mm",
+  "type": "cut_route",
+  "machine": { "profile": "shop-laser", "head": "laser" },
+  "parts": [
+    {
+      "id": "bracket",
+      "source": { "path": "bracket.svg", "hash": "cbf29ce484222325" },
+      "instances": [
+        { "id": "a", "placement": { "x": 0, "y": 0, "rotate_deg": 0 } },
+        { "id": "b", "placement": { "x": 20, "y": 0, "rotate_deg": 0 } }
+      ]
+    }
+  ],
+  "tools": [{ "id": 1, "kerf": 0.2 }],
+  "operations": [
+    {
+      "name": "cut",
+      "type": "profile",
+      "selector": { "type": "part", "parts": ["bracket"] },
+      "side": "outside",
+      "tool_id": 1,
+      "depth": 0.26,
+      "step_down": 0.26,
+      "feeds": { "cut": 300 },
+      "power": { "unit": "percent", "value": 80 },
+      "passes": 1
+    }
+  ],
+  "cut_order": ["cut"]
+}
+```
+
+### Parts and instances
+
+Each part has a unique `id`, a `source` (SVG, DXF, STEP, or STL; relative or absolute path,
+same hash rules as v1), and one or more `instances`. Linked instances share the part's source
+and the operations that apply to it; each instance has its own `placement`. If `instances` is
+omitted, a single instance `1` is used, optionally with a part-level `placement`. A part cannot
+set both `placement` and `instances`.
+
+`campanion run` plans every instance in part-list then instance-list order. Inside each
+instance, operations follow `cut_order` when that array is present, otherwise file order.
+A single-instance v2 job is planned the same way as the equivalent v1 job, so existing
+single-part G-code is unchanged.
+
+### Selectors
+
+Each operation may set `selector` instead of (or as well as) v1 `layers`. `layers` may be
+omitted when `selector` is present.
+
+| `selector.type` | Picks |
+| --- | --- |
+| `part` or `parts` | Whole part(s), listed in `parts` or `part`. |
+| `layer` or `layers` | Named SVG/DXF layers on the listed parts (empty `parts` means every part). |
+| `color` | SVG stroke or fill colour. The value is stored; matching is not applied yet because the importer does not record contour colour (a planning warning is issued). |
+| `contour` or `contours` | Stable contour ids on one `part`. Ids are `{layer}:{fnv1a64 of geometry}` with `:2`, `:3`, … when two contours on the same layer would otherwise collide. Coordinates are rounded to micrometres. Ids are computed from the source geometry, before placement. |
+
+### Power, passes, and overrides
+
+v2 power is an object with `unit` (`percent` or `w`) and `value`. A raw `0..=1` fraction is
+rejected. Percent maps to the planner's internal `0..=1` fraction as `value / 100`. Watts map
+as `value / max_power` using the user-entered head `max_power` in watts; if that field is
+missing, planning refuses rather than inventing a scale.
+
+Optional `passes` repeats the operation that many times (`name`, `name#2`, …). Optional
+`overrides` is a list of field names the user changed relative to a material preset; the
+marks are stored and are not themselves numeric defaults.
+
+### Cut order and per-contour overrides
+
+Optional `cut_order` is an array of operation names. Names not listed stay in file order after
+the listed ones.
+
+Optional `contour_overrides` is an array of `{ "part", "contour", "side", "lead_in", "direction" }`.
+At least one of `side`, `lead_in`, or `direction` is required. These are applied when that
+contour is planned.
+
+### Planning checks and cancellation
+
+- A part outside the user-entered bed or work area is a warning in planning and a refusal at
+  G-code export.
+- A contour with no matching operation is a warning.
+- A lead-in whose segment overlaps two instance bounding boxes is a warning (it may be
+  crossing another part).
+
+`plan_job_cancellable` / `PlanCancel` stop at the next instance or operation boundary so a
+GUI can debounce regeneration later.
+
+A `campanion-job/1` file is migrated on load to one part (`id` `part`) with one instance
+(`id` `1`). v1 `0..=1` power on the operation stays a fraction on that in-memory job so
+existing output does not change. The loaded file's `format` tag remains `campanion-job/1`.
+
+The current GUI still edits a single part. Opening a v2 or multi-part job can generate and
+preview toolpaths for every instance from the loaded file. Saving that file from the current
+Setup editor is refused so instances are not overwritten; use the CLI, or wait for the Setup
+UI in a later step.
 
 ## Tools
 

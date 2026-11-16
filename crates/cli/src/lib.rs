@@ -1,7 +1,7 @@
 //! Command-line interface for CAMpanion, also used as a library by `campanion-gui`.
 //!
 //! `ir` and `ngc` turn a 2D profile job into IR JSON or test-sink RS274/NGC.
-//! `run` loads a `campanion-job/1` file, imports its source, and writes toolpaths.
+//! `run` loads a `campanion-job/1` or `campanion-job/2` file, imports its source, and writes toolpaths.
 //! `lathe` loads a `campanion-lathe/1` file and writes turning toolpaths.
 //! `post` writes a dialect for an IR file. `posts` lists the built-in posts.
 //! `audit` re-checks a finished G-code file against a post's rules.
@@ -16,6 +16,8 @@ mod error;
 mod gouge;
 mod index;
 mod job;
+mod job_parts;
+mod job_plan;
 mod kertilt;
 mod lathe;
 mod live_mill;
@@ -25,13 +27,14 @@ mod plane;
 mod profiles;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
-mod job_parts;
 mod jobfile;
 mod post;
 mod raster;
 mod report;
 mod rotary;
 mod rough;
+// Public wrappers such as `plan_loaded_job` stay for the GUI and tests.
+#[allow(dead_code)]
 mod run;
 mod safety;
 mod stock;
@@ -51,11 +54,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 
 pub use engine::{
-    ImportedPart, LayerSummary, PlanOptions, PlanResult, PostInfo, Posted, SourceKind, builtin_posts, import_part, parse_job, plan_job, post_job,
-    suggested_post,
+    ImportedPart, LayerSummary, PlanOptions, PlanResult, PostInfo, Posted, SourceKind, builtin_posts, import_part, parse_job, plan_job,
+    plan_job_cancellable, plan_job_with_cancel, post_job, suggested_post,
 };
 pub use error::CliError;
 pub use job_parts::{ContourOverride, JobInstance, JobPart, OpSelector, contour_ids};
+pub use job_plan::PlanCancel;
 pub use jobfile::{
     DEFAULT_JOB_CHORD_MM, FORMAT_TAG, FORMAT_TAG_V2, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, hash_bytes,
     load, parse, source_path,

@@ -1203,6 +1203,11 @@ impl Operation {
         &self.name
     }
 
+    pub(crate) fn set_power_fraction(&mut self, power: f64) -> Result<(), JobFileError> {
+        self.params = self.params.clone().power(Some(power)).map_err(|err| JobFileError::Invalid { message: err.to_string() })?;
+        Ok(())
+    }
+
     pub fn kind(&self) -> OperationKind {
         self.kind
     }
@@ -1638,6 +1643,58 @@ impl JobFile {
     /// v2 operation extras (selector, real-unit power, passes, override marks).
     pub fn operation_extras(&self, name: &str) -> Option<&crate::job_parts::OperationExtras> {
         self.operation_extras.iter().find(|item| item.0 == name).map(|item| &item.1)
+    }
+
+    /// True when the job has more than one part or more than one instance.
+    #[must_use]
+    pub fn is_multi_part(&self) -> bool {
+        self.parts.len() > 1 || self.parts.iter().any(|part| part.instances.len() > 1)
+    }
+
+    /// A single-instance view of this job for one placed copy, with operations that apply
+    /// to that part, in cut order when one was stored.
+    pub(crate) fn for_instance(
+        &self,
+        part: &crate::job_parts::JobPart,
+        instance: &crate::job_parts::JobInstance,
+        max_power: Option<f64>,
+    ) -> Result<Self, JobFileError> {
+        let mut job = self.clone();
+        job.source = part.source.clone();
+        job.placement = Some(instance.placement);
+        job.parts = crate::job_parts::migrate_v1_parts(part.source.clone(), Some(instance.placement));
+        let mut operations: Vec<Operation> = self
+            .operations
+            .iter()
+            .filter(|op| {
+                crate::job_parts::selector_includes_part(
+                    self.operation_extras(op.name()).and_then(|extra| extra.selector.as_ref()),
+                    &part.id,
+                    op.layers(),
+                )
+            })
+            .cloned()
+            .collect();
+        if !self.cut_order.is_empty() {
+            operations.sort_by_key(|op| self.cut_order.iter().position(|name| name == op.name()).unwrap_or(usize::MAX));
+        }
+        let mut expanded = Vec::new();
+        for mut op in operations {
+            if let Some(power) = self.operation_extras(op.name()).and_then(|extra| extra.power) {
+                let fraction = power.to_fraction(max_power).map_err(JobFileError::invalid)?;
+                op.set_power_fraction(fraction)?;
+            }
+            let passes = self.operation_extras(op.name()).and_then(|extra| extra.passes).unwrap_or(1);
+            expanded.push(op.clone());
+            for n in 2..=passes {
+                let mut repeat = op.clone();
+                repeat.name = format!("{}#{n}", op.name());
+                expanded.push(repeat);
+            }
+        }
+        job.operations = expanded;
+        job.cut_order = Vec::new();
+        Ok(job)
     }
 
     pub fn source(&self) -> &Source {
@@ -2239,10 +2296,12 @@ fn parse_operation_extras_array(value: &Value) -> Result<Vec<(String, crate::job
         if let Some(value) = optional(map, "overrides") {
             extra.overrides = crate::job_parts::parse_overrides(value, &format!("{what}.overrides"))?;
         }
-        if let Some(value) = optional(map, "power")
-            && value.is_object()
-        {
-            extra.power = Some(parse_job_power_object(value, &format!("{what}.power"))?);
+        if let Some(value) = optional(map, "power") {
+            if value.is_object() {
+                extra.power = Some(parse_job_power_object(value, &format!("{what}.power"))?);
+            } else {
+                return Err(JobFileError::invalid(format!("{what}.power must be an object with unit and value, not a 0..=1 fraction")));
+            }
         }
         if extra.selector.is_some() || extra.power.is_some() || extra.passes.is_some() || !extra.overrides.names.is_empty() {
             extras.push((name.to_string(), extra));
@@ -3109,7 +3168,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
         return Err(JobFileError::invalid("direction is only valid on a profile or a rotary finish"));
     }
     reject_chamfer_cut_keys(map, kind)?;
-    let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
+    let layers = parse_operation_layers(map)?;
     let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
     let tool = tools.iter().find(|tool| tool.id() == tool_id).ok_or_else(|| JobFileError::invalid(format!("unknown tool {tool_id}")))?;
     let chamfer = parse_chamfer(map, kind, tool, scale)?;
@@ -3778,7 +3837,7 @@ fn reject_wrap_foreign_keys(map: &Map<String, Value>) -> Result<(), JobFileError
 /// Wrap onto a cylinder. `depth` is below the surface. Offsets default to 0 and may be negative.
 fn finish_wrap(name: String, map: &Map<String, Value>, scale: f64, tools: &[JobTool]) -> Result<Operation, JobFileError> {
     reject_wrap_foreign_keys(map)?;
-    let layers = parse_layers(require(map, "layers").map_err(from_cli)?)?;
+    let layers = parse_operation_layers(map)?;
     let tool_id = as_u32(require(map, "tool_id").map_err(from_cli)?, "tool_id").map_err(from_cli)?;
     if !tools.iter().any(|tool| tool.id() == tool_id) {
         return Err(JobFileError::invalid(format!("unknown tool {tool_id}")));
@@ -4716,7 +4775,7 @@ fn reject_side(side: Option<&Value>) -> Result<(), JobFileError> {
     if side.is_some() { Err(JobFileError::invalid("side is only valid on a profile or a chamfer")) } else { Ok(()) }
 }
 
-fn parse_job_profile_side(text: &str) -> Result<JobProfileSide, JobFileError> {
+pub(crate) fn parse_job_profile_side(text: &str) -> Result<JobProfileSide, JobFileError> {
     match text {
         "inside" => Ok(JobProfileSide::Inside),
         "outside" => Ok(JobProfileSide::Outside),
@@ -4749,6 +4808,14 @@ fn parse_profile_compensation(value: Option<&Value>, kind: OperationKind) -> Res
     }
     let (compensation, _) = parse_compensation(value).map_err(from_cli)?;
     Ok(compensation)
+}
+
+fn parse_operation_layers(map: &Map<String, Value>) -> Result<Vec<String>, JobFileError> {
+    match optional(map, "layers") {
+        Some(value) => parse_layers(value),
+        None if optional(map, "selector").is_some() => Ok(Vec::new()),
+        None => Err(JobFileError::invalid("operation needs layers, or a selector")),
+    }
 }
 
 fn parse_layers(value: &Value) -> Result<Vec<String>, JobFileError> {

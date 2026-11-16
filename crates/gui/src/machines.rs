@@ -689,7 +689,7 @@ pub fn apply_material(session: &mut JobSession, entry: &MaterialEntry) -> Result
     }
     if let Some(power) = entry.power {
         // Session power is still the planner fraction until the job format lands in this work.
-        op.power = format_number(power.to_fraction(None).map_err(|err| err)?);
+        op.power = format_number(power.to_fraction(None)?);
     }
     if let Some(value) = entry.pierce_delay {
         op.pierce_delay = format_number(value);
