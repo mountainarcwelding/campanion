@@ -58,7 +58,10 @@ pub use jobfile::{
     DEFAULT_JOB_CHORD_MM, FORMAT_TAG, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, hash_bytes, load, parse,
     source_path,
 };
-pub use profiles::{JobMachineRef, MachineFile, MachineHead, MaterialEntry, ProfileStore, WorkArea, parse_profile, profile_to_json};
+pub use profiles::{
+    JobMachineRef, MachineFile, MachineHead, MaterialEntry, PROCESS_IDS, ProfileStore, WorkArea, effective_post, load_job_ref, load_path,
+    parse_profile, profile_to_json, selected_head, valid_profile_id,
+};
 
 const HELP: &str = "\
 Usage:
