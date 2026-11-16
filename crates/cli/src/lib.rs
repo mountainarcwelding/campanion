@@ -25,6 +25,7 @@ mod plane;
 mod profiles;
 // `run` reads the file and does not rewrite the source hash. Tests cover the rest of the API.
 #[allow(dead_code)]
+mod job_parts;
 mod jobfile;
 mod post;
 mod raster;
@@ -54,9 +55,10 @@ pub use engine::{
     suggested_post,
 };
 pub use error::CliError;
+pub use job_parts::{ContourOverride, JobInstance, JobPart, OpSelector, contour_ids};
 pub use jobfile::{
-    DEFAULT_JOB_CHORD_MM, FORMAT_TAG, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, hash_bytes, load, parse,
-    source_path,
+    DEFAULT_JOB_CHORD_MM, FORMAT_TAG, FORMAT_TAG_V2, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, hash_bytes,
+    load, parse, source_path,
 };
 pub use profiles::{
     BedSize, FORMAT_TAG_V1, HeadOffset, JobMachineRef, JobType, MachineFile, MachineHead, MachineKind, MaterialEntry, PROCESS_IDS, PowerUnit,

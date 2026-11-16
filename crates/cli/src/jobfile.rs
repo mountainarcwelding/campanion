@@ -177,8 +177,11 @@ use crate::job::{
 /// On-disk tag this build reads. Minor tags are not accepted: unknown fields already fail the load.
 pub const FORMAT_TAG: &str = "campanion-job/1";
 
-/// Major version accepted by [`FORMAT_TAG`].
-pub const FORMAT_MAJOR: u32 = 1;
+/// Current job file format. `campanion-job/1` files are still loaded and migrated in memory.
+pub const FORMAT_TAG_V2: &str = "campanion-job/2";
+
+/// Highest major version this build reads.
+pub const FORMAT_MAJOR: u32 = 2;
 
 /// Default chord tolerance for curve fitting in job files; the geometry engine's 1e-6 mm
 /// default would turn every curve into thousands of tiny arcs.
@@ -264,7 +267,7 @@ impl JobFileError {
         Self::Io { path: path.display().to_string(), message: err.to_string() }
     }
 
-    fn invalid(message: impl fmt::Display) -> Self {
+    pub(crate) fn invalid(message: impl fmt::Display) -> Self {
         Self::Invalid { message: format!("invalid input: {message}") }
     }
 }
@@ -1524,19 +1527,21 @@ pub struct Placement {
     x: f64,
     y: f64,
     rotate_deg: f64,
+    mirror: bool,
+    scale: f64,
 }
 
 impl Placement {
     /// No rotation and no translation.
     #[must_use]
     pub fn identity() -> Self {
-        Self { x: 0.0, y: 0.0, rotate_deg: 0.0 }
+        Self { x: 0.0, y: 0.0, rotate_deg: 0.0, mirror: false, scale: 1.0 }
     }
 
     /// True when this placement does not move the drawing.
     #[must_use]
     pub fn is_identity(self) -> bool {
-        self.x == 0.0 && self.y == 0.0 && self.rotate_deg == 0.0
+        self.x == 0.0 && self.y == 0.0 && self.rotate_deg == 0.0 && !self.mirror && self.scale == 1.0
     }
 
     /// Translation along X, millimetres.
@@ -1556,6 +1561,18 @@ impl Placement {
     pub fn rotate_deg(self) -> f64 {
         self.rotate_deg
     }
+
+    /// True when the part is mirrored about the Y axis through its bounds centre.
+    #[must_use]
+    pub fn mirror(self) -> bool {
+        self.mirror
+    }
+
+    /// Uniform scale about the bounds centre. `1` leaves the size unchanged.
+    #[must_use]
+    pub fn scale(self) -> f64 {
+        self.scale
+    }
 }
 
 /// [`Self::rotary`] is the 4th-axis table, when the file has one.
@@ -1563,6 +1580,7 @@ impl Placement {
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobFile {
     path: PathBuf,
+    format: String,
     source: Source,
     units: Units,
     tolerance: Tolerance,
@@ -1580,6 +1598,11 @@ pub struct JobFile {
     nest: Option<Nest>,
     placement: Option<Placement>,
     machine: Option<crate::profiles::JobMachineRef>,
+    parts: Vec<crate::job_parts::JobPart>,
+    job_type: Option<crate::profiles::JobType>,
+    cut_order: Vec<String>,
+    contour_overrides: Vec<crate::job_parts::ContourOverride>,
+    operation_extras: Vec<(String, crate::job_parts::OperationExtras)>,
 }
 
 impl JobFile {
@@ -1589,7 +1612,32 @@ impl JobFile {
     }
 
     pub fn format(&self) -> &str {
-        FORMAT_TAG
+        &self.format
+    }
+
+    /// Parts in file order. A v1 job is migrated to a single part with one instance.
+    pub fn parts(&self) -> &[crate::job_parts::JobPart] {
+        &self.parts
+    }
+
+    /// Stored job type, when the file set `type`.
+    pub fn job_type(&self) -> Option<crate::profiles::JobType> {
+        self.job_type
+    }
+
+    /// Explicit operation order. Empty means file order.
+    pub fn cut_order(&self) -> &[String] {
+        &self.cut_order
+    }
+
+    /// Per-contour kerf/lead/direction overrides.
+    pub fn contour_overrides(&self) -> &[crate::job_parts::ContourOverride] {
+        &self.contour_overrides
+    }
+
+    /// v2 operation extras (selector, real-unit power, passes, override marks).
+    pub fn operation_extras(&self, name: &str) -> Option<&crate::job_parts::OperationExtras> {
+        self.operation_extras.iter().find(|item| item.0 == name).map(|item| &item.1)
     }
 
     pub fn source(&self) -> &Source {
@@ -1699,6 +1747,7 @@ impl JobFile {
 }
 
 struct Body {
+    format: String,
     source: Source,
     units: Units,
     tolerance: Tolerance,
@@ -1716,6 +1765,11 @@ struct Body {
     nest: Option<Nest>,
     placement: Option<Placement>,
     machine: Option<crate::profiles::JobMachineRef>,
+    parts: Vec<crate::job_parts::JobPart>,
+    job_type: Option<crate::profiles::JobType>,
+    cut_order: Vec<String>,
+    contour_overrides: Vec<crate::job_parts::ContourOverride>,
+    operation_extras: Vec<(String, crate::job_parts::OperationExtras)>,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -1732,6 +1786,7 @@ pub fn parse(text: &str, path: &Path) -> Result<JobFile, JobFileError> {
     let body = parse_text(text, path)?;
     Ok(JobFile {
         path: path.to_path_buf(),
+        format: body.format,
         source: body.source,
         units: body.units,
         tolerance: body.tolerance,
@@ -1749,6 +1804,11 @@ pub fn parse(text: &str, path: &Path) -> Result<JobFile, JobFileError> {
         nest: body.nest,
         placement: body.placement,
         machine: body.machine,
+        parts: body.parts,
+        job_type: body.job_type,
+        cut_order: body.cut_order,
+        contour_overrides: body.contour_overrides,
+        operation_extras: body.operation_extras,
     })
 }
 
@@ -1775,7 +1835,11 @@ pub fn source_changed(job: &JobFile, bytes: &[u8]) -> bool {
 #[must_use]
 pub fn with_updated_hash(job: &JobFile, bytes: &[u8]) -> JobFile {
     let mut updated = job.clone();
-    updated.source.hash = hash_bytes(bytes);
+    let digest = hash_bytes(bytes);
+    updated.source.hash = digest.clone();
+    if let Some(part) = updated.parts.first_mut() {
+        part.source.hash = digest;
+    }
     updated
 }
 
@@ -1820,35 +1884,35 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         Some(value) => as_str(value, "format tag").map_err(from_cli)?,
         None => return Err(JobFileError::invalid("missing format tag")),
     };
-    check_format(tag)?;
-    check_keys(
-        map,
-        &[
-            "format",
-            "source",
-            "units",
-            "tolerance",
-            "heights",
-            "tools",
-            "operations",
-            "rotary",
-            "kinematics",
-            "solution",
-            "fixtures",
-            "collision",
-            "stock",
-            "stock_model",
-            "sheet",
-            "nest",
-            "placement",
-            "machine",
-        ],
-        "job",
-    )
-    .map_err(from_cli)?;
+    let major = check_format(tag)?;
+    let is_v2 = major >= 2;
+    let mut keys = vec![
+        "format",
+        "source",
+        "units",
+        "tolerance",
+        "heights",
+        "tools",
+        "operations",
+        "rotary",
+        "kinematics",
+        "solution",
+        "fixtures",
+        "collision",
+        "stock",
+        "stock_model",
+        "sheet",
+        "nest",
+        "placement",
+        "machine",
+    ];
+    if is_v2 {
+        keys.extend(["type", "parts", "cut_order", "contour_overrides"]);
+    }
+    check_keys(map, &keys, "job").map_err(from_cli)?;
     let units = parse_units(require(map, "units").map_err(from_cli)?)?;
     let scale = units.mm_per_unit();
-    let source = parse_source(require(map, "source").map_err(from_cli)?)?;
+    let (source, parts, placement_from_parts) = parse_source_and_parts(map, scale, is_v2)?;
     let tolerance = parse_tolerance(optional(map, "tolerance"), scale)?;
     let (clearance, retract) = parse_heights(optional(map, "heights"), scale)?;
     let rotary = parse_rotary(optional(map, "rotary"), scale)?;
@@ -1913,6 +1977,11 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     }
     resolve_ir_shapes(&mut tools, &operations)?;
     check_mesh_source(&source, &operations, &tools)?;
+    for part in &parts {
+        if part.source.path() != source.path() || part.source.hash() != source.hash() {
+            check_mesh_source(&part.source, &operations, &tools)?;
+        }
+    }
     let fixtures = parse_fixtures(optional(map, "fixtures"), scale)?;
     let collision = parse_collision(optional(map, "collision"), scale)?;
     let stock = parse_stock(optional(map, "stock"), scale)?;
@@ -1931,9 +2000,35 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     if nest.is_some() && source.is_stl() {
         return Err(JobFileError::invalid("nest is not valid on an STL source"));
     }
-    let placement = parse_placement(optional(map, "placement"), scale)?;
-    if placement.is_some() && source.is_stl() {
-        return Err(JobFileError::invalid("placement is only supported on DXF, SVG and STEP sources"));
+    let placement = if is_v2 {
+        if optional(map, "placement").is_some() {
+            return Err(JobFileError::invalid("campanion-job/2 stores placement on each part instance, not at the job root"));
+        }
+        placement_from_parts
+    } else {
+        let placement = parse_placement(optional(map, "placement"), scale)?;
+        if placement.is_some() && source.is_stl() {
+            return Err(JobFileError::invalid("placement is only supported on DXF, SVG and STEP sources"));
+        }
+        placement
+    };
+    let parts = if is_v2 { parts } else { crate::job_parts::migrate_v1_parts(source.clone(), placement) };
+    let job_type = match optional(map, "type") {
+        Some(value) => Some(crate::job_parts::parse_job_type(value)?),
+        None => None,
+    };
+    let op_names: Vec<String> = operations.iter().map(|op| op.name().to_string()).collect();
+    let cut_order = match optional(map, "cut_order") {
+        Some(value) => crate::job_parts::parse_cut_order(value, &op_names)?,
+        None => Vec::new(),
+    };
+    let contour_overrides = match optional(map, "contour_overrides") {
+        Some(value) => crate::job_parts::parse_contour_overrides(value)?,
+        None => Vec::new(),
+    };
+    let operation_extras = if is_v2 { parse_operation_extras_array(require(map, "operations").map_err(from_cli)?)? } else { Vec::new() };
+    if is_v2 {
+        refuse_multi_head(map)?;
     }
     let machine = match optional(map, "machine") {
         Some(value) => Some(crate::profiles::parse_job_machine_ref(value).map_err(JobFileError::invalid)?),
@@ -1941,6 +2036,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     };
     let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
     Ok(Body {
+        format: tag.to_string(),
         source,
         units,
         tolerance,
@@ -1958,6 +2054,11 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         nest,
         placement,
         machine,
+        parts,
+        job_type,
+        cut_order,
+        contour_overrides,
+        operation_extras,
     })
 }
 
@@ -2005,7 +2106,7 @@ fn is_mesh_op(kind: OperationKind) -> bool {
     matches!(kind, OperationKind::Surface | OperationKind::Rough | OperationKind::Waterline | OperationKind::RotaryFinish)
 }
 
-fn check_format(tag: &str) -> Result<(), JobFileError> {
+fn check_format(tag: &str) -> Result<u32, JobFileError> {
     let Some(rest) = tag.strip_prefix("campanion-job/") else {
         return Err(JobFileError::UnknownFormat { tag: tag.to_string() });
     };
@@ -2015,7 +2116,7 @@ fn check_format(tag: &str) -> Result<(), JobFileError> {
     let Ok(major) = rest.parse::<u32>() else {
         return Err(JobFileError::UnknownFormat { tag: tag.to_string() });
     };
-    if major == FORMAT_MAJOR { Ok(()) } else { Err(JobFileError::UnsupportedVersion { found: major, supported: FORMAT_MAJOR }) }
+    if major == 1 || major == 2 { Ok(major) } else { Err(JobFileError::UnsupportedVersion { found: major, supported: FORMAT_MAJOR }) }
 }
 
 fn parse_placement(value: Option<&Value>, scale: f64) -> Result<Option<Placement>, JobFileError> {
@@ -2039,7 +2140,134 @@ fn parse_placement(value: Option<&Value>, scale: f64) -> Result<Option<Placement
     if rotate_deg.abs() > 1.0e6 {
         return Err(JobFileError::invalid("placement rotate_deg is outside ±1e6 degrees"));
     }
-    Ok(Some(Placement { x, y, rotate_deg }))
+    Ok(Some(Placement { x, y, rotate_deg, mirror: false, scale: 1.0 }))
+}
+
+/// Placement used on a v2 part instance: may include `mirror` and `scale`.
+pub(crate) fn parse_placement_value(value: Option<&Value>, scale: f64) -> Result<Option<Placement>, JobFileError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let map = object(value, "placement").map_err(from_cli)?;
+    check_keys(map, &["x", "y", "rotate_deg", "mirror", "scale"], "placement").map_err(from_cli)?;
+    let x = optional_scaled(map, "x", scale)?;
+    let y = optional_scaled(map, "y", scale)?;
+    let rotate_deg = match optional(map, "rotate_deg") {
+        Some(value) => as_f64(value, "placement rotate_deg").map_err(from_cli)?,
+        None => 0.0,
+    };
+    let mirror = match optional(map, "mirror") {
+        Some(value) => crate::job::as_bool(value, "placement mirror").map_err(from_cli)?,
+        None => false,
+    };
+    let scale_factor = match optional(map, "scale") {
+        Some(value) => as_f64(value, "placement scale").map_err(from_cli)?,
+        None => 1.0,
+    };
+    if ![x, y, rotate_deg, scale_factor].into_iter().all(f64::is_finite) {
+        return Err(JobFileError::invalid("placement values must be finite"));
+    }
+    if x.abs() > MAX_MM || y.abs() > MAX_MM {
+        return Err(JobFileError::invalid(format!("placement is outside ±{MAX_MM} mm")));
+    }
+    if rotate_deg.abs() > 1.0e6 {
+        return Err(JobFileError::invalid("placement rotate_deg is outside ±1e6 degrees"));
+    }
+    if scale_factor <= 0.0 || scale_factor > 1.0e6 {
+        return Err(JobFileError::invalid("placement scale must be greater than zero and at most 1e6"));
+    }
+    Ok(Some(Placement { x, y, rotate_deg, mirror, scale: scale_factor }))
+}
+
+pub(crate) fn parse_source_for_parts(value: &Value) -> Result<Source, JobFileError> {
+    parse_source(value)
+}
+
+fn parse_source_and_parts(
+    map: &serde_json::Map<String, Value>,
+    scale: f64,
+    is_v2: bool,
+) -> Result<(Source, Vec<crate::job_parts::JobPart>, Option<Placement>), JobFileError> {
+    if is_v2 {
+        if optional(map, "source").is_some() {
+            return Err(JobFileError::invalid("campanion-job/2 uses parts[].source, not a top-level source"));
+        }
+        let parts = crate::job_parts::parse_parts(require(map, "parts").map_err(from_cli)?, scale)?;
+        let source = parts[0].source.clone();
+        let placement = parts.first().and_then(|part| part.instances.first()).map(|instance| instance.placement);
+        return Ok((source, parts, placement));
+    }
+    let source = parse_source(require(map, "source").map_err(from_cli)?)?;
+    Ok((source, Vec::new(), None))
+}
+
+fn refuse_multi_head(map: &serde_json::Map<String, Value>) -> Result<(), JobFileError> {
+    let Some(machine) = optional(map, "machine") else {
+        return Ok(());
+    };
+    let machine = object(machine, "machine").map_err(from_cli)?;
+    if optional(machine, "heads").is_some() {
+        return Err(JobFileError::invalid("only a single head is supported now; use machine.head, not machine.heads"));
+    }
+    Ok(())
+}
+
+fn parse_operation_extras_array(value: &Value) -> Result<Vec<(String, crate::job_parts::OperationExtras)>, JobFileError> {
+    let Some(items) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut extras = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let what = format!("operations[{index}]");
+        let Ok(map) = object(item, &what) else {
+            continue;
+        };
+        let Ok(name) = as_str(require(map, "name").map_err(from_cli)?, "name") else {
+            continue;
+        };
+        let mut extra = crate::job_parts::OperationExtras::default();
+        if let Some(value) = optional(map, "selector") {
+            extra.selector = Some(crate::job_parts::parse_selector(value, &format!("{what}.selector"))?);
+        }
+        if let Some(value) = optional(map, "passes") {
+            let number = as_f64(value, &format!("{what}.passes")).map_err(from_cli)?;
+            if !number.is_finite() || number < 1.0 || number.fract() != 0.0 || number > 1_000.0 {
+                return Err(JobFileError::invalid(format!("{what}.passes must be a whole number in 1..=1000")));
+            }
+            extra.passes = Some(number as u32);
+        }
+        if let Some(value) = optional(map, "overrides") {
+            extra.overrides = crate::job_parts::parse_overrides(value, &format!("{what}.overrides"))?;
+        }
+        if let Some(value) = optional(map, "power")
+            && value.is_object()
+        {
+            extra.power = Some(parse_job_power_object(value, &format!("{what}.power"))?);
+        }
+        if extra.selector.is_some() || extra.power.is_some() || extra.passes.is_some() || !extra.overrides.names.is_empty() {
+            extras.push((name.to_string(), extra));
+        }
+    }
+    Ok(extras)
+}
+
+fn parse_job_power_object(value: &Value, what: &str) -> Result<crate::profiles::PowerValue, JobFileError> {
+    let map = object(value, what).map_err(from_cli)?;
+    check_keys(map, &["unit", "value"], what).map_err(from_cli)?;
+    let unit_text = as_str(require(map, "unit").map_err(from_cli)?, &format!("{what}.unit")).map_err(from_cli)?;
+    let unit = match unit_text {
+        "percent" | "%" => crate::profiles::PowerUnit::Percent,
+        "w" | "W" | "watts" => crate::profiles::PowerUnit::Watts,
+        other => return Err(JobFileError::invalid(format!("{what}.unit must be percent or w, not `{other}`"))),
+    };
+    let number = as_f64(require(map, "value").map_err(from_cli)?, &format!("{what}.value")).map_err(from_cli)?;
+    let power = crate::profiles::PowerValue { unit, value: number };
+    if unit == crate::profiles::PowerUnit::Percent {
+        power.to_fraction(None).map_err(JobFileError::invalid)?;
+    } else if !number.is_finite() || number < 0.0 {
+        return Err(JobFileError::invalid(format!("{what}.value must be a finite number that is not negative")));
+    }
+    Ok(power)
 }
 
 fn optional_scaled(map: &serde_json::Map<String, Value>, key: &str, scale: f64) -> Result<f64, JobFileError> {
@@ -2790,6 +3018,9 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "flush",
             "tilt",
             "pierce_type",
+            "selector",
+            "passes",
+            "overrides",
         ],
         "operation",
     )
@@ -5006,6 +5237,7 @@ fn apply_operation_power(
     match optional(map, "power") {
         Some(_) if matches!(kind, OperationKind::LaserRaster) => Err(JobFileError::invalid("power is not valid on a laser raster")),
         Some(_) if !kerf => Err(JobFileError::invalid("power is only valid on a laser or torch operation")),
+        Some(value) if value.is_object() => Ok(params),
         Some(value) => {
             let power = as_f64(value, "power").map_err(from_cli)?;
             if !(power.is_finite() && (0.0..=1.0).contains(&power)) {
@@ -6351,8 +6583,8 @@ mod tests {
         let path = write_job("tag", r#"{"format":"nope"}"#);
         assert!(matches!(load(&path), Err(JobFileError::UnknownFormat { .. })));
 
-        let path = write_job("major", r#"{"format":"campanion-job/2"}"#);
-        assert!(matches!(load(&path), Err(JobFileError::UnsupportedVersion { found: 2, supported: 1 })));
+        let path = write_job("major", r#"{"format":"campanion-job/3"}"#);
+        assert!(matches!(load(&path), Err(JobFileError::UnsupportedVersion { found: 3, supported: 2 })));
 
         let path = write_job("minor", r#"{"format":"campanion-job/1.1"}"#);
         assert!(matches!(load(&path), Err(JobFileError::UnknownFormat { .. })));
