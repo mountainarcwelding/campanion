@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## 0.19.0 — 2026-11-15
+
+User machine profiles live in the config directory, with one or more heads and a per-head
+material library. CAMpanion is still primarily command-line driven; the GUI is a work in
+progress and has not been machine-tested.
+
+### Added
+
+- A `campanion-machine/1` profile file (see `docs/machine-profile.md`) stored under
+  `CAMPANION_CONFIG_DIR/machines`, `$XDG_CONFIG_HOME/campanion/machines`, or
+  `$HOME/.config/campanion/machines`. A profile has a name, units, an optional work area,
+  optional controller and post, and one or more heads. Each head has a process, an optional
+  post, and a user-entered material library. No machine limits, posts, or material values are
+  shipped.
+- A `campanion-job/1` file may set `machine` with `profile` (the file stem) or `path`, and an
+  optional `head`. Planning refuses a toolpath that leaves the entered work area, or a missing
+  profile. `machine.model` remains the existing lathe Haas check and is rejected on a cutting
+  job.
+- The GUI Machines manager (Setup ribbon Machines…, or Machine → Machines…) can create, edit,
+  duplicate, delete, import and export profiles. The process tree has a machine and head
+  picker; a material button fills only the operation (and tool size) fields that the library
+  entry contains. Properties stay filtered to the selected head's process.
+
 ## 0.18.2 — 2026-11-15
 
 The graphical workspace now puts the workspace selector, CAM stage tabs, and
