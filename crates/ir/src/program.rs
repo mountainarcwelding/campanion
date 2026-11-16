@@ -263,6 +263,13 @@ impl Program {
         &self.toolpaths
     }
 
+    /// Append `paths` and re-validate. Tool lists must already be compatible (same ids).
+    pub fn extend_toolpaths(mut self, paths: Vec<ClPath>) -> Result<Self> {
+        self.toolpaths.extend(paths);
+        self.check_structure()?;
+        Ok(self)
+    }
+
     /// Replace each toolpath's blocks and re-validate.
     ///
     /// `block_lists` is one list per toolpath, in order. Name, tool, feeds, tabs, the continuous flag and the singular cone stay.
@@ -799,6 +806,12 @@ impl Document {
 
     pub fn program(&self) -> &Program {
         &self.program
+    }
+
+    /// Concatenate `other`'s toolpaths onto this document. Tools must match by id.
+    pub fn append_toolpaths(self, other: &Document) -> Result<Self> {
+        let program = self.program.extend_toolpaths(other.program.toolpaths.clone())?;
+        Self::new(program)
     }
 
     /// Compact JSON.

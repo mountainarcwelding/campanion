@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## 0.20.0 — 2026-11-15
+
+Backend data model for the approved GUI v0.4 spec: `campanion-machine/2`,
+`campanion-job/2` with a parts list and linked instances, and a cancellable planner
+that runs every instance in order. CAMpanion is still primarily command-line driven;
+the GUI is a work in progress and has not been machine-tested. This release is
+CLI-first. The current GUI keeps compiling on the new model with only a minimal
+adaptation; the machine selector, New Job, Setup, and Operations UIs come later.
+
+### Added
+
+- `campanion-machine/2` distinguishes gantry (user-entered bed and a mix of heads) from
+  resin (no heads; user-entered screen/bed). Heads may be laser, plasma, spindle,
+  extruder, or another kind. Per-head XYZ offsets, safe-Z, and max power are stored only
+  when the user enters them. `campanion-machine/1` files are migrated on load.
+- `campanion-job/2` names a machine and head, a job type (`cut_route` or `print`) derived
+  from that head, a parts list with linked instances, operation selectors (whole part,
+  layers, colour, or stable contour ids), an explicit cut order, per-contour overrides,
+  and material presets in real units (percent or watts, mm/min, passes). Raw `0..=1`
+  power is rejected. `campanion-job/1` files are migrated on load.
+- The planner plans every instance in order, warns about parts off the bed, contours
+  with no operation, and lead-ins that appear to cross another part, and refuses G-code
+  export when a part is off a user-entered bed or work area. `plan_job_cancellable`
+  stops at the next instance or operation boundary.
+- `campanion run` accepts a multi-part job. An arrayed two-instance laser job has a
+  G-code golden; equivalent single-instance v1 and v2 jobs produce the same output.
+
+### Changed
+
+- Opening a v2 or multi-part job in the current GUI generates and posts from the loaded
+  file so instances are not dropped. Saving that file from the current Setup editor is
+  refused until the Setup UI can represent it.
+
 ## 0.19.1 — 2026-11-15
 
 Generate toolpaths after importing a part from another folder, or before the job

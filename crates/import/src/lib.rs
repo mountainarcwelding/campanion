@@ -27,7 +27,7 @@ mod svg;
 mod units;
 
 pub use dxf::import_dxf;
-pub use place::place_drawing;
+pub use place::{place_drawing, place_with};
 pub use svg::import_svg;
 
 use std::fmt;

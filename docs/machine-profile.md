@@ -1,8 +1,8 @@
 # User machine profiles
 
-A machine profile is a `campanion-machine/1` JSON file that describes a machine the user owns:
-its name, units, optional work area, optional controller and post, and one or more heads. Each
-head has a process, an optional post, and an optional material library.
+A machine profile is a `campanion-machine/2` JSON file that describes a machine the user owns.
+`campanion-machine/1` files are still loaded and are migrated in memory (and rewritten as v2
+when saved).
 
 Every numeric value is entered by the user. CAMpanion does not ship machine limits, posts, or
 material feeds, kerfs, or power values.
@@ -26,11 +26,23 @@ stays a cited Haas lathe check and is not a user profile.
 
 ## File format
 
+`type` is `gantry` or `resin`.
+
+A gantry has a user-entered bed size and one or more heads. Heads may be mixed: `laser`,
+`plasma`, `spindle`, `extruder`, or another kind (the field is extensible). Each head has a
+process, an optional post, a material/tool library, and, when entered, per-head XYZ offsets
+and a safe-Z. None of those numbers are defaulted.
+
+A resin machine has no heads. `screen` and `bed` are optional and only stored when the user
+enters them. `bed.z` is the vat/build height when entered.
+
 ```json
 {
-  "format": "campanion-machine/1",
+  "format": "campanion-machine/2",
   "name": "Shop laser",
   "units": "mm",
+  "type": "gantry",
+  "bed": { "x": 600, "y": 400 },
   "work_area": { "x_min": 0, "x_max": 600, "y_min": 0, "y_max": 400, "z_min": 0, "z_max": 80 },
   "controller": "grbl",
   "post": "grbl_laser",
@@ -38,14 +50,19 @@ stays a cited Haas lathe check and is not a user profile.
     {
       "id": "laser",
       "name": "CO2",
+      "kind": "laser",
       "process": "laser",
       "post": "grbl_laser",
+      "offset": { "x": 0, "y": 0, "z": 0 },
+      "safe_z": 15,
+      "max_power": { "unit": "w", "value": 40 },
       "materials": [
         {
           "name": "3 mm acrylic",
           "kerf": 0.15,
           "cut_feed": 300,
-          "power": 0.8,
+          "power": { "unit": "percent", "value": 80 },
+          "passes": 1,
           "depth": 3
         }
       ]
@@ -54,24 +71,54 @@ stays a cited Haas lathe check and is not a user profile.
 }
 ```
 
-`format`, `name`, `units`, and `heads` are required. `units` is `mm` or `inch`; lengths in the
-file are in those units and are stored internally as millimetres. `work_area`, `controller`, and
-`post` may be omitted. An omitted work area means no travel check is run. A work area must
-include at least one of `x_min`, `x_max`, `y_min`, `y_max`, `z_min`, `z_max`. Only the limits
-that are present are checked. A value equal to a limit passes; a value outside it is a
-code-generation error.
+A resin example:
 
-`heads` must contain at least one head. Each head has a unique `id` and a `process` of
-`milling`, `routing`, `turning`, `laser`, `plasma`, `waterjet`, `oxyfuel`, `wire_edm`, `sla`,
-or `fdm`. `name`, `post`, and `materials` may be omitted. A head post, when set, overrides the
-machine-level post.
+```json
+{
+  "format": "campanion-machine/2",
+  "name": "Mars Pro",
+  "units": "mm",
+  "type": "resin",
+  "bed": { "x": 130, "y": 80, "z": 160 },
+  "screen": { "x": 130, "y": 80 }
+}
+```
+
+`format`, `name`, `units`, and `type` are required. `units` is `mm` or `inch`; lengths in the
+file are in those units and are stored internally as millimetres. `work_area`, `controller`,
+`post`, `bed`, and `screen` may be omitted. An omitted work area means no travel check is run
+from that block. A work area must include at least one of `x_min`, `x_max`, `y_min`, `y_max`,
+`z_min`, `z_max`. Only the limits that are present are checked. A value equal to a limit
+passes; a value outside it is a code-generation error.
+
+A gantry needs at least one head. A resin machine must not have a `heads` array (or must leave
+it empty) and must not be used as the selected head on a cutting job.
+
+Each gantry head has a unique `id` and a `process` of `milling`, `routing`, `turning`, `laser`,
+`plasma`, `waterjet`, `oxyfuel`, `wire_edm`, `sla`, or `fdm`. `kind` defaults to a value
+derived from `process` when omitted (`laser`, `plasma`, `spindle` for milling/routing,
+`extruder` for FDM, otherwise the process id). `name`, `post`, `offset`, `safe_z`,
+`max_power`, and `materials` may be omitted. A head post, when set, overrides the
+machine-level post. `offset` is all three of `x`, `y`, and `z` together; there is no implied
+zero for a missing axis. `safe_z` and `max_power` are stored only when entered.
 
 A material entry must have a `name`. Optional fields are `kerf`, `diameter`, `wire`, `depth`,
-`step_down`, `cut_feed`, `plunge_feed`, `power`, `pierce_delay`, and `post_delay`. Lengths use
-the profile units. Feeds, power, and delays are not scaled. Omitted fields stay unset; they are
+`step_down`, `cut_feed`, `plunge_feed`, `power`, `passes`, `pierce_delay`, and `post_delay`.
+Lengths use the profile units. Feeds and delays are not scaled. `passes` is a whole number in
+1..=1000. `power` is an object `{ "unit": "percent"|"w", "value": ... }`, never a raw 0..=1
+fraction. Percent is 0..=100. Watts need a user-entered `max_power` on the head before they
+can be mapped to the planner's internal 0..=1 fraction. Omitted fields stay unset; they are
 not filled with defaults.
 
 Unknown keys are rejected.
+
+### Migrating `campanion-machine/1`
+
+On load, a v1 file becomes a gantry. If the work area names both X and Y extents, `bed` is
+`x_max - x_min` by `y_max - y_min` (and `z` the same way when both Z ends are present). An
+incomplete work area does not invent a bed. Head `kind` is inferred from `process`. A v1
+material `power` in 0..=1 is stored as percent (`0.8` becomes `{ "unit": "percent", "value": 80 }`).
+Offsets, `safe_z`, and `max_power` stay unset. Saving writes `campanion-machine/2`.
 
 ## Jobs
 

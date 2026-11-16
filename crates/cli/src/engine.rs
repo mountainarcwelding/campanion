@@ -173,7 +173,21 @@ pub fn import_part(path: &Path) -> Result<ImportedPart, CliError> {
 
 /// Plan a loaded job the same way `campanion run` does, without writing G-code.
 pub fn plan_job(job: &JobFile, options: PlanOptions) -> Result<PlanResult, CliError> {
-    let planned: PlannedProgram = run::plan_loaded_job(job, options.up_axis.into())?;
+    plan_job_with_cancel(job, options, None)
+}
+
+/// Plan a job, stopping at the next instance or operation boundary when `cancel` is signalled.
+///
+/// The GUI can debounce regeneration later by cancelling an in-flight plan.
+pub fn plan_job_cancellable(job: &JobFile, options: PlanOptions, cancel: Option<&crate::job_plan::PlanCancel>) -> Result<PlanResult, CliError> {
+    plan_job_with_cancel(job, options, cancel)
+}
+
+/// Plan a job, stopping at the next instance or operation boundary when `cancel` is signalled.
+///
+/// The GUI can debounce regeneration later by cancelling an in-flight plan.
+pub fn plan_job_with_cancel(job: &JobFile, options: PlanOptions, cancel: Option<&crate::job_plan::PlanCancel>) -> Result<PlanResult, CliError> {
+    let planned: PlannedProgram = crate::job_plan::plan_job_inner(job, options.up_axis.into(), cancel)?;
     let blocking = run::blocking_findings(job, &planned.document, &planned.gouges);
     Ok(PlanResult { document: planned.document, warnings: planned.warnings, notes: planned.notes, blocking })
 }
@@ -185,6 +199,7 @@ pub fn post_job(job: &JobFile, document: &Document, post_spec: &str) -> Result<P
     if post_spec.is_empty() {
         return Err(CliError::run("choose a post before exporting G-code"));
     }
+    crate::job_plan::refuse_off_bed_for_export(job)?;
     let post_def = post::load_spec(Path::new(post_spec))?;
     run::require_spindle_speeds(job, &post_def)?;
     let text = post::render(document.program(), &post_def, job.tolerance().chord())?;

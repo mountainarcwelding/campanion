@@ -1,4 +1,4 @@
-//! `run`: load a `campanion-job/1` file, import its DXF, and write toolpaths.
+//! `run`: load a `campanion-job/1` or `campanion-job/2` file, import its source, and write toolpaths.
 //!
 //! The source path is relative to the job file, or absolute. A hash mismatch is a warning on stderr; the
 //! bytes just read are imported and the job file is not rewritten. Each operation keeps the
@@ -143,6 +143,8 @@ use campanion_post::PostDef;
 use crate::error::{CliError, MAX_JSON_BYTES};
 use crate::index::{self, IndexedOp};
 use crate::job::{pierce_type_of, read_text};
+use crate::job_parts::{OpSelector, contour_ids};
+use crate::job_plan::PlanCancel;
 use crate::jobfile::{self, Finish, JobFile, JobProfileSide, JobTool, Operation, OperationKind};
 use crate::plane::{self, ViewFrame};
 use crate::report;
@@ -177,6 +179,7 @@ struct Cut<'a> {
     import: &'a Import,
     tolerance: Tolerance,
     contours: &'a [Contour],
+    contour_ids: &'a [String],
     job: &'a JobFile,
 }
 
@@ -198,6 +201,16 @@ pub struct PlannedProgram {
 
 /// Import the job source and build the IR program, without writing G-code.
 pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedProgram, CliError> {
+    plan_loaded_job_with(job, up_axis, None)
+}
+
+/// Plan a loaded job, stopping at the next operation boundary when `cancel` is signalled.
+pub fn plan_loaded_job_with(job: &JobFile, up_axis: step::UpAxis, cancel: Option<&PlanCancel>) -> Result<PlannedProgram, CliError> {
+    if let Some(cancel) = cancel
+        && cancel.is_cancelled()
+    {
+        return Err(CliError::run("planning was cancelled"));
+    }
     let source = jobfile::source_path(job);
     let mut warnings = Vec::new();
     if job.source().is_stl() {
@@ -236,6 +249,7 @@ pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedPr
     }
     .map_err(show)?;
     let mut drawing = drawing;
+    let source_ids = contour_ids(&drawing);
     let format = if is_step {
         "STEP"
     } else if is_svg {
@@ -249,13 +263,22 @@ pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedPr
     if let Some(placement) = job.placement()
         && !placement.is_identity()
     {
-        drawing = campanion_import::place_drawing(&drawing, placement.x(), placement.y(), placement.rotate_deg(), &job.tolerance()).map_err(show)?;
+        drawing = campanion_import::place_with(
+            &drawing,
+            placement.x(),
+            placement.y(),
+            placement.rotate_deg(),
+            placement.mirror(),
+            placement.scale(),
+            &job.tolerance(),
+        )
+        .map_err(show)?;
     }
     if drawing.skipped_entities() > 0 {
         let kinds = drawing.skipped_types().iter().map(|(name, count)| format!("{name} x{count}")).collect::<Vec<_>>().join(", ");
         warnings.push(format!("skipped {format} entities: {kinds}"));
     }
-    let (doc, nest_report) = build(job, &drawing)?;
+    let (doc, nest_report) = build(job, &drawing, &source_ids, cancel)?;
     let mut notes = Vec::new();
     if let Some(report) = nest_report.as_ref()
         && !report.summary.is_empty()
@@ -263,7 +286,8 @@ pub fn plan_loaded_job(job: &JobFile, up_axis: step::UpAxis) -> Result<PlannedPr
         notes.push(report.summary.clone());
     }
     crate::collision::check_job(job, None, doc.program())?;
-    let implicit_stock = if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(job, &drawing)?) } else { None };
+    let implicit_stock =
+        if job.stock_model_enabled() && job.stock().is_none() { Some(drawing_stock_bounds(job, &drawing, &source_ids)?) } else { None };
     notes.extend(stock_messages(job, None, doc.program(), implicit_stock)?);
     crate::profiles::validate_job_machine(job, doc.program())?;
     Ok(PlannedProgram { document: doc, warnings, notes, gouges: Vec::new(), nest_report, implicit_stock })
@@ -279,7 +303,10 @@ pub fn run(args: &[OsString]) -> Result<ExitCode, CliError> {
     if args.nest_out.is_some() && job.nest().is_none() {
         return Err(CliError::run("--nest-out needs a job with sheet and nest"));
     }
-    let planned = plan_loaded_job(&job, args.up_axis)?;
+    let planned = crate::job_plan::plan_job_inner(&job, args.up_axis, None)?;
+    if post.is_some() {
+        crate::job_plan::refuse_off_bed_for_export(&job)?;
+    }
     for warning in &planned.warnings {
         warn(warning)?;
     }
@@ -361,14 +388,14 @@ fn write_stock_outputs(job: &JobFile, program: &Program, planned: &PlannedProgra
 ///
 /// XY is the selected contours. Z runs from `-depth` to 0. Wrap contours are cylinder coordinates,
 /// so they are skipped. A flat box is an error.
-fn drawing_stock_bounds(job: &JobFile, drawing: &Drawing) -> Result<(campanion_mesh::Vec3, campanion_mesh::Vec3), CliError> {
+fn drawing_stock_bounds(job: &JobFile, drawing: &Drawing, source_ids: &[String]) -> Result<(campanion_mesh::Vec3, campanion_mesh::Vec3), CliError> {
     let step_labels = if job.source().is_step() { Some(step_contour_labels(drawing, &job.tolerance())?) } else { None };
     let mut stock = StockBox::default();
     for op in job.operations() {
         if matches!(op.kind(), OperationKind::Wrap | OperationKind::LaserRaster) {
             continue;
         }
-        let contours = select(drawing, op.layers(), step_labels.as_deref());
+        let contours = select_for_op(job, op, drawing, source_ids, step_labels.as_deref());
         stock.include(op, &contours)?;
     }
     if !(stock.any && stock.max_x > stock.min_x && stock.max_y > stock.min_y && stock.deepest > 0.0) {
@@ -686,7 +713,12 @@ fn starts_with_dash(arg: &OsStr) -> bool {
     arg.to_string_lossy().starts_with('-')
 }
 
-fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::nest::Report>), CliError> {
+fn build(
+    job: &JobFile,
+    drawing: &Drawing,
+    source_ids: &[String],
+    cancel: Option<&PlanCancel>,
+) -> Result<(Document, Option<crate::nest::Report>), CliError> {
     // One nesting pass for the drawing. Operations then pick OUTER / INNER instead of layer "0".
     // Contours are collected first so the swept radius, including every wrap cylinder, is known
     // before a wrap path is built. A wrap's drawing is not stock: its X/Y are cylinder coordinates.
@@ -694,14 +726,19 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
     let mut selected = Vec::new();
     let mut stock = StockBox::default();
     for op in job.operations() {
+        if let Some(cancel) = cancel
+            && cancel.is_cancelled()
+        {
+            return Err(CliError::run("planning was cancelled"));
+        }
         if matches!(op.kind(), OperationKind::LaserRaster) {
             if job.nest().is_some() {
                 return Err(op_err(op, "laser raster is not valid with nest"));
             }
-            selected.push((op, Vec::new()));
+            selected.push((op, Vec::new(), Vec::new()));
             continue;
         }
-        let contours = select(drawing, op.layers(), step_labels.as_deref());
+        let (contours, ids) = select_for_op_with_ids(job, op, drawing, source_ids, step_labels.as_deref());
         if contours.is_empty() {
             return Err(op_err(op, "no geometry on the selected layers"));
         }
@@ -711,10 +748,10 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
         if job.rotary().is_some() && !matches!(op.kind(), OperationKind::Wrap) {
             stock.include(op, &contours)?;
         }
-        selected.push((op, contours));
+        selected.push((op, contours, ids));
     }
     let nest_ops: Vec<crate::nest::OpGeometry<'_>> =
-        selected.iter().map(|(op, contours)| crate::nest::OpGeometry { name: op.name(), contours }).collect();
+        selected.iter().map(|(op, contours, _)| crate::nest::OpGeometry { name: op.name(), contours }).collect();
     let nest_report = crate::nest::plan(job, drawing, &nest_ops)?;
     let corners = if job.rotary().is_some() { Some(stock.corners()?) } else { None };
     let safe_z = job.rotary().map(|setup| swept_clearance(job, &setup, corners.as_deref(), &[]));
@@ -722,7 +759,12 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
     let mut groups = Vec::new();
     let mut plane_groups = Vec::new();
     let mut freed_slugs: Vec<Contour> = Vec::new();
-    for (op, contours) in &selected {
+    for (op, contours, ids) in &selected {
+        if let Some(cancel) = cancel
+            && cancel.is_cancelled()
+        {
+            return Err(CliError::run("planning was cancelled"));
+        }
         let Some(tool) = job.tool(op.tool_id()) else {
             return Err(op_err(op, format!("unknown tool {}", op.tool_id())));
         };
@@ -732,7 +774,7 @@ fn build(job: &JobFile, drawing: &Drawing) -> Result<(Document, Option<crate::ne
             None => None,
         };
         let view = transformed.as_deref().unwrap_or(contours.as_slice());
-        let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours: view, job };
+        let cut = Cut { op, tool, import: &import, tolerance: job.tolerance(), contours: view, contour_ids: ids, job };
         let mut paths = Vec::new();
         match op.kind() {
             OperationKind::Profile { side } => profile_paths(&mut paths, &cut, side, &mut freed_slugs)?,
@@ -957,19 +999,68 @@ fn swept_clearance(job: &JobFile, setup: &RotarySetup, stock_corners: Option<&[V
     index::index_safe_z(job.clearance(), radius, job.clearance())
 }
 
-fn select(drawing: &Drawing, layers: &[String], labels: Option<&[String]>) -> Vec<Contour> {
+fn select_for_op(job: &JobFile, op: &Operation, drawing: &Drawing, source_ids: &[String], labels: Option<&[String]>) -> Vec<Contour> {
+    select_for_op_with_ids(job, op, drawing, source_ids, labels).0
+}
+
+fn select_for_op_with_ids(
+    job: &JobFile,
+    op: &Operation,
+    drawing: &Drawing,
+    source_ids: &[String],
+    labels: Option<&[String]>,
+) -> (Vec<Contour>, Vec<String>) {
+    let selector = job.operation_extras(op.name()).and_then(|extra| extra.selector.as_ref());
     let mut contours = Vec::new();
+    let mut ids = Vec::new();
     for (index, item) in drawing.contours().iter().enumerate() {
-        // `labels`, when present, replaces the DXF layer for that contour.
-        let matches = match labels.and_then(|names| names.get(index)) {
-            Some(label) => layers.iter().any(|layer| layer == label),
-            None => layers.iter().any(|layer| layer == item.layer()),
+        let id = source_ids.get(index).cloned().unwrap_or_default();
+        let layer = match labels.and_then(|names| names.get(index)) {
+            Some(label) => label.as_str(),
+            None => item.layer(),
         };
-        if matches {
+        if selector_matches(selector, op.layers(), layer, &id) {
             contours.push(item.contour().clone());
+            ids.push(id);
         }
     }
-    contours
+    (contours, ids)
+}
+
+fn selector_matches(selector: Option<&OpSelector>, op_layers: &[String], layer: &str, contour_id: &str) -> bool {
+    match selector {
+        Some(OpSelector::Contours { ids, .. }) => ids.iter().any(|id| id == contour_id),
+        Some(OpSelector::Layers { layers, .. }) => layers.iter().any(|name| name == layer),
+        Some(OpSelector::Color { .. }) => false,
+        Some(OpSelector::Parts { .. }) => op_layers.is_empty() || op_layers.iter().any(|name| name == layer),
+        None => op_layers.iter().any(|name| name == layer),
+    }
+}
+
+fn contour_override<'a>(cut: &'a Cut<'_>, contour: &Contour) -> Option<&'a crate::job_parts::ContourOverride> {
+    let index = cut.contours.iter().position(|item| std::ptr::eq(item, contour))?;
+    let id = cut.contour_ids.get(index)?;
+    if id.is_empty() {
+        return None;
+    }
+    let default_part = cut.job.parts().first().map(|part| part.id.as_str()).unwrap_or("part");
+    cut.job.contour_overrides().iter().find(|item| item.contour == *id && (item.part.is_empty() || item.part == default_part))
+}
+
+fn profile_side_for(cut: &Cut<'_>, side: JobProfileSide, contour: &Contour) -> Result<JobProfileSide, CliError> {
+    match contour_override(cut, contour).and_then(|item| item.side.as_deref()) {
+        Some(text) => jobfile::parse_job_profile_side(text).map_err(|err| op_err(cut.op, err)),
+        None => Ok(side),
+    }
+}
+
+fn cut_direction_for(cut: &Cut<'_>, contour: &Contour) -> Result<campanion_path::CutDirection, CliError> {
+    match contour_override(cut, contour).and_then(|item| item.direction.as_deref()) {
+        Some("climb" | "auto") => Ok(campanion_path::CutDirection::Climb),
+        Some("conventional") => Ok(campanion_path::CutDirection::Conventional),
+        Some(other) => Err(op_err(cut.op, format!("unknown direction `{other}`"))),
+        None => Ok(cut.op.cut_direction()),
+    }
 }
 
 /// STEP face export puts every contour on DXF layer "0". Depth is how many other contours
@@ -1132,7 +1223,7 @@ fn link_wire_pass(
     let mut features = Vec::with_capacity(cut.contours.len());
     for contour in cut.contours {
         let side = resolve_profile_side(cut, side, contour)?;
-        let mut op = ProfileOp::new(tool, cut.op.compensation(), side, cut.op.cut_direction())
+        let mut op = ProfileOp::new(tool, cut.op.compensation(), side, cut_direction_for(cut, contour)?)
             .z(0.0)
             .heights(0.0, 0.0)
             .lead_in(lead)
@@ -1270,6 +1361,7 @@ fn link_profile(
 }
 
 fn resolve_profile_side(cut: &Cut<'_>, side: JobProfileSide, contour: &Contour) -> Result<ProfileSide, CliError> {
+    let side = profile_side_for(cut, side, contour)?;
     match side.fixed() {
         Some(side) => Ok(side),
         None => auto_profile_side(cut, contour),
@@ -1505,13 +1597,16 @@ fn resolved_leads(cut: &Cut<'_>, contour: &Contour) -> Result<(Lead, Lead), CliE
         PathTool::Kerf { width } => default_kerf_lead(width).map_err(|err| op_err(cut.op, err))?,
         PathTool::Diameter { .. } => Lead::None,
     };
-    let lead_in = cut.op.lead_in().unwrap_or(fallback);
+    let lead_in = match contour_override(cut, contour).and_then(|item| item.lead_in.as_ref()) {
+        Some(value) => crate::job::parse_lead(Some(value)).map_err(|err| op_err(cut.op, err))?,
+        None => cut.op.lead_in().unwrap_or(fallback),
+    };
     let lead_out = cut.op.lead_out().unwrap_or(fallback);
     if matches!(lead_in, Lead::None) && matches!(lead_out, Lead::None) {
         return Ok((lead_in, lead_out));
     }
     let width = tool_radius(cut)? * 2.0;
-    let waste_left = matches!(cut.op.cut_direction(), CutDirection::Climb);
+    let waste_left = matches!(cut_direction_for(cut, contour)?, CutDirection::Climb);
     fit_leads(contour, lead_in, lead_out, waste_left, width, &cut.tolerance).map_err(|err| op_err(cut.op, err))
 }
 
@@ -1523,7 +1618,7 @@ fn depth_with_leads(cut: &Cut<'_>, contour: &Contour, total: f64, step_down: f64
     let retract = retract_z(cut.job);
     let mut moves = Vec::new();
     for z in depth_levels(cut.op, total, step_down)? {
-        let mut op = ProfileOp::new(cut.tool.path_tool(), cut.op.compensation(), cut_side(cut.op), cut.op.cut_direction())
+        let mut op = ProfileOp::new(cut.tool.path_tool(), cut.op.compensation(), cut_side(cut.op), cut_direction_for(cut, contour)?)
             .z(z)
             .heights(clearance, retract)
             .lead_in(lead_in)

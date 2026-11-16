@@ -7,20 +7,33 @@ use crate::{Drawing, ImportedContour, Result, invalid};
 /// Rotate `drawing` about its bounding-box centre by `rotate_deg` (counter-clockwise),
 /// then translate by `(x, y)` millimetres. A zero placement returns a clone.
 pub fn place_drawing(drawing: &Drawing, x: f64, y: f64, rotate_deg: f64, tolerance: &Tolerance) -> Result<Drawing> {
-    if !x.is_finite() || !y.is_finite() || !rotate_deg.is_finite() {
+    place_with(drawing, x, y, rotate_deg, false, 1.0, tolerance)
+}
+
+/// Place a drawing: scale and optional mirror about the bounds centre, then rotate
+/// about that centre, then translate by `(x, y)` millimetres.
+///
+/// `mirror` flips X about the centre. `scale` must be finite and greater than zero.
+/// A placement that does not move the drawing returns a clone.
+pub fn place_with(drawing: &Drawing, x: f64, y: f64, rotate_deg: f64, mirror: bool, scale: f64, tolerance: &Tolerance) -> Result<Drawing> {
+    if !x.is_finite() || !y.is_finite() || !rotate_deg.is_finite() || !scale.is_finite() {
         return Err(invalid("placement must be finite"));
     }
-    if x == 0.0 && y == 0.0 && rotate_deg == 0.0 {
+    if scale <= 0.0 {
+        return Err(invalid("placement scale must be greater than zero"));
+    }
+    if x == 0.0 && y == 0.0 && rotate_deg == 0.0 && !mirror && scale == 1.0 {
         return Ok(drawing.clone());
     }
     let theta = rotate_deg.to_radians();
     let (sin, cos) = (theta.sin(), theta.cos());
     let (cx, cy) = bounds_centre(drawing).unwrap_or((0.0, 0.0));
+    let mx = if mirror { -1.0 } else { 1.0 };
     let mut contours = Vec::with_capacity(drawing.contours().len());
     for item in drawing.contours() {
         let mut segments = Vec::with_capacity(item.contour().segments().len());
         for segment in item.contour().segments() {
-            segments.push(map_segment(segment, cx, cy, cos, sin, theta, x, y)?);
+            segments.push(map_segment(segment, cx, cy, cos, sin, theta, x, y, mx, scale)?);
         }
         let contour = Contour::try_new(segments, item.contour().is_closed(), tolerance).map_err(crate::ImportError::from_geom)?;
         contours.push(ImportedContour::new(item.layer().to_string(), contour));
@@ -45,23 +58,27 @@ fn bounds_centre(drawing: &Drawing) -> Option<(f64, f64)> {
     if min_x.is_finite() && max_x.is_finite() { Some(((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)) } else { None }
 }
 
-fn map_segment(segment: &Segment, cx: f64, cy: f64, cos: f64, sin: f64, theta: f64, x: f64, y: f64) -> Result<Segment> {
+fn map_segment(segment: &Segment, cx: f64, cy: f64, cos: f64, sin: f64, theta: f64, x: f64, y: f64, mx: f64, scale: f64) -> Result<Segment> {
     match segment {
         Segment::Line(line) => {
-            let start = map_point(line.start(), cx, cy, cos, sin, x, y)?;
-            let end = map_point(line.end(), cx, cy, cos, sin, x, y)?;
+            let start = map_point(line.start(), cx, cy, cos, sin, x, y, mx, scale)?;
+            let end = map_point(line.end(), cx, cy, cos, sin, x, y, mx, scale)?;
             Line::new(start, end).map(Segment::Line).map_err(crate::ImportError::from_geom)
         }
         Segment::Arc(arc) => {
-            let center = map_point(arc.center(), cx, cy, cos, sin, x, y)?;
-            Arc::new(center, arc.radius(), arc.start_angle() + theta, arc.sweep()).map(Segment::Arc).map_err(crate::ImportError::from_geom)
+            let center = map_point(arc.center(), cx, cy, cos, sin, x, y, mx, scale)?;
+            // Mirror about the vertical axis through the centre reverses sweep and reflects
+            // the start angle; scale changes the radius.
+            let start = if mx < 0.0 { std::f64::consts::PI - arc.start_angle() } else { arc.start_angle() };
+            let sweep = arc.sweep() * mx;
+            Arc::new(center, arc.radius() * scale, start + theta, sweep).map(Segment::Arc).map_err(crate::ImportError::from_geom)
         }
     }
 }
 
-fn map_point(point: Point, cx: f64, cy: f64, cos: f64, sin: f64, x: f64, y: f64) -> Result<Point> {
-    let dx = point.x() - cx;
-    let dy = point.y() - cy;
+fn map_point(point: Point, cx: f64, cy: f64, cos: f64, sin: f64, x: f64, y: f64, mx: f64, scale: f64) -> Result<Point> {
+    let dx = (point.x() - cx) * mx * scale;
+    let dy = (point.y() - cy) * scale;
     Point::new(cx + dx * cos - dy * sin + x, cy + dx * sin + dy * cos + y).map_err(crate::ImportError::from_geom)
 }
 
@@ -69,7 +86,7 @@ fn map_point(point: Point, cx: f64, cy: f64, cos: f64, sin: f64, x: f64, y: f64)
 mod tests {
     use campanion_geom::{Contour, Line, Point, Segment, Tolerance};
 
-    use super::place_drawing;
+    use super::{place_drawing, place_with};
     use crate::{Drawing, ImportedContour};
 
     fn square() -> Drawing {
@@ -111,5 +128,25 @@ mod tests {
         let drawing = square();
         let placed = place_drawing(&drawing, 0.0, 0.0, 0.0, &Tolerance::default()).expect("id");
         assert_eq!(placed, drawing);
+    }
+
+    #[test]
+    fn scale_two_about_centre_keeps_the_centre() {
+        let placed = place_with(&square(), 0.0, 0.0, 0.0, false, 2.0, &Tolerance::default()).expect("scale");
+        let bounds = placed.contours()[0].contour().bounding_box().expect("bounds");
+        assert!((bounds.min().x() + 5.0).abs() < 1e-9, "{}", bounds.min().x());
+        assert!((bounds.min().y() + 5.0).abs() < 1e-9, "{}", bounds.min().y());
+        assert!((bounds.max().x() - 15.0).abs() < 1e-9);
+        assert!((bounds.max().y() - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mirror_flips_x_about_the_centre() {
+        let placed = place_with(&square(), 0.0, 0.0, 0.0, true, 1.0, &Tolerance::default()).expect("mirror");
+        let bounds = placed.contours()[0].contour().bounding_box().expect("bounds");
+        assert!((bounds.min().x() - 0.0).abs() < 1e-9);
+        assert!((bounds.max().x() - 10.0).abs() < 1e-9);
+        assert!((bounds.min().y() - 0.0).abs() < 1e-9);
+        assert!((bounds.max().y() - 10.0).abs() < 1e-9);
     }
 }
