@@ -4,6 +4,7 @@
 //! `run` loads a `campanion-job/1` or `campanion-job/2` file, imports its source, and writes toolpaths.
 //! `lathe` loads a `campanion-lathe/1` file and writes turning toolpaths.
 //! `post` writes a dialect for an IR file. `posts` lists the built-in posts.
+//! `resin` slices an STL into a `.pm7m` for the Anycubic Photon Mono M7 Max; `resin-info` checks one.
 //! `audit` re-checks a finished G-code file against a post's rules.
 //! `verify` reports motion and process problems in an IR file, and can check an STL mesh for
 //! gouges. `view` opens the toolpath preview
@@ -31,6 +32,7 @@ mod jobfile;
 mod post;
 mod raster;
 mod report;
+mod resin;
 mod rotary;
 mod rough;
 // Public wrappers such as `plan_loaded_job` stay for the GUI and tests.
@@ -79,6 +81,9 @@ Usage:
   campanion post IR.json --post ID|FILE.json [-o OUT]
   campanion posts
   campanion audit FILE.nc --post ID|FILE.json
+  campanion resin MODEL.stl -o OUT.pm7m [--params-from SAMPLE.pm7m] [--layer-height MM] [--bottom-layers N] [--bottom-exposure S] [--exposure S]
+                  [--bottom-lift-height MM] [--bottom-lift-speed V] [--lift-height MM] [--lift-speed V] [--resin-name NAME] [--keep-xy]
+  campanion resin-info FILE.pm7m
   campanion verify FILE [--mesh PART.stl [--tool ball:3|flat:3|bull:3,1]]
   campanion view IR.json
   campanion gui [FILE]
@@ -128,6 +133,15 @@ posts   List built-in post ids with their names and descriptions.
 audit   Re-audit a finished G-code file. --post is an id or a file ending in .json, same as post.
         The status is 1 when the file is refused, including S above 0 in a file that records
         that power was not set.
+resin   Slice an STL into layer bitmaps and write a .pm7m for the Anycubic Photon Mono M7 Max (6480 x 3600, 297.5 x 164 mm).
+        NOT printer-tested. No exposure, lift or layer value has a default: give each flag, or --params-from an
+        existing .pm7m (for example a slicer export that prints well) to take them from it; flags override it.
+        Bottom layers use the --bottom-* values, the rest use --exposure, --lift-height and --lift-speed.
+        The model is centred on the plate with its lowest point at the plate (--keep-xy uses the STL X/Y as mm
+        from the plate centre). +X is image right and +Y is image up. A model that does not fit is refused.
+        No supports or raft are added, and pixels are fully on or off (no anti-aliasing yet).
+        The finished file is read back before it is written.
+resin-info  Print the machine, layer count, height and layer settings of a .pm7m, after checking every layer image.
 verify  Verify an IR JSON file and print a report. The status is 1 when the report has errors.
         --mesh checks cutting moves using IR tool shapes. --tool overrides all cutters and needs --mesh.
         The tool is a radius in millimetres: ball:3, flat:3 or bull:3,1 (bull corner after the comma).
@@ -195,6 +209,8 @@ pub fn try_main() -> Result<ExitCode, CliError> {
         name if name == "post" => post::post_command(rest),
         name if name == "posts" => post::posts_command(rest),
         name if name == "audit" => post::audit_command(rest),
+        name if name == "resin" => resin::resin(rest),
+        name if name == "resin-info" => resin::resin_info(rest),
         name if name == "verify" => verify(rest),
         name if name == "view" => view(rest),
         name if name == "gui" => gui(rest),

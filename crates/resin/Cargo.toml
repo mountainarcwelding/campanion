@@ -1,0 +1,21 @@
+[package]
+name = "campanion-resin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+campanion-mesh.workspace = true
+# MIT OR Apache-2.0. Preview thumbnails.
+png = "0.18"
+# MIT OR Zlib OR Apache-2.0. Deflate for the .pm7m zip container.
+miniz_oxide = "0.8"

@@ -23,6 +23,7 @@ campanion-geom.workspace = true
 campanion-import.workspace = true
 campanion-ir.workspace = true
 campanion-mesh.workspace = true
+campanion-resin.workspace = true
 campanion-path.workspace = true
 campanion-post.workspace = true
 campanion-turn.workspace = true
