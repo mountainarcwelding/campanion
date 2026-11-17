@@ -168,11 +168,11 @@ campanion resin part.stl -o part.pm7m --params-from sample.pm7m --supports --sup
 campanion resin-info part.pm7m
 ```
 
-`campanion supports` writes a watertight STL with a chamfered raft and pillar supports. The raft's
-outer edge slopes inward going up (`thickness / tan(angle)`, angle from the plate) so a scraper can
-get under it. Every support value is required: pass each flag, or `--support-params FILE.json`
-(flags override it). `--part-lift` is the gap from the raft top to the part; it is not the same as
-resin's `--lift-height` (the printer's peel move).
+`campanion supports` writes a watertight STL with a chamfered raft and pillar supports. The raft is
+wider on the part side and narrower on the bed (`thickness / tan(angle)`, angle from the plate), so
+it forms an undercut a scraper can get under. Every support value is required: pass each flag, or
+`--support-params FILE.json` (flags override it). `--part-lift` is the gap from the raft top to the
+part; it is not the same as resin's `--lift-height` (the printer's peel move).
 
 `campanion resin` slices an STL into one bitmap per layer and writes a `.pm7m` with the machine name
 `Anycubic Photon Mono M7 Max`. No exposure, lift or layer value has a default: pass each flag, or

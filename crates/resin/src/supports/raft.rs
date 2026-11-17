@@ -11,17 +11,15 @@ pub struct RaftOutlines {
     pub chamfer_inset_mm: f64,
 }
 
-/// Convex hull of XY points, then an outward margin, optional corner cut-back, and an inward
-/// chamfer inset of `thickness / tan(angle)` for the top outline.
+/// Convex hull of XY points, then an outward margin and optional corner cut-back for the top
+/// outline (the part side). The bottom outline (the bed side) is inset by `thickness / tan(angle)`,
+/// so the raft is wider on top and forms an undercut a scraper can get under.
 pub fn raft_outlines(points: &[(f64, f64)], params: &SupportParams) -> Result<RaftOutlines> {
     let hull = convex_hull(points)?;
-    let bottom_full = offset_convex(&hull, params.raft_margin_mm)?;
-    let bottom = corner_relief(&bottom_full, params.raft_corner_relief_mm)?;
+    let top_full = offset_convex(&hull, params.raft_margin_mm)?;
+    let top = corner_relief(&top_full, params.raft_corner_relief_mm)?;
     let inset = params.chamfer_inset_mm()?;
-    let top = offset_convex(&bottom, -inset)?;
-    if signed_area(&top) <= 0.0 {
-        return Err(ResinError::invalid("raft chamfer inset removes the top face; use a thicker margin, a thinner raft, or a steeper chamfer angle"));
-    }
+    let bottom = offset_convex(&top, -inset)?;
     Ok(RaftOutlines { bottom, top, chamfer_inset_mm: inset })
 }
 
@@ -144,10 +142,41 @@ pub fn offset_convex(points: &[(f64, f64)], distance: f64) -> Result<Vec<(f64, f
         }
         out.push((ox, oy));
     }
-    if distance < 0.0 && signed_area(&out) <= 0.0 {
-        return Err(ResinError::invalid("raft chamfer inset removes the top face; use a thicker margin, a thinner raft, or a steeper chamfer angle"));
+    if distance < 0.0 && inset_collapsed(points, &out) {
+        return Err(ResinError::invalid(
+            "raft chamfer inset collapses the bottom face; use a thicker margin, a thinner raft, or a steeper chamfer angle",
+        ));
     }
     Ok(out)
+}
+
+/// An inward offset has collapsed when its area is not smaller and positive, or a vertex has
+/// crossed outside the original (the usual result of insetting past the middle).
+fn inset_collapsed(outer: &[(f64, f64)], inner: &[(f64, f64)]) -> bool {
+    let inner_area = signed_area(inner);
+    let outer_area = signed_area(outer);
+    if inner_area <= 0.0 || inner_area >= outer_area {
+        return true;
+    }
+    inner.iter().any(|&p| !inside_convex(outer, p))
+}
+
+/// Strict interior test for a counter-clockwise convex ring: the point is to the left of every edge.
+fn inside_convex(poly: &[(f64, f64)], point: (f64, f64)) -> bool {
+    let n = poly.len();
+    for i in 0..n {
+        let Some(&o) = poly.get(i) else {
+            return false;
+        };
+        let Some(&a) = poly.get((i + 1) % n) else {
+            return false;
+        };
+        let cross = (a.0 - o.0) * (point.1 - o.1) - (a.1 - o.1) * (point.0 - o.0);
+        if cross <= 1e-9 {
+            return false;
+        }
+    }
+    true
 }
 
 /// Cut each convex corner back by `relief` millimetres along both edges. `0` leaves the outline unchanged.
@@ -197,25 +226,27 @@ pub fn corner_relief(points: &[(f64, f64)], relief: f64) -> Result<Vec<(f64, f64
     Ok(out)
 }
 
-/// Perpendicular distance from each top edge to the corresponding bottom edge. For a uniform inset these are equal.
-pub fn edge_insets(bottom: &[(f64, f64)], top: &[(f64, f64)]) -> Result<Vec<f64>> {
-    if bottom.len() != top.len() || bottom.len() < 3 {
+/// Perpendicular inset of each `inner` edge from the corresponding `outer` edge.
+///
+/// Positive when `inner` sits inside a counter-clockwise `outer`. For a uniform chamfer these are equal.
+pub fn edge_insets(outer: &[(f64, f64)], inner: &[(f64, f64)]) -> Result<Vec<f64>> {
+    if outer.len() != inner.len() || outer.len() < 3 {
         return Err(ResinError::invalid("outlines must have the same vertex count"));
     }
-    let n = bottom.len();
+    let n = outer.len();
     let mut insets = Vec::with_capacity(n);
     for i in 0..n {
         let j = (i + 1) % n;
-        let (Some(&b0), Some(&b1), Some(&t0)) = (bottom.get(i), bottom.get(j), top.get(i)) else {
+        let (Some(&o0), Some(&o1), Some(&i0)) = (outer.get(i), outer.get(j), inner.get(i)) else {
             return Err(ResinError::invalid("outline is short"));
         };
-        let (dx, dy) = (b1.0 - b0.0, b1.1 - b0.1);
+        let (dx, dy) = (o1.0 - o0.0, o1.1 - o0.1);
         let len = dx.hypot(dy);
         if !len.is_finite() || len <= 0.0 {
             return Err(ResinError::invalid("raft outline has a zero-length edge"));
         }
-        // Signed distance of t0 from the bottom edge, using the inward (left) normal of a CCW ring: (-dy, dx).
-        let dist = ((t0.0 - b0.0) * (-dy) + (t0.1 - b0.1) * dx) / len;
+        // Signed distance of i0 from the outer edge, using the inward (left) normal of a CCW ring: (-dy, dx).
+        let dist = ((i0.0 - o0.0) * (-dy) + (i0.1 - o0.1) * dx) / len;
         insets.push(dist);
     }
     Ok(insets)

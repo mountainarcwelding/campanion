@@ -150,9 +150,10 @@ resin   Slice an STL into layer bitmaps and write a .pm7m for the Anycubic Photo
         (flags or --support-params FILE.json); nothing is assumed. --supports-out writes the supported STL.
 supports    Write a watertight STL with a chamfered raft and vertical pillar supports under overhangs.
         NOT printer-tested. CAMpanion is primarily command-line driven; there is no support-editing GUI yet.
-        The raft's bottom outline is the part footprint plus --raft-margin; the top is inset by
-        thickness / tan(--raft-chamfer-angle), measured from the plate, so a scraper can get under the edge.
-        --raft-corner-relief cuts each corner back along both edges (0 keeps sharp corners).
+        The raft's top outline is the part footprint plus --raft-margin; the bottom (bed side) is inset by
+        thickness / tan(--raft-chamfer-angle), measured from the plate, so the raft is wider on the part
+        side and forms an undercut a scraper can get under. An inset that collapses the bottom face is refused.
+        --raft-corner-relief cuts each top corner back along both edges (0 keeps sharp corners).
         --overhang-angle is measured from vertical (0 supports every downward face; 90 only faces parallel to the plate).
         --part-lift is the gap from the raft top to the lowest point of the part. Units are millimetres.
         No numeric value has a default: give every flag or --support-params FILE.json (flags override it).

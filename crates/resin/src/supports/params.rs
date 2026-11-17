@@ -25,10 +25,10 @@ pub const REQUIRED_FLAGS: &[&str] = &[
 pub struct SupportParams {
     /// Chamfer angle of the raft perimeter, measured from the build plate (horizontal). Exclusive of 0 and 90.
     ///
-    /// The top outline is inset from the bottom outline by `thickness / tan(angle)`.
+    /// The bottom outline (bed side) is inset from the top outline by `thickness / tan(angle)`, forming an undercut.
     pub raft_chamfer_angle_deg: f64,
     pub raft_thickness_mm: f64,
-    /// Outward offset of the raft's bottom outline around the part (and support) footprint.
+    /// Outward offset of the raft's top outline (the part side) around the part (and support) footprint.
     pub raft_margin_mm: f64,
     /// Length, in millimetres, by which each raft corner is cut back along both edges. `0` keeps sharp corners.
     pub raft_corner_relief_mm: f64,
@@ -123,7 +123,7 @@ impl SupportParamsOverlay {
 }
 
 impl SupportParams {
-    /// Horizontal inset of the raft top outline relative to the bottom, `thickness / tan(angle)`.
+    /// Horizontal inset of the raft bottom outline (bed side) relative to the top, `thickness / tan(angle)`.
     pub fn chamfer_inset_mm(&self) -> Result<f64> {
         let angle = self.raft_chamfer_angle_deg;
         if !angle.is_finite() || angle <= 0.0 || angle >= 90.0 {

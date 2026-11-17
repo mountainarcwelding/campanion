@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## 0.22.1 — 2026-11-17
+
+The chamfered raft is inverted so the bed contact is smaller than the top, forming an undercut a
+scraper can get under. **Not printer-tested and not physically tested.** CAMpanion is still
+primarily command-line driven; this is a CLI fix and the GUI is a work in progress.
+
+### Fixed
+
+- The raft's top outline is now the part footprint plus `--raft-margin`, and the bottom (bed side)
+  is inset by `thickness / tan(chamfer angle)`, with the angle still measured from the plate.
+  v0.22.0 put the slope the other way (wide on the bed, narrow on the part). An inset that would
+  collapse the bottom face is refused. Corner relief is still applied to the wide top face.
+
 ## 0.22.0 — 2026-11-17
 
 Resin support generation with a chamfered raft, so a scraper can get under the base to take the
