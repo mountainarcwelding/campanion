@@ -39,11 +39,12 @@ campanion resin-info FILE.pm7m
   pillar supports. Every support length and angle is required, from a flag or from
   `--support-params FILE.json`; a flag wins over the file. Units are millimetres. Nothing is
   assumed.
-- The raft sits on z = 0. Its bottom outline is the convex hull of the part and the support
-  contacts, grown by `--raft-margin`. The top outline, at `--raft-thickness`, is inset by
+- The raft sits on z = 0. Its top outline (the part side) is the convex hull of the part and the
+  support contacts, grown by `--raft-margin`. The bottom outline (the bed side) is inset by
   `thickness / tan(--raft-chamfer-angle)`. The angle is measured from the plate (horizontal), so
-  the edge slopes inward going up and a scraper can get under it. `--raft-corner-relief` cuts each
-  corner back along both edges; `0` keeps sharp corners.
+  the raft is narrower on the bed and forms an undercut a scraper can get under. An inset that
+  would collapse the bottom face is refused. `--raft-corner-relief` cuts each top corner back
+  along both edges; `0` keeps sharp corners.
 - `--part-lift` is the gap from the top of the raft to the lowest point of the part. It is not
   the same as `--lift-height` on `campanion resin`, which is the printer's peel move.
 - A downward-facing triangle gets a support when its angle from vertical is at or above
@@ -54,7 +55,7 @@ campanion resin-info FILE.pm7m
   `--points-only` skips auto placement.
 - The supported STL is a multi-body mesh: the part, the raft, and each pillar are separately
   watertight. The slicer fills with non-zero winding, so bodies that touch merge in the layer
-  images. `--preview` writes a shaded 3/4 view (the raft chamfer is meant to be visible).
+  images. `--preview` writes a shaded 3/4 view from a low side angle (the raft undercut is meant to be visible).
 
 `--support-params` is a JSON object with these keys (unknown keys are refused):
 

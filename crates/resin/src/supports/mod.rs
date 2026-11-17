@@ -116,7 +116,7 @@ fn pillar_solid(point: &SupportPoint, params: &SupportParams, raft_top: f64) -> 
     profile_solid(point.x, point.y, &rings, RING_SIDES)
 }
 
-/// Shaded 3/4 view of the supported part, from a low angle so the raft chamfer is visible.
+/// Shaded 3/4 view of the supported part, from a low side angle so the raft undercut is visible.
 pub fn render_supported_png(result: &SupportedMesh, width: u32, height: u32) -> Result<Vec<u8>> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err(ResinError::invalid("bad preview size"));
@@ -125,8 +125,8 @@ pub fn render_supported_png(result: &SupportedMesh, width: u32, height: u32) -> 
     let (min, max) = (bounds.min(), bounds.max());
     let center = Vec3::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5);
     let span = (max.x - min.x).max(max.y - min.y).max(max.z - min.z).max(1.0);
-    // Look from the front-right, slightly above the plate, so the sloped raft edge reads clearly.
-    let look = Vec3::new(-1.2, 1.45, -0.42);
+    // Look from a low side angle, slightly upward, so the wider top of the raft reads as an undercut.
+    let look = Vec3::new(-1.35, 1.7, 0.22);
     let look = look.normalized().ok_or_else(|| ResinError::invalid("preview camera is degenerate"))?;
     let world_up = Vec3::new(0.0, 0.0, 1.0);
     let right = look.cross(world_up).normalized().ok_or_else(|| ResinError::invalid("preview camera is degenerate"))?;

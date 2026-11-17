@@ -46,22 +46,24 @@ fn chamfer_inset_matches_thickness_over_tan_angle() {
     let result = generate_supports(&part, &p, &[], true).expect("supports");
     let expected = p.raft_thickness_mm / p.raft_chamfer_angle_deg.to_radians().tan();
     assert!((result.outlines.chamfer_inset_mm - expected).abs() < 1e-12, "{} vs {expected}", result.outlines.chamfer_inset_mm);
-    let insets = edge_insets(&result.outlines.bottom, &result.outlines.top).expect("insets");
+    let insets = edge_insets(&result.outlines.top, &result.outlines.bottom).expect("insets");
     assert!(!insets.is_empty());
     for inset in &insets {
         assert!((inset - expected).abs() < 1e-9, "edge inset {inset} != {expected}");
     }
-    // Bottom is the full footprint; top is smaller. The part is 20 x 15, plus 3 mm margin on each side.
+    // Top is the full footprint; bottom (bed side) is smaller, forming an undercut.
+    // The part is 20 x 15, plus 3 mm margin on each side.
     let (bx, by): (Vec<f64>, Vec<f64>) = result.outlines.bottom.iter().cloned().unzip();
     let (tx, ty): (Vec<f64>, Vec<f64>) = result.outlines.top.iter().cloned().unzip();
     let bottom_w = bx.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - bx.iter().cloned().fold(f64::INFINITY, f64::min);
     let bottom_h = by.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - by.iter().cloned().fold(f64::INFINITY, f64::min);
     let top_w = tx.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - tx.iter().cloned().fold(f64::INFINITY, f64::min);
     let top_h = ty.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - ty.iter().cloned().fold(f64::INFINITY, f64::min);
-    assert!((bottom_w - 26.0).abs() < 1e-9, "bottom width {bottom_w}");
-    assert!((bottom_h - 21.0).abs() < 1e-9, "bottom height {bottom_h}");
-    assert!((bottom_w - top_w - 2.0 * expected).abs() < 1e-9, "width inset {bottom_w} {top_w}");
-    assert!((bottom_h - top_h - 2.0 * expected).abs() < 1e-9, "height inset {bottom_h} {top_h}");
+    assert!((top_w - 26.0).abs() < 1e-9, "top width {top_w}");
+    assert!((top_h - 21.0).abs() < 1e-9, "top height {top_h}");
+    assert!(bottom_w < top_w && bottom_h < top_h, "bed side must be smaller than the part side");
+    assert!((top_w - bottom_w - 2.0 * expected).abs() < 1e-9, "width inset {top_w} {bottom_w}");
+    assert!((top_h - bottom_h - 2.0 * expected).abs() < 1e-9, "height inset {top_h} {bottom_h}");
     let raft_bounds = result.raft.bounds().expect("raft bounds");
     assert!((raft_bounds.min().z).abs() < 1e-12);
     assert!((raft_bounds.max().z - p.raft_thickness_mm).abs() < 1e-9);
@@ -100,14 +102,24 @@ fn corner_relief_cuts_each_corner_back() {
     let part = box_mesh(Vec3::new(0.0, 0.0, 0.0), Vec3::new(20.0, 15.0, 4.0));
     let sharp = generate_supports(&part, &params(), &[], true).expect("sharp");
     let relieved = generate_supports(&part, &p, &[], true).expect("relieved");
-    assert_eq!(sharp.outlines.bottom.len(), 4);
+    assert_eq!(sharp.outlines.top.len(), 4);
+    assert_eq!(relieved.outlines.top.len(), 8);
     assert_eq!(relieved.outlines.bottom.len(), 8);
-    // A cut-back corner sits inward of the original sharp corner.
-    let sharp_corners = sharp.outlines.bottom.clone();
-    for &(x, y) in &relieved.outlines.bottom {
+    // Relief is applied to the wide top face; a cut-back corner sits inward of the sharp corner.
+    let sharp_corners = sharp.outlines.top.clone();
+    for &(x, y) in &relieved.outlines.top {
         let dist = sharp_corners.iter().map(|(sx, sy)| (x - sx).hypot(y - sy)).fold(f64::INFINITY, f64::min);
-        assert!(dist > 0.5, "relieved vertex ({x}, {y}) is too close to a sharp corner ({dist})");
+        assert!(dist > 0.5, "relieved top vertex ({x}, {y}) is too close to a sharp corner ({dist})");
     }
+    // The bed-side outline stays smaller than the relieved top.
+    let top_w = max_span(&relieved.outlines.top, 0);
+    let bot_w = max_span(&relieved.outlines.bottom, 0);
+    assert!(bot_w < top_w, "relieved raft must still be smaller on the bed side ({bot_w} vs {top_w})");
+}
+
+fn max_span(pts: &[(f64, f64)], axis: usize) -> f64 {
+    let xs: Vec<f64> = pts.iter().map(|p| if axis == 0 { p.0 } else { p.1 }).collect();
+    xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - xs.iter().cloned().fold(f64::INFINITY, f64::min)
 }
 
 #[test]
@@ -135,6 +147,15 @@ fn missing_parameters_and_bad_values_are_refused() {
     p.part_lift_mm = 1.0;
     let err = p.validate().expect_err("short lift");
     assert!(err.to_string().contains("part lift"), "{err}");
+
+    // A shallow chamfer on a thin footprint insets past the centre and must be refused.
+    p = params();
+    p.raft_margin_mm = 1.0;
+    p.raft_thickness_mm = 5.0;
+    p.raft_chamfer_angle_deg = 15.0;
+    let tiny = box_mesh(Vec3::new(0.0, 0.0, 0.0), Vec3::new(8.0, 8.0, 3.0));
+    let err = generate_supports(&tiny, &p, &[], true).expect_err("collapsed bottom");
+    assert!(err.to_string().contains("collapses the bottom face"), "{err}");
 }
 
 #[test]

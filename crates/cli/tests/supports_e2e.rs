@@ -88,6 +88,8 @@ fn writes_a_supported_stl_and_refuses_missing_params() {
     let out = tmp("supports_box_supported.stl");
     let preview = tmp("supports_box.png");
     box_stl(&stl, [0.0, 0.0, 0.0], [10.0, 8.0, 3.0]);
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&preview);
     let s = stl.to_str().expect("utf8");
     let o = out.to_str().expect("utf8");
     let p = preview.to_str().expect("utf8");
