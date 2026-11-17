@@ -1,17 +1,26 @@
 # Resin output: Anycubic Photon Mono M7 Max
 
-**Status: not printer-tested.** Nothing written by `campanion resin` has been printed. The
-format was derived from one file, so some fields are copied rather than understood. CAMpanion is
-primarily command-line driven; there is no resin GUI yet.
+**Status: not printer-tested.** Nothing written by `campanion resin` or `campanion supports` has
+been printed or physically tested. The format was derived from one file, so some fields are copied
+rather than understood. CAMpanion is primarily command-line driven; there is no resin GUI yet, and
+supports cannot be edited on screen.
 
 ## Commands
 
 ```
+campanion supports MODEL.stl -o OUT.stl [--support-params FILE.json]
+    [--raft-chamfer-angle DEG] [--raft-thickness MM] [--raft-margin MM]
+    [--raft-corner-relief MM] [--overhang-angle DEG] [--support-spacing MM]
+    [--tip-diameter MM] [--tip-length MM] [--pillar-diameter MM]
+    [--foot-diameter MM] [--foot-height MM] [--part-lift MM]
+    [--points FILE] [--points-only] [--preview FILE.png]
 campanion resin MODEL.stl -o OUT.pm7m [--params-from SAMPLE.pm7m]
     [--layer-height MM] [--bottom-layers N]
     [--bottom-exposure S] [--bottom-lift-height MM] [--bottom-lift-speed V]
     [--exposure S] [--lift-height MM] [--lift-speed V]
     [--resin-name NAME] [--keep-xy]
+    [--supports ...support flags or --support-params FILE.json...]
+    [--supports-out FILE.stl] [--preview FILE.png] [--points FILE] [--points-only]
 campanion resin-info FILE.pm7m
 ```
 
@@ -26,6 +35,34 @@ campanion resin-info FILE.pm7m
   its own support shells merges. A pixel is fully on (15) or off (0).
 - `resin-info` decodes every layer image and checks the layer counts and markers.
 - The finished file is read back before it is written.
+- `campanion supports` (and `campanion resin --supports`) adds a chamfered raft and vertical
+  pillar supports. Every support length and angle is required, from a flag or from
+  `--support-params FILE.json`; a flag wins over the file. Units are millimetres. Nothing is
+  assumed.
+- The raft sits on z = 0. Its bottom outline is the convex hull of the part and the support
+  contacts, grown by `--raft-margin`. The top outline, at `--raft-thickness`, is inset by
+  `thickness / tan(--raft-chamfer-angle)`. The angle is measured from the plate (horizontal), so
+  the edge slopes inward going up and a scraper can get under it. `--raft-corner-relief` cuts each
+  corner back along both edges; `0` keeps sharp corners.
+- `--part-lift` is the gap from the top of the raft to the lowest point of the part. It is not
+  the same as `--lift-height` on `campanion resin`, which is the printer's peel move.
+- A downward-facing triangle gets a support when its angle from vertical is at or above
+  `--overhang-angle`. `0` includes every downward face; `90` includes only faces parallel to the
+  plate. Pillars go straight down: a foot of `--foot-diameter` and `--foot-height`, a shaft of
+  `--pillar-diameter`, and a tip of `--tip-diameter` and `--tip-length`. Spacing is
+  `--support-spacing`. `--points FILE` is lines of `x y` or `x y z` (comments start with `#`);
+  `--points-only` skips auto placement.
+- The supported STL is a multi-body mesh: the part, the raft, and each pillar are separately
+  watertight. The slicer fills with non-zero winding, so bodies that touch merge in the layer
+  images. `--preview` writes a shaded 3/4 view (the raft chamfer is meant to be visible).
+
+`--support-params` is a JSON object with these keys (unknown keys are refused):
+
+```
+raft_chamfer_angle_deg, raft_thickness_mm, raft_margin_mm, raft_corner_relief_mm,
+overhang_angle_deg, support_spacing_mm, tip_diameter_mm, tip_length_mm,
+pillar_diameter_mm, foot_diameter_mm, foot_height_mm, part_lift_mm
+```
 
 ## What was derived from the sample
 
@@ -73,7 +110,9 @@ The sample is not committed (it is a user file). Without the variable, those tes
 - **`print_info.json`**: `print_time` is the total exposure time only, a lower bound that leaves out lift
   and settle time; `cost` is 0; `volume` is the solid volume in mL.
 - Previews are a simple shaded top view.
-- Not done: anti-aliasing, supports and rafts, STL units other than millimetres, other Anycubic models,
-  other resin printers, wait-before-lift and wait-after-lift times, per-layer overrides.
+- Not done: anti-aliasing, painted no-support zones, per-region support settings, branching tree
+  supports, scaffolding, a GUI for placing or editing supports, STL units other than millimetres,
+  other Anycubic models, other resin printers, wait-before-lift and wait-after-lift times,
+  per-layer overrides.
 - No UVtools read-back was done (it was not installed on the build machine); the read-back is
   CAMpanion's own reader.

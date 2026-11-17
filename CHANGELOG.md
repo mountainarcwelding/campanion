@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## 0.22.0 — 2026-11-17
+
+Resin support generation with a chamfered raft, so a scraper can get under the base to take the
+part off the plate. **Not printer-tested and not physically tested:** the geometry was checked by
+unit tests, a slice round-trip, and previews, and has not been printed. CAMpanion is still
+primarily command-line driven; this is a CLI feature and the GUI is a work in progress. There is
+no on-screen support editor yet.
+
+### Added
+
+- `campanion supports MODEL.stl -o OUT.stl` writes a watertight multi-body STL: the part is lifted
+  off the plate, a raft sits under it, and vertical pillar supports reach downward-facing overhangs.
+  The raft's bottom outline is the footprint plus a user-set margin; the top is inset by
+  `thickness / tan(chamfer angle)`, with the angle measured from the plate, so the edge slopes
+  inward going up. Optional corner relief cuts each corner back along both edges (`0` keeps sharp
+  corners).
+- Pillars are a foot, a straight shaft, and a tapered tip. Overhangs are faces whose angle from
+  vertical is at or above `--overhang-angle`. `--points FILE` adds explicit `x y` or `x y z`
+  contacts (millimetres); `--points-only` uses only those points. `--preview FILE.png` writes a
+  shaded 3/4 view.
+- `campanion resin --supports` generates the same supports and slices them to `.pm7m` in one step.
+  `--supports-out` writes the supported STL as well.
+- Every support length and angle is required, from a flag or from `--support-params FILE.json`
+  (flags override it). Nothing is assumed. `--part-lift` is the gap from the raft top to the
+  lowest point of the part, and is a different flag from resin's `--lift-height` (the printer's
+  peel move). Units are millimetres.
+
+### Deferred
+
+- Painted no-support zones, per-region settings, branching tree supports, scaffolding, and GUI
+  editing of supports are not in this release. Anti-aliasing is still not implemented.
+
 ## 0.21.0 — 2026-11-17
 
 Resin MSLA output for the Anycubic Photon Mono M7 Max. **Not printer-tested:** the output was checked

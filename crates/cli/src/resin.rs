@@ -2,6 +2,8 @@
 //!
 //! No exposure, lift or layer value has a default. Each one comes from a flag or from
 //! `--params-from` (an existing `.pm7m`, such as a slicer export that is known to print).
+//! Pass `--supports` (and the support flags, or `--support-params`) to generate a chamfered
+//! raft and pillar supports before slicing.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -13,6 +15,7 @@ use campanion_resin::{Placement, build_pm7m, pw0, read_pm7m};
 
 use crate::error::CliError;
 use crate::run::read_bytes;
+use crate::supports::{self, SupportCli};
 
 const MAX_PM7M_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
@@ -31,6 +34,7 @@ struct Args {
     bottom_lift_speed: Option<f64>,
     lift_height: Option<f64>,
     lift_speed: Option<f64>,
+    support: SupportCli,
 }
 
 fn value<'a>(args: &'a [OsString], index: &mut usize, flag: &str) -> Result<&'a str, CliError> {
@@ -93,12 +97,16 @@ fn parse(args: &[OsString]) -> Result<Args, CliError> {
                 dup(slot.is_some())?;
                 *slot = Some(v);
             }
-            f if f.starts_with('-') => return Err(CliError::usage(format!("unknown argument `{f}`"))),
-            _ => {
-                if a.model.is_some() {
+            other => {
+                if crate::supports::apply_flag(other, args, &mut i, &mut a.support)? {
+                    // support flag
+                } else if other.starts_with('-') {
+                    return Err(CliError::usage(format!("unknown argument `{other}`")));
+                } else if a.model.is_some() {
                     return Err(CliError::usage("resin needs exactly one STL file"));
+                } else {
+                    a.model = Some(PathBuf::from(other));
                 }
-                a.model = Some(PathBuf::from(flag));
             }
         }
     }
@@ -175,6 +183,18 @@ pub(crate) fn resin(args: &[OsString]) -> Result<ExitCode, CliError> {
     }
     let bytes = read_bytes(&model)?;
     let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
+    let (mesh, support_report) = if a.support.enabled {
+        let (generated, params) = supports::generate(&model, &a.support)?;
+        if a.support.supports_out.as_ref() == Some(&out) || a.support.preview.as_ref() == Some(&out) {
+            return Err(CliError::usage("--supports-out and --preview must differ from -o"));
+        }
+        supports::write_outputs(&generated, &params, a.support.supports_out.as_deref(), a.support.preview.as_deref())?;
+        (generated.mesh, Some(generated.points.len()))
+    } else if a.support.points_only || a.support.support_params.is_some() || a.support.points.is_some() {
+        return Err(CliError::usage("support flags need --supports"));
+    } else {
+        (mesh, None)
+    };
     let placement = if a.keep_xy { Placement::Keep } else { Placement::Center };
     let (data, report) = build_pm7m(&mesh, &M7_MAX, &settings, placement).map_err(|err| CliError::run(err.to_string()))?;
     // Read the file back before it is written.
@@ -198,7 +218,11 @@ pub(crate) fn resin(args: &[OsString]) -> Result<ExitCode, CliError> {
     if report.empty_layers > 0 {
         writeln!(err, "warning: {} layers have no exposed pixels (a gap in the model)", report.empty_layers)?;
     }
-    writeln!(err, "the model sits on the plate with no supports and no raft; CAMpanion does not add any")?;
+    if let Some(count) = support_report {
+        writeln!(err, "sliced with a chamfered raft and {count} supports")?;
+    } else {
+        writeln!(err, "the model sits on the plate with no supports and no raft; pass --supports to add them")?;
+    }
     writeln!(err, "NOT printer-tested: check the file on the printer screen and print a test before a real job")?;
     Ok(ExitCode::SUCCESS)
 }

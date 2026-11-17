@@ -2,7 +2,7 @@
 //!
 //! CAMpanion slices a triangle mesh into one bitmap per layer, run-length encodes each bitmap as a
 //! `.pw0Img` layer image, and writes a `.pm7m` file (a zip container) in the layout of a sample
-//! export that Ryan supplied. The format was derived only from that one sample file, so every
+//! export. The format was derived only from that one sample file, so every
 //! field the sample does not explain is copied as a constant and listed in `docs/resin.md`.
 //!
 //! **Not printer-tested.** Nothing here has been printed yet.
@@ -21,9 +21,14 @@ pub mod pm7m;
 pub mod preview;
 pub mod pw0;
 pub mod slice;
+pub mod supports;
 pub mod zip;
 
 pub use build::{BuildReport, build_pm7m};
 pub use error::ResinError;
 pub use pm7m::{LayerParams, LayerRecord, M7_MAX, MachineSpec, Pm7mFile, ResinSettings, WriteInput, make_previews, read_pm7m, write_pm7m};
 pub use slice::{Placement, PreparedMesh, SliceGrid, Span, encode_spans};
+pub use supports::{
+    InputPoint, REQUIRED_FLAGS, SupportParams, SupportParamsOverlay, SupportPoint, SupportedMesh, generate_supports, is_watertight,
+    parse_points_text, parse_support_params_json, render_supported_png,
+};
