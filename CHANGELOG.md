@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## 0.21.0 — 2026-11-17
+
+Resin MSLA output for the Anycubic Photon Mono M7 Max. **Not printer-tested:** the output was checked
+against one slicer export and by reading it back, and has not been printed. CAMpanion is still
+primarily command-line driven; this is a CLI feature and the GUI is a work in progress.
+
+### Added
+
+- `campanion resin MODEL.stl -o OUT.pm7m` slices an STL into 6480 x 3600 layer bitmaps and writes a
+  `.pm7m` (machine name `Anycubic Photon Mono M7 Max`). No exposure, lift or layer value has a default:
+  each comes from a flag or from `--params-from` an existing `.pm7m`. The result is read back before it is
+  written. No supports, rafts or anti-aliasing yet.
+- `campanion resin-info FILE.pm7m` checks a `.pm7m` and prints its layer settings.
+- New crate `campanion-resin`: the `.pw0Img` run-length codec, a mesh slicer (non-zero winding fill), the
+  `.pm7m` writer and reader, a small zip reader/writer, and thumbnails. It adds the `png` and
+  `miniz_oxide` dependencies.
+- Format notes, assumptions and gaps are in `docs/resin.md`. Against the sample, all 592 layer images
+  re-encode byte for byte and `scene.slice` is rebuilt byte for byte.
+
 ## 0.20.0 — 2026-11-15
 
 Backend data model for the approved GUI v0.4 spec: `campanion-machine/2`,
