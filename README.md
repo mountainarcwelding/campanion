@@ -156,22 +156,29 @@ only checks that the motion matches the toolpath.
 
 ## Resin output (Anycubic Photon Mono M7 Max)
 
-**Not printer-tested.** The resin output has been checked against one exported sample file and
-by reading its own output back, but nothing has been printed yet. Treat the first print as a
-test. CAMpanion is primarily command-line driven; resin output is a CLI command, not a GUI feature yet.
+**Not printer-tested.** The resin output and the supports it can add have been checked against one
+exported sample file, by reading output back, and by geometry tests, but nothing has been printed
+or physically tested yet. Treat the first print as a test. CAMpanion is primarily command-line
+driven; resin output and support generation are CLI commands, not GUI features yet.
 
 ```
-campanion resin part.stl -o part.pm7m --params-from sample.pm7m
-campanion resin part.stl -o part.pm7m --layer-height 0.05 --bottom-layers 5 --bottom-exposure 30 \
-    --bottom-lift-height 4 --bottom-lift-speed 2 --exposure 2 --lift-height 8 --lift-speed 6
+campanion supports part.stl -o part_supported.stl --support-params supports.json --preview preview.png
+campanion resin part_supported.stl -o part.pm7m --params-from sample.pm7m
+campanion resin part.stl -o part.pm7m --params-from sample.pm7m --supports --support-params supports.json
 campanion resin-info part.pm7m
 ```
 
-It slices the mesh into one bitmap per layer and writes a `.pm7m` with the machine name
+`campanion supports` writes a watertight STL with a chamfered raft and pillar supports. The raft's
+outer edge slopes inward going up (`thickness / tan(angle)`, angle from the plate) so a scraper can
+get under it. Every support value is required: pass each flag, or `--support-params FILE.json`
+(flags override it). `--part-lift` is the gap from the raft top to the part; it is not the same as
+resin's `--lift-height` (the printer's peel move).
+
+`campanion resin` slices an STL into one bitmap per layer and writes a `.pm7m` with the machine name
 `Anycubic Photon Mono M7 Max`. No exposure, lift or layer value has a default: pass each flag, or
-take them from an existing `.pm7m` with `--params-from` (flags override it). There are no supports,
-no raft, and no anti-aliasing yet; bring a model with its supports already in the STL.
-See [docs/resin.md](docs/resin.md) for the format notes, assumptions and open gaps.
+take them from an existing `.pm7m` with `--params-from` (flags override it). `--supports` generates
+the raft and pillars before slicing. There is no anti-aliasing yet. See [docs/resin.md](docs/resin.md)
+for the flags, format notes, assumptions and open gaps.
 
 ## Preview
 

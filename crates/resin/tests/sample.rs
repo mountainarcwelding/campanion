@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Checks against the Lychee 8.0.4 sample export. Set `CAMPANION_PM7M_SAMPLE` to its path; the
-//! tests pass trivially when it is unset because the sample is Ryan's file and is not in the repo.
+//! tests pass trivially when it is unset because the sample is a user file and is not in the repo.
 
 use campanion_resin::pm7m::{M7_MAX, WriteInput, read_pm7m, write_pm7m};
 use campanion_resin::{pw0, zip};
