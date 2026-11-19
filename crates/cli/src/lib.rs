@@ -20,6 +20,7 @@ mod index;
 mod job;
 mod job_parts;
 mod job_plan;
+mod job_setup;
 mod kertilt;
 mod lathe;
 mod live_mill;
@@ -64,14 +65,15 @@ pub use engine::{
 pub use error::CliError;
 pub use job_parts::{ContourOverride, JobInstance, JobPart, OpSelector, contour_ids};
 pub use job_plan::PlanCancel;
+pub use job_setup::{Datum, DatumAnchor, JobOriginAnchor, OrderRules, SetupHooks, StartFrom, ZZero, bed_z_shift, datum_shift};
 pub use jobfile::{
-    DEFAULT_JOB_CHORD_MM, FORMAT_TAG, FORMAT_TAG_V2, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, hash_bytes,
-    load, parse, source_path,
+    DEFAULT_JOB_CHORD_MM, FORMAT_TAG, FORMAT_TAG_V2, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, Sheet,
+    hash_bytes, load, parse, source_path,
 };
 pub use profiles::{
-    BedSize, FORMAT_TAG_V1, HeadOffset, JobMachineRef, JobType, MachineFile, MachineHead, MachineKind, MaterialEntry, PROCESS_IDS, PowerUnit,
-    PowerValue, ProfileStore, WorkArea, effective_post, job_type_for, kind_from_process, load_job_ref, load_path, parse_profile, profile_to_json,
-    selected_head, valid_profile_id,
+    BedSize, ChangerTool, FORMAT_TAG_V1, HeadChanger, HeadOffset, JobMachineRef, JobType, MachineFile, MachineHead, MachineKind, MaterialEntry,
+    PROCESS_IDS, PowerUnit, PowerValue, ProfileStore, WorkArea, effective_post, job_type_for, kind_from_process, load_job_ref, load_path,
+    parse_profile, profile_to_json, selected_head, valid_profile_id,
 };
 
 const HELP: &str = "\

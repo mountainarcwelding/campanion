@@ -39,6 +39,14 @@ pub const RAPID: Color32 = Color32::from_rgb(150, 150, 150);
 pub const PLUNGE: Color32 = Color32::from_rgb(255, 150, 40);
 /// Playhead and tool mark.
 pub const TOOL: Color32 = Color32::from_rgb(255, 255, 255);
+/// Machine bed outline.
+pub const BED: Color32 = Color32::from_rgb(80, 110, 150);
+/// Job sheet outline.
+pub const SHEET: Color32 = Color32::from_rgb(180, 140, 70);
+/// Part geometry that sits off the bed.
+pub const OFF_BED: Color32 = Color32::from_rgb(230, 70, 70);
+/// Part geometry that sits off the sheet but on the bed.
+pub const OFF_SHEET: Color32 = Color32::from_rgb(230, 160, 60);
 /// Light-theme window fill.
 pub const LIGHT_WINDOW: Color32 = Color32::from_rgb(236, 239, 244);
 /// Light-theme panel fill.

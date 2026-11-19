@@ -12,6 +12,7 @@ pub mod fields;
 pub mod files;
 pub mod machines;
 pub mod session;
+pub mod setup;
 pub mod theme;
 pub mod viewport;
 
@@ -673,7 +674,7 @@ impl ModeTab {
     /// Toolbar label.
     pub const fn label(self) -> &'static str {
         match self {
-            ModeTab::Process => "Process",
+            ModeTab::Process => "Job",
             ModeTab::Setup => "Setup",
             ModeTab::Operations => "Operations",
             ModeTab::Orient => "Orient",

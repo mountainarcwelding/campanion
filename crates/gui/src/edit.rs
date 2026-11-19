@@ -29,7 +29,7 @@ pub fn copy_selection(session: &JobSession) -> Result<SessionClipboard, String> 
             let op = session.operations.get(index).ok_or_else(|| "no operation is selected".to_string())?;
             Ok(SessionClipboard::Operation(Box::new(op.clone())))
         }
-        Some(TreeSelection::Source | TreeSelection::Layer(_)) => {
+        Some(TreeSelection::Source | TreeSelection::Layer(_) | TreeSelection::Part(_) | TreeSelection::Instance(_, _)) => {
             Err("the imported part cannot be copied; copy a tool or operation instead".to_string())
         }
         None => Err("select a tool or operation to copy".to_string()),
@@ -75,6 +75,8 @@ pub fn delete_selection(session: &mut JobSession) -> Result<String, String> {
         Some(TreeSelection::Tool(index)) => delete_tool(session, index),
         Some(TreeSelection::Operation(index)) => delete_operation(session, index),
         Some(TreeSelection::Source) => delete_source(session),
+        Some(TreeSelection::Part(index)) => delete_part(session, index),
+        Some(TreeSelection::Instance(part, inst)) => delete_instance(session, part, inst),
         Some(TreeSelection::Layer(ref name)) => {
             Err(format!("source layer `{name}` cannot be deleted from the part; remove the imported part instead"))
         }
@@ -94,9 +96,50 @@ fn delete_source(session: &mut JobSession) -> Result<String, String> {
     session.placement_x.clear();
     session.placement_y.clear();
     session.placement_rotate.clear();
+    session.placement_scale.clear();
+    session.placement_mirror = false;
+    session.parts.clear();
     session.selected = None;
     session.dirty = true;
     Ok("Removed the imported part".to_string())
+}
+
+fn delete_part(session: &mut JobSession, index: usize) -> Result<String, String> {
+    if index >= session.parts.len() {
+        return Err("no part is selected".to_string());
+    }
+    if session.parts.len() == 1 && session.parts[0].instances.len() == 1 {
+        return delete_source(session);
+    }
+    let id = session.parts[index].id.clone();
+    session.parts.remove(index);
+    session.selected = None;
+    if !session.parts.is_empty() {
+        session.select_instance(0, 0);
+    } else {
+        session.source_path = None;
+        session.source_drawing = None;
+        session.layers.clear();
+    }
+    session.dirty = true;
+    Ok(format!("Removed part `{id}`"))
+}
+
+fn delete_instance(session: &mut JobSession, part: usize, inst: usize) -> Result<String, String> {
+    let Some(draft) = session.parts.get_mut(part) else {
+        return Err("no instance is selected".to_string());
+    };
+    if inst >= draft.instances.len() {
+        return Err("no instance is selected".to_string());
+    }
+    if draft.instances.len() == 1 {
+        return delete_part(session, part);
+    }
+    let id = draft.instances[inst].id.clone();
+    draft.instances.remove(inst);
+    session.select_instance(part, inst.min(session.parts[part].instances.len() - 1));
+    session.dirty = true;
+    Ok(format!("Removed instance `{id}`"))
 }
 
 fn delete_tool(session: &mut JobSession, index: usize) -> Result<String, String> {

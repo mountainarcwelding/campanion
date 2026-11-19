@@ -10,7 +10,7 @@ use campanion_cli::{
     post_job, suggested_post,
 };
 use campanion_geom::Segment;
-use campanion_import::{Drawing, place_drawing};
+use campanion_import::Drawing;
 use campanion_ir::Document;
 use campanion_path::{Compensation, ControllerSide, CutDirection, Lead, Tool as PathTool};
 use campanion_view::{Scene, Stroke, StrokeKind, tessellate_arc};
@@ -128,6 +128,66 @@ pub enum TreeSelection {
     Operation(usize),
     /// A source layer name.
     Layer(String),
+    /// A part in the Setup parts list.
+    Part(usize),
+    /// A placed instance (`part`, `instance`).
+    Instance(usize, usize),
+}
+
+/// One imported source and its linked instances.
+#[derive(Debug, Clone)]
+pub struct PartDraft {
+    pub id: String,
+    pub source_path: Option<PathBuf>,
+    pub source_hash: Option<String>,
+    pub source_kind: Option<SourceKind>,
+    pub layers: Vec<LayerSummary>,
+    pub drawing: Option<Drawing>,
+    pub instances: Vec<InstanceDraft>,
+}
+
+/// One placed copy of a part.
+#[derive(Debug, Clone)]
+pub struct InstanceDraft {
+    pub id: String,
+    pub x: String,
+    pub y: String,
+    pub rotate: String,
+    pub scale: String,
+    pub mirror: bool,
+}
+
+impl InstanceDraft {
+    /// Identity placement with the given instance id.
+    #[must_use]
+    pub fn identity(id: impl Into<String>) -> Self {
+        Self { id: id.into(), x: String::new(), y: String::new(), rotate: String::new(), scale: String::new(), mirror: false }
+    }
+
+    /// Draft fields from a parsed placement. Zero translation, zero rotation and scale `1` stay empty.
+    #[must_use]
+    pub fn from_placement(id: impl Into<String>, placement: campanion_cli::Placement) -> Self {
+        Self {
+            id: id.into(),
+            x: if placement.x() == 0.0 { String::new() } else { format_number(placement.x()) },
+            y: if placement.y() == 0.0 { String::new() } else { format_number(placement.y()) },
+            rotate: if placement.rotate_deg() == 0.0 { String::new() } else { format_number(placement.rotate_deg()) },
+            scale: if placement.scale() == 1.0 { String::new() } else { format_number(placement.scale()) },
+            mirror: placement.mirror(),
+        }
+    }
+
+    /// Parse this draft into a placement.
+    pub fn to_placement(&self) -> Result<campanion_cli::Placement, String> {
+        let x = parse_optional_number(&self.x, "placement X")?;
+        let y = parse_optional_number(&self.y, "placement Y")?;
+        let rotate = parse_optional_number(&self.rotate, "placement rotate_deg")?;
+        let scale = if self.scale.trim().is_empty() { 1.0 } else { parse_optional_number(&self.scale, "placement scale")? };
+        if scale == 0.0 || !scale.is_finite() {
+            return Err("placement scale must be a non-zero finite number".to_string());
+        }
+        Ok(campanion_cli::Placement::new(x, y, rotate, self.mirror, scale))
+    }
 }
 
 /// In-memory job the GUI can edit, plan and save.
@@ -169,6 +229,36 @@ pub struct JobSession {
     pub machine_path: String,
     /// Selected head id on that profile.
     pub machine_head: String,
+    /// Parts and linked instances. Empty until a part is imported or a job is opened.
+    pub parts: Vec<PartDraft>,
+    /// Placement scale, when typed. Empty means 1.
+    pub placement_scale: String,
+    /// Mirror about the Y axis through the drawing bounds centre.
+    pub placement_mirror: bool,
+    /// `z_zero` value: empty, `stock_top`, or `bed`.
+    pub z_zero: String,
+    /// Stock thickness, millimetres, when Z-zero is the bed.
+    pub stock_thickness: String,
+    /// Datum anchor: empty, `min_min`, `max_min`, `min_max`, `max_max`, or `center`.
+    pub datum_anchor: String,
+    /// Optional datum offset X, millimetres.
+    pub datum_offset_x: String,
+    /// Optional datum offset Y, millimetres.
+    pub datum_offset_y: String,
+    /// `start_from` value: empty, `absolute`, `current_position`, or `user_origin`.
+    pub start_from: String,
+    /// Nine-position `job_origin`, when entered.
+    pub job_origin: String,
+    /// When true, write `order_rules` on save.
+    pub order_rules_set: bool,
+    pub order_inner_first: bool,
+    pub order_cuts_last: bool,
+    /// Sheet width, millimetres, when entered.
+    pub sheet_width: String,
+    /// Sheet height, millimetres, when entered.
+    pub sheet_height: String,
+    /// Increment applied by the Setup Rotate command, degrees, when typed.
+    pub rotate_by: String,
     pub dirty: bool,
     pub messages: Vec<SessionMessage>,
 }
@@ -196,8 +286,102 @@ impl JobSession {
             machine_profile: String::new(),
             machine_path: String::new(),
             machine_head: String::new(),
+            parts: Vec::new(),
+            placement_scale: String::new(),
+            placement_mirror: false,
+            z_zero: String::new(),
+            stock_thickness: String::new(),
+            datum_anchor: String::new(),
+            datum_offset_x: String::new(),
+            datum_offset_y: String::new(),
+            start_from: String::new(),
+            job_origin: String::new(),
+            order_rules_set: false,
+            order_inner_first: false,
+            order_cuts_last: false,
+            sheet_width: String::new(),
+            sheet_height: String::new(),
+            rotate_by: String::new(),
             dirty: false,
             messages: Vec::new(),
+        }
+    }
+
+    /// Copy the selected instance's placement into the typed fields.
+    pub fn sync_placement_from_selection(&mut self) {
+        if let Some(instance) = self.selected_instance() {
+            let x = instance.x.clone();
+            let y = instance.y.clone();
+            let rotate = instance.rotate.clone();
+            let scale = instance.scale.clone();
+            let mirror = instance.mirror;
+            self.placement_x = x;
+            self.placement_y = y;
+            self.placement_rotate = rotate;
+            self.placement_scale = scale;
+            self.placement_mirror = mirror;
+        }
+        if let Some(part) = self.selected_part() {
+            let source_path = part.source_path.clone();
+            let source_hash = part.source_hash.clone();
+            let source_kind = part.source_kind;
+            let layers = part.layers.clone();
+            let drawing = part.drawing.clone();
+            self.source_path = source_path;
+            self.source_hash = source_hash;
+            self.source_kind = source_kind;
+            self.layers = layers;
+            self.source_drawing = drawing;
+        }
+    }
+
+    /// Write the typed placement fields back onto the selected instance, when there is one.
+    pub fn commit_placement(&mut self) {
+        let Some(TreeSelection::Instance(part, _) | TreeSelection::Part(part)) = self.selected else {
+            if let Some(part) = self.parts.first_mut().and_then(|part| part.instances.first_mut()) {
+                part.x = self.placement_x.clone();
+                part.y = self.placement_y.clone();
+                part.rotate = self.placement_rotate.clone();
+                part.scale = self.placement_scale.clone();
+                part.mirror = self.placement_mirror;
+            }
+            return;
+        };
+        let inst = match self.selected {
+            Some(TreeSelection::Instance(_, inst)) => inst,
+            _ => 0,
+        };
+        if let Some(instance) = self.parts.get_mut(part).and_then(|item| item.instances.get_mut(inst)) {
+            instance.x = self.placement_x.clone();
+            instance.y = self.placement_y.clone();
+            instance.rotate = self.placement_rotate.clone();
+            instance.scale = self.placement_scale.clone();
+            instance.mirror = self.placement_mirror;
+        }
+    }
+
+    /// Select a part instance and sync the typed fields.
+    pub fn select_instance(&mut self, part: usize, inst: usize) {
+        self.selected = Some(TreeSelection::Instance(part, inst));
+        self.sync_placement_from_selection();
+    }
+
+    /// The selected or first part.
+    #[must_use]
+    pub fn selected_part(&self) -> Option<&PartDraft> {
+        match self.selected {
+            Some(TreeSelection::Part(part) | TreeSelection::Instance(part, _)) => self.parts.get(part),
+            _ => self.parts.first(),
+        }
+    }
+
+    /// The selected or first instance.
+    #[must_use]
+    pub fn selected_instance(&self) -> Option<&InstanceDraft> {
+        match self.selected {
+            Some(TreeSelection::Instance(part, inst)) => self.parts.get(part).and_then(|item| item.instances.get(inst)),
+            Some(TreeSelection::Part(part)) => self.parts.get(part).and_then(|item| item.instances.first()),
+            _ => self.parts.first().and_then(|item| item.instances.first()),
         }
     }
 }
@@ -219,38 +403,61 @@ pub fn open_job_text(path: &Path, text: &str) -> Result<(JobSession, Option<Impo
     let value: Value = serde_json::from_str(text).map_err(|err| format!("{}: {err}", path.display()))?;
     let job = parse_job(text, path).map_err(|err| err.to_string())?;
     let mut session = session_from_job(path, value, &job);
-    let imported = match import_part(&campanion_cli::source_path(&job)) {
-        Ok(part) => {
-            session.layers = part.layers.clone();
-            session.source_kind = Some(part.kind);
-            session.source_drawing = part.drawing.clone();
-            attach_import_messages(&mut session, &part);
-            Some(part)
+    let sources: Vec<(usize, PathBuf)> =
+        session.parts.iter().enumerate().filter_map(|(index, part)| part.source_path.clone().map(|path| (index, path))).collect();
+    let mut first = None;
+    for (index, source) in sources {
+        match import_part(&source) {
+            Ok(imported) => {
+                if let Some(part) = session.parts.get_mut(index) {
+                    part.layers = imported.layers.clone();
+                    part.source_kind = Some(imported.kind);
+                    part.drawing = imported.drawing.clone();
+                }
+                attach_import_messages(&mut session, &imported);
+                if index == 0 {
+                    first = Some(imported);
+                }
+            }
+            Err(err) => session.messages.push(warning(err.to_string())),
         }
-        Err(err) => {
-            session.messages.push(warning(err.to_string()));
-            None
-        }
-    };
-    Ok((session, imported))
+    }
+    session.sync_placement_from_selection();
+    Ok((session, first))
 }
 
 /// Start a new job from an imported part. No tools or operations are invented.
 pub fn session_from_import(part: &ImportedPart) -> JobSession {
     let mut session = JobSession::new();
-    session.source_path = Some(part.path.clone());
-    session.source_hash = Some(part.hash.clone());
-    session.source_kind = Some(part.kind);
-    session.layers = part.layers.clone();
-    session.source_drawing = part.drawing.clone();
+    add_imported_part(&mut session, part);
     session.dirty = true;
     if part.kind == SourceKind::Step {
         session.messages.push(note(
             "STEP import is recorded. A job must name a face, and planning uses solidcraft-cli, the same way as campanion run.".to_string(),
         ));
     }
-    attach_import_messages(&mut session, part);
     session
+}
+
+/// Append an imported part as a new Setup part with one instance. The first import also
+/// fills the legacy single-source fields.
+pub fn add_imported_part(session: &mut JobSession, part: &ImportedPart) {
+    let suggested = part.path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("part");
+    let id = crate::setup::next_part_id(session, suggested);
+    let draft = PartDraft {
+        id,
+        source_path: Some(part.path.clone()),
+        source_hash: Some(part.hash.clone()),
+        source_kind: Some(part.kind),
+        layers: part.layers.clone(),
+        drawing: part.drawing.clone(),
+        instances: vec![InstanceDraft::identity("1")],
+    };
+    session.parts.push(draft);
+    let part_index = session.parts.len() - 1;
+    session.select_instance(part_index, 0);
+    session.dirty = true;
+    attach_import_messages(session, part);
 }
 
 fn attach_import_messages(session: &mut JobSession, part: &ImportedPart) {
@@ -296,7 +503,12 @@ fn session_from_job(path: &Path, value: Value, job: &JobFile) -> JobSession {
         if placement.rotate_deg() != 0.0 {
             session.placement_rotate = format_number(placement.rotate_deg());
         }
+        if placement.scale() != 1.0 {
+            session.placement_scale = format_number(placement.scale());
+        }
+        session.placement_mirror = placement.mirror();
     }
+    load_setup_fields(&mut session, job);
     if let Some(machine) = job.machine() {
         session.machine_profile = machine.profile.clone().unwrap_or_default();
         session.machine_path = machine.path.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
@@ -466,6 +678,9 @@ pub fn job_json_of(session: &JobSession) -> Result<String, String> {
 }
 
 fn job_value_of(session: &JobSession) -> Result<Value, String> {
+    let mut working = session.clone();
+    working.commit_placement();
+    let session = &working;
     let mut root = match &session.original_json {
         Some(Value::Object(map)) => Value::Object(map.clone()),
         _ => serde_json::json!({ "format": FORMAT_TAG, "units": session.units }),
@@ -473,9 +688,7 @@ fn job_value_of(session: &JobSession) -> Result<Value, String> {
     let Some(obj) = root.as_object_mut() else {
         return Err("job JSON is not an object".to_string());
     };
-    obj.insert("format".into(), Value::String(FORMAT_TAG.to_string()));
     obj.insert("units".into(), Value::String(session.units.clone()));
-    obj.insert("source".into(), source_object(session)?);
     obj.insert("tools".into(), Value::Array(session.tools.iter().map(|tool| tool_value(tool, &session.units)).collect::<Result<Vec<_>, _>>()?));
     let mut operations = Vec::new();
     for (index, op) in session.operations.iter().enumerate() {
@@ -484,15 +697,6 @@ fn job_value_of(session: &JobSession) -> Result<Value, String> {
         operations.push(operation_value(op, original, &session.units)?);
     }
     obj.insert("operations".into(), Value::Array(operations));
-    match placement_value(session) {
-        Ok(Some(value)) => {
-            obj.insert("placement".into(), value);
-        }
-        Ok(None) => {
-            obj.remove("placement");
-        }
-        Err(err) => return Err(err),
-    }
     match machine_value(session) {
         Some(value) => {
             obj.insert("machine".into(), value);
@@ -501,7 +705,280 @@ fn job_value_of(session: &JobSession) -> Result<Value, String> {
             obj.remove("machine");
         }
     }
+    if save_as_v2(session) {
+        write_v2_fields(session, obj)?;
+    } else {
+        obj.insert("format".into(), Value::String(FORMAT_TAG.to_string()));
+        obj.insert("source".into(), source_object(session)?);
+        obj.remove("parts");
+        obj.remove("z_zero");
+        obj.remove("stock_thickness");
+        obj.remove("datum");
+        obj.remove("start_from");
+        obj.remove("job_origin");
+        obj.remove("order_rules");
+        obj.remove("sheet");
+        match placement_value(session) {
+            Ok(Some(value)) => {
+                obj.insert("placement".into(), value);
+            }
+            Ok(None) => {
+                obj.remove("placement");
+            }
+            Err(err) => return Err(err),
+        }
+    }
     Ok(root)
+}
+
+fn save_as_v2(session: &JobSession) -> bool {
+    if session.original_json.as_ref().and_then(|value| value.get("format")).and_then(Value::as_str) == Some(FORMAT_TAG_V2) {
+        return true;
+    }
+    if session.parts.len() > 1 || session.parts.iter().any(|part| part.instances.len() > 1) {
+        return true;
+    }
+    if session.parts.iter().flat_map(|part| &part.instances).any(|instance| instance.mirror || !instance.scale.trim().is_empty()) {
+        return true;
+    }
+    hooks_or_sheet_present(session)
+}
+
+fn hooks_or_sheet_present(session: &JobSession) -> bool {
+    !session.z_zero.trim().is_empty()
+        || !session.stock_thickness.trim().is_empty()
+        || !session.datum_anchor.trim().is_empty()
+        || !session.datum_offset_x.trim().is_empty()
+        || !session.datum_offset_y.trim().is_empty()
+        || !session.start_from.trim().is_empty()
+        || !session.job_origin.trim().is_empty()
+        || session.order_rules_set
+        || !session.sheet_width.trim().is_empty()
+        || !session.sheet_height.trim().is_empty()
+}
+
+fn write_v2_fields(session: &JobSession, obj: &mut Map<String, Value>) -> Result<(), String> {
+    obj.insert("format".into(), Value::String(FORMAT_TAG_V2.to_string()));
+    obj.remove("source");
+    obj.remove("placement");
+    let parts = effective_parts(session)?;
+    if parts.is_empty() {
+        return Err("import a part or open a job before saving".to_string());
+    }
+    obj.insert("parts".into(), Value::Array(parts));
+    write_setup_hooks(session, obj)?;
+    match crate::setup::sheet_bounds(session)? {
+        Some([_, _, width, height]) => {
+            obj.insert(
+                "sheet".into(),
+                serde_json::json!({
+                    "width": to_file_units(width, &session.units),
+                    "height": to_file_units(height, &session.units),
+                }),
+            );
+        }
+        None => {
+            obj.remove("sheet");
+        }
+    }
+    Ok(())
+}
+
+fn effective_parts(session: &JobSession) -> Result<Vec<Value>, String> {
+    let drafts = if session.parts.is_empty() {
+        if session.source_path.is_none() {
+            return Ok(Vec::new());
+        }
+        vec![PartDraft {
+            id: "part".to_string(),
+            source_path: session.source_path.clone(),
+            source_hash: session.source_hash.clone(),
+            source_kind: session.source_kind,
+            layers: session.layers.clone(),
+            drawing: session.source_drawing.clone(),
+            instances: vec![InstanceDraft {
+                id: "1".to_string(),
+                x: session.placement_x.clone(),
+                y: session.placement_y.clone(),
+                rotate: session.placement_rotate.clone(),
+                scale: session.placement_scale.clone(),
+                mirror: session.placement_mirror,
+            }],
+        }]
+    } else {
+        session.parts.clone()
+    };
+    let mut values = Vec::new();
+    for part in &drafts {
+        values.push(part_value(session, part)?);
+    }
+    Ok(values)
+}
+
+fn part_value(session: &JobSession, part: &PartDraft) -> Result<Value, String> {
+    let Some(source) = &part.source_path else {
+        return Err(format!("part `{}` has no source path", part.id));
+    };
+    let hash = part.source_hash.clone().ok_or_else(|| format!("part `{}` is missing a source hash; import the part again", part.id))?;
+    let stored = stored_source_path(session.job_path.as_deref(), source);
+    let mut source_map = Map::new();
+    source_map.insert("path".into(), Value::String(stored));
+    source_map.insert("hash".into(), Value::String(hash));
+    let mut instances = Vec::new();
+    if part.instances.is_empty() {
+        return Err(format!("part `{}` needs at least one instance", part.id));
+    }
+    for instance in &part.instances {
+        let placement = instance.to_placement()?;
+        let mut item = Map::new();
+        item.insert("id".into(), Value::String(instance.id.clone()));
+        if !placement.is_identity() {
+            item.insert("placement".into(), placement_json(placement, &session.units));
+        }
+        instances.push(Value::Object(item));
+    }
+    Ok(serde_json::json!({
+        "id": part.id,
+        "source": Value::Object(source_map),
+        "instances": instances,
+    }))
+}
+
+fn placement_json(placement: campanion_cli::Placement, units: &str) -> Value {
+    let mut map = Map::new();
+    if placement.x() != 0.0 {
+        map.insert("x".into(), json_number(to_file_units(placement.x(), units)));
+    }
+    if placement.y() != 0.0 {
+        map.insert("y".into(), json_number(to_file_units(placement.y(), units)));
+    }
+    if placement.rotate_deg() != 0.0 {
+        map.insert("rotate_deg".into(), json_number(placement.rotate_deg()));
+    }
+    if placement.mirror() {
+        map.insert("mirror".into(), Value::Bool(true));
+    }
+    if placement.scale() != 1.0 {
+        map.insert("scale".into(), json_number(placement.scale()));
+    }
+    Value::Object(map)
+}
+
+fn write_setup_hooks(session: &JobSession, obj: &mut Map<String, Value>) -> Result<(), String> {
+    for key in ["z_zero", "stock_thickness", "datum", "start_from", "job_origin", "order_rules"] {
+        obj.remove(key);
+    }
+    let z_zero = session.z_zero.trim();
+    if !z_zero.is_empty() {
+        if z_zero != "stock_top" && z_zero != "bed" {
+            return Err("z_zero must be stock_top or bed".to_string());
+        }
+        obj.insert("z_zero".into(), Value::String(z_zero.to_string()));
+    }
+    let thickness = session.stock_thickness.trim();
+    if !thickness.is_empty() {
+        let value = parse_optional_number(thickness, "stock thickness")?;
+        if value <= 0.0 {
+            return Err("stock thickness must be greater than zero".to_string());
+        }
+        obj.insert("stock_thickness".into(), json_number(to_file_units(value, &session.units)));
+    } else if z_zero == "bed" {
+        return Err("z_zero bed needs a stock thickness".to_string());
+    }
+    let anchor = session.datum_anchor.trim();
+    if !anchor.is_empty() {
+        match anchor {
+            "min_min" | "max_min" | "min_max" | "max_max" | "center" => {}
+            other => return Err(format!("datum anchor `{other}` is not valid")),
+        }
+        let mut datum = Map::new();
+        datum.insert("anchor".into(), Value::String(anchor.to_string()));
+        let ox = session.datum_offset_x.trim();
+        let oy = session.datum_offset_y.trim();
+        if !ox.is_empty() || !oy.is_empty() {
+            let x = parse_optional_number(&session.datum_offset_x, "datum offset X")?;
+            let y = parse_optional_number(&session.datum_offset_y, "datum offset Y")?;
+            datum.insert(
+                "offset".into(),
+                Value::Array(vec![json_number(to_file_units(x, &session.units)), json_number(to_file_units(y, &session.units))]),
+            );
+        }
+        obj.insert("datum".into(), Value::Object(datum));
+    }
+    let start = session.start_from.trim();
+    if !start.is_empty() {
+        if !matches!(start, "absolute" | "current_position" | "user_origin") {
+            return Err("start_from must be absolute, current_position, or user_origin".to_string());
+        }
+        obj.insert("start_from".into(), Value::String(start.to_string()));
+    }
+    let origin = session.job_origin.trim();
+    if !origin.is_empty() {
+        obj.insert("job_origin".into(), Value::String(origin.to_string()));
+    }
+    if session.order_rules_set {
+        obj.insert("order_rules".into(), serde_json::json!({ "inner_first": session.order_inner_first, "cuts_last": session.order_cuts_last }));
+    }
+    Ok(())
+}
+
+fn load_setup_fields(session: &mut JobSession, job: &JobFile) {
+    for part in job.parts() {
+        let source_path = resolved_part_path(job, part.source.path());
+        let instances = part.instances.iter().map(|instance| InstanceDraft::from_placement(&instance.id, instance.placement)).collect();
+        session.parts.push(PartDraft {
+            id: part.id.clone(),
+            source_path: Some(source_path),
+            source_hash: Some(part.source.hash().to_string()),
+            source_kind: None,
+            layers: Vec::new(),
+            drawing: None,
+            instances,
+        });
+    }
+    if !session.parts.is_empty() {
+        session.select_instance(0, 0);
+    }
+    if let Some(sheet) = job.sheet() {
+        session.sheet_width = format_number(sheet.width());
+        session.sheet_height = format_number(sheet.height());
+    }
+    let hooks = job.setup_hooks();
+    if let Some(z_zero) = hooks.z_zero {
+        session.z_zero = z_zero.as_str().to_string();
+    }
+    if let Some(thickness) = hooks.stock_thickness {
+        session.stock_thickness = format_number(thickness);
+    }
+    if let Some(datum) = hooks.datum {
+        session.datum_anchor = datum.anchor.as_str().to_string();
+        if let Some([x, y]) = datum.offset {
+            session.datum_offset_x = format_number(x);
+            session.datum_offset_y = format_number(y);
+        }
+    }
+    if let Some(start) = hooks.start_from {
+        session.start_from = start.as_str().to_string();
+    }
+    if let Some(origin) = hooks.job_origin {
+        session.job_origin = origin.as_str().to_string();
+    }
+    if let Some(rules) = hooks.order_rules {
+        session.order_rules_set = true;
+        session.order_inner_first = rules.inner_first;
+        session.order_cuts_last = rules.cuts_last;
+    }
+}
+
+fn resolved_part_path(job: &JobFile, stored: &str) -> PathBuf {
+    let path = Path::new(stored);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match job.path().parent() {
+        Some(dir) => dir.join(path),
+        None => path.to_path_buf(),
+    }
 }
 
 fn machine_value(session: &JobSession) -> Option<Value> {
@@ -545,7 +1022,7 @@ pub fn parse_placement_mm(session: &JobSession) -> Result<(f64, f64, f64), Strin
     ))
 }
 
-fn parse_optional_number(text: &str, what: &str) -> Result<f64, String> {
+pub fn parse_optional_number(text: &str, what: &str) -> Result<f64, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(0.0);
@@ -560,14 +1037,61 @@ fn parse_optional_number(text: &str, what: &str) -> Result<f64, String> {
 /// The source drawing after the session placement is applied.
 pub fn placed_drawing(session: &JobSession) -> Result<Option<Drawing>, String> {
     let Some(drawing) = session.source_drawing.as_ref() else {
+        if let Some(part) = session.selected_part().or(session.parts.first())
+            && let (Some(drawing), Some(instance)) = (part.drawing.as_ref(), part.instances.first())
+        {
+            return crate::setup::placed_drawing_of(drawing, instance).map(Some);
+        }
         return Ok(None);
     };
+    if let Some(instance) = session.selected_instance() {
+        return crate::setup::placed_drawing_of(drawing, instance).map(Some);
+    }
     let (x, y, rotate) = parse_placement_mm(session)?;
-    if x == 0.0 && y == 0.0 && rotate == 0.0 {
+    let scale = if session.placement_scale.trim().is_empty() { 1.0 } else { parse_optional_number(&session.placement_scale, "placement scale")? };
+    if x == 0.0 && y == 0.0 && rotate == 0.0 && !session.placement_mirror && scale == 1.0 {
         return Ok(Some(drawing.clone()));
     }
     let tolerance = campanion_geom::Tolerance::default();
-    place_drawing(drawing, x, y, rotate, &tolerance).map(Some).map_err(|err| err.to_string())
+    campanion_import::place_with(drawing, x, y, rotate, session.placement_mirror, scale, &tolerance).map(Some).map_err(|err| err.to_string())
+}
+
+/// Combined preview of every placed instance.
+pub fn placed_scene_parts(session: &JobSession, arc_tol: f64) -> Result<Option<campanion_view::Scene>, String> {
+    if session.parts.is_empty() {
+        return match placed_drawing(session)? {
+            Some(drawing) => Ok(Some(scene_from_drawing(&drawing, arc_tol))),
+            None => Ok(None),
+        };
+    }
+    let mut combined: Option<campanion_view::Scene> = None;
+    for part in &session.parts {
+        let Some(drawing) = part.drawing.as_ref() else { continue };
+        for instance in &part.instances {
+            let placed = crate::setup::placed_drawing_of(drawing, instance)?;
+            let scene = scene_from_drawing(&placed, arc_tol);
+            combined = Some(match combined {
+                None => scene,
+                Some(mut acc) => {
+                    acc.strokes.extend(scene.strokes);
+                    acc.names.extend(scene.names);
+                    acc.total_length += scene.total_length;
+                    acc.bounds = merge_bounds(acc.bounds, scene.bounds);
+                    acc
+                }
+            });
+        }
+    }
+    Ok(combined)
+}
+
+fn merge_bounds(a: Option<([f64; 2], [f64; 2])>, b: Option<([f64; 2], [f64; 2])>) -> Option<([f64; 2], [f64; 2])> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some((amin, amax)), Some((bmin, bmax))) => {
+            Some(([amin[0].min(bmin[0]), amin[1].min(bmin[1])], [amax[0].max(bmax[0]), amax[1].max(bmax[1])]))
+        }
+    }
 }
 
 fn source_object(session: &JobSession) -> Result<Value, String> {
@@ -760,16 +1284,9 @@ pub fn job_file_of(session: &JobSession) -> Result<JobFile, String> {
     parse_job(&json, &path).map_err(|err| err.to_string())
 }
 
-fn uses_loaded_job(session: &JobSession) -> bool {
-    session.loaded_job.as_ref().is_some_and(|job| job.format() == FORMAT_TAG_V2 || job.is_multi_part())
-}
-
 /// Job used for planning and posting. A loaded v2 or multi-part file is kept as-is
 /// so the current single-part editor cannot drop instances.
 fn planning_job(session: &JobSession) -> Result<JobFile, String> {
-    if uses_loaded_job(session) {
-        return session.loaded_job.clone().ok_or_else(|| "loaded job is missing".to_string());
-    }
     job_file_of(session)
 }
 
@@ -829,12 +1346,6 @@ pub fn write_gcode(path: &Path, text: &str) -> Result<(), String> {
 
 /// Write a job file.
 pub fn write_job(path: &Path, session: &JobSession) -> Result<(), String> {
-    if uses_loaded_job(session) {
-        return Err(
-            "Saving a campanion-job/2 or multi-part job from the current Setup editor is not supported yet. Use the CLI, or wait for the Setup UI in a later step."
-                .to_string(),
-        );
-    }
     let json = job_json_of(session)?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -919,7 +1430,7 @@ fn segment_points(segment: Segment, tol: f64) -> Vec<[f64; 2]> {
     }
 }
 
-fn warning(text: impl Into<String>) -> SessionMessage {
+pub(crate) fn warning(text: impl Into<String>) -> SessionMessage {
     SessionMessage { kind: MessageKind::Warning, text: text.into() }
 }
 
@@ -1196,5 +1707,45 @@ mod tests {
         assert_eq!(reopened.placement_x, "10");
         assert_eq!(reopened.placement_y, "5");
         assert_eq!(reopened.placement_rotate, "90");
+    }
+
+    #[test]
+    fn multi_part_save_keeps_instances_and_hooks() {
+        let dir = temp_dir("campanion-gui-session-multipart");
+        fs::write(dir.join("part.svg"), PART_SVG).expect("svg");
+        let imported = import_part_file(&dir.join("part.svg")).expect("import");
+        let mut session = session_from_import(&imported);
+        session.job_path = Some(dir.join("job.json"));
+        session.tools.push(ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: "0.1".to_string() });
+        let mut op = OpDraft::new_profile("outline", 1);
+        op.layers = vec![imported.layers[0].name.clone()];
+        op.side = "outside".to_string();
+        op.depth = "0.26".to_string();
+        op.step_down = "0.26".to_string();
+        op.cut_feed = "300".to_string();
+        session.operations.push(op);
+        crate::setup::linked_copy(&mut session).expect("copy");
+        session.z_zero = "bed".to_string();
+        session.stock_thickness = "6".to_string();
+        session.datum_anchor = "min_min".to_string();
+        session.start_from = "absolute".to_string();
+        session.sheet_width = "200".to_string();
+        session.sheet_height = "100".to_string();
+        let saved = job_json_of(&session).expect("save");
+        let value: Value = serde_json::from_str(&saved).expect("json");
+        assert_eq!(value["format"], "campanion-job/2");
+        assert!(value.get("source").is_none());
+        assert_eq!(value["parts"][0]["instances"].as_array().map(Vec::len), Some(2));
+        assert_eq!(value["z_zero"], "bed");
+        assert_eq!(value["stock_thickness"], 6.0);
+        assert_eq!(value["sheet"]["width"], 200.0);
+        fs::write(dir.join("job.json"), saved).expect("write");
+        let (reopened, _) = open_job_file(&dir.join("job.json")).expect("reopen");
+        assert_eq!(reopened.parts.len(), 1);
+        assert_eq!(reopened.parts[0].instances.len(), 2);
+        assert_eq!(reopened.z_zero, "bed");
+        assert_eq!(reopened.stock_thickness, "6");
+        assert_eq!(reopened.sheet_width, "200");
+        assert_eq!(reopened.datum_anchor, "min_min");
     }
 }

@@ -507,6 +507,12 @@ pub struct Sheet {
 }
 
 impl Sheet {
+    /// A rectangular sheet, millimetres. Width and height must be greater than zero.
+    #[must_use]
+    pub fn new(width: f64, height: f64) -> Option<Self> {
+        if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 { Some(Self { width, height }) } else { None }
+    }
+
     /// Sheet size along X, millimetres.
     pub fn width(self) -> f64 {
         self.width
@@ -1543,6 +1549,19 @@ impl Placement {
         Self { x: 0.0, y: 0.0, rotate_deg: 0.0, mirror: false, scale: 1.0 }
     }
 
+    /// Build a placement. `scale` of `1` leaves the size unchanged.
+    #[must_use]
+    pub fn new(x: f64, y: f64, rotate_deg: f64, mirror: bool, scale: f64) -> Self {
+        let scale = if scale.is_finite() && scale != 0.0 { scale } else { 1.0 };
+        Self { x, y, rotate_deg, mirror, scale }
+    }
+
+    /// Translate this placement by `dx`, `dy` millimetres.
+    #[must_use]
+    pub fn translated(self, dx: f64, dy: f64) -> Self {
+        Self { x: self.x + dx, y: self.y + dy, ..self }
+    }
+
     /// True when this placement does not move the drawing.
     #[must_use]
     pub fn is_identity(self) -> bool {
@@ -1608,6 +1627,7 @@ pub struct JobFile {
     cut_order: Vec<String>,
     contour_overrides: Vec<crate::job_parts::ContourOverride>,
     operation_extras: Vec<(String, crate::job_parts::OperationExtras)>,
+    setup_hooks: crate::job_setup::SetupHooks,
 }
 
 impl JobFile {
@@ -1801,6 +1821,23 @@ impl JobFile {
     pub fn machine(&self) -> Option<&crate::profiles::JobMachineRef> {
         self.machine.as_ref()
     }
+
+    /// Optional Setup hooks (`z_zero`, datum, start-from, job origin, order rules).
+    pub fn setup_hooks(&self) -> &crate::job_setup::SetupHooks {
+        &self.setup_hooks
+    }
+
+    /// Translate every placement by `dx`, `dy` millimetres (used when a datum is applied).
+    pub(crate) fn shift_placements(&mut self, dx: f64, dy: f64) {
+        if let Some(placement) = self.placement {
+            self.placement = Some(placement.translated(dx, dy));
+        }
+        for part in &mut self.parts {
+            for instance in &mut part.instances {
+                instance.placement = instance.placement.translated(dx, dy);
+            }
+        }
+    }
 }
 
 struct Body {
@@ -1827,6 +1864,7 @@ struct Body {
     cut_order: Vec<String>,
     contour_overrides: Vec<crate::job_parts::ContourOverride>,
     operation_extras: Vec<(String, crate::job_parts::OperationExtras)>,
+    setup_hooks: crate::job_setup::SetupHooks,
 }
 
 /// Read a `campanion-job/1` file. Lengths in the result are millimetres.
@@ -1866,6 +1904,7 @@ pub fn parse(text: &str, path: &Path) -> Result<JobFile, JobFileError> {
         cut_order: body.cut_order,
         contour_overrides: body.contour_overrides,
         operation_extras: body.operation_extras,
+        setup_hooks: body.setup_hooks,
     })
 }
 
@@ -1965,6 +2004,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
     ];
     if is_v2 {
         keys.extend(["type", "parts", "cut_order", "contour_overrides"]);
+        keys.extend(crate::job_setup::JOB_HOOK_KEYS);
     }
     check_keys(map, &keys, "job").map_err(from_cli)?;
     let units = parse_units(require(map, "units").map_err(from_cli)?)?;
@@ -2092,6 +2132,8 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         None => None,
     };
     let five_axis = kinematics.map(|kinematics| FiveAxisSetup { kinematics, policy });
+    let stock_height = stock.map(|bounds| bounds.max().z() - bounds.min().z());
+    let setup_hooks = if is_v2 { crate::job_setup::parse_setup_hooks(map, scale, stock_height)? } else { crate::job_setup::SetupHooks::default() };
     Ok(Body {
         format: tag.to_string(),
         source,
@@ -2116,6 +2158,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         cut_order,
         contour_overrides,
         operation_extras,
+        setup_hooks,
     })
 }
 

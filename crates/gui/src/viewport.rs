@@ -37,6 +37,13 @@ pub struct ViewportOutput {
     pub part_delta: Option<[f64; 2]>,
 }
 
+/// Optional bed and sheet rectangles drawn in the viewport, millimetres, `[min_x, min_y, max_x, max_y]`.
+#[derive(Debug, Clone, Default)]
+pub struct ViewportGuides {
+    pub bed: Option<[f64; 4]>,
+    pub sheet: Option<[f64; 4]>,
+}
+
 impl Viewport {
     /// Frame the whole path, paused.
     pub fn new(scene: &Scene) -> Self {
@@ -72,6 +79,17 @@ impl Viewport {
 /// Left-drag moves the part when `allow_part_drag` is set. Shift+left-drag, Alt+left-drag, or
 /// middle-drag pans the view.
 pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>, allow_part_drag: bool) -> ViewportOutput {
+    show_with(ui, viewport, scene, allow_part_drag, None)
+}
+
+/// Draw the toolpath and optional bed/sheet guides.
+pub fn show_with(
+    ui: &mut egui::Ui,
+    viewport: &mut Viewport,
+    scene: Option<&Scene>,
+    allow_part_drag: bool,
+    guides: Option<&ViewportGuides>,
+) -> ViewportOutput {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::VIEWPORT);
@@ -120,9 +138,18 @@ pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>, a
             viewport.fit(scene, rect);
         }
         draw_grid(&painter, &viewport.view, rect, viewport.projection);
+        if let Some(guides) = guides {
+            if let Some(bed) = guides.bed {
+                draw_rect(&painter, &viewport.view, rect, bed, viewport.projection, UiStroke::new(1.4, theme::BED));
+            }
+            if let Some(sheet) = guides.sheet {
+                draw_rect(&painter, &viewport.view, rect, sheet, viewport.projection, UiStroke::new(1.4, theme::SHEET));
+            }
+        }
         let shown = visible(scene, viewport.playback.position);
         for stroke in &shown {
-            draw_stroke(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection);
+            let color = stroke_color(stroke, guides);
+            draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color);
         }
         if let Some(tool) = tool_position(scene, viewport.playback.position) {
             let z = scene.z_range.map(|(lo, _)| lo).unwrap_or(0.0);
@@ -148,7 +175,48 @@ pub fn show(ui: &mut egui::Ui, viewport: &mut Viewport, scene: Option<&Scene>, a
     ViewportOutput { response, part_delta }
 }
 
-fn draw_stroke(painter: &egui::Painter, view: &View, rect: Rect, stroke: &Stroke, show_rapids: bool, projection: Projection) {
+fn stroke_color(stroke: &Stroke, guides: Option<&ViewportGuides>) -> Color32 {
+    if stroke.kind != StrokeKind::Cut {
+        return if stroke.kind == StrokeKind::Plunge { theme::PLUNGE } else { theme::RAPID };
+    }
+    let Some(guides) = guides else { return theme::CUT };
+    let Some(bounds) = stroke_bounds(stroke) else { return theme::CUT };
+    if let Some(bed) = guides.bed
+        && !crate::setup::inside_limits(bounds, [Some(bed[0]), Some(bed[1]), Some(bed[2]), Some(bed[3])])
+    {
+        return theme::OFF_BED;
+    }
+    if let Some(sheet) = guides.sheet
+        && !crate::setup::inside_limits(bounds, [Some(sheet[0]), Some(sheet[1]), Some(sheet[2]), Some(sheet[3])])
+    {
+        return theme::OFF_SHEET;
+    }
+    theme::CUT
+}
+
+fn stroke_bounds(stroke: &Stroke) -> Option<[f64; 4]> {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for point in &stroke.points {
+        min_x = min_x.min(point[0]);
+        min_y = min_y.min(point[1]);
+        max_x = max_x.max(point[0]);
+        max_y = max_y.max(point[1]);
+    }
+    if min_x.is_finite() { Some([min_x, min_y, max_x, max_y]) } else { None }
+}
+
+fn draw_rect(painter: &egui::Painter, view: &View, rect: Rect, bounds: [f64; 4], projection: Projection, stroke: UiStroke) {
+    let [x0, y0, x1, y1] = bounds;
+    draw_segment(painter, view, rect, [x0, y0], [x1, y0], projection, stroke);
+    draw_segment(painter, view, rect, [x1, y0], [x1, y1], projection, stroke);
+    draw_segment(painter, view, rect, [x1, y1], [x0, y1], projection, stroke);
+    draw_segment(painter, view, rect, [x0, y1], [x0, y0], projection, stroke);
+}
+
+fn draw_stroke_colored(painter: &egui::Painter, view: &View, rect: Rect, stroke: &Stroke, show_rapids: bool, projection: Projection, color: Color32) {
     let points = screen_points(view, rect, stroke, projection);
     if points.len() < 2 {
         return;
@@ -160,10 +228,10 @@ fn draw_stroke(painter: &egui::Painter, view: &View, rect: Rect, stroke: &Stroke
             }
         }
         StrokeKind::Cut => {
-            let _ = painter.add(egui::Shape::line(points, UiStroke::new(1.6, theme::CUT)));
+            let _ = painter.add(egui::Shape::line(points, UiStroke::new(1.6, color)));
         }
         StrokeKind::Plunge => {
-            let _ = painter.add(egui::Shape::line(points, UiStroke::new(1.4, theme::PLUNGE)));
+            let _ = painter.add(egui::Shape::line(points, UiStroke::new(1.4, color)));
         }
     }
 }

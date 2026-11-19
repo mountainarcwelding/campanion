@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## 0.23.0 — 2026-11-19
+
+Setup milestone for the graphical workspace: a New Job flow, a drawn bed, multi-part import,
+linked copies, array, arrange, align, mirror, rotate, and typed origin fields, saving
+`campanion-job/2`. **Not physically tested.** CAMpanion is still primarily command-line driven;
+the GUI can now lay out and save a multi-part job and generate toolpaths through the existing
+CLI path, but it does not talk to a machine.
+
+### Added
+
+- Optional `campanion-job/2` hooks, omitted by default: `z_zero`, `stock_thickness`, `datum`,
+  `start_from`, `job_origin`, and `order_rules`. Old files that omit them still load, and
+  posted G-code stays byte-identical when those keys are omitted. A set `datum` is applied to
+  instance placements (it needs a sheet or a stock box). `z_zero` of `bed` is stored; posted Z
+  still uses stock-top as zero until a later change applies the thickness shift. `order_rules`
+  and `start_from` / `job_origin` are stored for later Operations and Run work.
+- Optional machine-profile `kinematics` path and a nested head `changer` (child tools with
+  optional XYZ offsets and an optional change-sequence id). No change codes or machine limits
+  are invented. Existing profiles that omit these keys still load and save without them.
+- Setup UI: Job tab (machine, process, units), Parts list, multi-part import, linked copies,
+  array, arrange (empty gap is 0 mm and is noted), align, mirror, rotate, place at origin,
+  typed placement including scale and mirror, sheet versus bed, off-bed parts drawn in red,
+  off-sheet parts warned. The GUI saves multi-part `campanion-job/2` files the CLI can run.
+  The CLI-first banner is unchanged.
+
+### Known limits
+
+- 3D place-on-face is not in the job format; STL/STEP footprints can only be moved in X and Y.
+- Off-sheet parts warn and are not refused at export. Off-bed export is still refused.
+- Automatic `order_rules` are not applied to planning yet. `cut_order` or file order still wins.
+- Start-from and job-origin are stored, not yet used by Run or Frame.
+- Nested changers are stored, not posted.
+- The Run tab, resin Orient/Supports, and auto-regeneration after every edit remain later
+  milestones.
+
 ## 0.22.1 — 2026-11-17
 
 The chamfered raft is inverted so the bed contact is smaller than the top, forming an undercut a
