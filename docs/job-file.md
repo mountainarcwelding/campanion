@@ -43,6 +43,12 @@ lengths are millimetres and feeds are millimetres per minute.
 | `collision` | no | Clearance and sampling for the assembly check. See [Tool assembly and collisions](#tool-assembly-and-collisions). |
 | `sheet` | no | Router sheet in the XY plane. See [Sheet nesting](#sheet-nesting). |
 | `nest` | no | Part gap, margin, clamp keep-outs and the parts to pack. Needs `sheet`. See [Sheet nesting](#sheet-nesting). |
+| `z_zero` | no | v2 only. `stock_top` (the existing convention: stock top is Z 0) or `bed` (the machine bed is Z 0). Omitted means stock top, and posted Z is unchanged from today. `bed` needs `stock_thickness` or a stock box with height. |
+| `stock_thickness` | no | v2 only. Stock thickness in `units`, greater than zero. Required when `z_zero` is `bed` unless a stock box already gives a height. |
+| `datum` | no | v2 only. `{ "anchor": "min_min"|"max_min"|"min_max"|"max_max"|"center", "offset"?: [x, y] }`. The named corner or centre of the sheet (or of the stock box when there is no sheet) is moved to X0,Y0, then `offset` is applied. `datum` without a sheet or stock box is refused. Omitted, posted XY is unchanged. |
+| `start_from` | no | v2 only. `absolute`, `current_position`, or `user_origin`. Stored so Run and Frame can agree later. Planning and posting do not change numbers from this field yet. |
+| `job_origin` | no | v2 only. Nine-position anchor of the job bounds: `min_min`, `mid_min`, `max_min`, `min_mid`, `center`, `max_mid`, `min_max`, `mid_max`, `max_max`. Stored with `start_from`; not applied to posted coordinates yet. |
+| `order_rules` | no | v2 only. `{ "inner_first"?: bool, "cuts_last"?: bool }`. At least one flag is required. Stored for later Operations planning. Omitted (and until Operations applies them), planning still follows `cut_order` or file order, so posted G-code stays byte-identical. |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
 
@@ -187,6 +193,21 @@ set both `placement` and `instances`.
 instance, operations follow `cut_order` when that array is present, otherwise file order.
 A single-instance v2 job is planned the same way as the equivalent v1 job, so existing
 single-part G-code is unchanged.
+
+### Origin hooks
+
+These keys are omitted by default. A file that does not name them posts the same numbers as
+before.
+
+When `datum` is set, each instance placement is translated so the chosen corner or centre of
+the sheet or stock box sits at the origin, plus any typed offset. When `z_zero` is `bed`, the
+value is stored and shown in the Setup UI; posted Z still uses the stock-top-is-zero convention
+until a later change applies the thickness shift to the planned program. `start_from`,
+`job_origin`, and `order_rules` are stored and round-tripped; they do not change planning yet.
+
+A part that sits outside a named `sheet` produces a planning warning and is not refused at
+export. A part that sits outside the machine bed or work area is still a warning at plan time
+and a refusal at export, as before.
 
 ### Selectors
 

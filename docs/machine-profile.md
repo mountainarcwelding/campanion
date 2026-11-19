@@ -86,10 +86,14 @@ A resin example:
 
 `format`, `name`, `units`, and `type` are required. `units` is `mm` or `inch`; lengths in the
 file are in those units and are stored internally as millimetres. `work_area`, `controller`,
-`post`, `bed`, and `screen` may be omitted. An omitted work area means no travel check is run
+`post`, `bed`, `screen`, and `kinematics` may be omitted. An omitted work area means no travel check is run
 from that block. A work area must include at least one of `x_min`, `x_max`, `y_min`, `y_max`,
 `z_min`, `z_max`. Only the limits that are present are checked. A value equal to a limit
 passes; a value outside it is a code-generation error.
+
+`kinematics` is an optional path to a user-supplied kinematics file, stored as written. The
+profile parser does not load or validate that file. The field is omitted when unset and is
+never invented. Job files may still name their own `kinematics` path as before.
 
 A gantry needs at least one head. A resin machine must not have a `heads` array (or must leave
 it empty) and must not be used as the selected head on a cutting job.
@@ -98,9 +102,16 @@ Each gantry head has a unique `id` and a `process` of `milling`, `routing`, `tur
 `plasma`, `waterjet`, `oxyfuel`, `wire_edm`, `sla`, or `fdm`. `kind` defaults to a value
 derived from `process` when omitted (`laser`, `plasma`, `spindle` for milling/routing,
 `extruder` for FDM, otherwise the process id). `name`, `post`, `offset`, `safe_z`,
-`max_power`, and `materials` may be omitted. A head post, when set, overrides the
+`max_power`, `materials`, and `changer` may be omitted. A head post, when set, overrides the
 machine-level post. `offset` is all three of `x`, `y`, and `z` together; there is no implied
 zero for a missing axis. `safe_z` and `max_power` are stored only when entered.
+
+`changer` is a nested tool changer on a gantry head: `{ "tools": [ { "id", "name", "offset"?,
+"sequence"? }, ... ] }`. Each child tool needs a unique `id`. `name` may be empty. `offset` is
+all three of `x`, `y`, and `z` together when present. `sequence` is an optional change-sequence
+id from the user's machine definition; CAMpanion does not invent change codes. An empty tool
+list is refused. The changer is stored and round-tripped; tool changes from it are not posted
+yet.
 
 A material entry must have a `name`. Optional fields are `kerf`, `diameter`, `wire`, `depth`,
 `step_down`, `cut_feed`, `plunge_feed`, `power`, `passes`, `pierce_delay`, and `post_delay`.

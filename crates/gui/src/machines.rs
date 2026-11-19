@@ -39,6 +39,7 @@ struct ProfileDraft {
     heads: Vec<HeadDraft>,
     head_index: usize,
     material_index: Option<usize>,
+    kinematics: String,
 }
 
 #[derive(Clone)]
@@ -48,6 +49,7 @@ struct HeadDraft {
     process: String,
     post: String,
     materials: Vec<MaterialDraft>,
+    changer: Option<campanion_cli::HeadChanger>,
 }
 
 #[derive(Clone)]
@@ -324,6 +326,7 @@ impl MachinesUi {
         });
         labeled_field(ui, "Controller", &mut draft.controller);
         labeled_field(ui, "Post", &mut draft.post);
+        labeled_field(ui, "Kinematics file (optional path)", &mut draft.kinematics);
         ui.label(RichText::new("Work area (leave blank if you have not measured a limit)").color(theme::MUTED).size(11.0));
         ui.horizontal(|ui| {
             area_field(ui, "X min", &mut draft.x_min);
@@ -478,6 +481,7 @@ impl ProfileDraft {
             heads,
             head_index: 0,
             material_index: None,
+            kinematics: profile.kinematics.clone().unwrap_or_default(),
         }
     }
 
@@ -504,6 +508,7 @@ impl ProfileDraft {
             controller: nonempty(&self.controller),
             post: nonempty(&self.post),
             heads,
+            kinematics: nonempty(&self.kinematics),
         })
     }
 }
@@ -525,7 +530,7 @@ fn parse_work_area(draft: &ProfileDraft) -> Result<Option<WorkArea>, String> {
 
 impl HeadDraft {
     fn blank(id: String, process: &str) -> Self {
-        Self { id, name: String::new(), process: process.to_string(), post: String::new(), materials: Vec::new() }
+        Self { id, name: String::new(), process: process.to_string(), post: String::new(), materials: Vec::new(), changer: None }
     }
 
     fn from_head(head: &MachineHead) -> Self {
@@ -535,6 +540,7 @@ impl HeadDraft {
             process: head.process.clone(),
             post: head.post.clone().unwrap_or_default(),
             materials: head.materials.iter().map(MaterialDraft::from_entry).collect(),
+            changer: head.changer.clone(),
         }
     }
 
@@ -556,6 +562,7 @@ impl HeadDraft {
             safe_z: None,
             max_power: None,
             materials: materials?,
+            changer: self.changer.clone(),
         })
     }
 }
@@ -748,6 +755,7 @@ pub fn screenshot_example(name: &str) -> MachineFile {
         kind: MachineKind::Gantry,
         bed: Some(campanion_cli::BedSize { x: 600.0, y: 400.0, z: None }),
         screen: None,
+        kinematics: None,
         heads: vec![MachineHead {
             id: "laser".to_string(),
             name: "CO2".to_string(),
@@ -771,6 +779,7 @@ pub fn screenshot_example(name: &str) -> MachineFile {
                 pierce_delay: None,
                 post_delay: None,
             }],
+            changer: None,
         }],
     }
 }

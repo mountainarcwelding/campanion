@@ -54,6 +54,8 @@ pub struct MachineFile {
     pub post: Option<String>,
     /// Heads on a gantry. Empty on a resin machine.
     pub heads: Vec<MachineHead>,
+    /// Optional path to a user-supplied kinematics file. Stored as written; not loaded here.
+    pub kinematics: Option<String>,
 }
 
 /// Machine family stored in `type`.
@@ -154,6 +156,29 @@ pub struct MachineHead {
     pub max_power: Option<PowerValue>,
     /// User-entered material and tool-library entries. Empty until the user adds one.
     pub materials: Vec<MaterialEntry>,
+    /// Nested changer on this head, when entered. Child tools carry user-supplied offsets
+    /// and an optional change-sequence id. No change codes are invented.
+    pub changer: Option<HeadChanger>,
+}
+
+/// A nested tool changer on a gantry head.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HeadChanger {
+    /// Child tools in the changer, in file order.
+    pub tools: Vec<ChangerTool>,
+}
+
+/// One child tool in a [`HeadChanger`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangerTool {
+    /// Id unique within the changer.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Optional XYZ offset, millimetres, when the user entered all three axes.
+    pub offset: Option<HeadOffset>,
+    /// Optional change-sequence id from the user's machine definition. Never invented.
+    pub sequence: Option<String>,
 }
 
 /// Per-head XYZ offset, millimetres. All three axes are user-entered together.
@@ -427,12 +452,17 @@ fn parse_profile_v1(map: &Map<String, Value>) -> Result<MachineFile, String> {
         controller,
         post,
         heads: migrate_v1_heads(heads),
+        kinematics: None,
     })
 }
 
 fn parse_profile_v2(map: &Map<String, Value>) -> Result<MachineFile, String> {
-    check_keys(map, &["format", "name", "units", "type", "bed", "screen", "work_area", "controller", "post", "heads"], "machine profile")
-        .map_err(|err| err.to_string())?;
+    check_keys(
+        map,
+        &["format", "name", "units", "type", "bed", "screen", "work_area", "controller", "post", "heads", "kinematics"],
+        "machine profile",
+    )
+    .map_err(|err| err.to_string())?;
     let (name, units, scale, work_area, controller, post) = parse_profile_common(map)?;
     let kind = MachineKind::parse(as_str(require(map, "type")?, "type").map_err(|err| err.to_string())?)?;
     let bed = match optional(map, "bed") {
@@ -462,7 +492,13 @@ fn parse_profile_v2(map: &Map<String, Value>) -> Result<MachineFile, String> {
             }
         }
     }
-    Ok(MachineFile { name, units, kind, bed, screen, work_area, controller, post, heads })
+    let kinematics = optional_string(map, "kinematics")?;
+    if let Some(path) = &kinematics
+        && path.trim().is_empty()
+    {
+        return Err("kinematics path is empty".to_string());
+    }
+    Ok(MachineFile { name, units, kind, bed, screen, work_area, controller, post, heads, kinematics })
 }
 
 fn parse_profile_common(map: &Map<String, Value>) -> Result<(String, String, f64, Option<WorkArea>, Option<String>, Option<String>), String> {
@@ -581,6 +617,9 @@ pub fn profile_to_json(profile: &MachineFile) -> Value {
     if let Some(post) = &profile.post {
         map.insert("post".to_string(), json!(post));
     }
+    if let Some(kinematics) = &profile.kinematics {
+        map.insert("kinematics".to_string(), json!(kinematics));
+    }
     if profile.kind == MachineKind::Gantry || !profile.heads.is_empty() {
         let heads: Vec<Value> = profile.heads.iter().map(|head| head_to_json(head, scale)).collect();
         map.insert("heads".to_string(), Value::Array(heads));
@@ -664,6 +703,35 @@ fn head_to_json(head: &MachineHead, scale: f64) -> Value {
         let materials: Vec<Value> = head.materials.iter().map(|item| material_to_json(item, scale)).collect();
         map.insert("materials".to_string(), Value::Array(materials));
     }
+    if let Some(changer) = &head.changer {
+        map.insert("changer".to_string(), changer_to_json(changer, scale));
+    }
+    Value::Object(map)
+}
+
+fn changer_to_json(changer: &HeadChanger, scale: f64) -> Value {
+    let mut map = Map::new();
+    let tools: Vec<Value> = changer
+        .tools
+        .iter()
+        .map(|tool| {
+            let mut item = Map::new();
+            item.insert("id".to_string(), json!(tool.id));
+            item.insert("name".to_string(), json!(tool.name));
+            if let Some(offset) = tool.offset {
+                let mut off = Map::new();
+                off.insert("x".to_string(), json!(offset.x / scale));
+                off.insert("y".to_string(), json!(offset.y / scale));
+                off.insert("z".to_string(), json!(offset.z / scale));
+                item.insert("offset".to_string(), Value::Object(off));
+            }
+            if let Some(sequence) = &tool.sequence {
+                item.insert("sequence".to_string(), json!(sequence));
+            }
+            Value::Object(item)
+        })
+        .collect();
+    map.insert("tools".to_string(), Value::Array(tools));
     Value::Object(map)
 }
 
@@ -740,7 +808,7 @@ fn parse_head(value: &Value, scale: f64, index: usize, v1: bool) -> Result<Machi
     let allowed = if v1 {
         ["id", "name", "process", "post", "materials"].as_slice()
     } else {
-        ["id", "name", "kind", "process", "post", "offset", "safe_z", "max_power", "materials"].as_slice()
+        ["id", "name", "kind", "process", "post", "offset", "safe_z", "max_power", "materials", "changer"].as_slice()
     };
     check_keys(map, allowed, &what).map_err(|err| err.to_string())?;
     let id = as_str(require(map, "id")?, &format!("{what}.id")).map_err(|err| err.to_string())?.to_string();
@@ -784,7 +852,47 @@ fn parse_head(value: &Value, scale: f64, index: usize, v1: bool) -> Result<Machi
         }
         None => Vec::new(),
     };
-    Ok(MachineHead { id, name, kind, process, post, offset, safe_z, max_power, materials })
+    let changer = match optional(map, "changer") {
+        Some(value) => Some(parse_changer(value, scale, &format!("{what}.changer"))?),
+        None => None,
+    };
+    Ok(MachineHead { id, name, kind, process, post, offset, safe_z, max_power, materials, changer })
+}
+
+fn parse_changer(value: &Value, scale: f64, what: &str) -> Result<HeadChanger, String> {
+    let map = object(value, what).map_err(|err| err.to_string())?;
+    check_keys(map, &["tools"], what).map_err(|err| err.to_string())?;
+    let items = require(map, "tools")?.as_array().ok_or_else(|| format!("{what}.tools must be an array"))?;
+    if items.is_empty() {
+        return Err(format!("{what}.tools is empty"));
+    }
+    let mut tools = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let item_what = format!("{what}.tools[{index}]");
+        let item_map = object(item, &item_what).map_err(|err| err.to_string())?;
+        check_keys(item_map, &["id", "name", "offset", "sequence"], &item_what).map_err(|err| err.to_string())?;
+        let id = as_str(require(item_map, "id")?, &format!("{item_what}.id")).map_err(|err| err.to_string())?.to_string();
+        if id.trim().is_empty() {
+            return Err(format!("{item_what}.id is empty"));
+        }
+        if !seen.insert(id.clone()) {
+            return Err(format!("{what}: duplicate tool id `{id}`"));
+        }
+        let name = optional_string(item_map, "name")?.unwrap_or_default();
+        let offset = match optional(item_map, "offset") {
+            Some(value) => Some(parse_offset(value, scale, &format!("{item_what}.offset"))?),
+            None => None,
+        };
+        let sequence = optional_string(item_map, "sequence")?;
+        if let Some(seq) = &sequence
+            && seq.trim().is_empty()
+        {
+            return Err(format!("{item_what}.sequence is empty"));
+        }
+        tools.push(ChangerTool { id, name, offset, sequence });
+    }
+    Ok(HeadChanger { tools })
 }
 
 fn parse_offset(value: &Value, scale: f64, what: &str) -> Result<HeadOffset, String> {
@@ -1033,7 +1141,9 @@ impl MachineFile {
                 safe_z: None,
                 max_power: None,
                 materials: Vec::new(),
+                changer: None,
             }],
+            kinematics: None,
         }
     }
 }
@@ -1282,5 +1392,50 @@ mod tests {
         .expect("kind");
         assert_eq!(profile.heads[0].kind, "waterjet");
         assert_eq!(job_type_for(&profile, Some(&profile.heads[0])), JobType::CutRoute);
+    }
+
+    #[test]
+    fn kinematics_and_changer_round_trip() {
+        let text = r#"{
+            "format": "campanion-machine/2",
+            "name": "5-axis router",
+            "units": "mm",
+            "type": "gantry",
+            "kinematics": "machines/table.json",
+            "heads": [{
+                "id": "spindle",
+                "name": "Main",
+                "kind": "spindle",
+                "process": "milling",
+                "changer": {
+                    "tools": [
+                        {"id": "t1", "name": "End mill", "offset": {"x": 0, "y": 0, "z": 80}, "sequence": "atc-1"},
+                        {"id": "t2", "name": "Ball"}
+                    ]
+                }
+            }]
+        }"#;
+        let profile = parse_profile(text).expect("parse");
+        assert_eq!(profile.kinematics.as_deref(), Some("machines/table.json"));
+        let changer = profile.heads[0].changer.as_ref().expect("changer");
+        assert_eq!(changer.tools.len(), 2);
+        assert_eq!(changer.tools[0].sequence.as_deref(), Some("atc-1"));
+        assert_eq!(changer.tools[0].offset.unwrap().z, 80.0);
+        let json = profile_to_json(&profile);
+        assert_eq!(json["kinematics"], "machines/table.json");
+        assert_eq!(json["heads"][0]["changer"]["tools"][0]["sequence"], "atc-1");
+        let again = parse_profile(&json.to_string()).expect("reparse");
+        assert_eq!(again.kinematics, profile.kinematics);
+        assert_eq!(again.heads[0].changer, profile.heads[0].changer);
+    }
+
+    #[test]
+    fn omitted_kinematics_and_changer_are_absent() {
+        let profile = parse_profile(sample()).expect("parse");
+        assert!(profile.kinematics.is_none());
+        assert!(profile.heads[0].changer.is_none());
+        let json = profile_to_json(&profile);
+        assert!(json.get("kinematics").is_none());
+        assert!(json["heads"][0].get("changer").is_none());
     }
 }

@@ -16,12 +16,13 @@ use crate::fields::{self, ProcessFields};
 use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_stem, resolve_user_path};
 use crate::machines::{self, MachinesUi};
 use crate::session::{
-    GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, OpDraft, ToolDraft, ToolKind, TreeSelection, export_destination,
-    format_number, generate_toolpaths, import_part_file, list_posts, open_job_file, parse_placement_mm, placed_drawing, post_session,
-    scene_from_drawing, session_from_import, suggested_post_for_process, write_gcode, write_job,
+    GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, OpDraft, ToolDraft, ToolKind, TreeSelection, add_imported_part,
+    export_destination, format_number, generate_toolpaths, import_part_file, list_posts, open_job_file, parse_placement_mm, placed_scene_parts,
+    post_session, scene_from_drawing, suggested_post_for_process, write_gcode, write_job,
 };
+use crate::setup::{self, AlignMode, ArraySpec};
 use crate::theme;
-use crate::viewport::{self, Viewport};
+use crate::viewport::{self, Viewport, ViewportGuides};
 use crate::{
     DEFAULT_ARC_TOL_MM, GuiState, JOG_STEPS_MM, ModeTab, OpenedDocument, ParkedWorkspace, ROTATE_STEPS_DEG, RunPhase, SubProcess, UserField,
     Workspace, gcode_line_count, open_path,
@@ -245,21 +246,26 @@ impl App {
     fn import_part(&mut self, path: &Path) {
         match import_part_file(path) {
             Ok(part) => {
-                let scene = part.drawing.as_ref().map(|drawing| scene_from_drawing(drawing, DEFAULT_ARC_TOL_MM));
-                let session = session_from_import(&part);
+                self.push_undo();
+                add_imported_part(&mut self.session, &part);
                 let display = path.display().to_string();
-                self.apply_session(session, scene);
+                self.document = None;
+                self.state.gcode.clear();
+                self.refresh_placed_scene();
                 self.state.remember_open(path.to_path_buf());
-                if let Some(stem) = export_stem(path) {
+                if self.state.export_name.is_empty()
+                    && let Some(stem) = export_stem(path)
+                {
                     self.state.export_name = stem.to_string();
                 }
                 self.state.status = format!("Imported {display}");
                 if matches!(self.state.workspace, Workspace::Resin | Workspace::Fdm) {
                     self.state.set_workspace(Workspace::ThermalJet);
                 }
-                if self.state.workspace.has_tab(ModeTab::Operations) {
-                    let _ = self.state.set_tab(ModeTab::Operations);
+                if self.state.workspace.has_tab(ModeTab::Setup) {
+                    let _ = self.state.set_tab(ModeTab::Setup);
                 }
+                self.merge_session_messages();
             }
             Err(err) => {
                 self.state.status = err;
@@ -312,9 +318,12 @@ impl App {
     }
 
     fn refresh_placed_scene(&mut self) {
-        match placed_drawing(&self.session) {
-            Ok(Some(drawing)) => {
-                let scene = scene_from_drawing(&drawing, DEFAULT_ARC_TOL_MM);
+        match placed_scene_parts(&self.session, DEFAULT_ARC_TOL_MM) {
+            Ok(Some(mut scene)) => {
+                scene.bounds = expand_bounds(scene.bounds, self.bed_bounds());
+                if let Ok(Some(sheet)) = setup::sheet_bounds(&self.session) {
+                    scene.bounds = expand_bounds(scene.bounds, Some(sheet));
+                }
                 if let Some(viewport) = self.viewport.as_mut() {
                     viewport.fitted = false;
                     viewport.user_adjusted = false;
@@ -324,9 +333,54 @@ impl App {
                 }
                 self.scene = Some(scene);
                 self.state.has_scene = true;
+                self.note_off_bed_parts();
             }
             Ok(None) => {}
             Err(err) => self.state.status = err,
+        }
+    }
+
+    fn bed_bounds(&self) -> Option<[f64; 4]> {
+        match machines::session_profile(&self.profile_store, &self.session) {
+            Ok(Some((profile, _))) => {
+                if let Some(bed) = profile.bed {
+                    return Some([0.0, 0.0, bed.x, bed.y]);
+                }
+                if let Some(area) = profile.work_area {
+                    let x0 = area.x_min.unwrap_or(0.0);
+                    let y0 = area.y_min.unwrap_or(0.0);
+                    let x1 = area.x_max?;
+                    let y1 = area.y_max?;
+                    return Some([x0, y0, x1, y1]);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn viewport_guides(&self) -> ViewportGuides {
+        ViewportGuides { bed: self.bed_bounds(), sheet: setup::sheet_bounds(&self.session).ok().flatten() }
+    }
+
+    fn note_off_bed_parts(&mut self) {
+        self.session.messages.retain(|message| !message.text.contains("is off the bed") && !message.text.contains("is off the sheet"));
+        let bed = self.bed_bounds();
+        let sheet = setup::sheet_bounds(&self.session).ok().flatten();
+        for part in &self.session.parts {
+            let Some(drawing) = part.drawing.as_ref() else { continue };
+            for instance in &part.instances {
+                let Ok(Some(bounds)) = setup::placed_bounds(drawing, instance) else { continue };
+                if let Some(bed) = bed
+                    && !setup::inside_limits(bounds, [Some(bed[0]), Some(bed[1]), Some(bed[2]), Some(bed[3])])
+                {
+                    self.session.messages.push(crate::session::warning(format!("part `{}` instance `{}` is off the bed", part.id, instance.id)));
+                } else if let Some(sheet) = sheet
+                    && !setup::inside_limits(bounds, [Some(sheet[0]), Some(sheet[1]), Some(sheet[2]), Some(sheet[3])])
+                {
+                    self.session.messages.push(crate::session::warning(format!("part `{}` instance `{}` is off the sheet", part.id, instance.id)));
+                }
+            }
         }
     }
 
@@ -336,6 +390,7 @@ impl App {
                 self.session.placement_x = format_number(x + delta[0]);
                 self.session.placement_y = format_number(y + delta[1]);
                 let _ = rotate;
+                self.session.commit_placement();
                 self.session.dirty = true;
                 self.document = None;
                 self.state.gcode.clear();
@@ -444,9 +499,11 @@ impl App {
     }
 
     fn show_viewport_area(&mut self, ui: &mut egui::Ui) {
-        let allow_drag = self.session.source_drawing.is_some() && self.document.is_none();
+        let allow_drag =
+            (self.session.source_drawing.is_some() || self.session.parts.iter().any(|part| part.drawing.is_some())) && self.document.is_none();
+        let guides = self.viewport_guides();
         if let Some(viewport) = self.viewport.as_mut() {
-            let output = viewport::show(ui, viewport, self.scene.as_ref(), allow_drag);
+            let output = viewport::show_with(ui, viewport, self.scene.as_ref(), allow_drag, Some(&guides));
             if let Some(delta) = output.part_delta {
                 self.apply_part_delta(delta);
             }
@@ -691,6 +748,13 @@ impl App {
                 (Workspace::Resin, ModeTab::Export, "resin-export.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Operations, "machines-manager.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Operations, "job-machine-picker.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Process, "g1-job-new.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-bed.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-parts.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-array.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-arrange.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-origin.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-off-bed.png".to_string()),
             ],
             index: 0,
             frames_waited: 0,
@@ -711,7 +775,8 @@ impl App {
     }
 
     fn prepare_screenshot_frame(&mut self, name: Option<&str>) {
-        let machine_shot = name == Some("machines-manager.png") || name == Some("job-machine-picker.png");
+        let g1 = name.is_some_and(|name| name.starts_with("g1-"));
+        let machine_shot = name == Some("machines-manager.png") || name == Some("job-machine-picker.png") || g1;
         if !machine_shot {
             self.machines = None;
             return;
@@ -734,6 +799,95 @@ impl App {
                 self.machines = None;
             }
         }
+        if g1 {
+            self.prepare_g1_screenshot(name);
+        }
+    }
+
+    fn prepare_g1_screenshot(&mut self, name: Option<&str>) {
+        self.session.sheet_width = "300".to_string();
+        self.session.sheet_height = "200".to_string();
+        self.session.z_zero = "stock_top".to_string();
+        self.session.datum_anchor = "min_min".to_string();
+        self.session.start_from = "absolute".to_string();
+        if self.session.parts.is_empty() {
+            // keep the opened sample part if present
+        }
+        if name == Some("g1-setup-array.png")
+            && self.session.parts.len() == 1
+            && self.session.parts[0].instances.len() == 1
+            && let Ok(spec) = ArraySpec::parse("2", "2", "40", "30")
+        {
+            let _ = setup::array_copies(&mut self.session, spec);
+        }
+        if name == Some("g1-setup-arrange.png") {
+            if self.session.parts.first().is_some_and(|part| part.instances.len() < 2) {
+                let _ = setup::linked_copy(&mut self.session);
+            }
+            let _ = setup::arrange(&mut self.session, "5", Some(300.0));
+        }
+        if name == Some("g1-setup-origin.png") {
+            self.session.z_zero = "bed".to_string();
+            self.session.stock_thickness = "6".to_string();
+            self.session.datum_anchor = "center".to_string();
+        }
+        if name == Some("g1-setup-off-bed.png") && !self.session.parts.is_empty() {
+            if let Some(instance) = self.session.parts[0].instances.first_mut() {
+                instance.x = "700".to_string();
+                instance.y = "0".to_string();
+            }
+            self.session.sync_placement_from_selection();
+        }
+        self.refresh_placed_scene();
+    }
+
+    fn apply_setup_result(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(status) => {
+                self.session.dirty = true;
+                self.document = None;
+                self.state.gcode.clear();
+                self.refresh_placed_scene();
+                self.state.status = status;
+            }
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn run_array(&mut self) {
+        match ArraySpec::parse(
+            &self.state.array_x.value,
+            &self.state.array_y.value,
+            &self.state.array_spacing_mm.value,
+            &self.state.array_spacing_mm.value,
+        ) {
+            Ok(spec) => {
+                let result = setup::array_copies(&mut self.session, spec);
+                self.apply_setup_result(result);
+            }
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn run_arrange(&mut self) {
+        let guides = self.viewport_guides();
+        let width = guides.sheet.or(guides.bed).map(|b| b[2] - b[0]);
+        let gap = self.state.arrange_gap_mm.value.clone();
+        let result = setup::arrange(&mut self.session, &gap, width);
+        self.apply_setup_result(result);
+    }
+
+    fn run_align(&mut self, mode: AlignMode) {
+        let guides = self.viewport_guides();
+        let frame = guides.sheet.or(guides.bed);
+        let result = setup::align(&mut self.session, mode, frame);
+        self.apply_setup_result(result);
+    }
+
+    fn run_rotate(&mut self) {
+        let degrees = self.session.rotate_by.clone();
+        let result = setup::rotate_targets(&mut self.session, &degrees);
+        self.apply_setup_result(result);
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -840,8 +994,12 @@ impl App {
         if prev {
             self.state.prev_tab();
         }
-        if arrange && self.state.workspace == Workspace::Resin && self.state.tab == ModeTab::Orient {
-            self.state.status = "Arrange is a placeholder in this preview".to_string();
+        if arrange {
+            if self.state.tab == ModeTab::Setup {
+                self.run_arrange();
+            } else if self.state.workspace == Workspace::Resin && self.state.tab == ModeTab::Orient {
+                self.state.status = "Arrange is a placeholder in this preview".to_string();
+            }
         }
         if self.state.tab == ModeTab::Slice {
             if layer_up {
@@ -1138,6 +1296,36 @@ impl App {
                     }
                     if ribbon_command(ui, "Open job", false).clicked() {
                         self.request_open();
+                    }
+                });
+                ribbon_group_separator(ui);
+                ribbon_group(ui, "Layout", |ui| {
+                    if ribbon_command(ui, "Linked copy", false).clicked() {
+                        let result = setup::linked_copy(&mut self.session);
+                        self.apply_setup_result(result);
+                    }
+                    if ribbon_command(ui, "Array", false).clicked() {
+                        self.run_array();
+                    }
+                    if ribbon_command(ui, "Arrange", false).clicked() {
+                        self.run_arrange();
+                    }
+                    if ribbon_command(ui, "Align left", false).clicked() {
+                        self.run_align(AlignMode::Left);
+                    }
+                    if ribbon_command(ui, "Align right", false).clicked() {
+                        self.run_align(AlignMode::Right);
+                    }
+                    if ribbon_command(ui, "Mirror", false).clicked() {
+                        let result = setup::mirror_targets(&mut self.session);
+                        self.apply_setup_result(result);
+                    }
+                    if ribbon_command(ui, "Rotate", false).clicked() {
+                        self.run_rotate();
+                    }
+                    if ribbon_command(ui, "Place at origin", false).clicked() {
+                        let result = setup::place_at_origin(&mut self.session);
+                        self.apply_setup_result(result);
                     }
                 });
                 ribbon_group_separator(ui);
@@ -1521,14 +1709,37 @@ impl App {
             return;
         }
         ui.separator();
+        ui.collapsing("Parts", |ui| {
+            if self.session.parts.is_empty() {
+                ui.label(RichText::new("Import a part on the Setup tab").color(theme::MUTED).size(12.0));
+            }
+            let part_count = self.session.parts.len();
+            for part_index in 0..part_count {
+                let id = self.session.parts[part_index].id.clone();
+                let inst_count = self.session.parts[part_index].instances.len();
+                let selected = self.session.selected == Some(TreeSelection::Part(part_index));
+                if ui.selectable_label(selected, format!("{id} ({inst_count})")).clicked() {
+                    self.session.selected = Some(TreeSelection::Part(part_index));
+                    self.session.sync_placement_from_selection();
+                }
+                for inst in 0..inst_count {
+                    let inst_id = self.session.parts[part_index].instances[inst].id.clone();
+                    let selected = self.session.selected == Some(TreeSelection::Instance(part_index, inst));
+                    if ui.selectable_label(selected, format!("    {id} / {inst_id}")).clicked() {
+                        self.session.select_instance(part_index, inst);
+                    }
+                }
+            }
+        });
         if let Some(label) = self.session.source_path.as_ref().map(|path| path.display().to_string()) {
             let selected = self.session.selected == Some(TreeSelection::Source);
             let response = ui.selectable_label(selected, format!("Source: {label}"));
             if response.clicked() {
                 self.session.selected = Some(TreeSelection::Source);
+                self.session.sync_placement_from_selection();
             }
             self.tree_context_menu(response);
-        } else {
+        } else if self.session.parts.is_empty() {
             tree_line(ui, "Source", "Not imported");
         }
         ui.collapsing("Layers", |ui| {
@@ -1625,16 +1836,144 @@ impl App {
         changed |= self.placement_field(ui, "X (mm)", 0);
         changed |= self.placement_field(ui, "Y (mm)", 1);
         changed |= self.placement_field(ui, "Rotation (deg, CCW)", 2);
+        ui.label("Scale");
+        if ui.add(egui::TextEdit::singleline(&mut self.session.placement_scale).desired_width(180.0).hint_text("1")).changed() {
+            changed = true;
+        }
+        if ui.checkbox(&mut self.session.placement_mirror, "Mirror").changed() {
+            changed = true;
+        }
         ui.label(
             RichText::new("Drag the part in the viewport to move it. Shift-drag, Alt-drag, or middle-drag pans the view.")
                 .color(theme::MUTED)
                 .size(11.0),
         );
         if changed {
+            self.session.commit_placement();
             self.session.dirty = true;
             self.document = None;
             self.state.gcode.clear();
             self.refresh_placed_scene();
+        }
+        ui.separator();
+        self.setup_properties(ui);
+    }
+
+    fn setup_properties(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Origin").strong().size(13.0));
+        ui.label("Z-zero");
+        ui.horizontal(|ui| {
+            for (value, label) in [("", "unset"), ("stock_top", "stock top"), ("bed", "bed")] {
+                if ui.selectable_label(self.session.z_zero == value, label).clicked() {
+                    self.session.z_zero = value.to_string();
+                    self.session.dirty = true;
+                }
+            }
+        });
+        if self.session.z_zero == "bed" {
+            ui.label("Stock thickness (mm)");
+            if ui.add(egui::TextEdit::singleline(&mut self.session.stock_thickness).desired_width(180.0).hint_text("required")).changed() {
+                self.session.dirty = true;
+            }
+        }
+        ui.label("XY datum");
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in
+                [("", "unset"), ("min_min", "min/min"), ("max_min", "max/min"), ("min_max", "min/max"), ("max_max", "max/max"), ("center", "centre")]
+            {
+                if ui.selectable_label(self.session.datum_anchor == value, label).clicked() {
+                    self.session.datum_anchor = value.to_string();
+                    self.session.dirty = true;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Offset X");
+            if ui.add(egui::TextEdit::singleline(&mut self.session.datum_offset_x).desired_width(70.0)).changed() {
+                self.session.dirty = true;
+            }
+            ui.label("Y");
+            if ui.add(egui::TextEdit::singleline(&mut self.session.datum_offset_y).desired_width(70.0)).changed() {
+                self.session.dirty = true;
+            }
+        });
+        ui.label("Start-from");
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in [("", "unset"), ("absolute", "absolute"), ("current_position", "current position"), ("user_origin", "user origin")]
+            {
+                if ui.selectable_label(self.session.start_from == value, label).clicked() {
+                    self.session.start_from = value.to_string();
+                    self.session.dirty = true;
+                }
+            }
+        });
+        if self.session.start_from == "current_position" || self.session.start_from == "user_origin" {
+            ui.label("Job origin");
+            ui.horizontal_wrapped(|ui| {
+                for (value, label) in [
+                    ("", "unset"),
+                    ("min_min", "SW"),
+                    ("mid_min", "S"),
+                    ("max_min", "SE"),
+                    ("min_mid", "W"),
+                    ("center", "centre"),
+                    ("max_mid", "E"),
+                    ("min_max", "NW"),
+                    ("mid_max", "N"),
+                    ("max_max", "NE"),
+                ] {
+                    if ui.selectable_label(self.session.job_origin == value, label).clicked() {
+                        self.session.job_origin = value.to_string();
+                        self.session.dirty = true;
+                    }
+                }
+            });
+        } else {
+            ui.label(RichText::new("Job origin is used with current-position or user-origin starts.").color(theme::MUTED).size(11.0));
+        }
+        ui.separator();
+        ui.label(RichText::new("Sheet").strong().size(13.0));
+        ui.label(
+            RichText::new("The sheet is the stock rectangle. The bed comes from the machine profile and is not invented.")
+                .color(theme::MUTED)
+                .size(11.0),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Width (mm)");
+            if ui.add(egui::TextEdit::singleline(&mut self.session.sheet_width).desired_width(70.0)).changed() {
+                self.session.dirty = true;
+                self.refresh_placed_scene();
+            }
+            ui.label("Height");
+            if ui.add(egui::TextEdit::singleline(&mut self.session.sheet_height).desired_width(70.0)).changed() {
+                self.session.dirty = true;
+                self.refresh_placed_scene();
+            }
+        });
+        ui.separator();
+        ui.label(RichText::new("Array / Arrange").strong().size(13.0));
+        field_row(ui, "Columns", &mut self.state.array_x, self.state.dark_theme);
+        field_row(ui, "Rows", &mut self.state.array_y, self.state.dark_theme);
+        field_row(ui, "Spacing (mm)", &mut self.state.array_spacing_mm, self.state.dark_theme);
+        field_row(ui, "Arrange gap (mm)", &mut self.state.arrange_gap_mm, self.state.dark_theme);
+        ui.label(RichText::new("Empty arrange gap is treated as 0 mm.").color(theme::MUTED).size(11.0));
+        ui.label("Rotate by (deg, CCW)");
+        if ui.add(egui::TextEdit::singleline(&mut self.session.rotate_by).desired_width(180.0).hint_text("enter an angle")).changed() {
+            // typed only; applied by the Rotate command
+        }
+        if !self.session.order_rules_set {
+            if ui.button("Set order rules").clicked() {
+                self.session.order_rules_set = true;
+                self.session.dirty = true;
+            }
+        } else {
+            if ui.checkbox(&mut self.session.order_inner_first, "Inner contours first").changed() {
+                self.session.dirty = true;
+            }
+            if ui.checkbox(&mut self.session.order_cuts_last, "Cuts last").changed() {
+                self.session.dirty = true;
+            }
+            ui.label(RichText::new("Stored now; planning still follows cut_order or file order until Operations.").color(theme::MUTED).size(11.0));
         }
         ui.separator();
     }
@@ -1834,25 +2173,51 @@ impl App {
     }
 
     fn process_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Select a sub-process").strong().size(16.0));
-        ui.add_space(8.0);
-        ui.label(RichText::new("This is the first tab in every cutting, mill and turning workspace.").color(theme::MUTED));
-        ui.add_space(12.0);
-        let processes: Vec<SubProcess> = self.state.workspace.sub_processes().to_vec();
-        for process in processes {
-            let selected = self.state.process == Some(process);
-            if ui.selectable_label(selected, process.label()).clicked() {
-                self.apply_sub_process(process);
+        ui.label(RichText::new("New Job").strong().size(16.0));
+        ui.add_space(6.0);
+        ui.label(RichText::new("Pick a process, a machine and units, then go to Setup to import parts.").color(theme::MUTED).size(12.0));
+        ui.add_space(10.0);
+        ui.label(RichText::new("Process").strong().size(13.0));
+        ui.horizontal_wrapped(|ui| {
+            let processes: Vec<SubProcess> = self.state.workspace.sub_processes().to_vec();
+            for process in processes {
+                let selected = self.state.process == Some(process);
+                if ui.selectable_label(selected, process.label()).clicked() {
+                    self.apply_sub_process(process);
+                }
             }
-        }
-        for planned in self.state.workspace.planned_sub_processes() {
-            ui.add_enabled(false, egui::Button::new(planned.label()));
-        }
+            for planned in self.state.workspace.planned_sub_processes() {
+                ui.add_enabled(false, egui::Button::new(planned.label()));
+            }
+        });
         if let Some(process) = self.state.process
             && let Some(id) = suggested_post_for_process(process.label())
         {
-            ui.add_space(8.0);
             ui.label(RichText::new(format!("Suggested post: {id} (you can change this on the Export tab)")).color(theme::MUTED).size(12.0));
+        }
+        ui.add_space(10.0);
+        ui.label(RichText::new("Machine").strong().size(13.0));
+        self.machine_job_picker(ui);
+        ui.add_space(8.0);
+        ui.label(RichText::new("Units").strong().size(13.0));
+        ui.horizontal(|ui| {
+            for units in ["mm", "inch"] {
+                if ui.selectable_label(self.session.units == units, units).clicked() {
+                    self.session.units = units.to_string();
+                    self.session.dirty = true;
+                }
+            }
+        });
+        ui.label(RichText::new("Displayed values are millimetres. Inch is stored on save when selected.").color(theme::MUTED).size(11.0));
+        ui.add_space(8.0);
+        if let Some(path) = &self.session.job_path {
+            ui.label(RichText::new(format!("Save location: {}", path.display())).color(theme::MUTED).size(12.0));
+        } else {
+            ui.label(RichText::new("Save location: unsaved (File → Save Job As…)").color(theme::MUTED).size(12.0));
+        }
+        ui.add_space(12.0);
+        if ui.button("Continue to Setup").clicked() && self.state.workspace.has_tab(ModeTab::Setup) {
+            let _ = self.state.set_tab(ModeTab::Setup);
         }
     }
 
@@ -2439,6 +2804,15 @@ fn tree_line(ui: &mut egui::Ui, label: &str, value: &str) {
         ui.label(RichText::new(format!("{label}:")).color(theme::MUTED).size(12.0));
         ui.label(RichText::new(value).size(12.0));
     });
+}
+
+fn expand_bounds(existing: Option<([f64; 2], [f64; 2])>, extra: Option<[f64; 4]>) -> Option<([f64; 2], [f64; 2])> {
+    match (existing, extra) {
+        (None, None) => None,
+        (Some(bounds), None) => Some(bounds),
+        (None, Some([x0, y0, x1, y1])) => Some(([x0, y0], [x1, y1])),
+        (Some((min, max)), Some([x0, y0, x1, y1])) => Some(([min[0].min(x0), min[1].min(y0)], [max[0].max(x1), max[1].max(y1)])),
+    }
 }
 
 fn placeholder_pane(ui: &mut egui::Ui, message: &str) {

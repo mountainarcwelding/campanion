@@ -43,6 +43,8 @@ pub fn plan_job_inner(job: &JobFile, up_axis: step::UpAxis, cancel: Option<&Plan
         return Err(cancelled());
     }
     let max_power = check_plan_machine(job)?;
+    let shifted = apply_datum(job)?;
+    let job = shifted.as_ref().unwrap_or(job);
     let planned = if job.is_multi_part() {
         plan_multi(job, up_axis, cancel, max_power)?
     } else if job.format() == FORMAT_TAG_V2 {
@@ -102,6 +104,7 @@ fn planning_warnings(job: &JobFile, document: &Document) -> Result<Vec<String>, 
     }
     warnings.extend(unused_contour_warnings(job)?);
     warnings.extend(off_bed_warnings(job, false)?);
+    warnings.extend(off_sheet_warnings(job)?);
     warnings.extend(lead_in_cross_warnings(job, document)?);
     Ok(warnings)
 }
@@ -146,6 +149,51 @@ pub fn refuse_off_bed_for_export(job: &JobFile) -> Result<(), CliError> {
         return Err(CliError::run(message));
     }
     Ok(())
+}
+
+fn apply_datum(job: &JobFile) -> Result<Option<JobFile>, CliError> {
+    let Some(datum) = job.setup_hooks().datum else {
+        return Ok(None);
+    };
+    let rect = datum_rect(job)?;
+    let shift = crate::job_setup::datum_shift(datum, rect);
+    if shift[0] == 0.0 && shift[1] == 0.0 {
+        return Ok(None);
+    }
+    let mut cloned = job.clone();
+    cloned.shift_placements(shift[0], shift[1]);
+    Ok(Some(cloned))
+}
+
+fn datum_rect(job: &JobFile) -> Result<[f64; 4], CliError> {
+    if let Some(sheet) = job.sheet() {
+        return Ok([0.0, 0.0, sheet.width(), sheet.height()]);
+    }
+    if let Some(stock) = job.stock() {
+        return Ok([stock.min().x(), stock.min().y(), stock.max().x(), stock.max().y()]);
+    }
+    Err(CliError::run("datum needs a sheet or a stock box"))
+}
+
+/// Warning only: parts that sit outside a named sheet are not refused at export.
+fn off_sheet_warnings(job: &JobFile) -> Result<Vec<String>, CliError> {
+    let Some(sheet) = job.sheet() else {
+        return Ok(Vec::new());
+    };
+    let limits = [Some(0.0), Some(0.0), Some(sheet.width()), Some(sheet.height())];
+    let mut messages = Vec::new();
+    for part in job.parts() {
+        let drawing = load_part_drawing(job, part)?;
+        for instance in &part.instances {
+            let placed = place_instance(&drawing, instance.placement, job)?;
+            if let Some(bounds) = drawing_bounds(&placed)
+                && !inside_limits(bounds, limits)
+            {
+                messages.push(format!("warning: part `{}` instance `{}` is off the sheet", part.id, instance.id));
+            }
+        }
+    }
+    Ok(messages)
 }
 
 fn off_bed_warnings(job: &JobFile, refuse: bool) -> Result<Vec<String>, CliError> {

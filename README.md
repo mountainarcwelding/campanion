@@ -4,8 +4,9 @@ An open, machine-neutral CAM (toolpath) engine in Rust. CAMpanion is a standalon
 It can import STEP parts through [SolidCraft](https://github.com/tangency-labs/solidcraft)'s
 `solidcraft-cli`, but it is not part of SolidCraft.
 
-CAMpanion is primarily command-line driven. The graphical workspace (`campanion-gui`) is still
-in development.
+CAMpanion is primarily command-line driven. The graphical workspace (`campanion-gui`) can start
+a job, import and lay out parts, and save a `campanion-job/2` file, but it is still in
+development and does not talk to a machine.
 
 Status: early. Start with 2D path processing, then work up to multi-axis machines
 (the toolpath format is designed for up to 13 axes from the start).
