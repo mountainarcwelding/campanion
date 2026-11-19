@@ -328,6 +328,15 @@ Proposed order for further processes: docs/processes-plan.md (approved 2026-11-0
   Nozzle and carriage collision checks run against the part as printed so far. Until then the
   IR must not assume a subtractive process: process kinds, axes and verify rules stay generic.
 
+## Graphical workspace (v0.4)
+
+The GUI implementation plan is [docs/gui-plan.md](gui-plan.md). It keeps the existing
+theme and layout (workspace selector at the top-left of the ribbon, stage tabs, grouped
+actions, pinned STOP) and sequences Setup, Operations, Simulate/Export, resin, Run
+streaming, tool changing, FDM, nesting, and a later 5-axis GUI. CAMpanion remains
+primarily command-line driven; the GUI is still in development and has not been
+machine-tested.
+
 ## SolidCraft integration path
 1. **Now: companion over files and the CLI.** SolidCraft exports STEP; we read it (and DXF/SVG),
    and we can call `solidcraft-cli` for sections and faces. Our CLI and, later, an MCP server
