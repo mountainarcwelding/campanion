@@ -239,7 +239,7 @@ campanion gui examples/laser_rect.job.json
 
 ## Roadmap and contributing
 
-See [docs/plan.md](docs/plan.md) for the roadmap and [CONTRIBUTING.md](CONTRIBUTING.md) for how to help.
+See [docs/plan.md](docs/plan.md) for the engine roadmap, [docs/gui-plan.md](docs/gui-plan.md) for the graphical workspace plan, and [CONTRIBUTING.md](CONTRIBUTING.md) for how to help.
 
 ## Licence
 
