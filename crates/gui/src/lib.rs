@@ -1,8 +1,8 @@
 //! Navigation and session state for the CAMpanion graphical workspace.
 //!
 //! CAMpanion is primarily command-line driven. This GUI is still in development: it can open a
-//! part or job, edit operations, generate toolpaths and export G-code through the existing
-//! backend, but it does not talk to a machine and is not a finished CAM interface.
+//! part or job, edit operations, generate toolpaths, export G-code, and stream to a Grbl-class
+//! controller over USB serial. Streaming is not hardware-tested and is not a finished CAM interface.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -12,6 +12,7 @@ pub mod fields;
 pub mod files;
 pub mod machines;
 pub mod operations;
+pub mod run_stream;
 pub mod session;
 pub mod setup;
 pub mod simulate;
@@ -81,7 +82,7 @@ pub enum ModeTab {
     Slice,
     /// Job summary and export settings.
     Export,
-    /// Direct send to a controller. Layout only; no machine I/O.
+    /// Direct send to a connected Grbl-class controller. Not hardware-tested.
     Run,
 }
 
@@ -194,7 +195,7 @@ pub struct GuiState {
     pub tab: ModeTab,
     /// Selected sub-process, when the user has picked one.
     pub process: Option<SubProcess>,
-    /// Simulated run phase. Never opens a port or sends motion.
+    /// Run phase driven by the streamer, or by the preview when no controller is connected.
     pub run: RunPhase,
     /// Left process tree.
     pub show_tree: bool,
@@ -224,10 +225,20 @@ pub struct GuiState {
     pub export_path: String,
     /// Embed a thumbnail in the exported file.
     pub embed_thumbnail: bool,
-    /// Typed port field on the Run tab. Never used to open a port.
+    /// Typed or selected serial port on the Run tab.
     pub port: String,
-    /// Typed baud field on the Run tab. Never used to open a port.
+    /// Typed baud field on the Run tab.
     pub baud: String,
+    /// True after a controller (or the in-process mock) has been opened.
+    pub connected: bool,
+    /// True while the controller is in alarm. Start, Frame and jog stay locked until `$X`.
+    pub in_alarm: bool,
+    /// When true, stream with send-response safe mode (no RX buffer required).
+    pub safe_mode: bool,
+    /// User-entered frame feed, millimetres per minute. Empty until typed.
+    pub frame_feed: String,
+    /// User-entered jog feed, millimetres per minute. Empty until typed.
+    pub jog_feed: String,
     /// Work-coordinate readout when true, machine coordinates when false.
     pub dro_work: bool,
     /// Displayed work position, millimetres. Updated only by the preview jog pad.
@@ -316,6 +327,11 @@ impl GuiState {
             embed_thumbnail: true,
             port: String::new(),
             baud: String::new(),
+            connected: false,
+            in_alarm: false,
+            safe_mode: false,
+            frame_feed: String::new(),
+            jog_feed: String::new(),
             dro_work: true,
             work_pos: [0.0, 0.0, 0.0],
             machine_pos: [0.0, 0.0, 0.0],
@@ -393,7 +409,7 @@ impl GuiState {
         true
     }
 
-    /// Start a preview run. Fails when the phase does not allow Start.
+    /// Mark the session as running. The window only calls this after a controller accepts Start.
     pub fn start_run(&mut self) -> bool {
         if !self.can_start() {
             return false;
@@ -401,7 +417,7 @@ impl GuiState {
         self.run = RunPhase::Running;
         self.run_line = 0;
         self.run_lines = gcode_line_count(&self.gcode);
-        self.status = "Preview run started (no machine connection)".to_string();
+        self.status = "Streaming started".to_string();
         true
     }
 
@@ -411,7 +427,7 @@ impl GuiState {
             return false;
         }
         self.run = RunPhase::Paused;
-        self.status = "Preview run paused".to_string();
+        self.status = "Feed hold sent".to_string();
         true
     }
 
@@ -421,21 +437,25 @@ impl GuiState {
             return false;
         }
         self.run = RunPhase::Running;
-        self.status = "Preview run resumed (no machine connection)".to_string();
+        self.status = "Resume sent".to_string();
         true
     }
 
     /// Stop a preview run. Always succeeds, including from Idle, so the STOP button can be pressed
     /// on every tab.
     pub fn stop_run(&mut self) {
+        if !self.connected {
+            self.status = "STOP is live once a controller is connected".to_string();
+            return;
+        }
         if self.run == RunPhase::Idle {
-            self.status = "STOP (no program running; no machine connection)".to_string();
+            self.status = "STOP sent (soft-reset)".to_string();
             return;
         }
         if self.run != RunPhase::Stopped && self.run != RunPhase::Finished {
             self.run = RunPhase::Stopped;
         }
-        self.status = "Preview run stopped".to_string();
+        self.status = "STOP sent (soft-reset); last line is kept".to_string();
     }
 
     /// Mark the preview run complete.
@@ -445,13 +465,13 @@ impl GuiState {
             if self.run_lines > 0 {
                 self.run_line = self.run_lines;
             }
-            self.status = "Preview run finished".to_string();
+            self.status = "Job finished".to_string();
         }
     }
 
-    /// Start is live when idle, stopped, or finished.
+    /// Start is live when connected, not in alarm, and idle, stopped, or finished.
     pub fn can_start(&self) -> bool {
-        matches!(self.run, RunPhase::Idle | RunPhase::Stopped | RunPhase::Finished)
+        self.connected && !self.in_alarm && matches!(self.run, RunPhase::Idle | RunPhase::Stopped | RunPhase::Finished)
     }
 
     /// Pause is live only while running.
@@ -459,9 +479,9 @@ impl GuiState {
         self.run == RunPhase::Running
     }
 
-    /// Jog, Frame, Home and Set Origin stay locked while running or paused.
+    /// Jog, Frame, Home and Set Origin stay locked while running, paused, or in alarm.
     pub fn can_jog(&self) -> bool {
-        matches!(self.run, RunPhase::Idle | RunPhase::Stopped | RunPhase::Finished)
+        self.connected && !self.in_alarm && matches!(self.run, RunPhase::Idle | RunPhase::Stopped | RunPhase::Finished)
     }
 
     /// Same lock as jog.
@@ -469,19 +489,19 @@ impl GuiState {
         self.can_jog()
     }
 
-    /// Same lock as jog.
+    /// `$H` is not sent in this slice.
     pub fn can_home(&self) -> bool {
-        self.can_jog()
+        false
     }
 
-    /// Same lock as jog.
+    /// Work-origin commands are not sent in this slice.
     pub fn can_set_origin(&self) -> bool {
-        self.can_jog()
+        false
     }
 
-    /// The STOP button is shown and pressable on every tab.
+    /// The STOP button is live on every tab once a controller is connected.
     pub fn can_stop(&self) -> bool {
-        true
+        self.connected
     }
 
     /// Displayed readout for the current DRO mode.
@@ -498,7 +518,7 @@ impl GuiState {
         if let Some(value) = self.work_pos.get_mut(axis) {
             *value += delta;
         }
-        self.status = "Jog preview only; no machine connection".to_string();
+        self.status = "Jog command queued".to_string();
         true
     }
 
@@ -918,11 +938,15 @@ mod tests {
     #[test]
     fn lockout_rules_while_running_and_paused() {
         let mut state = GuiState::new();
+        assert!(!state.can_start());
+        assert!(!state.can_jog());
+        assert!(!state.can_stop());
+        state.connected = true;
         assert!(state.can_start());
         assert!(state.can_jog());
         assert!(state.can_frame());
-        assert!(state.can_home());
-        assert!(state.can_set_origin());
+        assert!(!state.can_home());
+        assert!(!state.can_set_origin());
         assert!(!state.can_pause());
         assert!(state.can_stop());
 
@@ -951,6 +975,7 @@ mod tests {
     #[test]
     fn jog_unlocks_after_stop_or_finish() {
         let mut state = GuiState::new();
+        state.connected = true;
         assert!(state.start_run());
         state.stop_run();
         assert_eq!(state.run, RunPhase::Stopped);
@@ -964,13 +989,33 @@ mod tests {
         assert_eq!(state.run, RunPhase::Finished);
         assert!(state.can_jog());
         assert!(state.can_start());
-        assert!(state.set_origin());
-        assert_eq!(state.work_pos, [0.0, 0.0, 0.0]);
+        assert!(!state.set_origin());
+        assert!(!state.home());
+    }
+
+    #[test]
+    fn start_frame_and_jog_stay_locked_in_alarm() {
+        let mut state = GuiState::new();
+        state.connected = true;
+        state.run = RunPhase::Stopped;
+        state.in_alarm = true;
+        assert!(!state.can_start());
+        assert!(!state.can_jog());
+        assert!(!state.can_frame());
+        assert!(state.can_stop());
+        assert!(!state.jog(0, 1));
+        state.in_alarm = false;
+        assert!(state.can_start());
+        assert!(state.can_jog());
     }
 
     #[test]
     fn stop_from_idle_stays_idle() {
         let mut state = GuiState::new();
+        state.stop_run();
+        assert_eq!(state.run, RunPhase::Idle);
+        assert!(!state.can_jog());
+        state.connected = true;
         state.stop_run();
         assert_eq!(state.run, RunPhase::Idle);
         assert!(state.can_jog());

@@ -4,6 +4,7 @@
 //! on load. Every numeric value is entered by the user. This module does not ship machine
 //! limits, posts, or material defaults.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -56,6 +57,10 @@ pub struct MachineFile {
     pub heads: Vec<MachineHead>,
     /// Optional path to a user-supplied kinematics file. Stored as written; not loaded here.
     pub kinematics: Option<String>,
+    /// Serial RX buffer size in characters, when the user entered one. Required for
+    /// character-counting streaming; omitted means unset (send-response safe mode still works).
+    /// Never defaulted.
+    pub rx_buffer: Option<usize>,
 }
 
 /// Machine family stored in `type`.
@@ -291,6 +296,20 @@ pub struct MaterialEntry {
     pub post_delay: Option<f64>,
 }
 
+thread_local! {
+    static STORE_OVERRIDE: RefCell<Option<ProfileStore>> = const { RefCell::new(None) };
+}
+
+/// Use `store` for any [`ProfileStore::from_env`] lookup on this thread while `f` runs.
+pub fn with_store<R>(store: &ProfileStore, f: impl FnOnce() -> R) -> R {
+    STORE_OVERRIDE.with(|slot| {
+        let previous = slot.replace(Some(store.clone()));
+        let result = f();
+        slot.replace(previous);
+        result
+    })
+}
+
 /// Root of the user config tree (`.../campanion`), which holds `machines/*.json`.
 ///
 /// Override with `CAMPANION_CONFIG_DIR`. Otherwise `XDG_CONFIG_HOME/campanion`, or
@@ -303,6 +322,9 @@ pub struct ProfileStore {
 impl ProfileStore {
     /// Discover the config directory from the environment, without creating it.
     pub fn from_env() -> Result<Self, CliError> {
+        if let Some(store) = STORE_OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return Ok(store);
+        }
         Ok(Self { root: discover_config_dir()? })
     }
 
@@ -453,13 +475,14 @@ fn parse_profile_v1(map: &Map<String, Value>) -> Result<MachineFile, String> {
         post,
         heads: migrate_v1_heads(heads),
         kinematics: None,
+        rx_buffer: None,
     })
 }
 
 fn parse_profile_v2(map: &Map<String, Value>) -> Result<MachineFile, String> {
     check_keys(
         map,
-        &["format", "name", "units", "type", "bed", "screen", "work_area", "controller", "post", "heads", "kinematics"],
+        &["format", "name", "units", "type", "bed", "screen", "work_area", "controller", "post", "heads", "kinematics", "rx_buffer"],
         "machine profile",
     )
     .map_err(|err| err.to_string())?;
@@ -498,7 +521,8 @@ fn parse_profile_v2(map: &Map<String, Value>) -> Result<MachineFile, String> {
     {
         return Err("kinematics path is empty".to_string());
     }
-    Ok(MachineFile { name, units, kind, bed, screen, work_area, controller, post, heads, kinematics })
+    let rx_buffer = parse_rx_buffer(map)?;
+    Ok(MachineFile { name, units, kind, bed, screen, work_area, controller, post, heads, kinematics, rx_buffer })
 }
 
 fn parse_profile_common(map: &Map<String, Value>) -> Result<(String, String, f64, Option<WorkArea>, Option<String>, Option<String>), String> {
@@ -594,6 +618,24 @@ fn bed_from_work_area(area: Option<WorkArea>) -> Option<BedSize> {
     })
 }
 
+fn parse_rx_buffer(map: &Map<String, Value>) -> Result<Option<usize>, String> {
+    let Some(value) = optional(map, "rx_buffer") else {
+        return Ok(None);
+    };
+    let number = match value {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.parse::<u64>().ok(),
+        _ => None,
+    };
+    let Some(number) = number else {
+        return Err("rx_buffer must be a positive integer number of characters".to_string());
+    };
+    if number == 0 {
+        return Err("rx_buffer must be a positive integer number of characters".to_string());
+    }
+    usize::try_from(number).map(Some).map_err(|_| "rx_buffer is too large".to_string())
+}
+
 /// Serialise a profile for disk. Lengths are written in the profile's `units`.
 pub fn profile_to_json(profile: &MachineFile) -> Value {
     let scale = if profile.units == "inch" { 25.4 } else { 1.0 };
@@ -619,6 +661,9 @@ pub fn profile_to_json(profile: &MachineFile) -> Value {
     }
     if let Some(kinematics) = &profile.kinematics {
         map.insert("kinematics".to_string(), json!(kinematics));
+    }
+    if let Some(rx_buffer) = profile.rx_buffer {
+        map.insert("rx_buffer".to_string(), json!(rx_buffer));
     }
     if profile.kind == MachineKind::Gantry || !profile.heads.is_empty() {
         let heads: Vec<Value> = profile.heads.iter().map(|head| head_to_json(head, scale)).collect();
@@ -1144,6 +1189,7 @@ impl MachineFile {
                 changer: None,
             }],
             kinematics: None,
+            rx_buffer: None,
         }
     }
 }
@@ -1437,5 +1483,34 @@ mod tests {
         let json = profile_to_json(&profile);
         assert!(json.get("kinematics").is_none());
         assert!(json["heads"][0].get("changer").is_none());
+        assert!(profile.rx_buffer.is_none());
+        assert!(json.get("rx_buffer").is_none());
+    }
+
+    #[test]
+    fn rx_buffer_round_trips_and_zero_is_refused() {
+        let text = r#"{
+            "format": "campanion-machine/2",
+            "name": "Laser",
+            "units": "mm",
+            "type": "gantry",
+            "rx_buffer": 128,
+            "heads": [{ "id": "laser", "process": "laser" }]
+        }"#;
+        let profile = parse_profile(text).expect("parse");
+        assert_eq!(profile.rx_buffer, Some(128));
+        let json = profile_to_json(&profile);
+        assert_eq!(json["rx_buffer"], 128);
+        let again = parse_profile(&json.to_string()).expect("reparse");
+        assert_eq!(again.rx_buffer, Some(128));
+        let zero = r#"{
+            "format": "campanion-machine/2",
+            "name": "Laser",
+            "units": "mm",
+            "type": "gantry",
+            "rx_buffer": 0,
+            "heads": [{ "id": "laser", "process": "laser" }]
+        }"#;
+        assert!(parse_profile(zero).is_err());
     }
 }

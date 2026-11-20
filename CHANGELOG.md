@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## 0.26.0 — 2026-11-19
+
+Grbl-class laser streaming on the Run tab and a `campanion stream` command, following the public
+Grbl v1.1 interface and commands documents. **NOT hardware-tested. First run: low power, hand on
+the power switch.** CAMpanion is still primarily command-line driven.
+
+### Added
+
+- A live **Run** tab for a connected Grbl-class controller over USB serial: port picker, a baud
+  rate you select or type (Grbl documents 115200 8-N-1; nothing is assumed), connect and
+  disconnect, status polling with `?`, a DRO, Start, Pause/Resume (`!` / `~`), STOP (`0x18`
+  soft-reset followed by `M5` verification), alarm and error display with the numeric code, and
+  `$X` unlock only after confirm.
+- Character-counting streaming that uses a serial RX buffer size entered on the machine profile.
+  If that size is unset, character-counting is refused with a clear message. Send-response safe
+  mode needs no buffer size.
+- Frame traces the job bounding box with the laser off (`M5`/`S0`) at a frame feed you enter.
+  Jog uses `$J=` only when the controller is idle, with a jog feed you enter; jog is locked in
+  hold. The playhead follows acknowledged G-code lines. The last acknowledged line is kept on
+  Stop. While running, only Pause and STOP stay available. The STOP button on every tab becomes
+  live once a controller is connected.
+- `campanion stream` sends a posted G-code file over a serial port with the same protocols.
+  `--list` prints ports. On Linux, membership in the dialout group is typically required to open
+  a USB serial device.
+- Optional machine-profile field `rx_buffer` (character count). Omitted by default; never
+  invented.
+
+### Known limits
+
+- This release has not been hardware-tested. First run: low power, hand on the power switch.
+- Home (`$H`) and Set Origin are not sent in this slice. Resin Orient/Supports remain later
+  milestones. Movable start-point markers, visual height planes, colour selectors, and laser fill
+  raster sources are still later work. Off-sheet is a warning, not an export refusal.
+- The in-process `mock-grbl` port is only offered when `CAMPANION_STREAM_MOCK` is set or when
+  taking screenshots. It is a simulator, not a machine.
+
 ## 0.25.0 — 2026-11-19
 
 Simulate and Export for the graphical cutting workspace, so a first-time user can go from a new

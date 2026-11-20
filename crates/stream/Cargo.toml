@@ -1,0 +1,23 @@
+[package]
+name = "campanion-stream"
+description = "Grbl-class serial streaming for CAMpanion, following public Grbl v1.1 protocols. Not hardware-tested."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+serial = ["dep:nix"]
+
+[dependencies]
+thiserror.workspace = true
+
+# MIT. Used only on native Unix, never on wasm, and only behind the `serial` feature.
+[target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
+nix = { version = "0.29", optional = true, default-features = false, features = ["term", "fs"] }

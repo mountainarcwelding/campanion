@@ -86,7 +86,7 @@ A resin example:
 
 `format`, `name`, `units`, and `type` are required. `units` is `mm` or `inch`; lengths in the
 file are in those units and are stored internally as millimetres. `work_area`, `controller`,
-`post`, `bed`, `screen`, and `kinematics` may be omitted. An omitted work area means no travel check is run
+`post`, `bed`, `screen`, `kinematics`, and `rx_buffer` may be omitted. An omitted work area means no travel check is run
 from that block. A work area must include at least one of `x_min`, `x_max`, `y_min`, `y_max`,
 `z_min`, `z_max`. Only the limits that are present are checked. A value equal to a limit
 passes; a value outside it is a code-generation error.
@@ -94,6 +94,12 @@ passes; a value outside it is a code-generation error.
 `kinematics` is an optional path to a user-supplied kinematics file, stored as written. The
 profile parser does not load or validate that file. The field is omitted when unset and is
 never invented. Job files may still name their own `kinematics` path as before.
+
+`rx_buffer` is an optional positive integer: the serial receive buffer size in characters, used
+by character-counting streaming on the Run tab and by `campanion stream`. It is omitted when
+unset and is never invented. If it is unset, character-counting is refused and send-response
+safe mode can be used instead. Grbl's public interface document describes a 128-character
+buffer, but that value is not assumed.
 
 A gantry needs at least one head. A resin machine must not have a `heads` array (or must leave
 it empty) and must not be used as the selected head on a cutting job.

@@ -27,6 +27,7 @@ campanion-resin.workspace = true
 campanion-path.workspace = true
 campanion-post.workspace = true
 campanion-turn.workspace = true
+campanion-stream = { path = "../stream", features = ["serial"] }
 serde_json.workspace = true
 
 [dev-dependencies]

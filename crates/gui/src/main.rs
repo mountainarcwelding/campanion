@@ -1,8 +1,8 @@
 //! Window entry for the CAMpanion graphical workspace preview.
 //!
 //! `campanion-gui [FILE] [--screenshot DIR]` opens the shell. FILE may be IR JSON, a job file, or
-//! G-code. `--screenshot DIR` writes PNG previews of the main views and exits. The window never
-//! opens a serial port or moves a machine.
+//! G-code. `--screenshot DIR` writes PNG previews of the main views and exits. The Run tab can
+//! open a user-selected serial port; streaming is not hardware-tested.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -85,6 +85,7 @@ Usage:
                   Write PNG previews of the main views into DIR and exit.
 
 CAMpanion is primarily command-line driven. This GUI is still in development.
-It can open a part or job, generate toolpaths and export G-code.
-It does not talk to a machine.
+It can open a part or job, generate toolpaths, export G-code, and stream to a
+Grbl-class controller over USB serial. Streaming is NOT hardware-tested.
+First run: low power, hand on the power switch.
 ";

@@ -27,6 +27,7 @@ campanion-path.workspace = true
 campanion-view = { path = "../view" }
 campanion-cli = { path = "../cli" }
 campanion-post.workspace = true
+campanion-stream = { path = "../stream", features = ["serial"] }
 thiserror.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "x11", "wayland"] }
