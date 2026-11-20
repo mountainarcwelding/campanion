@@ -28,6 +28,8 @@ campanion supports MODEL.stl -o OUT.stl [--support-params FILE.json]
     [--layer-height MM] [--detect-cell MM] [--island-ignore-area MM2]
     [--lowest-band-height MM] [--lowest-band-spacing MM]
     [--calibration FILE.json] [--optimize]
+    [--zones FILE.json --zone-spacing MM] [--presets FILE.json] [--preset-mix ROLE=NAME,...]
+    [--tip-penetration MM] [--brace-diameter MM --brace-span MM --brace-pitch MM]
 campanion resin MODEL.stl -o OUT.pm7m [--params-from SAMPLE.pm7m]
     [--layer-height MM] [--bottom-layers N]
     [--bottom-exposure S] [--bottom-lift-height MM] [--bottom-lift-speed V]
@@ -89,6 +91,42 @@ campanion resin-info FILE.pm7m
 - The supported STL is a multi-body mesh: the part, the raft, and each pillar are separately
   watertight. The slicer fills with non-zero winding, so bodies that touch merge in the layer
   images. `--preview` writes a shaded 3/4 view from a low side angle (the raft undercut is meant to be visible).
+
+### Painted zones, presets, tip penetration and cross-bracing
+
+None of these has a default. Each is off until you give it, and a feature that is on needs every
+value it uses.
+
+- `--zones FILE.json` marks part triangles as support or no-support faces. The file is written by
+  the GUI (Supports tab, Paint support / Paint no-support) or by hand:
+  `{"schema":"campanion-resin-zones/1","triangle_count":N,"support":[[start,end],...],"block":[[start,end],...]}`.
+  Ranges are half-open triangle indices into the input STL. A different triangle count is refused.
+  Down-facing support faces are sampled at `--zone-spacing` even below `--overhang-angle`; faces
+  that face up or sideways, or that have part below them, cannot take a vertical support and are
+  counted in a warning. Automatic supports whose contact face is a no-support face are removed.
+  Supports you list in `--points` are never removed. Painted zones work with `--points-only`.
+- `--presets FILE.json` is a list of named tip presets you saved:
+  `{"schema":"campanion-resin-presets/1","presets":[{"name":"fine","tip_diameter_mm":...,"tip_length_mm":...,"pillar_diameter_mm":...,"foot_diameter_mm":...,"foot_height_mm":...,"tip_penetration_mm":...}]}`
+  (`tip_penetration_mm` is optional). Names may not contain spaces, commas or `=`. A `--points`
+  line may name a preset in its fourth column. `--preset-mix` picks a preset for each kind of
+  support: `overhang`, `island`, `lowest-band`, `painted`, `manual`. A role left out uses the tip
+  and pillar flags. The mix cannot be combined with `--optimize`, which picks from the calibration
+  tips instead. The GUI keeps its presets in `resin-tip-presets.json` in the user config folder.
+- `--tip-penetration` sinks each tip that far into the part along the tip axis, so the contact is
+  not tangent. A preset's own `tip_penetration_mm` wins for its supports.
+- `--brace-diameter`, `--brace-span` and `--brace-pitch` go together. Pillars are joined into a
+  minimum spanning tree of neighbours no farther apart than the span. Each link gets zig-zag
+  struts of the given diameter at the given vertical pitch, between the top of the feet and the
+  base of the tip cones. A strut that would come within one strut diameter of the part is left out
+  and counted. Struts are closed 8-sided prisms; the slicer's non-zero fill merges them with the
+  pillars.
+
+### Islands in the slice
+
+`campanion resin` reports regions of a layer that touch no lit pixel on the layer below (the first
+layer is skipped). These would print in mid-air. The GUI Slice tab colours and outlines them on the
+layer image and can step to the previous or next layer with one. The check is pixel overlap only;
+it does not judge whether a thin overlap is strong enough.
 
 `--support-params` is a JSON object with these keys (unknown keys are refused):
 

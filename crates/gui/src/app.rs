@@ -159,6 +159,8 @@ struct App {
     resin_view3d: View3d,
     resin_generate: ResinGenerateJob,
     orient_drag: Option<OrientDrag>,
+    /// True between the start and end of a paint drag, so one stroke is one undo step.
+    resin_paint_stroke: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -168,6 +170,9 @@ struct OrientDrag {
     origin_x: f64,
     origin_y: f64,
 }
+
+/// Saved tip presets, next to the machine profiles.
+const RESIN_PRESETS_FILE: &str = "resin-tip-presets.json";
 
 struct ScreenshotJob {
     dir: PathBuf,
@@ -184,7 +189,7 @@ struct ScreenshotJob {
 
 impl App {
     fn new(has_font: bool) -> Self {
-        Self {
+        let mut app = Self {
             state: GuiState::new(),
             session: JobSession::new(),
             document: None,
@@ -218,7 +223,11 @@ impl App {
             resin_view3d: View3d::default(),
             resin_generate: ResinGenerateJob::default(),
             orient_drag: None,
-        }
+            resin_paint_stroke: false,
+        };
+        let presets_path = app.profile_store.root().join(RESIN_PRESETS_FILE);
+        app.resin.load_presets(presets_path);
+        app
     }
 
     fn open_file(&mut self, path: &Path) {
@@ -915,7 +924,15 @@ impl App {
         let three_d_set = set == Some("3d") || dir_name == Some("gui-shots-3d");
         let fix281_set = set == Some("fix281") || dir_name == Some("gui-shots-fix281");
         let fix282_set = set == Some("fix282") || dir_name == Some("gui-shots-fix282");
-        let plan = if fix282_set {
+        let p1_set = set == Some("p1") || dir_name == Some("gui-shots-p1");
+        let plan = if p1_set {
+            vec![
+                (Workspace::Resin, ModeTab::Supports, "resin-p1-paint.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-p1-bracing.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-p1-presets.png".to_string()),
+                (Workspace::Resin, ModeTab::Slice, "resin-p1-slice-islands.png".to_string()),
+            ]
+        } else if fix282_set {
             vec![
                 (Workspace::Resin, ModeTab::Supports, "resin-fix282-progress.png".to_string()),
                 (Workspace::Resin, ModeTab::Supports, "resin-fix282-supports.png".to_string()),
@@ -983,6 +1000,10 @@ impl App {
         }
         if name.is_some_and(|name| name.starts_with("g3-")) {
             self.prepare_g3_screenshot(name);
+            return;
+        }
+        if name.is_some_and(|name| name.starts_with("resin-p1-")) {
+            self.prepare_p1_screenshot(name.unwrap_or(""));
             return;
         }
         if name.is_some_and(|name| name.starts_with("resin-")) {
@@ -1131,6 +1152,146 @@ impl App {
                     // A layer through the raft, the largest XY footprint, so the LCD preview is visible on the bed.
                     let layer = self.state.layer_count.clamp(1, 2);
                     self.state.set_layer(layer);
+                }
+                Err(err) => self.state.status = err,
+            }
+        }
+        if self.state.status.is_empty() || self.state.status.starts_with("Machine:") {
+            self.state.status = "Screenshot values are examples typed for this preview, not program defaults.".to_string();
+        }
+    }
+
+    /// Screenshots for painted zones, cross-bracing, tip presets and slice islands.
+    ///
+    /// Every value typed here is a screenshot stand-in, not a shipped default. Set
+    /// `CAMPANION_SCREENSHOT_PART` to an STL to photograph a real part; otherwise a built-in
+    /// stand-in is used. The part is never copied into the repository.
+    fn prepare_p1_screenshot(&mut self, name: &str) {
+        self.resin_generate.abandon();
+        self.state.set_workspace(Workspace::Resin);
+        let Some(dir) = self.screenshot.as_ref().map(|job| job.dir.clone()) else {
+            return;
+        };
+        let store = campanion_cli::ProfileStore::from_dir(dir.join("config"));
+        let mut resin_example = machines::screenshot_example_resin("Example resin printer (example values)");
+        let spec = &campanion_resin::M7_MAX;
+        resin_example.bed = Some(campanion_cli::BedSize { x: spec.bed_x_mm, y: spec.bed_y_mm, z: Some(spec.bed_z_mm) });
+        resin_example.screen = Some(campanion_cli::BedSize { x: spec.bed_x_mm, y: spec.bed_y_mm, z: None });
+        let _ = store.save("example-shop-resin", &resin_example);
+        self.profile_store = store;
+        self.session.machine_profile = "example-shop-resin".to_string();
+        self.session.machine_head.clear();
+        self.apply_machine_selection();
+
+        let slice = name.contains("slice");
+        let real = if slice {
+            None
+        } else {
+            std::env::var_os("CAMPANION_SCREENSHOT_PART")
+                .and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| campanion_mesh::parse_stl(&bytes).ok())
+        };
+        let is_real = real.is_some();
+        self.resin = ResinSession::default();
+        self.resin.mesh = Some(real.unwrap_or_else(if slice { screenshot_island_part } else { screenshot_resin_part }));
+        self.resin.mesh_path = Some(PathBuf::from("screenshot-part.stl"));
+        fill_screenshot_support_fields(&mut self.state);
+        let set = |field: &mut UserField, value: &str| field.value = value.to_string();
+        set(&mut self.state.support.tip_penetration_mm, "0.20");
+        set(&mut self.state.support.zone_spacing_mm, "2.00");
+        set(&mut self.state.support.brush_radius_mm, "4.00");
+        set(&mut self.state.support.support_spacing_mm, if is_real { "3.00" } else { "4.00" });
+        self.state.support.bracing_on = !slice;
+        set(&mut self.state.support.brace_diameter_mm, "0.50");
+        set(&mut self.state.support.brace_span_mm, "8.00");
+        set(&mut self.state.support.brace_pitch_mm, "3.00");
+        if is_real {
+            let _ = resin_ui::center_session_on_plate(&mut self.resin, &mut self.state.position_mm, &mut self.state.rotation_deg);
+        }
+
+        // Saved presets live in the screenshot config folder, never in the user's.
+        let presets_path = dir.join("config").join(RESIN_PRESETS_FILE);
+        let _ = std::fs::remove_file(&presets_path);
+        self.resin.load_presets(presets_path);
+        if !slice {
+            let fine = campanion_resin::TipPreset {
+                name: "fine".to_string(),
+                tip_diameter_mm: 0.40,
+                tip_length_mm: 1.00,
+                pillar_diameter_mm: 0.80,
+                foot_diameter_mm: 2.50,
+                foot_height_mm: 0.60,
+                tip_penetration_mm: None,
+            };
+            let heavy = campanion_resin::TipPreset {
+                name: "heavy".to_string(),
+                tip_diameter_mm: 0.80,
+                tip_length_mm: 1.40,
+                pillar_diameter_mm: 1.60,
+                foot_diameter_mm: 3.50,
+                foot_height_mm: 0.80,
+                tip_penetration_mm: Some(0.30),
+            };
+            let _ = self.resin.store_preset(fine);
+            let _ = self.resin.store_preset(heavy);
+            self.resin.mix.set(campanion_resin::SupportRole::Overhang, Some("fine".to_string()));
+            self.resin.mix.set(campanion_resin::SupportRole::Island, Some("heavy".to_string()));
+            self.resin.mix.set(campanion_resin::SupportRole::LowestBand, Some("heavy".to_string()));
+            self.resin.mix.set(campanion_resin::SupportRole::Painted, Some("fine".to_string()));
+        }
+
+        // Paint on the posed part before generating.
+        let bounds = self.resin.posed_part().ok().and_then(|mesh| mesh.bounds().ok());
+        if let Some(bounds) = bounds {
+            let up = campanion_mesh::Vec3::new(0.0, 0.0, 1.0);
+            let cx = (bounds.min().x + bounds.max().x) * 0.5;
+            let cy = (bounds.min().y + bounds.max().y) * 0.5;
+            if slice || !is_real {
+                // Block the floating block's underside so it slices as an unsupported island.
+                let island = campanion_mesh::Vec3::new(19.0, 19.0, 12.0);
+                let _ = self.resin.paint_at(island, 5.0, campanion_resin::ZoneMark::Block, Some(up));
+                if !slice {
+                    let base = campanion_mesh::Vec3::new(-4.0, -4.0, 0.0);
+                    let _ = self.resin.paint_at(base, 5.0, campanion_resin::ZoneMark::Support, Some(up));
+                }
+            } else {
+                let z = bounds.min().z;
+                let green = campanion_mesh::Vec3::new(cx + (bounds.max().x - cx) * 0.55, cy, z);
+                let red = campanion_mesh::Vec3::new(bounds.min().x + 2.0, cy, z);
+                let _ = self.resin.paint_at(green, 5.0, campanion_resin::ZoneMark::Support, Some(up));
+                let _ = self.resin.paint_at(red, 5.0, campanion_resin::ZoneMark::Block, Some(up));
+            }
+        }
+        if let Err(err) = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false, None, None) {
+            self.state.status = err;
+        }
+        self.resin.view = SupportView::ThreeQuarter;
+        self.refresh_resin_view();
+        self.resin_view3d = View3d::default();
+        self.resin_view3d.set_standard(self.resin.view.standard());
+        self.resin_view3d.user_adjusted = false;
+        if name.contains("paint") {
+            self.resin.tool = SupportEditTool::PaintSupport;
+            self.resin.scroll_to = Some("zones");
+            self.resin_view3d.pending_orbit = Some((30.0, 40.0));
+        }
+        if name.contains("bracing") {
+            self.resin.scroll_to = Some("bracing");
+            self.resin_view3d.pending_orbit = Some((-20.0, 10.0));
+            self.resin_view3d.pending_zoom = Some((2.6, 0.5, 0.82));
+        }
+        if name.contains("presets") {
+            self.resin.scroll_to = Some("presets");
+            self.resin.tool = SupportEditTool::Direct;
+            self.resin.selected_point = if self.resin.points.is_empty() { None } else { Some(0) };
+        }
+        if slice {
+            self.prepare_screenshot_print_settings(&dir);
+            match resin_ui::apply_slice(&mut self.resin, &self.state.support, &self.state.lift_mm, true) {
+                Ok(report) => {
+                    self.state.layer_count = u32::try_from(report.layers).unwrap_or(1).max(1);
+                    let first = self.resin.slice_islands.islands.first().map(|island| island.layer).unwrap_or(0);
+                    self.state.set_layer(u32::try_from(first + 1).unwrap_or(1));
                 }
                 Err(err) => self.state.status = err,
             }
@@ -2287,8 +2448,40 @@ impl App {
                     {
                         self.resin.tool = SupportEditTool::Delete;
                     }
-                    if ribbon_command(ui, "Undo", false).on_hover_text("Undo the last add, move, or delete. Ctrl+Z also works.").clicked() {
+                    if ribbon_command(ui, "Undo", false)
+                        .on_hover_text("Undo the last add, move, delete or paint stroke. Ctrl+Z also works.")
+                        .clicked()
+                    {
                         self.undo_resin();
+                    }
+                });
+                ribbon_group_separator(ui);
+                ribbon_group(ui, "Paint", |ui| {
+                    let reason = resin_ui::paint_disabled_reason(&self.resin, &self.state.support);
+                    for (tool, label, tip) in [
+                        (
+                            SupportEditTool::PaintSupport,
+                            "Paint support",
+                            "Left-drag on the part to mark faces that must get supports (green). Uses the brush radius and painted zone spacing on the right.",
+                        ),
+                        (
+                            SupportEditTool::PaintBlock,
+                            "Paint no-support",
+                            "Left-drag on the part to mark faces that must never get an automatic support (red), such as a cosmetic face.",
+                        ),
+                        (SupportEditTool::ErasePaint, "Erase paint", "Left-drag on the part to clear paint."),
+                    ] {
+                        let response = ribbon_command(ui, label, self.resin.tool == tool);
+                        let tip = match &reason {
+                            Some(reason) => format!("{tip}\n\n{reason}"),
+                            None => tip.to_string(),
+                        };
+                        if response.on_hover_text(tip).clicked() {
+                            self.resin.tool = tool;
+                            if let Some(reason) = &reason {
+                                self.state.status = reason.clone();
+                            }
+                        }
                     }
                 });
                 ribbon_group_separator(ui);
@@ -3891,6 +4084,7 @@ impl App {
                 RichText::new(format!("Sliced {} layer(s) with the same slicer as `campanion resin`. NOT printer-tested.", self.state.layer_count))
                     .size(12.0),
             );
+            self.slice_islands_bar(ui);
         }
         ui.add_space(6.0);
         ui.columns(3, |columns| {
@@ -3974,6 +4168,45 @@ impl App {
             ui.label(RichText::new(time_label).color(theme::MUTED));
         });
         ui.label(RichText::new("Image orientation is unverified until an asymmetric test part is printed.").color(theme::MUTED).size(11.0));
+    }
+
+    /// Island summary and jump buttons for the Slice tab.
+    fn slice_islands_bar(&mut self, ui: &mut egui::Ui) {
+        let total = self.resin.slice_islands.total();
+        let current = self.state.layer.saturating_sub(1) as usize;
+        ui.horizontal(|ui| {
+            if total == 0 {
+                ui.label(RichText::new("Islands: none. Every lit region sits on the layer below or on the plate.").size(12.0));
+                return;
+            }
+            let mut layers: Vec<usize> = self.resin.slice_islands.islands.iter().map(|island| island.layer).collect();
+            layers.dedup();
+            let area: f64 = self.resin.slice_islands.islands.iter().map(|island| island.pixels as f64).sum::<f64>() * self.resin.pixel_area_mm2;
+            ui.label(
+                RichText::new(format!(
+                    "Islands: {total} region(s) on {} layer(s), {area:.2} mm² in all, start with nothing under them.",
+                    layers.len()
+                ))
+                .color(theme::OFF_BED)
+                .size(12.0),
+            );
+            let prev = self.resin.slice_islands.prev_layer_before(current);
+            let next = self.resin.slice_islands.next_layer_after(current);
+            let prev_btn = ui.add_enabled(prev.is_some(), egui::Button::new("◀ Previous island"));
+            let prev_btn = if prev.is_none() { prev_btn.on_disabled_hover_text("No island below this layer.") } else { prev_btn };
+            if let Some(layer) = prev
+                && prev_btn.on_hover_text(format!("Go to layer {}", layer + 1)).clicked()
+            {
+                self.state.set_layer(u32::try_from(layer + 1).unwrap_or(1));
+            }
+            let next_btn = ui.add_enabled(next.is_some(), egui::Button::new("Next island ▶"));
+            let next_btn = if next.is_none() { next_btn.on_disabled_hover_text("No island above this layer.") } else { next_btn };
+            if let Some(layer) = next
+                && next_btn.on_hover_text(format!("Go to layer {}", layer + 1)).clicked()
+            {
+                self.state.set_layer(u32::try_from(layer + 1).unwrap_or(1));
+            }
+        });
     }
 
     fn cutting_export_center(&mut self, ui: &mut egui::Ui) {
@@ -4572,6 +4805,7 @@ impl App {
                     self.state.position_mm = [UserField::empty(), UserField::empty(), UserField::empty()];
                     self.state.rotation_deg = [UserField::empty(), UserField::empty(), UserField::empty()];
                     self.resin.points.clear();
+                    self.resin.zones = None;
                     self.resin.features = None;
                     self.resin.supported = None;
                     self.resin.points_dirty = false;
@@ -4795,13 +5029,50 @@ impl App {
             placeholder_pane(ui, "That layer is not in this slice.");
             return;
         };
-        match resin_ui::layer_preview_rgba(image, self.resin.slice_width, self.resin.slice_height, 640) {
-            Ok((w, h, rgba)) => {
-                let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-                let texture = ui.ctx().load_texture(format!("resin-layer-{index}"), color, egui::TextureOptions::NEAREST);
+        let islands: Vec<(&[campanion_resin::Span], egui::Color32)> = self
+            .resin
+            .slice_islands
+            .on_layer(index)
+            .enumerate()
+            .map(|(k, island)| (island.spans.as_slice(), resin_ui::island_color(u32::try_from(k).unwrap_or(0).saturating_add(1))))
+            .collect();
+        let island_count = islands.len();
+        let cached = self.resin.layer_cache.as_ref().filter(|(i, _)| *i == index).map(|(_, preview)| preview.clone());
+        let preview = match cached {
+            Some(preview) => Ok(preview),
+            None => resin_ui::layer_preview_with_islands(image, self.resin.slice_width, self.resin.slice_height, 640, &islands),
+        };
+        if let Ok(preview) = &preview {
+            self.resin.layer_cache = Some((index, preview.clone()));
+        }
+        match preview {
+            Ok(preview) => {
+                let (w, h) = (preview.width, preview.height);
+                let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &preview.rgba);
+                let texture = ui.ctx().load_texture("resin-layer", color, egui::TextureOptions::NEAREST);
                 let avail = ui.available_size();
+                let avail = egui::vec2(avail.x, (avail.y - 40.0).max(80.0));
                 let scale = (avail.x / w as f32).min(avail.y / h as f32).max(0.05);
-                ui.image((texture.id(), egui::vec2(w as f32 * scale, h as f32 * scale)));
+                let response = ui.image((texture.id(), egui::vec2(w as f32 * scale, h as f32 * scale)));
+                let origin = response.rect.min;
+                let painter = ui.painter_at(response.rect.expand(8.0));
+                for (color, b) in &preview.island_boxes {
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(origin.x + b[0] * scale, origin.y + b[1] * scale),
+                        egui::pos2(origin.x + b[2] * scale, origin.y + b[3] * scale),
+                    )
+                    .expand(4.0);
+                    painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, *color), egui::StrokeKind::Outside);
+                }
+                if island_count > 0 {
+                    ui.label(
+                        RichText::new(format!(
+                            "{island_count} island(s) start on this layer with nothing under them (outlined). They will not attach; add supports there."
+                        ))
+                        .color(theme::OFF_BED)
+                        .size(11.0),
+                    );
+                }
                 ui.label(
                     RichText::new(format!(
                         "Zoomed to exposed pixels. Full layer {}×{} px. Orientation unverified.",
@@ -4832,6 +5103,21 @@ impl App {
         let scene = self.resin.scene3(volume);
         let output = view3d::show_with_controls(ui, &mut self.resin_view3d, &scene, caption);
         self.handle_resin_pointer(&output);
+        if self.state.tab == ModeTab::Supports
+            && let Some((center, radius_px)) = self.resin.brush_hover
+        {
+            let rect = output.rect;
+            let p = self.resin_view3d.camera.project(center, f64::from(rect.width()), f64::from(rect.height()));
+            let pos = egui::pos2(rect.left() + p.x as f32, rect.top() + p.y as f32);
+            let color = match self.resin.tool {
+                SupportEditTool::PaintSupport => egui::Color32::from_rgb(70, 190, 110),
+                SupportEditTool::PaintBlock => egui::Color32::from_rgb(220, 70, 70),
+                _ => egui::Color32::from_rgb(230, 230, 230),
+            };
+            let painter = ui.painter_at(rect);
+            painter.circle_stroke(pos, radius_px.max(3.0), egui::Stroke::new(2.0, color));
+            painter.circle_filled(pos, 2.0, color);
+        }
     }
 
     fn handle_orient_drag(&mut self, output: &view3d::View3dOutput) {
@@ -4891,6 +5177,11 @@ impl App {
             self.handle_orient_drag(output);
             return;
         }
+        if let Some(mark) = self.resin.tool.paint_mark() {
+            self.handle_resin_paint(output, mark);
+            return;
+        }
+        self.resin.brush_hover = None;
         let raft_top = self.state.support.raft_thickness_mm.value.trim().parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
         if output.primary_drag_started
             && let Some(id) = output.hover_hit.and_then(|hit| hit.marker_id)
@@ -4929,6 +5220,7 @@ impl App {
                 SupportEditTool::Move => {
                     self.resin.selected_point = hit.marker_id;
                 }
+                SupportEditTool::PaintSupport | SupportEditTool::PaintBlock | SupportEditTool::ErasePaint => {}
                 SupportEditTool::Add | SupportEditTool::Direct => {
                     if let Some(index) = hit.marker_id {
                         self.resin.selected_point = Some(index);
@@ -4969,6 +5261,43 @@ impl App {
             output.response.clone().on_hover_ui_at_pointer(move |ui| {
                 ui.label(text);
             });
+        }
+    }
+
+    /// Left-drag paints with the current paint tool. Right and middle drag still orbit and pan.
+    fn handle_resin_paint(&mut self, output: &view3d::View3dOutput, mark: campanion_resin::ZoneMark) {
+        let reason = resin_ui::paint_disabled_reason(&self.resin, &self.state.support);
+        let radius = resin_ui::parse_optional(&self.state.support.brush_radius_mm, "brush radius (mm)").ok().flatten().filter(|r| *r > 0.0);
+        let camera = self.resin_view3d.camera;
+        let hit = output.hover_mesh_hit.filter(|hit| hit.role == campanion_view::MeshRole::Part);
+        self.resin.brush_hover = match (hit, radius) {
+            (Some(hit), Some(r)) => Some((hit.point, (r * camera.pixels_per_mm(f64::from(output.rect.height()))) as f32)),
+            _ => None,
+        };
+        let clicked = output.response.clicked_by(egui::PointerButton::Primary);
+        let started = output.primary_drag_started || clicked;
+        if started && let Some(reason) = &reason {
+            self.state.status = reason.clone();
+        }
+        if let (None, Some(hit), Some(radius)) = (&reason, hit, radius)
+            && (output.primary_dragging || clicked)
+        {
+            if !self.resin_paint_stroke {
+                self.push_resin_undo();
+                self.resin_paint_stroke = true;
+            }
+            let view_dir = Some(camera.basis().forward);
+            match self.resin.paint_at(hit.point, radius, mark, view_dir) {
+                Ok(_) => {
+                    let (support, block) = self.resin.zone_counts();
+                    self.state.status =
+                        format!("Painted: {support} support face(s), {block} no-support face(s). Generate supports to apply the zones.");
+                }
+                Err(err) => self.state.status = err,
+            }
+        }
+        if output.primary_drag_stopped || clicked || !output.primary_dragging {
+            self.resin_paint_stroke = false;
         }
     }
 
@@ -5166,6 +5495,23 @@ fn screenshot_resin_part() -> campanion_mesh::Mesh {
                 Err(_) => screenshot_resin_part(),
             },
         },
+    }
+}
+
+fn screenshot_island_part() -> campanion_mesh::Mesh {
+    // Screenshot stand-in only: a tall block with a floating block beside it, so the first
+    // island layer also shows the main body.
+    use campanion_mesh::{Aabb, Mesh, Vec3};
+    let mut tris = Vec::new();
+    if let Ok(base) = Mesh::new(Aabb::from_corners(Vec3::new(-8.0, -8.0, 0.0), Vec3::new(8.0, 8.0, 20.0)).face_triangles().to_vec()) {
+        tris.extend_from_slice(base.triangles());
+    }
+    if let Ok(island) = Mesh::new(Aabb::from_corners(Vec3::new(16.0, 16.0, 12.0), Vec3::new(22.0, 22.0, 16.0)).face_triangles().to_vec()) {
+        tris.extend_from_slice(island.triangles());
+    }
+    match Mesh::new(tris) {
+        Ok(mesh) => mesh,
+        Err(_) => screenshot_resin_part(),
     }
 }
 

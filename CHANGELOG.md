@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## 0.29.0 — 2026-11-20
+
+**NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.
+Check any `.pm7m` on the printer screen and print a test before a real job. CAMpanion is still
+primarily command-line driven; the GUI is in development.
+
+### Added
+
+- Painted zones. In the Supports tab, Paint support, Paint no-support and Erase paint brush part
+  faces in the 3D view (left-drag; a ring shows the brush). Support faces get supports at the
+  painted zone spacing even below the overhang angle; no-support faces never get an automatic
+  support. Marks are stored per triangle, so they follow the part through pose changes. One
+  stroke is one undo step. On the CLI: `--zones FILE.json` with `--zone-spacing`.
+- Cross-bracing between pillars (`--brace-diameter`, `--brace-span`, `--brace-pitch`, or the
+  Cross-bracing section). Struts follow a minimum spanning tree of neighbouring pillars and are
+  left out where they would come near the part.
+- Tip penetration (`--tip-penetration`, or per preset): tips sink into the part instead of
+  touching it at a point.
+- Saved tip presets and a preset mix. The GUI saves named presets to `resin-tip-presets.json` in
+  the user config folder; each kind of support (overhang, island, lowest band, painted, added by
+  hand) can use a different preset, and a selected support can be switched. On the CLI:
+  `--presets FILE.json` and `--preset-mix overhang=fine,island=heavy`.
+- Slice islands. `campanion resin` warns about regions that start with nothing under them. The
+  Slice tab colours and outlines them, counts them, and has Previous / Next island buttons.
+
+### Known limits
+
+- Nothing in this release has been printer-tested. Image orientation is unverified.
+- The only `.pm7m` format written is the Anycubic Photon Mono M7 Max layout.
+- Branching trees, hollowing, auto-orient and calibration-print geometry are not included.
+- Braces are straight zig-zag struts along the spanning tree only.
+- Painted faces that face up or sideways, or have part below them, cannot take a vertical
+  support; they are counted, not supported.
+- The brush paints whole triangles: every front-facing triangle with a corner or centre inside
+  the brush. On a coarse mesh one large triangle can paint a wide area.
+- The slice island check is pixel overlap with the layer below only.
+- The GUI is still in development. CAMpanion remains primarily command-line driven.
+
 ## 0.28.2 — 2026-11-20
 
 **NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.
