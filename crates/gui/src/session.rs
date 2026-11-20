@@ -512,6 +512,101 @@ fn attach_import_messages(session: &mut JobSession, part: &ImportedPart) {
     }
 }
 
+/// Part ids in this session, comma-separated, for a parts selector.
+#[must_use]
+pub fn all_part_ids(session: &JobSession) -> String {
+    session.parts.iter().map(|part| part.id.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// Assign `op` to every part, with no layer filter.
+pub fn assign_to_all_parts(op: &mut OpDraft, session: &JobSession) {
+    op.assign = "parts".to_string();
+    op.assign_parts = all_part_ids(session);
+    op.layers.clear();
+}
+
+/// Layers from every imported part, merged by name. Falls back to the selected part list.
+#[must_use]
+pub fn all_part_layers(session: &JobSession) -> Vec<LayerSummary> {
+    let mut out: Vec<LayerSummary> = Vec::new();
+    for part in &session.parts {
+        for layer in &part.layers {
+            if let Some(existing) = out.iter_mut().find(|item| item.name == layer.name) {
+                existing.contour_count = existing.contour_count.saturating_add(layer.contour_count);
+            } else {
+                out.push(layer.clone());
+            }
+        }
+    }
+    if out.is_empty() {
+        out = session.layers.clone();
+    }
+    out
+}
+
+/// Layer name with the part ids that actually have that layer, e.g. `OUTER (sample, curves)`.
+#[must_use]
+pub fn layer_parts_label(session: &JobSession, layer: &str) -> String {
+    let parts: Vec<&str> =
+        session.parts.iter().filter(|part| part.layers.iter().any(|item| item.name == layer)).map(|part| part.id.as_str()).collect();
+    if parts.is_empty() { layer.to_string() } else { format!("{layer} ({})", parts.join(", ")) }
+}
+
+fn part_has_layer(part: &PartDraft, layer: &str) -> bool {
+    part.layers.iter().any(|item| item.name == layer)
+        || part.drawing.as_ref().is_some_and(|drawing| drawing.contours().iter().any(|item| item.layer() == layer))
+}
+
+fn part_has_any_geometry(part: &PartDraft) -> bool {
+    !part.layers.is_empty() || part.drawing.as_ref().is_some_and(|drawing| !drawing.contours().is_empty())
+}
+
+fn part_matches_op_layers(part: &PartDraft, op: &OpDraft) -> bool {
+    if op.layers.is_empty() { part_has_any_geometry(part) } else { op.layers.iter().any(|layer| part_has_layer(part, layer)) }
+}
+
+/// Whether `op`'s current assignment would select any imported contour.
+#[must_use]
+pub fn operation_has_geometry(session: &JobSession, op: &OpDraft) -> bool {
+    if session.parts.is_empty() {
+        return false;
+    }
+    let listed = csv_list(&op.assign_parts);
+    match op.assign.trim() {
+        "parts" => {
+            if listed.is_empty() {
+                return false;
+            }
+            session.parts.iter().filter(|part| listed.iter().any(|id| id == &part.id)).any(|part| part_matches_op_layers(part, op))
+        }
+        "layers" => {
+            if op.layers.is_empty() {
+                return false;
+            }
+            session
+                .parts
+                .iter()
+                .filter(|part| listed.is_empty() || listed.iter().any(|id| id == &part.id))
+                .any(|part| part_matches_op_layers(part, op))
+        }
+        "contours" => !csv_list(&op.assign_contours).is_empty(),
+        "" => session.parts.iter().any(|part| part_matches_op_layers(part, op)),
+        _ => false,
+    }
+}
+
+/// Inline warning when an operation's assignment matches no geometry.
+#[must_use]
+pub fn operation_match_warning(session: &JobSession, op: &OpDraft) -> Option<String> {
+    if operation_has_geometry(session, op) {
+        return None;
+    }
+    if session.parts.is_empty() {
+        return Some("This operation matches no geometry. Import a part, then assign this operation to it.".to_string());
+    }
+    Some("This operation matches no geometry. Assign it to a part, or pick a layer that exists on an imported part.".to_string())
+}
+
 /// Import a part file (DXF, SVG, STEP or STL).
 pub fn import_part_file(path: &Path) -> Result<ImportedPart, String> {
     import_part(path).map_err(|err| {
@@ -1432,6 +1527,9 @@ fn operation_value(op: &OpDraft, original: Option<&Value>, units: &str, v2: bool
     }
     if !op.layers.is_empty() {
         map.insert("layers".into(), Value::Array(op.layers.iter().map(|layer| Value::String(layer.clone())).collect()));
+    } else {
+        // Do not keep layers from a previously opened job when this draft has none.
+        map.remove("layers");
     }
     if op.kind == "profile" && !op.side.is_empty() {
         map.insert("side".into(), Value::String(op.side.clone()));
@@ -2177,5 +2275,77 @@ mod tests {
         assert_eq!(reopened.stock_thickness, "6");
         assert_eq!(reopened.sheet_width, "200");
         assert_eq!(reopened.datum_anchor, "min_min");
+    }
+
+    #[test]
+    fn new_operation_defaults_to_all_parts_and_plans_mixed_layer_sources() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo");
+        let sample = import_part_file(&root.join("examples/sample.svg")).expect("sample");
+        let nest = import_part_file(&root.join("examples/nest.dxf")).expect("nest");
+        let mut session = session_from_import(&sample);
+        add_imported_part(&mut session, &nest);
+        session.tools.push(ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: "0.1".to_string() });
+        let mut op = crate::operations::new_operation_on_session(&session, "outline", "profile", 1);
+        assert_eq!(op.assign, "parts");
+        assert!(op.assign_parts.contains("sample"), "{}", op.assign_parts);
+        assert!(op.assign_parts.contains("nest"), "{}", op.assign_parts);
+        assert!(op.layers.is_empty());
+        op.side = "outside".to_string();
+        op.depth = "0.26".to_string();
+        op.step_down = "0.26".to_string();
+        op.cut_feed = "300".to_string();
+        session.operations.push(op);
+        assert!(operation_match_warning(&session, &session.operations[0]).is_none());
+        let planned = generate_toolpaths(&session).expect("plan mixed-layer parts by part assignment");
+        assert!(planned.scene.strokes.iter().any(|stroke| stroke.kind == StrokeKind::Cut), "toolpaths should be generated");
+        let names: Vec<_> = all_part_layers(&session).into_iter().map(|layer| layer.name).collect();
+        for expected in ["OUTER", "INNER", "LEFT", "RIGHT"] {
+            assert!(names.iter().any(|name| name == expected), "missing {expected} in {names:?}");
+        }
+    }
+
+    #[test]
+    fn missing_layer_assignment_warns_and_does_not_invent_geometry() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo");
+        let sample = import_part_file(&root.join("examples/sample.svg")).expect("sample");
+        let nest = import_part_file(&root.join("examples/nest.dxf")).expect("nest");
+        let mut session = session_from_import(&sample);
+        add_imported_part(&mut session, &nest);
+        session.tools.push(ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: "0.1".to_string() });
+        let mut op = crate::operations::new_operation_on_session(&session, "outline", "profile", 1);
+        op.assign = "layers".to_string();
+        op.layers = vec!["NOPE".to_string()];
+        op.side = "outside".to_string();
+        op.depth = "0.26".to_string();
+        op.step_down = "0.26".to_string();
+        op.cut_feed = "300".to_string();
+        session.operations.push(op);
+        let warning = operation_match_warning(&session, &session.operations[0]).expect("warning");
+        assert!(warning.contains("matches no geometry"), "{warning}");
+        let err = generate_toolpaths(&session).expect_err("typo layer on every part must not plan");
+        assert!(err.contains("no geometry") || err.contains("NOPE") || err.contains("outline"), "{err}");
+    }
+
+    #[test]
+    fn empty_layers_on_a_parts_assignment_do_not_keep_layers_from_the_opened_job() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo");
+        let (mut session, _) = open_job_file(&root.join("examples/laser_rect.job.json")).expect("open");
+        let sample = import_part_file(&root.join("examples/sample.svg")).expect("sample");
+        let nest = import_part_file(&root.join("examples/nest.dxf")).expect("nest");
+        session.parts.clear();
+        add_imported_part(&mut session, &sample);
+        add_imported_part(&mut session, &nest);
+        let mut op = crate::operations::new_operation_on_session(&session, "outline", "profile", 1);
+        op.side = "outside".to_string();
+        op.depth = "0.26".to_string();
+        op.step_down = "0.26".to_string();
+        op.cut_feed = "300".to_string();
+        session.operations = vec![op];
+        let json = job_json_of(&session).expect("json");
+        let value: Value = serde_json::from_str(&json).expect("parse");
+        assert!(value["operations"][0].get("layers").is_none(), "leftover layers: {json}");
+        let planned = generate_toolpaths(&session).expect("plan after replacing layers with a parts assignment");
+        assert!(planned.scene.strokes.iter().any(|stroke| stroke.kind == StrokeKind::Cut));
+        assert!(!planned.messages.iter().any(|message| message.text.contains("no geometry")), "messages {:?}", planned.messages);
     }
 }

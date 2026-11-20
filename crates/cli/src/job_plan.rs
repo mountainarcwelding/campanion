@@ -1,6 +1,6 @@
 //! Multi-part planning, bed checks, and a cancellable planning handle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use campanion_geom::Containment;
@@ -9,7 +9,7 @@ use campanion_ir::{Document, MoveRole};
 
 use crate::error::CliError;
 use crate::job_parts::{JobPart, OpSelector, contour_ids, selector_includes_part};
-use crate::jobfile::{FORMAT_TAG_V2, JobFile, Placement, join_job_path};
+use crate::jobfile::{FORMAT_TAG_V2, JobFile, Operation, OperationKind, Placement, join_job_path};
 use crate::profiles::{self, JobType, MachineFile, MachineKind, WorkArea, job_type_for, load_job_ref, selected_head};
 use crate::run::{self, PlannedProgram};
 use crate::step;
@@ -76,6 +76,9 @@ fn plan_single_v2(job: &JobFile, up_axis: step::UpAxis, cancel: Option<&PlanCanc
 
 fn plan_multi(job: &JobFile, up_axis: step::UpAxis, cancel: Option<&PlanCancel>, max_power: Option<f64>) -> Result<PlannedProgram, CliError> {
     let mut combined: Option<PlannedProgram> = None;
+    let mut planned_ops: HashSet<String> = HashSet::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut skipped_pairs: HashSet<(String, String)> = HashSet::new();
     for part in job.parts() {
         for instance in &part.instances {
             if let Some(cancel) = cancel
@@ -83,7 +86,24 @@ fn plan_multi(job: &JobFile, up_axis: step::UpAxis, cancel: Option<&PlanCancel>,
             {
                 return Err(cancelled());
             }
-            let instance_job = job.for_instance(part, instance, max_power).map_err(|err| CliError::run(err.to_string()))?;
+            let mut instance_job = job.for_instance(part, instance, max_power).map_err(|err| CliError::run(err.to_string()))?;
+            let drawing = load_part_drawing(job, part)?;
+            instance_job.retain_operations(|op| {
+                if op_has_geometry_on_part(job, part, op, &drawing) {
+                    true
+                } else {
+                    if skipped_pairs.insert((op.name().to_string(), part.id.clone())) {
+                        skipped.push(format!("operation `{}` has no geometry on part `{}` (no matching layer or selector)", op.name(), part.id));
+                    }
+                    false
+                }
+            });
+            if instance_job.operations().is_empty() {
+                continue;
+            }
+            for op in instance_job.operations() {
+                planned_ops.insert(op.name().to_string());
+            }
             let planned = run::plan_loaded_job_with(&instance_job, up_axis, cancel)?;
             combined = Some(match combined {
                 None => planned,
@@ -98,7 +118,33 @@ fn plan_multi(job: &JobFile, up_axis: step::UpAxis, cancel: Option<&PlanCancel>,
             });
         }
     }
-    combined.ok_or_else(|| CliError::run("a job needs at least one part instance"))
+    let Some(mut combined) = combined else {
+        if skipped.is_empty() {
+            return Err(CliError::run("a job needs at least one part instance"));
+        }
+        return Err(CliError::run(skipped.join("; ")));
+    };
+    for op in job.operations() {
+        if matches!(op.kind(), OperationKind::LaserRaster) {
+            continue;
+        }
+        if !planned_ops.contains(op.name()) {
+            combined.warnings.push(format!("operation `{}`: no geometry on the selected layers or parts", op.name()));
+        }
+    }
+    combined.warnings.extend(skipped);
+    Ok(combined)
+}
+
+fn op_has_geometry_on_part(job: &JobFile, part: &JobPart, op: &Operation, drawing: &Drawing) -> bool {
+    if matches!(op.kind(), OperationKind::LaserRaster) {
+        return true;
+    }
+    let ids = contour_ids(drawing);
+    drawing.contours().iter().enumerate().any(|(index, item)| {
+        let id = ids.get(index).map(String::as_str).unwrap_or("");
+        operation_includes_contour(job, part, op, item.layer(), id)
+    })
 }
 
 fn planning_warnings(job: &JobFile, document: &Document) -> Result<Vec<String>, CliError> {
@@ -639,5 +685,27 @@ mod tests {
         let mark = names.iter().position(|name| name.contains("mark")).expect("mark");
         let cut = names.iter().position(|name| name.contains("cut")).expect("cut");
         assert!(cut < mark, "names {names:?}");
+    }
+
+    #[test]
+    fn multi_part_skips_a_part_that_lacks_the_selected_layer() {
+        let path = examples_dir().join("mixed-layers.job.json");
+        let text = r#"{"format":"campanion-job/2","units":"mm","parts":[{"id":"sample","source":{"path":"sample.svg","hash":"0000000000000000"}},{"id":"nest","source":{"path":"nest.dxf","hash":"0000000000000000"}}],"tools":[{"id":1,"kerf":0.1}],"operations":[{"name":"outline","type":"profile","layers":["OUTER"],"side":"outside","tool_id":1,"depth":0.26,"step_down":0.26,"feeds":{"cut":300.0}}]}"#;
+        let job = parse_with(text, &path);
+        let planned = plan(&job);
+        assert!(!toolpath_names(&planned.document).is_empty(), "sample OUTER should still plan");
+        assert!(planned.warnings.iter().any(|text| text.contains("outline") && text.contains("nest")), "warnings {:?}", planned.warnings);
+    }
+
+    #[test]
+    fn typo_layer_on_a_single_part_still_fails() {
+        let path = examples_dir().join("laser_rect.job.json");
+        let text = r#"{"format":"campanion-job/2","units":"mm","parts":[{"id":"p","source":{"path":"laser_rect.svg","hash":"7325d5be1c8f0420"}}],"tools":[{"id":1,"kerf":0.1}],"operations":[{"name":"outline","type":"profile","layers":["NOPE"],"side":"outside","tool_id":1,"depth":0.26,"step_down":0.26,"feeds":{"cut":300.0}}]}"#;
+        let job = parse_with(text, &path);
+        let err = match plan_job_inner(&job, step::UpAxis::Z, None) {
+            Ok(_) => panic!("typo layer must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("no geometry"), "{err}");
     }
 }

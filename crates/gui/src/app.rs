@@ -17,9 +17,10 @@ use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_s
 use crate::machines::{self, MachinesUi};
 use crate::operations::{self, RegenState};
 use crate::session::{
-    GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, ToolDraft, ToolKind, TreeSelection, add_imported_part, export_destination,
-    format_number, generate_toolpaths, import_part_file, list_posts, open_job_file, parse_placement_mm, placed_scene_parts, post_session,
-    scene_from_drawing, suggested_post_for_process, write_gcode, write_job,
+    GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, ToolDraft, ToolKind, TreeSelection, add_imported_part, all_part_ids,
+    all_part_layers, export_destination, format_number, generate_toolpaths, import_part_file, layer_parts_label, list_posts, open_job_file,
+    operation_match_warning, parse_placement_mm, placed_scene_parts, post_session, scene_from_drawing, suggested_post_for_process, write_gcode,
+    write_job,
 };
 use crate::setup::{self, AlignMode, ArraySpec};
 use crate::theme;
@@ -345,6 +346,16 @@ impl App {
         self.state.status = "Undo".to_string();
     }
 
+    fn show_planned_scene(&mut self, mut scene: Scene) {
+        scene.bounds = expand_bounds(scene.bounds, self.bed_bounds());
+        if let Ok(Some(sheet)) = setup::sheet_bounds(&self.session) {
+            scene.bounds = expand_bounds(scene.bounds, Some(sheet));
+        }
+        self.viewport = Some(Viewport::new(&scene));
+        self.scene = Some(scene);
+        self.state.has_scene = true;
+    }
+
     fn refresh_placed_scene(&mut self) {
         match placed_scene_parts(&self.session, DEFAULT_ARC_TOL_MM) {
             Ok(Some(mut scene)) => {
@@ -641,10 +652,8 @@ impl App {
                 Ok(planned) => {
                     self.session.messages = planned.messages;
                     self.document = Some(planned.document);
-                    self.viewport = Some(Viewport::new(&planned.scene));
-                    let n = planned.scene.names.len();
-                    self.scene = Some(planned.scene);
-                    self.state.has_scene = true;
+                    self.show_planned_scene(planned.scene);
+                    let n = self.scene.as_ref().map(|scene| scene.names.len()).unwrap_or(0);
                     self.state.pending_job = self.session.job_path.as_ref().map(|path| path.display().to_string());
                     if self.session.messages.is_empty() {
                         self.state.status = format!("Generated {n} toolpath(s)");
@@ -669,10 +678,8 @@ impl App {
                 self.regen.stale = false;
                 self.session.messages = planned.messages;
                 self.document = Some(planned.document);
-                self.viewport = Some(Viewport::new(&planned.scene));
-                let n = planned.scene.names.len();
-                self.scene = Some(planned.scene);
-                self.state.has_scene = true;
+                self.show_planned_scene(planned.scene);
+                let n = self.scene.as_ref().map(|scene| scene.names.len()).unwrap_or(0);
                 self.state.pending_job = self.session.job_path.as_ref().map(|path| path.display().to_string());
                 if self.session.messages.is_empty() {
                     self.state.status = format!("Generated {n} toolpath(s)");
@@ -843,6 +850,7 @@ impl App {
                 (Workspace::ThermalJet, ModeTab::Operations, "g2-operations.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Operations, "g2-cut-order.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Operations, "g2-material-override.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Operations, "g2-stale-toolpaths.png".to_string()),
             ],
             index: 0,
             frames_waited: 0,
@@ -906,39 +914,14 @@ impl App {
 
     fn prepare_g2_screenshot(&mut self, name: Option<&str>) {
         self.ensure_g1_demo();
+        // Restore on-bed placements so a previous off-bed frame does not linger.
+        self.restore_g1_demo_placements();
         self.layout_tool = None;
         self.job_section_open = false;
         // Collapse the long Parts list so Operations and the cut-order list are on screen.
         self.parts_tree_open = false;
         self.operations_tree_open = true;
-        if self.session.operations.is_empty() {
-            self.add_session_operation("profile");
-            if let Some(op) = self.session.operations.last_mut() {
-                if let Some(layer) = self.session.layers.first() {
-                    op.layers = vec![layer.name.clone()];
-                }
-                op.side = "outside".to_string();
-                op.depth = "3".to_string();
-                op.step_down = "3".to_string();
-                op.cut_feed = "300".to_string();
-                op.power = "0.8".to_string();
-            }
-        }
-        if self.session.operations.len() == 1 {
-            self.add_session_operation("engrave");
-            if let Some(op) = self.session.operations.last_mut() {
-                if let Some(layer) = self.session.layers.first() {
-                    op.layers = vec![layer.name.clone()];
-                }
-                op.depth = "0.26".to_string();
-                op.step_down = "0.26".to_string();
-                op.cut_feed = "400".to_string();
-                op.power = "0.2".to_string();
-            }
-        }
-        self.session.order_rules_set = true;
-        self.session.order_inner_first = true;
-        self.session.order_cuts_last = true;
+        self.seed_g2_operations();
         if name == Some("g2-cut-order.png") {
             self.session.cut_order_explicit = true;
         }
@@ -958,11 +941,43 @@ impl App {
                 op.tabs_width = "2".to_string();
                 op.lead_in = "line".to_string();
                 op.lead_in_size = "2".to_string();
-                op.assign = "layers".to_string();
             }
         }
         self.generate_paths();
-        self.refresh_placed_scene();
+        // Do not refresh_placed_scene after planning: that would replace toolpaths with part outlines.
+        if name == Some("g2-stale-toolpaths.png") {
+            self.regen.stale = true;
+            self.state.status = "Toolpaths are stale until regenerate finishes".to_string();
+        }
+    }
+
+    fn seed_g2_operations(&mut self) {
+        if self.session.tools.is_empty() || self.session.tools.iter().all(|tool| tool.size.trim().is_empty()) {
+            self.session.tools =
+                vec![crate::session::ToolDraft { id: 1, name: String::new(), kind: crate::session::ToolKind::Kerf, size: "0.1".to_string() }];
+        }
+        self.session.operations.clear();
+        self.add_session_operation("profile");
+        if let Some(op) = self.session.operations.last_mut() {
+            op.name = "outline".to_string();
+            op.side = "outside".to_string();
+            op.depth = "3".to_string();
+            op.step_down = "3".to_string();
+            op.cut_feed = "300".to_string();
+            op.power = "0.8".to_string();
+        }
+        self.add_session_operation("engrave");
+        if let Some(op) = self.session.operations.last_mut() {
+            op.name = "engrave".to_string();
+            op.depth = "0.26".to_string();
+            op.step_down = "0.26".to_string();
+            op.cut_feed = "400".to_string();
+            op.power = "0.2".to_string();
+        }
+        self.session.order_rules_set = true;
+        self.session.order_inner_first = true;
+        self.session.order_cuts_last = true;
+        self.session.cut_order_explicit = false;
     }
 
     fn prepare_g1_screenshot(&mut self, name: Option<&str>) {
@@ -1843,7 +1858,7 @@ impl App {
         let tool_id = self.session.tools.first().map(|tool| tool.id).unwrap_or(1);
         let stem = if kind == "profile" { "profile" } else { kind };
         let name = crate::session::next_operation_name(&self.session.operations, stem);
-        self.session.operations.push(operations::new_operation(name, kind, tool_id));
+        self.session.operations.push(operations::new_operation_on_session(&self.session, name, kind, tool_id));
         self.session.selected = Some(TreeSelection::Operation(self.session.operations.len() - 1));
         self.mark_dirty();
     }
@@ -1981,6 +1996,8 @@ impl App {
         {
             self.state.set_workspace(Workspace::Resin);
             let _ = self.state.set_process(SubProcess::Sla);
+            self.session.post_id.clear();
+            self.state.export_name.clear();
             self.session.dirty = true;
             self.state.status = format!("Machine: {} (Resin)", profile.name);
             self.refresh_placed_scene();
@@ -2154,13 +2171,15 @@ impl App {
             tree_line(ui, "Source", "Not imported");
         }
         ui.collapsing("Layers", |ui| {
-            if self.session.layers.is_empty() {
+            let layers = all_part_layers(&self.session);
+            if layers.is_empty() {
                 ui.label(RichText::new("Import a part to list layers").color(theme::MUTED).size(12.0));
             } else {
-                for layer in &self.session.layers {
+                for layer in layers {
                     let id = TreeSelection::Layer(layer.name.clone());
                     let selected = self.session.selected.as_ref() == Some(&id);
-                    if ui.selectable_label(selected, format!("{} ({})", layer.name, layer.contour_count)).clicked() {
+                    let label = format!("{} ({})", layer_parts_label(&self.session, &layer.name), layer.contour_count);
+                    if ui.selectable_label(selected, label).clicked() {
                         self.session.selected = Some(id);
                     }
                 }
@@ -2188,13 +2207,18 @@ impl App {
             let count = self.session.operations.len();
             for index in 0..count {
                 let op = &self.session.operations[index];
-                let label = if op.name.is_empty() { format!("Operation {}", index + 1) } else { op.name.clone() };
+                let name = if op.name.is_empty() { format!("Operation {}", index + 1) } else { op.name.clone() };
+                let unmatched = operation_match_warning(&self.session, op);
                 let selected = self.session.selected == Some(TreeSelection::Operation(index));
+                let label = if unmatched.is_some() { RichText::new(format!("{name}  !")).color(theme::OVERRIDE) } else { RichText::new(name) };
                 let response = ui.selectable_label(selected, label);
                 if response.clicked() {
                     self.session.selected = Some(TreeSelection::Operation(index));
                 }
                 self.tree_context_menu(response);
+                if let Some(warning) = unmatched {
+                    ui.label(RichText::new(warning).color(theme::OVERRIDE).size(11.0));
+                }
             }
             if self.session.operations.is_empty() {
                 ui.label(RichText::new("No operations yet").color(theme::MUTED).size(12.0));
@@ -2236,32 +2260,33 @@ impl App {
             } else {
                 self.session.operations[index].name.clone()
             };
+            let mut move_up = false;
+            let mut move_down = false;
             let response = ui
                 .dnd_drag_source(id, index, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("☰");
-                        ui.label(&name);
-                        if ui.small_button("↑").clicked() && index > 0 {
-                            // handled after the source returns
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if ui.add_enabled(index > 0, egui::Button::new("↑").small()).clicked() {
+                            move_up = true;
                         }
-                        if ui.small_button("↓").clicked() && index + 1 < count {}
+                        if ui.add_enabled(index + 1 < count, egui::Button::new("↓").small()).clicked() {
+                            move_down = true;
+                        }
+                        ui.label("☰");
+                        ui.add(egui::Label::new(&name).truncate());
                     });
                 })
                 .response;
-            if ui.input(|input| input.pointer.any_released())
+            if move_up {
+                reorder = Some((index, index - 1));
+            } else if move_down {
+                reorder = Some((index, index + 1));
+            } else if ui.input(|input| input.pointer.any_released())
                 && let Some(from) = response.dnd_hover_payload::<usize>()
                 && *from != index
             {
                 reorder = Some((*from, index));
             }
-            ui.horizontal(|ui| {
-                if ui.small_button("↑").clicked() && index > 0 {
-                    reorder = Some((index, index - 1));
-                }
-                if ui.small_button("↓").clicked() && index + 1 < count {
-                    reorder = Some((index, index + 1));
-                }
-            });
         }
         if let Some((from, to)) = reorder {
             operations::reorder_operation(&mut self.session, from, to);
@@ -2545,6 +2570,9 @@ impl App {
             self.session.dirty = true;
         }
         ui.label(format!("Type: {}", self.session.operations[index].kind));
+        if let Some(warning) = operation_match_warning(&self.session, &self.session.operations[index]) {
+            ui.label(RichText::new(warning).color(theme::OVERRIDE).size(12.0));
+        }
         if self.reveal_material_fields && !self.session.operations[index].override_fields.is_empty() {
             ui.label(
                 RichText::new(format!("Orange overrides: {}", self.session.operations[index].override_fields.join(", ")))
@@ -2569,14 +2597,19 @@ impl App {
                 });
             }
             ui.label("Layers");
-            let available: Vec<String> = if self.session.layers.is_empty() {
-                self.session.operations[index].layers.clone()
-            } else {
-                self.session.layers.iter().map(|layer| layer.name.clone()).collect()
+            let available: Vec<String> = {
+                let mut names: Vec<String> = all_part_layers(&self.session).into_iter().map(|layer| layer.name).collect();
+                for layer in &self.session.operations[index].layers {
+                    if !names.iter().any(|name| name == layer) {
+                        names.push(layer.clone());
+                    }
+                }
+                names
             };
             for layer in available {
                 let mut on = self.session.operations[index].layers.iter().any(|item| item == &layer);
-                if ui.checkbox(&mut on, &layer).changed() {
+                let label = layer_parts_label(&self.session, &layer);
+                if ui.checkbox(&mut on, label).changed() {
                     let layers = &mut self.session.operations[index].layers;
                     if on {
                         if !layers.iter().any(|item| item == &layer) {
@@ -2585,11 +2618,13 @@ impl App {
                     } else {
                         layers.retain(|item| item != &layer);
                     }
-                    self.session.dirty = true;
+                    self.mark_dirty();
                 }
             }
-            if self.session.layers.is_empty() {
-                ui.label(RichText::new("Import a part to pick layers.").color(theme::MUTED).size(11.0));
+            if all_part_layers(&self.session).is_empty() {
+                ui.label(
+                    RichText::new("Import a part to pick layers. SVG and DXF layer names are listed from every part.").color(theme::MUTED).size(11.0),
+                );
             }
         }
         ui.label("Tool id");
@@ -2701,7 +2736,15 @@ impl App {
             for (id, label) in [("", "layers"), ("parts", "part"), ("layers", "layer"), ("contours", "contour")] {
                 let selected = self.session.operations[index].assign == id;
                 if ui.selectable_label(selected, label).clicked() {
-                    self.session.operations[index].assign = id.to_string();
+                    if id == "parts" {
+                        let parts = all_part_ids(&self.session);
+                        let op = &mut self.session.operations[index];
+                        op.assign = "parts".to_string();
+                        op.assign_parts = parts;
+                        op.layers.clear();
+                    } else {
+                        self.session.operations[index].assign = id.to_string();
+                    }
                     self.mark_dirty();
                 }
             }
@@ -2710,6 +2753,11 @@ impl App {
             ui.label(if self.session.operations[index].assign == "parts" { "Part ids (comma-separated)" } else { "Part id" });
             if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].assign_parts).desired_width(180.0)).changed() {
                 self.mark_dirty();
+            }
+            if self.session.operations[index].assign == "parts" && self.session.operations[index].assign_parts.trim().is_empty() {
+                ui.label(
+                    RichText::new("Enter at least one part id, or pick part assignment again to use every part.").color(theme::OVERRIDE).size(11.0),
+                );
             }
         }
         if self.session.operations[index].assign == "contours" {

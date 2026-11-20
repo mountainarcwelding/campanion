@@ -1836,6 +1836,14 @@ impl JobFile {
         self.operations.sort_by_key(key);
     }
 
+    /// Drop operations that do not apply to a given instance (no matching geometry).
+    pub(crate) fn retain_operations<F>(&mut self, keep: F)
+    where
+        F: FnMut(&Operation) -> bool,
+    {
+        self.operations.retain(keep);
+    }
+
     /// Translate every placement by `dx`, `dy` millimetres (used when a datum is applied).
     pub(crate) fn shift_placements(&mut self, dx: f64, dy: f64) {
         if let Some(placement) = self.placement {

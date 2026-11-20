@@ -42,6 +42,14 @@ pub fn new_operation(name: impl Into<String>, kind: &str, tool_id: u32) -> OpDra
     op
 }
 
+/// A new operation assigned to every part in `session` (no layer filter).
+#[must_use]
+pub fn new_operation_on_session(session: &JobSession, name: impl Into<String>, kind: &str, tool_id: u32) -> OpDraft {
+    let mut op = new_operation(name, kind, tool_id);
+    crate::session::assign_to_all_parts(&mut op, session);
+    op
+}
+
 /// In-flight auto-regenerate state.
 #[derive(Default)]
 pub struct RegenState {

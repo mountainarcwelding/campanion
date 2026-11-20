@@ -220,7 +220,7 @@ omitted when `selector` is present.
 | `selector.type` | Picks |
 | --- | --- |
 | `part` or `parts` | Whole part(s), listed in `parts` or `part`. |
-| `layer` or `layers` | Named SVG/DXF layers on the listed parts (empty `parts` means every part). |
+| `layer` or `layers` | Named SVG/DXF layers on the listed parts (empty `parts` means every part). In a multi-part job, a part that has none of those layers is skipped for that operation (a warning is issued). The job is still refused if the operation matches no geometry on any part. |
 | `color` | SVG stroke or fill colour. The value is stored; matching is not applied yet because the importer does not record contour colour (a planning warning is issued). |
 | `contour` or `contours` | Stable contour ids on one `part`. Ids are `{layer}:{fnv1a64 of geometry}` with `:2`, `:3`, … when two contours on the same layer would otherwise collide. Coordinates are rounded to micrometres. Ids are computed from the source geometry, before placement. |
 
