@@ -18,6 +18,7 @@ pub mod session;
 pub mod setup;
 pub mod simulate;
 pub mod theme;
+pub mod view3d;
 pub mod viewport;
 
 use std::path::{Path, PathBuf};

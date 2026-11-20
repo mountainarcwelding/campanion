@@ -4,12 +4,13 @@
 //! numeric defaults. Palettes stay empty until the user saves a preset. The optimizer stays
 //! disabled until a complete calibration profile is loaded.
 
-use campanion_mesh::{Mesh, Vec3};
+use campanion_mesh::{Aabb, Mesh, Vec3};
 use campanion_resin::{
     BuildReport, CalibrationProfile, DetectedFeatures, GenerateOptions, InputPoint, IslandDetectParams, M7_MAX, MissingConstant, Placement,
     PointSource, ResinSettings, SupportParams, SupportPoint, SupportedMesh, build_pm7m, generate_supports_with, load_print_settings,
     parse_calibration, rebuild_supported,
 };
+use campanion_view::{BuildVolume, MeshRole, PointMarker, Scene3, ShadedMesh};
 use campanion_view::{Scene, Stroke, StrokeKind};
 use eframe::egui::{self, Color32, RichText, Stroke as UiStroke};
 
@@ -37,7 +38,7 @@ impl SupportView {
             Self::Top => "Top",
             Self::Front => "Front",
             Self::Side => "Side",
-            Self::ThreeQuarter => "3D",
+            Self::ThreeQuarter => "Iso",
         }
     }
 
@@ -46,12 +47,30 @@ impl SupportView {
             Self::Top => "Build plate, top view — supports and islands",
             Self::Front => "Front view (X–Z) — pillar heights",
             Self::Side => "Side view (Y–Z) — pillar heights",
-            Self::ThreeQuarter => "3D view — pillars and mid-air islands",
+            Self::ThreeQuarter => "Isometric view — orbit, pan and zoom",
         }
     }
 
     pub fn allows_edit(self) -> bool {
-        self == Self::Top
+        true
+    }
+
+    pub fn standard(self) -> campanion_view::StandardView {
+        match self {
+            Self::Top => campanion_view::StandardView::Top,
+            Self::Front => campanion_view::StandardView::Front,
+            Self::Side => campanion_view::StandardView::Side,
+            Self::ThreeQuarter => campanion_view::StandardView::Iso,
+        }
+    }
+
+    pub fn from_standard(view: campanion_view::StandardView) -> Self {
+        match view {
+            campanion_view::StandardView::Top => Self::Top,
+            campanion_view::StandardView::Front => Self::Front,
+            campanion_view::StandardView::Side => Self::Side,
+            campanion_view::StandardView::Iso => Self::ThreeQuarter,
+        }
     }
 
     pub fn project(self, x: f64, y: f64, z: f64) -> [f64; 2] {
@@ -157,6 +176,8 @@ pub struct ResinSession {
     pub slice_height: u32,
     pub points_dirty: bool,
     pub last_export_path: Option<std::path::PathBuf>,
+    /// Cached shaded solids (part, raft, pillars, island boxes). Markers are rebuilt each frame.
+    pub solid_meshes: Vec<ShadedMesh>,
 }
 
 /// Snapshot for resin undo (points and selection only).
@@ -439,6 +460,7 @@ pub fn apply_generate(session: &mut ResinSession, support: &SupportFields, lift_
     session.last_generate_note = Some(format!("Placed {} support(s), {} island(s) detected. NOT printer-tested.", session.points.len(), islands));
     session.supported = Some(result.clone());
     session.points_dirty = false;
+    session.invalidate_solids();
     session.invalidate_slice();
     Ok(result)
 }
@@ -481,6 +503,7 @@ pub fn print_mesh(session: &mut ResinSession, support: &SupportFields, lift_mm: 
     let mesh = rebuilt.mesh.clone();
     session.supported = Some(rebuilt);
     session.points_dirty = false;
+    session.invalidate_solids();
     Ok(mesh)
 }
 
@@ -646,6 +669,66 @@ pub fn hit_point(points: &[SupportPoint], x: f64, y: f64, tol_mm: f64) -> Option
         }
     }
     best.map(|(index, _)| index)
+}
+
+/// Display colours for shaded resin solids. These are not process values.
+pub const COLOR_PART: [u8; 4] = [200, 206, 214, 255];
+pub const COLOR_RAFT: [u8; 4] = [70, 90, 110, 255];
+pub const COLOR_SUPPORT: [u8; 4] = [240, 140, 40, 255];
+pub const COLOR_SUPPORT_SELECTED: [u8; 4] = [255, 220, 80, 255];
+
+impl ResinSession {
+    /// Drop cached solids so the next [`Self::ensure_solid_meshes`] rebuilds them.
+    pub fn invalidate_solids(&mut self) {
+        self.solid_meshes.clear();
+    }
+
+    /// Rebuild shaded part/raft/pillar/island meshes when the cache is empty.
+    pub fn ensure_solid_meshes(&mut self, island_layer_mm: Option<f64>) {
+        if !self.solid_meshes.is_empty() {
+            return;
+        }
+        let mut meshes = Vec::new();
+        if let Some(supported) = &self.supported {
+            meshes.push(ShadedMesh::from_mesh(&supported.part, COLOR_PART, MeshRole::Part));
+            meshes.push(ShadedMesh::from_mesh(&supported.raft, COLOR_RAFT, MeshRole::Raft));
+            meshes.push(ShadedMesh::from_mesh(&supported.pillars, COLOR_SUPPORT, MeshRole::Support));
+        } else if let Some(mesh) = &self.mesh {
+            meshes.push(ShadedMesh::from_mesh(mesh, COLOR_PART, MeshRole::Part));
+        }
+        if let Some(features) = &self.features {
+            let slab = island_layer_mm.filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.05);
+            for island in &features.islands {
+                let color = island_color_rgba(island.id);
+                let min = Vec3::new(island.min.0, island.min.1, island.z_mm);
+                let max = Vec3::new(island.max.0, island.max.1, island.z_mm + slab);
+                if let Ok(mesh) = Mesh::new(Aabb::from_corners(min, max).face_triangles().to_vec()) {
+                    meshes.push(ShadedMesh::from_mesh(&mesh, color, MeshRole::Island));
+                }
+            }
+        }
+        self.solid_meshes = meshes;
+    }
+
+    /// Scene for the shared 3D viewport. Solids come from the cache; markers follow live points.
+    pub fn scene3(&self, volume: Option<BuildVolume>) -> Scene3 {
+        let mut scene = Scene3 { meshes: self.solid_meshes.clone(), volume, ..Scene3::default() };
+        for (index, point) in self.points.iter().enumerate() {
+            let selected = self.selected_point == Some(index);
+            scene.markers.push(PointMarker {
+                position: Vec3::new(point.x, point.y, point.contact_z),
+                color: if selected { COLOR_SUPPORT_SELECTED } else { COLOR_SUPPORT },
+                selected,
+                id: index,
+            });
+        }
+        scene
+    }
+}
+
+fn island_color_rgba(id: u32) -> [u8; 4] {
+    let c = island_color(id);
+    [c.r(), c.g(), c.b(), 160]
 }
 
 /// Draw island fills and support points in plan view. `to_screen` maps world millimetres to pixels.

@@ -8,7 +8,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use campanion_ir::Document;
-use campanion_view::{Playback, Projection, Scene, StrokeKind, find_system_font, projected_bounds};
+use campanion_view::{BuildVolume, Playback, Projection, Scene, StrokeKind, find_system_font, projected_bounds};
 use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Layout, RichText, Stroke, Vec2};
 
 use crate::edit::{self, SessionClipboard, SessionSnapshot};
@@ -27,6 +27,7 @@ use crate::session::{
 use crate::setup::{self, AlignMode, ArraySpec};
 use crate::simulate::{PlayIndex, blocks_export, estimate_time, play_index, session_checks};
 use crate::theme;
+use crate::view3d::{self, View3d};
 use crate::viewport::{self, Viewport, ViewportGuides};
 use crate::{
     DEFAULT_ARC_TOL_MM, GuiState, JOG_STEPS_MM, ModeTab, OpenedDocument, ROTATE_STEPS_DEG, RunPhase, SubProcess, UserField, Workspace,
@@ -155,6 +156,7 @@ struct App {
     run_conn: Option<RunConnection>,
     resin: ResinSession,
     resin_undo: Vec<ResinSnapshot>,
+    resin_view3d: View3d,
 }
 
 struct ScreenshotJob {
@@ -203,6 +205,7 @@ impl App {
             run_conn: None,
             resin: ResinSession::default(),
             resin_undo: Vec::new(),
+            resin_view3d: View3d::default(),
         }
     }
 
@@ -895,8 +898,16 @@ impl App {
 
     fn begin_screenshots(&mut self, dir: PathBuf, set: Option<&str>) {
         let (sender, receiver) = mpsc::channel();
-        let resin_set = set == Some("resin") || dir.file_name().is_some_and(|name| name == "gui-shots-g4" || name == "gui-shots-g4b");
-        let plan = if resin_set {
+        let dir_name = dir.file_name().and_then(|name| name.to_str());
+        let resin_set = set == Some("resin") || dir_name == Some("gui-shots-g4") || dir_name == Some("gui-shots-g4b");
+        let three_d_set = set == Some("3d") || dir_name == Some("gui-shots-3d");
+        let plan = if three_d_set {
+            vec![
+                (Workspace::Resin, ModeTab::Supports, "resin-3d-orbit.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-3d-edit.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-3d-bed.png".to_string()),
+            ]
+        } else if resin_set {
             vec![
                 (Workspace::Resin, ModeTab::Orient, "resin-flow-orient.png".to_string()),
                 (Workspace::Resin, ModeTab::Supports, "resin-supports-islands.png".to_string()),
@@ -994,7 +1005,15 @@ impl App {
         self.state.set_workspace(Workspace::Resin);
         if let Some(job) = self.screenshot.as_ref() {
             let store = campanion_cli::ProfileStore::from_dir(job.dir.join("config"));
-            let resin_example = machines::screenshot_example_resin("Example resin printer (example values)");
+            let mut resin_example = machines::screenshot_example_resin("Example resin printer (example values)");
+            // Screenshot stand-ins only, taken from the sample M7 Max machine already used by the
+            // `.pm7m` writer. They are not shipped defaults and are not written into user profiles.
+            let three_d = name.unwrap_or("").contains("3d") || job.dir.file_name().is_some_and(|n| n == "gui-shots-3d");
+            if three_d {
+                let spec = &campanion_resin::M7_MAX;
+                resin_example.bed = Some(campanion_cli::BedSize { x: spec.bed_x_mm, y: spec.bed_y_mm, z: Some(spec.bed_z_mm) });
+                resin_example.screen = Some(campanion_cli::BedSize { x: spec.bed_x_mm, y: spec.bed_y_mm, z: None });
+            }
             let _ = store.save("example-shop-resin", &resin_example);
             self.profile_store = store;
             self.session.machine_profile = "example-shop-resin".to_string();
@@ -1007,21 +1026,31 @@ impl App {
         self.resin.mesh_path = Some(PathBuf::from("screenshot-part.stl"));
         fill_screenshot_support_fields(&mut self.state);
         let name = name.unwrap_or("");
+        let is_3d = name.contains("3d");
         if name.contains("calibration-missing") {
             self.resin.calibration = Some(resin_ui::load_calibration_text(
                 PathBuf::from("partial-calibration.json"),
                 r#"{"schema":"campanion-resin-calibration/1","name":"partial-screenshot"}"#,
             ));
             let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false);
-        } else if name.contains("supports") || name.contains("slice") || name.contains("export") {
+        } else if name.contains("supports") || name.contains("slice") || name.contains("export") || is_3d {
             let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false);
         }
-        if name.contains("side") {
+        if name.contains("side") || is_3d {
             self.resin.view = SupportView::ThreeQuarter;
         } else {
             self.resin.view = SupportView::Top;
         }
         self.refresh_resin_view();
+        self.resin_view3d = View3d::default();
+        self.resin_view3d.set_standard(self.resin.view.standard());
+        self.resin_view3d.user_adjusted = false;
+        if is_3d && name.contains("orbit") {
+            self.resin_view3d.pending_orbit = Some((48.0, -14.0));
+        }
+        if is_3d && name.contains("bed") {
+            self.resin_view3d.pending_fit_all = true;
+        }
         if name.contains("edit") && !self.resin.points.is_empty() {
             self.resin.selected_point = Some(0);
             self.resin.tool = SupportEditTool::Direct;
@@ -2199,7 +2228,8 @@ impl App {
                 ribbon_group_separator(ui);
                 ribbon_group(ui, "View", |ui| {
                     for view in [SupportView::Top, SupportView::Front, SupportView::Side, SupportView::ThreeQuarter] {
-                        if ribbon_command(ui, view.label(), self.resin.view == view).on_hover_text(view.caption()).clicked() {
+                        let selected = self.resin_view3d.camera.matches_standard(view.standard());
+                        if ribbon_command(ui, view.label(), selected).on_hover_text(view.caption()).clicked() {
                             self.set_resin_view(view);
                         }
                     }
@@ -3608,9 +3638,12 @@ impl App {
 
     fn orient_center(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
-            let caption =
-                if self.resin.has_part() { "Build plate, top view" } else { "Build plate — import an STL to begin (File → Import part…)" };
-            self.viewport_panel(ui, caption);
+            let caption = if self.resin.has_part() {
+                "Build plate — orbit to inspect the pose"
+            } else {
+                "Build plate — import an STL to begin (File → Import part…)"
+            };
+            self.show_resin_viewport(ui, caption);
         });
     }
 
@@ -3700,20 +3733,14 @@ impl App {
             ui.label(RichText::new(warning).color(theme::OFF_BED).size(11.0));
         }
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("View").color(theme::MUTED).size(11.0));
-            for view in [SupportView::Top, SupportView::Front, SupportView::Side, SupportView::ThreeQuarter] {
-                if ui.selectable_label(self.resin.view == view, view.label()).on_hover_text(view.caption()).clicked() {
-                    self.set_resin_view(view);
-                }
-            }
-        });
-        let edit_hint = if self.resin.view.allows_edit() {
-            "Click empty space to add a support. Drag a tip to move it. Press Delete (or use the Delete tool) to remove the selection. Ctrl+Z undoes an edit."
-        } else {
-            "Switch to Top to add or drag supports. This view is for inspecting pillar heights and mid-air islands."
-        };
-        ui.label(RichText::new(edit_hint).color(theme::MUTED).size(11.0));
+        // View chips and Fit all live on the 3D viewport chrome.
+        ui.label(
+            RichText::new(
+                "Click the part surface to add a support. Drag a tip to move it. Press Delete (or use the Delete tool) to remove the selection. Ctrl+Z undoes an edit.",
+            )
+            .color(theme::MUTED)
+            .size(11.0),
+        );
         self.show_resin_viewport(ui, self.resin.view.caption());
     }
 
@@ -4434,7 +4461,9 @@ impl App {
                     self.resin.features = None;
                     self.resin.supported = None;
                     self.resin.points_dirty = false;
+                    self.resin.invalidate_solids();
                     self.resin.invalidate_slice();
+                    self.resin_view3d = View3d::default();
                     self.state.remember_open(path.to_path_buf());
                     if self.state.export_name.is_empty()
                         && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
@@ -4585,7 +4614,18 @@ impl App {
 
     fn set_resin_view(&mut self, view: SupportView) {
         self.resin.view = view;
+        self.resin_view3d.set_standard(view.standard());
         self.refresh_resin_view();
+    }
+
+    fn resin_build_volume(&self) -> Option<BuildVolume> {
+        let profile = machines::session_machine(&self.profile_store, &self.session).ok().flatten()?;
+        if profile.kind != campanion_cli::MachineKind::Resin {
+            return None;
+        }
+        let xy = profile.screen.or(profile.bed)?;
+        let z = profile.bed.and_then(|bed| bed.z).or_else(|| profile.screen.and_then(|screen| screen.z));
+        BuildVolume::centered_plate(xy.x, xy.y, z)
     }
 
     fn refresh_resin_view(&mut self) {
@@ -4636,73 +4676,55 @@ impl App {
     }
 
     fn show_resin_viewport(&mut self, ui: &mut egui::Ui, caption: &str) {
-        ui.label(RichText::new(caption).color(theme::MUTED).size(11.0));
-        if self.viewport.is_none() {
+        if !self.resin.has_part() {
+            ui.label(RichText::new(caption).color(theme::MUTED).size(11.0));
             placeholder_pane(ui, "Import a part to place supports.\nFile → Import part… (STL, millimetres)");
             return;
         }
-        let guides = self.viewport_guides();
-        let Some(viewport) = self.viewport.as_mut() else {
-            return;
-        };
-        let output = viewport::show_with(ui, viewport, self.scene.as_ref(), false, Some(&guides));
-        if let Some(viewport) = self.viewport.as_ref() {
-            let to_screen = |world: [f64; 2]| viewport.world_to_screen(output.rect, world);
-            let raft_top = self.state.support.raft_thickness_mm.value.trim().parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
-            resin_ui::paint_support_overlay(
-                ui.painter(),
-                self.resin.features.as_ref(),
-                &self.resin.points,
-                self.resin.selected_point,
-                self.resin.selected_island,
-                self.resin.view,
-                raft_top,
-                to_screen,
-            );
+        let layer = self.state.support.layer_height_mm.value.trim().parse::<f64>().ok().filter(|v| *v > 0.0);
+        self.resin.ensure_solid_meshes(layer);
+        let volume = self.resin_build_volume();
+        if volume.is_none() && self.state.workspace == crate::Workspace::Resin && self.state.tab == ModeTab::Supports {
+            ui.label(RichText::new("Build volume is hidden: enter the bed or screen size on the machine profile.").color(theme::MUTED).size(11.0));
         }
+        let scene = self.resin.scene3(volume);
+        let output = view3d::show_with_controls(ui, &mut self.resin_view3d, &scene, caption);
         self.handle_resin_pointer(&output);
     }
 
-    fn handle_resin_pointer(&mut self, output: &viewport::ViewportOutput) {
+    fn handle_resin_pointer(&mut self, output: &view3d::View3dOutput) {
         if self.resin.mesh.is_none() {
             return;
         }
-        let can_edit = self.resin.view.allows_edit();
         let raft_top = self.state.support.raft_thickness_mm.value.trim().parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
-        let hover = output.hover_world;
-        let click = output.click_world;
-        let dragging = output.response.dragged_by(egui::PointerButton::Primary);
-        if can_edit
-            && output.response.drag_started_by(egui::PointerButton::Primary)
-            && let Some(world) = hover.or(click)
-            && let Some(index) = resin_ui::hit_point_in_view(&self.resin.points, world[0], world[1], 1.5, self.resin.view)
+        if output.primary_drag_started
+            && let Some(id) = output.hover_hit.and_then(|hit| hit.marker_id)
             && self.resin.tool != SupportEditTool::Add
         {
             self.push_resin_undo();
-            self.resin.selected_point = Some(index);
-            self.resin.dragging = Some(index);
+            self.resin.selected_point = Some(id);
+            self.resin.dragging = Some(id);
         }
-        if can_edit
-            && dragging
+        if output.primary_dragging
             && let Some(index) = self.resin.dragging
-            && let Some(world) = hover
             && (self.resin.tool == SupportEditTool::Direct || self.resin.tool == SupportEditTool::Move)
+            && let Some(hit) = output.hover_mesh_hit
+            && (hit.role == campanion_view::MeshRole::Part)
             && let Some(mesh) = self.resin_edit_mesh().cloned()
         {
-            let _ = campanion_resin::move_support_point(&mut self.resin.points, index, &mesh, world[0], world[1], None, raft_top);
+            let _ = campanion_resin::move_support_point(&mut self.resin.points, index, &mesh, hit.point.x, hit.point.y, Some(hit.point.z), raft_top);
             self.resin.points_dirty = true;
             self.resin.invalidate_slice();
         }
-        if output.response.drag_stopped() {
+        if output.primary_drag_stopped {
             self.resin.dragging = None;
         }
-        if let Some(world) = click
+        if let Some(hit) = output.click_hit
             && self.resin.dragging.is_none()
         {
-            let hit = resin_ui::hit_point_in_view(&self.resin.points, world[0], world[1], 1.5, self.resin.view);
             match self.resin.tool {
                 SupportEditTool::Delete => {
-                    if let Some(index) = hit {
+                    if let Some(index) = hit.marker_id {
                         self.push_resin_undo();
                         let _ = campanion_resin::delete_support_point(&mut self.resin.points, index);
                         self.resin.selected_point = None;
@@ -4710,20 +4732,27 @@ impl App {
                     }
                 }
                 SupportEditTool::Move => {
-                    self.resin.selected_point = hit;
+                    self.resin.selected_point = hit.marker_id;
                 }
                 SupportEditTool::Add | SupportEditTool::Direct => {
-                    if let Some(index) = hit {
+                    if let Some(index) = hit.marker_id {
                         self.resin.selected_point = Some(index);
-                    } else {
+                    } else if hit.role == campanion_view::MeshRole::Part {
                         self.push_resin_undo();
                         if let Some(mesh) = self.resin_edit_mesh().cloned() {
-                            match campanion_resin::add_support_point(&mut self.resin.points, &mesh, world[0], world[1], None, raft_top) {
+                            match campanion_resin::add_support_point(
+                                &mut self.resin.points,
+                                &mesh,
+                                hit.point.x,
+                                hit.point.y,
+                                Some(hit.point.z),
+                                raft_top,
+                            ) {
                                 Ok(index) => {
                                     self.resin.selected_point = Some(index);
                                     self.resin.points_dirty = true;
                                     self.resin.invalidate_slice();
-                                    self.state.status = format!("Added support at ({:.3}, {:.3}) mm", world[0], world[1]);
+                                    self.state.status = format!("Added support at ({:.3}, {:.3}, {:.3}) mm", hit.point.x, hit.point.y, hit.point.z);
                                 }
                                 Err(err) => self.state.status = err.to_string(),
                             }
@@ -4733,12 +4762,17 @@ impl App {
             }
         }
         if output.response.hovered()
-            && let Some(world) = hover
-            && let Some(index) = resin_ui::hit_point_in_view(&self.resin.points, world[0], world[1], 1.5, self.resin.view)
-            && let Some(point) = self.resin.points.get(index)
+            && let Some(hit) = output.hover_hit
         {
-            output.response.clone().on_hover_ui_at_pointer(|ui| {
-                ui.label(format!("Support {index}: ({:.3}, {:.3}, {:.3}) mm", point.x, point.y, point.contact_z));
+            let text = if let Some(index) = hit.marker_id
+                && let Some(point) = self.resin.points.get(index)
+            {
+                format!("Support {index}: ({:.3}, {:.3}, {:.3}) mm", point.x, point.y, point.contact_z)
+            } else {
+                format!("({:.3}, {:.3}, {:.3}) mm", hit.point.x, hit.point.y, hit.point.z)
+            };
+            output.response.clone().on_hover_ui_at_pointer(move |ui| {
+                ui.label(text);
             });
         }
     }

@@ -35,9 +35,14 @@ use campanion_ir::{ArcSense, ClBlock, ClMotion, Document, Event, Plane, RotaryAx
 
 mod sim;
 mod stock;
+mod view3d;
 
 pub use sim::{MachineSim, SimHit, SimSample, SimSolid, tessellate_box, tessellate_cylinder};
 pub use stock::{StockDraw, StockLine, StockMovie, StockTri, StockViewKind, stock_bounds, tessellate_stock};
+pub use view3d::{
+    BACKGROUND_RGBA, BuildVolume, Camera, Frame, MeshRole, PickHit, PointMarker, Polyline3, Ray, Scene3, ShadedMesh, StandardView, heightfield_mesh,
+    pick, pick_marker, pick_mesh, render,
+};
 
 /// Motions whose XY travel is at or below this (millimetres) are vertical feeds.
 ///
