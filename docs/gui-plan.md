@@ -54,8 +54,7 @@ The backend and CLI already carry the v0.4 data model:
 
 The GUI already compiles against that model, but the editor is still a preview:
 
-- Cutting workspaces show Process, Setup, Operations, Export, and Run. There is no
-  Simulate tab yet.
+- Cutting workspaces show Process (labelled Job), Setup, Operations, Simulate, Export, and Run.
 - Resin shows Orient, Supports, Slice, Export, and Run. Most Orient and Supports ribbon
   actions are placeholders.
 - FDM shows Orient, Slice, Export, and Run.

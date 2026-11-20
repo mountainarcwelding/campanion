@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-cli"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-geom"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "cavalier_contours",
  "proptest",
@@ -237,13 +237,14 @@ dependencies = [
 
 [[package]]
 name = "campanion-gui"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-cli",
  "campanion-geom",
  "campanion-import",
  "campanion-ir",
  "campanion-path",
+ "campanion-post",
  "campanion-view",
  "eframe",
  "image",
@@ -254,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-import"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-geom",
  "kurbo",
@@ -266,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-ir"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-geom",
  "campanion-path",
@@ -280,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-mesh"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-geom",
  "proptest",
@@ -290,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-path"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-geom",
  "proptest",
@@ -299,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-post"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -314,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-resin"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-mesh",
  "miniz_oxide 0.8.9",
@@ -326,14 +327,14 @@ dependencies = [
 
 [[package]]
 name = "campanion-testsupport"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "campanion-turn"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -346,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-view"
-version = "0.24.1"
+version = "0.25.0"
 dependencies = [
  "campanion-ir",
  "campanion-mesh",

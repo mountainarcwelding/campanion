@@ -46,7 +46,7 @@ pub use audit_5ax::{FiveAudit, FiveIndex, FiveMotion, FiveRetract, audit_five};
 pub use audit_lathe::{ChannelAudit, HousingMove, InterpFrame, LatheAudit, LatheFeedMode, LatheMotion, NoseComp, XMode, audit_lathe};
 pub use balance::{ChannelSegment, channel_balance};
 pub use compare::compare;
-pub use read::{ReadMove, read_back};
+pub use read::{IndexedMove, ReadMove, read_back, read_back_indexed};
 pub use write::{PostOptions, post_program};
 
 pub use def::{ChannelsOutput, PostDef, load_post};

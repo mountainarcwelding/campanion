@@ -867,6 +867,50 @@ pub fn screenshot_example(name: &str) -> MachineFile {
     }
 }
 
+/// A laser profile filled with values a first-time user might type.
+///
+/// This is not a shipped default. Tests and the G3 screenshot harness write it into an empty
+/// config directory the same way the Machines manager would after the user clicked New and
+/// entered a bed, a post, and a material.
+pub fn first_user_laser_profile() -> MachineFile {
+    MachineFile {
+        name: "My laser".to_string(),
+        units: "mm".to_string(),
+        work_area: Some(WorkArea { x_min: Some(0.0), x_max: Some(600.0), y_min: Some(0.0), y_max: Some(400.0), z_min: None, z_max: None }),
+        controller: Some("grbl".to_string()),
+        post: Some("grbl_laser".to_string()),
+        kind: MachineKind::Gantry,
+        bed: Some(campanion_cli::BedSize { x: 600.0, y: 400.0, z: None }),
+        screen: None,
+        kinematics: None,
+        heads: vec![MachineHead {
+            id: "laser".to_string(),
+            name: "CO2".to_string(),
+            kind: "laser".to_string(),
+            process: "laser".to_string(),
+            post: Some("grbl_laser".to_string()),
+            offset: None,
+            safe_z: None,
+            max_power: None,
+            materials: vec![MaterialEntry {
+                name: "3 mm plywood".to_string(),
+                kerf: Some(0.15),
+                diameter: None,
+                wire: None,
+                depth: Some(3.0),
+                step_down: Some(3.0),
+                cut_feed: Some(300.0),
+                plunge_feed: None,
+                power: Some(PowerValue::percent(80.0)),
+                passes: None,
+                pierce_delay: None,
+                post_delay: None,
+            }],
+            changer: None,
+        }],
+    }
+}
+
 /// A profile used only to populate a resin screenshot. It is not a shipped default.
 ///
 /// No bed or screen size is filled in: those are machine limits and are not invented.

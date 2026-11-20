@@ -27,6 +27,8 @@ pub struct Viewport {
     pub last_size: Option<[f32; 2]>,
     /// Draw rapid moves as dashed lines.
     pub show_rapids: bool,
+    /// When true, fit to the toolpath (or an off-bed part plus the bed) instead of the full bed.
+    pub fit_content: bool,
 }
 
 /// Result of drawing the viewport for one frame.
@@ -57,6 +59,7 @@ impl Viewport {
             user_adjusted: false,
             last_size: None,
             show_rapids: true,
+            fit_content: false,
         }
     }
 
@@ -66,10 +69,15 @@ impl Viewport {
     }
 
     /// Fit the view to the machine bed when one is known, otherwise to the scene.
+    ///
+    /// When [`Self::fit_content`] is set, the view frames the projected toolpaths so a small part
+    /// on a large bed stays readable. If that content sits outside the bed, the fit is the union
+    /// of the bed and the content so the off-bed error is visible.
     pub fn fit_with_guides(&mut self, scene: Option<&Scene>, rect: Rect, guides: Option<&ViewportGuides>) {
         let bed = guides.and_then(|guides| guides.bed).map(|bounds| ([bounds[0], bounds[1]], [bounds[2], bounds[3]]));
-        let scene_bounds = scene.and_then(|scene| scene.bounds.or(projected_bounds(scene, self.projection)));
-        self.fit_world(bed.or(scene_bounds), rect);
+        let content = scene.and_then(|scene| projected_bounds(scene, self.projection).or(scene.bounds));
+        let bounds = if self.fit_content { content_fit_bounds(content, bed) } else { bed.or(content) };
+        self.fit_world(bounds, rect);
     }
 
     fn fit_world(&mut self, bounds: Option<([f64; 2], [f64; 2])>, rect: Rect) {
@@ -84,6 +92,24 @@ impl Viewport {
         self.fitted = true;
         self.last_size = Some([rect.width(), rect.height()]);
     }
+}
+
+fn content_fit_bounds(content: Option<([f64; 2], [f64; 2])>, bed: Option<([f64; 2], [f64; 2])>) -> Option<([f64; 2], [f64; 2])> {
+    let Some(content) = content else {
+        return bed;
+    };
+    let Some(bed) = bed else {
+        return Some(content);
+    };
+    if bounds_inside(content, bed) { Some(content) } else { Some(union_bounds(content, bed)) }
+}
+
+fn bounds_inside(inner: ([f64; 2], [f64; 2]), outer: ([f64; 2], [f64; 2])) -> bool {
+    inner.0[0] >= outer.0[0] && inner.0[1] >= outer.0[1] && inner.1[0] <= outer.1[0] && inner.1[1] <= outer.1[1]
+}
+
+fn union_bounds(a: ([f64; 2], [f64; 2]), b: ([f64; 2], [f64; 2])) -> ([f64; 2], [f64; 2]) {
+    ([a.0[0].min(b.0[0]), a.0[1].min(b.0[1])], [a.1[0].max(b.1[0]), a.1[1].max(b.1[1])])
 }
 
 /// Draw the toolpath into `ui` and handle zoom, pan and fit.

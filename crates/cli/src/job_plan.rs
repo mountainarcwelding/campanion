@@ -153,7 +153,7 @@ fn planning_warnings(job: &JobFile, document: &Document) -> Result<Vec<String>, 
         warnings.push("colour selectors are stored but not matched yet; the importer does not record contour colour".to_string());
     }
     warnings.extend(unused_contour_warnings(job)?);
-    warnings.extend(off_bed_warnings(job, false)?);
+    warnings.extend(off_bed_warnings(job, false, None)?);
     warnings.extend(off_sheet_warnings(job)?);
     warnings.extend(lead_in_cross_warnings(job, document)?);
     Ok(warnings)
@@ -192,13 +192,99 @@ fn check_job_type(job: &JobFile, expected: JobType) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Severity of a pre-flight check. Errors block export; warnings do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightLevel {
+    /// Export must not write G-code until this is fixed.
+    Error,
+    /// Surfaced to the user; export may continue.
+    Warning,
+}
+
+/// One pre-flight finding shared by the GUI and tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightItem {
+    /// Whether this finding blocks export.
+    pub level: PreflightLevel,
+    /// User-visible message.
+    pub message: String,
+}
+
+impl PreflightItem {
+    fn error(message: impl Into<String>) -> Self {
+        Self { level: PreflightLevel::Error, message: message.into() }
+    }
+
+    fn warning(message: impl Into<String>) -> Self {
+        Self { level: PreflightLevel::Warning, message: message.into() }
+    }
+
+    /// True when this finding must block export.
+    #[must_use]
+    pub fn blocks_export(&self) -> bool {
+        self.level == PreflightLevel::Error
+    }
+}
+
 /// Refuse export when a part sits outside the user-entered bed or work area.
 pub fn refuse_off_bed_for_export(job: &JobFile) -> Result<(), CliError> {
-    let messages = off_bed_warnings(job, true)?;
+    let messages = off_bed_warnings(job, true, None)?;
     if let Some(message) = messages.into_iter().next() {
         return Err(CliError::run(message));
     }
     Ok(())
+}
+
+/// Pre-flight checks before writing G-code, using `CAMPANION_CONFIG_DIR` for the machine bed.
+pub fn export_preflight(job: &JobFile, document: Option<&Document>) -> Result<Vec<PreflightItem>, CliError> {
+    export_preflight_with(job, document, None)
+}
+
+/// Pre-flight checks before writing G-code.
+///
+/// Pass `store` when the caller already loaded profiles from a known directory (the GUI and
+/// tests). `None` uses [`profiles::ProfileStore::from_env`], the same path as `campanion run`.
+pub fn export_preflight_with(
+    job: &JobFile,
+    document: Option<&Document>,
+    store: Option<&profiles::ProfileStore>,
+) -> Result<Vec<PreflightItem>, CliError> {
+    let mut items = Vec::new();
+    if job.operations().is_empty() {
+        items.push(PreflightItem::error("the job has no operations"));
+    }
+    items.extend(empty_operation_messages(job)?.into_iter().map(PreflightItem::error));
+    items.extend(off_bed_warnings(job, true, store)?.into_iter().map(PreflightItem::error));
+    items.extend(off_sheet_warnings(job)?.into_iter().map(PreflightItem::warning));
+    items.extend(unused_contour_warnings(job)?.into_iter().map(PreflightItem::warning));
+    if let Some(document) = document {
+        items.extend(lead_in_cross_warnings(job, document)?.into_iter().map(PreflightItem::warning));
+    }
+    Ok(items)
+}
+
+fn empty_operation_messages(job: &JobFile) -> Result<Vec<String>, CliError> {
+    let mut messages = Vec::new();
+    if job.parts().is_empty() {
+        return Ok(messages);
+    }
+    for op in job.operations() {
+        if matches!(op.kind(), OperationKind::LaserRaster) {
+            continue;
+        }
+        let mut any = false;
+        for part in job.parts() {
+            let drawing = load_part_drawing(job, part)?;
+            if op_has_geometry_on_part(job, part, op, &drawing) {
+                any = true;
+                break;
+            }
+        }
+        if !any {
+            messages.push(format!("operation `{}` matches no geometry", op.name()));
+        }
+    }
+    Ok(messages)
 }
 
 fn apply_datum(job: &JobFile) -> Result<Option<JobFile>, CliError> {
@@ -246,8 +332,8 @@ fn off_sheet_warnings(job: &JobFile) -> Result<Vec<String>, CliError> {
     Ok(messages)
 }
 
-fn off_bed_warnings(job: &JobFile, refuse: bool) -> Result<Vec<String>, CliError> {
-    let Some(limits) = bed_limits(job)? else {
+fn off_bed_warnings(job: &JobFile, refuse: bool, store: Option<&profiles::ProfileStore>) -> Result<Vec<String>, CliError> {
+    let Some(limits) = bed_limits(job, store)? else {
         return Ok(Vec::new());
     };
     let mut messages = Vec::new();
@@ -422,12 +508,19 @@ fn inside_limits(bounds: [f64; 4], limits: [Option<f64>; 4]) -> bool {
     true
 }
 
-fn bed_limits(job: &JobFile) -> Result<Option<[Option<f64>; 4]>, CliError> {
+fn bed_limits(job: &JobFile, store: Option<&profiles::ProfileStore>) -> Result<Option<[Option<f64>; 4]>, CliError> {
     let Some(reference) = job.machine() else {
         return Ok(None);
     };
-    let store = crate::profiles::ProfileStore::from_env()?;
-    let profile = crate::profiles::load_job_ref(reference, &store)?;
+    let owned;
+    let store = match store {
+        Some(store) => store,
+        None => {
+            owned = crate::profiles::ProfileStore::from_env()?;
+            &owned
+        }
+    };
+    let profile = crate::profiles::load_job_ref(reference, store)?;
     Ok(limits_from_profile(&profile))
 }
 
@@ -707,5 +800,48 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("no geometry"), "{err}");
+    }
+
+    #[test]
+    fn preflight_refuses_off_bed_and_allows_warning_only_jobs() {
+        let path = examples_dir().join("laser_rect.job.json");
+        let on_sheet = r#"{"format":"campanion-job/2","units":"mm","sheet":{"width":200,"height":200},"parts":[{"id":"p","source":{"path":"laser_rect.svg","hash":"7325d5be1c8f0420"}}],"tools":[{"id":1,"kerf":0.1}],"operations":[{"name":"cut","type":"profile","layers":["0"],"side":"outside","tool_id":1,"depth":0.26,"step_down":0.26,"feeds":{"cut":300.0}}]}"#;
+        let job = parse_with(on_sheet, &path);
+        let items = export_preflight_with(&job, None, None).unwrap_or_else(|err| panic!("{err}"));
+        assert!(items.iter().all(|item| !item.blocks_export()), "unexpected errors: {items:?}");
+
+        let off_sheet = r#"{"format":"campanion-job/2","units":"mm","sheet":{"width":1,"height":1},"parts":[{"id":"p","source":{"path":"laser_rect.svg","hash":"7325d5be1c8f0420"}}],"tools":[{"id":1,"kerf":0.1}],"operations":[{"name":"cut","type":"profile","layers":["0"],"side":"outside","tool_id":1,"depth":0.26,"step_down":0.26,"feeds":{"cut":300.0}}]}"#;
+        let job = parse_with(off_sheet, &path);
+        let items = export_preflight_with(&job, None, None).unwrap_or_else(|err| panic!("{err}"));
+        assert!(items.iter().any(|item| item.level == PreflightLevel::Warning && item.message.contains("off the sheet")), "{items:?}");
+        assert!(items.iter().all(|item| !item.blocks_export()), "off-sheet must not block export: {items:?}");
+
+        let dir = std::env::temp_dir().join(format!("campanion-preflight-{}", std::process::id()));
+        let machines = dir.join("machines");
+        std::fs::create_dir_all(&machines).unwrap_or_else(|err| panic!("{err}"));
+        let profile = r#"{
+            "format": "campanion-machine/2",
+            "name": "Tiny laser",
+            "units": "mm",
+            "type": "gantry",
+            "bed": {"x": 5, "y": 5},
+            "heads": [{"id": "laser", "name": "CO2", "kind": "laser", "process": "laser", "post": "grbl_laser"}]
+        }"#;
+        std::fs::write(machines.join("tiny.json"), profile).unwrap_or_else(|err| panic!("{err}"));
+        let store = profiles::ProfileStore::from_dir(dir.clone());
+        let off_bed = r#"{"format":"campanion-job/2","units":"mm","machine":{"profile":"tiny","head":"laser"},"parts":[{"id":"p","source":{"path":"laser_rect.svg","hash":"7325d5be1c8f0420"}}],"tools":[{"id":1,"kerf":0.1}],"operations":[{"name":"cut","type":"profile","layers":["0"],"side":"outside","tool_id":1,"depth":0.26,"step_down":0.26,"feeds":{"cut":300.0}}]}"#;
+        let job = parse_with(off_bed, &path);
+        let items = export_preflight_with(&job, None, Some(&store)).unwrap_or_else(|err| panic!("{err}"));
+        assert!(items.iter().any(|item| item.blocks_export() && item.message.contains("off the bed")), "{items:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_reports_an_empty_operation_as_an_error() {
+        let path = examples_dir().join("laser_rect.job.json");
+        let text = r#"{"format":"campanion-job/2","units":"mm","parts":[{"id":"p","source":{"path":"laser_rect.svg","hash":"7325d5be1c8f0420"}}],"tools":[{"id":1,"kerf":0.1}],"operations":[{"name":"outline","type":"profile","layers":["NOPE"],"side":"outside","tool_id":1,"depth":0.26,"step_down":0.26,"feeds":{"cut":300.0}}]}"#;
+        let job = parse_with(text, &path);
+        let items = export_preflight_with(&job, None, None).unwrap_or_else(|err| panic!("{err}"));
+        assert!(items.iter().any(|item| item.blocks_export() && item.message.contains("matches no geometry")), "{items:?}");
     }
 }

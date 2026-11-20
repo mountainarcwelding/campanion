@@ -60,11 +60,11 @@ use std::process::{Command, ExitCode, ExitStatus, Stdio};
 
 pub use engine::{
     ImportedPart, LayerSummary, PlanOptions, PlanResult, PostInfo, Posted, SourceKind, builtin_posts, import_part, parse_job, plan_job,
-    plan_job_cancellable, plan_job_with_cancel, post_job, suggested_post,
+    plan_job_cancellable, plan_job_with_cancel, post_job, post_job_preview, posts_for_process, suggested_post,
 };
 pub use error::CliError;
 pub use job_parts::{ContourOverride, JobInstance, JobPart, OpSelector, contour_ids};
-pub use job_plan::PlanCancel;
+pub use job_plan::{PlanCancel, PreflightItem, PreflightLevel, export_preflight, export_preflight_with, refuse_off_bed_for_export};
 pub use job_setup::{Datum, DatumAnchor, JobOriginAnchor, OrderRules, SetupHooks, StartFrom, ZZero, bed_z_shift, datum_shift};
 pub use jobfile::{
     DEFAULT_JOB_CHORD_MM, FORMAT_TAG, FORMAT_TAG_V2, JobFile, JobFileError, JobProfileSide, JobTool, Operation, OperationKind, Placement, Sheet,
