@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## 0.28.2 — 2026-11-20
+
+**NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.
+Check any `.pm7m` on the printer screen and print a test before a real job. CAMpanion is still
+primarily command-line driven; the GUI is in development.
+
+Support generation on a many-triangle part is now dominated by a one-time XY index of
+the mesh, not a full walk of every triangle for every self-support ray. Island detection
+still uses the user-entered layer height (or the detection step the user typed). The
+Supports tab shows a progress bar while generate runs in the background.
+
+### Fixed
+
+- Placing supports on a fine mesh was unusably slow: each overhang sample shot a
+  vertical ray that tested every triangle. A 177,558-triangle part took 113 s at
+  0.50 mm layer height, almost all of it in those rays (about 97,600 rays × 177,558
+  tests). Placement now builds a uniform XY grid (with a Z range check) and tests
+  only the triangles whose bounds overlap the ray. The same part finishes in 0.34 s
+  at 0.50 mm and 0.40 s at 0.05 mm on the same machine. Results match the previous
+  linear walk on the synthetic regression meshes, and on a grid of vertical rays
+  through that 177,558-triangle part.
+
+### Known limits
+
+- Nothing in this release has been printer-tested. Image orientation is unverified until
+  an asymmetric test part is printed.
+- Paint-on supports, no-support zones, branching trees, hollowing, auto-orient, and
+  calibration-print geometry are not included.
+- The undercut chamfered raft is unchanged and still unprinted. The only `.pm7m` format
+  written is the Anycubic Photon Mono M7 Max layout derived from the sample file.
+- The GUI is still in development. CAMpanion remains primarily command-line driven.
+- Cutting processes still use the 2D viewport. FDM toolpath drawing is not wired up yet.
+
+
 ## 0.28.1 — 2026-11-20
 
 **NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.

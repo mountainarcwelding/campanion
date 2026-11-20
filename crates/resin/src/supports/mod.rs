@@ -9,11 +9,13 @@
 mod calibration;
 mod cancel;
 mod classify;
+mod grid;
 mod islands;
 mod optimize;
 mod params;
 mod place;
 mod pose;
+mod profile;
 mod raft;
 mod solid;
 
@@ -151,7 +153,9 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
     if !lift_z.is_finite() {
         return Err(ResinError::invalid("part lift is not finite"));
     }
+    let t_gen = std::time::Instant::now();
     let part = translate_mesh(part, Vec3::new(0.0, 0.0, lift_z))?;
+    crate::supports::profile::log("lift part", t_gen);
     crate::supports::cancel::check_cancel(options.cancel)?;
     let raft_top = params.raft_thickness_mm;
     let band = match (options.lowest_band_height_mm, options.lowest_band_spacing_mm) {
@@ -182,12 +186,16 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         if let Some(progress) = options.progress {
             progress.set_stage("Detecting islands");
         }
+        let t_detect = std::time::Instant::now();
         let features = detect_islands_with(&part, &detect, options.cancel, options.progress)?;
+        crate::supports::profile::log("generate detect", t_detect);
         crate::supports::cancel::check_cancel(options.cancel)?;
         if let Some(progress) = options.progress {
             progress.set_stage("Placing supports");
         }
+        let t_place = std::time::Instant::now();
         let points = place_with_islands(&part, params, &features, options.extra, options.auto, options.island_ignore_area_mm2, band, raft_top)?;
+        crate::supports::profile::log("generate place", t_place);
         (points, Some(features), None, Vec::new())
     } else {
         crate::supports::cancel::check_cancel(options.cancel)?;
@@ -206,7 +214,11 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         progress.set_stage("Building solids");
     }
     let palette = options.calibration.map(|profile| profile.tip_palette.as_slice()).unwrap_or(&[]);
-    assemble_supported(part, params, points, features, optimize, warnings, palette)
+    let t_assemble = std::time::Instant::now();
+    let out = assemble_supported(part, params, points, features, optimize, warnings, palette)?;
+    crate::supports::profile::log("generate assemble", t_assemble);
+    crate::supports::profile::log("generate total", t_gen);
+    Ok(out)
 }
 
 /// Lift `part` and rebuild the raft and pillars from already-placed `points`.
@@ -219,7 +231,9 @@ pub fn rebuild_supported(part: &Mesh, params: &SupportParams, points: &[SupportP
     if !lift_z.is_finite() {
         return Err(ResinError::invalid("part lift is not finite"));
     }
+    let t_gen = std::time::Instant::now();
     let part = translate_mesh(part, Vec3::new(0.0, 0.0, lift_z))?;
+    crate::supports::profile::log("lift part", t_gen);
     assemble_supported(part, params, points.to_vec(), None, None, Vec::new(), palette)
 }
 

@@ -14,7 +14,8 @@
 use campanion_mesh::{Mesh, Triangle};
 
 use crate::error::{ResinError, Result};
-use crate::supports::cancel::{CancelFlag, GenerateProgress, check_cancel};
+use crate::supports::cancel::{CancelFlag, GenerateProgress, check_cancel, screenshot_hold};
+use crate::supports::profile;
 
 /// Hard cap on occupancy grid width or height, in cells.
 pub const MAX_GRID_SIDE: u32 = 2048;
@@ -185,6 +186,7 @@ pub fn detect_islands_with(
 ) -> Result<DetectedFeatures> {
     check_cancel(cancel)?;
     params.validate()?;
+    let t_all = std::time::Instant::now();
     let bounds = mesh.bounds().map_err(|err| ResinError::invalid(format!("part: {err}")))?;
     let z_min = bounds.min().z;
     let z_max = bounds.max().z;
@@ -221,6 +223,7 @@ pub fn detect_islands_with(
         DetectGrid { origin_x, origin_y, cell_mm: params.cell_mm, width, height: height_cells, layers: Vec::with_capacity(layer_count as usize) };
 
     let triangles = mesh.triangles();
+    let t_bucket = std::time::Instant::now();
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); layer_count as usize];
     for (index, tri) in triangles.iter().enumerate() {
         let tz_min = tri.a.z.min(tri.b.z).min(tri.c.z);
@@ -239,11 +242,16 @@ pub fn detect_islands_with(
         }
     }
 
+    profile::log("detect bucket", t_bucket);
+    let t_raster = std::time::Instant::now();
     if let Some(progress) = progress {
         progress.set_layers(layer_count);
         progress.set_layer(0);
     }
     for i in 0..layer_count {
+        if i == layer_count / 2 {
+            screenshot_hold();
+        }
         check_cancel(cancel)?;
         if let Some(progress) = progress {
             progress.set_layer(i + 1);
@@ -254,6 +262,8 @@ pub fn detect_islands_with(
         grid.layers.push(bitmap);
     }
     check_cancel(cancel)?;
+    profile::log("detect raster", t_raster);
+    let t_components = std::time::Instant::now();
 
     let cell_area = params.cell_mm * params.cell_mm;
     let mut islands = Vec::new();
@@ -295,6 +305,8 @@ pub fn detect_islands_with(
         previous_area = area;
     }
 
+    profile::log("detect components", t_components);
+    profile::log("detect total", t_all);
     Ok(DetectedFeatures { islands, layers, cups, grid, z_min_mm: z_min, z_max_mm: z_max })
 }
 

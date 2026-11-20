@@ -34,12 +34,18 @@ This file is only the GUI sequence and the data-model hooks it needs.
    behaviour has been physically tested. A code-generation error is fixed, with a
    regression test, before the next feature.
 
-## Current baseline (v0.28.1, in progress)
+## Current baseline (v0.28.2, in progress)
+
+Support generation uses an XY hit grid for vertical self-support rays, so a
+177,558-triangle part that previously took 113 s at 0.50 mm finishes in 0.34 s
+(and 0.40 s at 0.05 mm) on the same machine. Island detection still follows the
+user-entered layer height. The Supports tab shows a progress bar during generate.
 
 On the resin Orient tab, typed X/Y/Z (with a move snap), left-drag in the 3D viewport,
 Center on plate, and Drop to plate actually move the part. Empty pose fields still mean
 "as imported." Generate supports runs in the background with progress and cancel.
 A panic hook writes `~/.cache/campanion/crash-*.log` and tells the user the path.
+
 
 A shared 3D viewport (orbit, pan, zoom, fit-all, Top/Front/Side/Iso) is used on the resin
 Orient, Supports, and Slice solid panes. Mouse bindings follow SolidCraft's documented
@@ -48,6 +54,13 @@ pans, the wheel zooms at the pointer. Meshes are shaded with depth. The build vo
 drawn only from the selected machine profile. Support tips can be edited in 3D, not only
 in Top view. Cutting workspaces keep the 2D viewport. The scene API accepts polylines
 for later FDM and toolpath drawing.
+
+## Previous baseline (v0.28.1)
+
+On the resin Orient tab, typed X/Y/Z (with a move snap), left-drag in the 3D viewport,
+Center on plate, and Drop to plate actually move the part. Empty pose fields still mean
+"as imported." Generate supports runs in the background with progress and cancel.
+A panic hook writes `~/.cache/campanion/crash-*.log` and tells the user the path.
 
 ## Previous baseline (v0.28.0)
 
