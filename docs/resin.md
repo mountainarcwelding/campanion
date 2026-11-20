@@ -2,8 +2,7 @@
 
 **Status: not printer-tested.** Nothing written by `campanion resin` or `campanion supports` has
 been printed or physically tested. The format was derived from one file, so some fields are copied
-rather than understood. CAMpanion is primarily command-line driven; there is no resin GUI yet, and
-supports cannot be edited on screen.
+rather than understood. CAMpanion is primarily command-line driven; the GUI is still in development.
 
 ## Commands
 
@@ -13,7 +12,10 @@ campanion supports MODEL.stl -o OUT.stl [--support-params FILE.json]
     [--raft-corner-relief MM] [--overhang-angle DEG] [--support-spacing MM]
     [--tip-diameter MM] [--tip-length MM] [--pillar-diameter MM]
     [--foot-diameter MM] [--foot-height MM] [--part-lift MM]
-    [--points FILE] [--points-only] [--preview FILE.png]
+    [--points FILE] [--points-only] [--preview FILE.png] [--points-out FILE]
+    [--layer-height MM] [--detect-cell MM] [--island-ignore-area MM2]
+    [--lowest-band-height MM] [--lowest-band-spacing MM]
+    [--calibration FILE.json] [--optimize]
 campanion resin MODEL.stl -o OUT.pm7m [--params-from SAMPLE.pm7m]
     [--layer-height MM] [--bottom-layers N]
     [--bottom-exposure S] [--bottom-lift-height MM] [--bottom-lift-speed V]
@@ -21,6 +23,9 @@ campanion resin MODEL.stl -o OUT.pm7m [--params-from SAMPLE.pm7m]
     [--resin-name NAME] [--keep-xy]
     [--supports ...support flags or --support-params FILE.json...]
     [--supports-out FILE.stl] [--preview FILE.png] [--points FILE] [--points-only]
+    [--detect-cell MM] [--island-ignore-area MM2]
+    [--lowest-band-height MM] [--lowest-band-spacing MM]
+    [--calibration FILE.json] [--optimize] [--points-out FILE]
 campanion resin-info FILE.pm7m
 ```
 
@@ -51,8 +56,24 @@ campanion resin-info FILE.pm7m
   `--overhang-angle`. `0` includes every downward face; `90` includes only faces parallel to the
   plate. Pillars go straight down: a foot of `--foot-diameter` and `--foot-height`, a shaft of
   `--pillar-diameter`, and a tip of `--tip-diameter` and `--tip-length`. Spacing is
-  `--support-spacing`. `--points FILE` is lines of `x y` or `x y z` (comments start with `#`);
-  `--points-only` skips auto placement.
+  `--support-spacing`. `--points FILE` is lines of `x y`, `x y z`, or `x y z preset` (comments
+  start with `#`); `--points-only` skips auto placement. `--points-out` writes the placed points
+  back in that format.
+- `--layer-height` on `campanion supports` enables first-appearance island detection, including
+  mid-air islands. A region on a layer that does not overlap the previous layer is an island and
+  gets at least one support (plus fill at `--support-spacing`, or at `--lowest-band-spacing` when
+  the island is in the lowest band). `--detect-cell` is the occupancy cell size; if it is omitted,
+  `--support-spacing` is used. `--island-ignore-area` is optional and is not assumed. On
+  `campanion resin --supports`, island detection uses that command's `--layer-height`.
+- `--lowest-band-height` and `--lowest-band-spacing` must be given together. They tighten spacing
+  near the part's first contact. Omitting the pair leaves uniform spacing.
+- `--optimize` runs the holding-force optimizer: feature classification (islands, lowest band,
+  area jumps, overhangs, cups/suction, thin features) and the check
+  `sum(tip capacity) >= safety factor × (peel + suction + weight)`. Every constant comes from
+  `--calibration FILE.json`. There are no shipped defaults. A missing field is an error. Uniform
+  and manual modes work without a calibration profile. Fitting measurements to constants is not
+  implemented; enter fitted constants in the file. The geometry of a calibration test print is
+  not defined in this release.
 - The supported STL is a multi-body mesh: the part, the raft, and each pillar are separately
   watertight. The slicer fills with non-zero winding, so bodies that touch merge in the layer
   images. `--preview` writes a shaded 3/4 view from a low side angle (the raft undercut is meant to be visible).
@@ -111,9 +132,17 @@ The sample is not committed (it is a user file). Without the variable, those tes
 - **`print_info.json`**: `print_time` is the total exposure time only, a lower bound that leaves out lift
   and settle time; `cost` is 0; `volume` is the solid volume in mL.
 - Previews are a simple shaded top view.
-- Not done: anti-aliasing, painted no-support zones, per-region support settings, branching tree
-  supports, scaffolding, a GUI for placing or editing supports, STL units other than millimetres,
-  other Anycubic models, other resin printers, wait-before-lift and wait-after-lift times,
-  per-layer overrides.
+- A calibration profile is a JSON object with schema `campanion-resin-calibration/1`. Required
+  fields: `schema`, `name`, `tip_palette` (each entry needs `name`, `tip_diameter_mm`,
+  `tip_length_mm`, `pillar_diameter_mm`, `foot_diameter_mm`, `foot_height_mm`, `tip_capacity_n`,
+  `contact_area_mm2`), `peel_coefficient_n_per_mm2`, `suction_coefficient_n_per_mm2`,
+  `safety_factor`, `resin_density_g_per_cm3`, `gravity_m_s2`. Optional: `island_ignore_area_mm2`,
+  `thin_width_mm`, `area_jump_ratio`, `lowest_band_height_mm` with `lowest_band_spacing_mm`, and
+  `measurements` (recorded observations; unused until fitting is implemented). No example numeric
+  values are shipped.
+- Not done: anti-aliasing, painted no-support zones, branching tree supports, scaffolding,
+  fitting measurements to calibration constants, a calibration test-print geometry, STL units
+  other than millimetres, other Anycubic models, other resin printers, wait-before-lift and
+  wait-after-lift times, per-layer overrides.
 - No UVtools read-back was done (it was not installed on the build machine); the read-back is
   CAMpanion's own reader.

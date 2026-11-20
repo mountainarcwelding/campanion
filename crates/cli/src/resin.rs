@@ -166,7 +166,7 @@ fn settings(a: &Args) -> Result<ResinSettings, CliError> {
 }
 
 pub(crate) fn resin(args: &[OsString]) -> Result<ExitCode, CliError> {
-    let a = parse(args)?;
+    let mut a = parse(args)?;
     let Some(model) = a.model.clone() else {
         return Err(CliError::usage("resin needs an STL file"));
     };
@@ -177,6 +177,9 @@ pub(crate) fn resin(args: &[OsString]) -> Result<ExitCode, CliError> {
         return Err(CliError::usage("-o must differ from the input files"));
     }
     let settings = settings(&a)?;
+    if a.support.enabled && a.support.layer_height_mm.is_none() {
+        a.support.layer_height_mm = Some(settings.layer_height_mm);
+    }
     let is_stl = model.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("stl"));
     if !is_stl {
         return Err(CliError::usage("resin reads .stl files"));
@@ -189,6 +192,7 @@ pub(crate) fn resin(args: &[OsString]) -> Result<ExitCode, CliError> {
             return Err(CliError::usage("--supports-out and --preview must differ from -o"));
         }
         supports::write_outputs(&generated, &params, a.support.supports_out.as_deref(), a.support.preview.as_deref())?;
+        supports::write_points_and_report(&generated, &a.support)?;
         (generated.mesh, Some(generated.points.len()))
     } else if a.support.points_only || a.support.support_params.is_some() || a.support.points.is_some() {
         return Err(CliError::usage("support flags need --supports"));

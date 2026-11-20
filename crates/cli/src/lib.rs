@@ -5,7 +5,7 @@
 //! `lathe` loads a `campanion-lathe/1` file and writes turning toolpaths.
 //! `post` writes a dialect for an IR file. `posts` lists the built-in posts.
 //! `resin` slices an STL into a `.pm7m` for the Anycubic Photon Mono M7 Max; `resin-info` checks one.
-//! `supports` writes a supported STL with a chamfered raft and pillar supports.
+//! `supports` writes a supported STL with a chamfered raft and pillar supports, including island detection.
 //! `audit` re-checks a finished G-code file against a post's rules.
 //! `verify` reports motion and process problems in an IR file, and can check an STL mesh for
 //! gouges. `view` opens the toolpath preview
@@ -89,9 +89,13 @@ Usage:
   campanion resin MODEL.stl -o OUT.pm7m [--params-from SAMPLE.pm7m] [--layer-height MM] [--bottom-layers N] [--bottom-exposure S] [--exposure S]
                   [--bottom-lift-height MM] [--bottom-lift-speed V] [--lift-height MM] [--lift-speed V] [--resin-name NAME] [--keep-xy]
                   [--supports --support-params FILE.json | support flags] [--supports-out FILE.stl] [--preview FILE.png] [--points FILE] [--points-only]
+                  [--detect-cell MM] [--island-ignore-area MM2] [--lowest-band-height MM] [--lowest-band-spacing MM]
+                  [--calibration FILE.json] [--optimize] [--points-out FILE]
   campanion supports MODEL.stl -o OUT.stl [--support-params FILE.json] [--raft-chamfer-angle DEG] [--raft-thickness MM] [--raft-margin MM]
                   [--raft-corner-relief MM] [--overhang-angle DEG] [--support-spacing MM] [--tip-diameter MM] [--tip-length MM]
                   [--pillar-diameter MM] [--foot-diameter MM] [--foot-height MM] [--part-lift MM] [--points FILE] [--points-only] [--preview FILE.png]
+                  [--layer-height MM] [--detect-cell MM] [--island-ignore-area MM2] [--lowest-band-height MM] [--lowest-band-spacing MM]
+                  [--calibration FILE.json] [--optimize] [--points-out FILE]
   campanion resin-info FILE.pm7m
   campanion verify FILE [--mesh PART.stl [--tool ball:3|flat:3|bull:3,1]]
   campanion view IR.json
@@ -151,8 +155,10 @@ resin   Slice an STL into layer bitmaps and write a .pm7m for the Anycubic Photo
         Pixels are fully on or off (no anti-aliasing yet). The finished file is read back before it is written.
         Pass --supports to add a chamfered raft and pillar supports first. Every support value is required
         (flags or --support-params FILE.json); nothing is assumed. --supports-out writes the supported STL.
-supports    Write a watertight STL with a chamfered raft and vertical pillar supports under overhangs.
-        NOT printer-tested. CAMpanion is primarily command-line driven; there is no support-editing GUI yet.
+        With --supports, island detection uses this command's --layer-height (and --detect-cell, or --support-spacing
+        as the cell size). --optimize requires --calibration FILE.json; uniform and manual supports work without one.
+supports    Write a watertight STL with a chamfered raft and vertical pillar supports under overhangs and islands.
+        NOT printer-tested. CAMpanion is primarily command-line driven; the GUI is still in development.
         The raft's top outline is the part footprint plus --raft-margin; the bottom (bed side) is inset by
         thickness / tan(--raft-chamfer-angle), measured from the plate, so the raft is wider on the part
         side and forms an undercut a scraper can get under. An inset that collapses the bottom face is refused.
@@ -160,7 +166,13 @@ supports    Write a watertight STL with a chamfered raft and vertical pillar sup
         --overhang-angle is measured from vertical (0 supports every downward face; 90 only faces parallel to the plate).
         --part-lift is the gap from the raft top to the lowest point of the part. Units are millimetres.
         No numeric value has a default: give every flag or --support-params FILE.json (flags override it).
-        --points FILE adds explicit x y or x y z contacts; --points-only uses only those points.
+        --points FILE adds explicit x y, x y z, or x y z preset contacts; --points-only uses only those points.
+        --points-out writes the placed points back in that format.
+        --layer-height enables first-appearance island detection (including mid-air islands). --detect-cell sets the
+        occupancy cell size; if omitted, --support-spacing is used. --island-ignore-area is optional.
+        --lowest-band-height and --lowest-band-spacing must be given together for denser spacing near the first contact.
+        --optimize runs the holding-force optimizer and requires --calibration FILE.json (a complete profile; no
+        shipped defaults). Fitting measurements to constants is not implemented: enter fitted constants in the file.
 resin-info  Print the machine, layer count, height and layer settings of a .pm7m, after checking every layer image.
 verify  Verify an IR JSON file and print a report. The status is 1 when the report has errors.
         --mesh checks cutting moves using IR tool shapes. --tool overrides all cutters and needs --mesh.

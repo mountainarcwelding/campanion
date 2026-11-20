@@ -8,20 +8,59 @@ use crate::supports::params::SupportParams;
 /// Most auto-generated plus explicit support points accepted in one run.
 pub const MAX_SUPPORT_POINTS: usize = 20_000;
 
+/// How a support point was created.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointSource {
+    /// Auto-placed on an overhang.
+    #[default]
+    Overhang,
+    /// User-supplied (points file or manual edit).
+    Manual,
+    /// Auto-placed on a first-appearance island.
+    Island,
+    /// Added by the optimizer to meet the holding-force check.
+    Optimizer,
+}
+
 /// A contact where a support tip meets the part.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SupportPoint {
     pub x: f64,
     pub y: f64,
     pub contact_z: f64,
+    pub source: PointSource,
+    /// Index into the user's tip palette, when a class has been assigned.
+    pub preset_index: Option<u16>,
 }
 
-/// An explicit point from a file. `z` is used when present; otherwise the lowest downward hit is taken.
-#[derive(Clone, Copy, Debug, PartialEq)]
+impl SupportPoint {
+    /// A point with no palette assignment. `source` defaults to overhang (the historical auto path).
+    pub fn new(x: f64, y: f64, contact_z: f64) -> Self {
+        Self { x, y, contact_z, source: PointSource::Overhang, preset_index: None }
+    }
+
+    /// A user-supplied contact.
+    pub fn manual(x: f64, y: f64, contact_z: f64) -> Self {
+        Self { x, y, contact_z, source: PointSource::Manual, preset_index: None }
+    }
+}
+
+/// An explicit point from a file or from the GUI. `z` is used when present; otherwise the lowest downward hit is taken.
+#[derive(Clone, Debug, PartialEq)]
 pub struct InputPoint {
     pub x: f64,
     pub y: f64,
     pub z: Option<f64>,
+    /// Palette class name, when the points file named one.
+    pub preset: Option<String>,
+    pub source: PointSource,
+}
+
+impl InputPoint {
+    /// A manual point with no palette class.
+    pub fn new(x: f64, y: f64, z: Option<f64>) -> Self {
+        Self { x, y, z, preset: None, source: PointSource::Manual }
+    }
 }
 
 /// A downward-facing triangle whose angle from vertical is at or above the overhang threshold.
@@ -143,7 +182,7 @@ pub fn place_supports(mesh: &Mesh, params: &SupportParams, extra: &[InputPoint],
         if is_self_supported(mesh, point, Some(index)) {
             continue;
         }
-        needed.push(SupportPoint { x: point.x, y: point.y, contact_z: point.z });
+        needed.push(SupportPoint::new(point.x, point.y, point.z));
     }
     for point in extra {
         if !point.x.is_finite() || !point.y.is_finite() {
@@ -154,10 +193,19 @@ pub fn place_supports(mesh: &Mesh, params: &SupportParams, extra: &[InputPoint],
                 if !z.is_finite() {
                     return Err(ResinError::invalid("a support point is not finite"));
                 }
-                SupportPoint { x: point.x, y: point.y, contact_z: z }
+                {
+                    let mut contact = SupportPoint::manual(point.x, point.y, z);
+                    contact.source = point.source;
+                    contact.preset_index = None;
+                    contact
+                }
             }
             None => match lowest_hit_above(mesh, point.x, point.y, z_min) {
-                Some((hit, _)) => SupportPoint { x: hit.x, y: hit.y, contact_z: hit.z },
+                Some((hit, _)) => {
+                    let mut contact = SupportPoint::manual(hit.x, hit.y, hit.z);
+                    contact.source = point.source;
+                    contact
+                }
                 None => return Err(ResinError::invalid(format!("explicit support at ({}, {}) does not hit the part", point.x, point.y))),
             },
         };
@@ -179,25 +227,65 @@ pub fn place_supports(mesh: &Mesh, params: &SupportParams, extra: &[InputPoint],
     Ok(thinned)
 }
 
-fn thin_points(points: &[SupportPoint], spacing: f64) -> Result<Vec<SupportPoint>> {
+pub(crate) fn thin_points(points: &[SupportPoint], spacing: f64) -> Result<Vec<SupportPoint>> {
+    thin_points_with(points, spacing, None)
+}
+
+/// Thin points to `spacing`. When `band` is `Some((z_cut, band_spacing))`, points at or below
+/// `z_cut` are thinned to `band_spacing` and are considered first so the lowest band stays denser.
+pub fn thin_points_with(points: &[SupportPoint], spacing: f64, band: Option<(f64, f64)>) -> Result<Vec<SupportPoint>> {
     if !spacing.is_finite() || spacing <= 0.0 {
-        return Err(ResinError::invalid("support spacing must be greater than 0"));
+        return Err(ResinError::invalid("support spacing must be greater than 0 mm"));
+    }
+    if let Some((z_cut, band_spacing)) = band {
+        if !z_cut.is_finite() {
+            return Err(ResinError::invalid("lowest-band height is not finite"));
+        }
+        if !band_spacing.is_finite() || band_spacing <= 0.0 {
+            return Err(ResinError::invalid("lowest-band spacing must be greater than 0 mm"));
+        }
+        let mut low: Vec<SupportPoint> = points.iter().copied().filter(|p| p.contact_z <= z_cut).collect();
+        let mut high: Vec<SupportPoint> = points.iter().copied().filter(|p| p.contact_z > z_cut).collect();
+        let mut kept = thin_sorted(&mut low, band_spacing)?;
+        kept.extend(thin_against(&mut high, spacing, &kept)?);
+        return Ok(kept);
     }
     let mut ordered = points.to_vec();
-    ordered.sort_by(|a, b| {
+    thin_sorted(&mut ordered, spacing)
+}
+
+fn sort_points(points: &mut [SupportPoint]) {
+    points.sort_by(|a, b| {
         a.contact_z.partial_cmp(&b.contact_z).unwrap_or(std::cmp::Ordering::Equal).then_with(|| {
             a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
         })
     });
+}
+
+fn thin_sorted(points: &mut [SupportPoint], spacing: f64) -> Result<Vec<SupportPoint>> {
+    sort_points(points);
+    thin_against(points, spacing, &[])
+}
+
+fn thin_against(points: &mut [SupportPoint], spacing: f64, existing: &[SupportPoint]) -> Result<Vec<SupportPoint>> {
+    if !spacing.is_finite() || spacing <= 0.0 {
+        return Err(ResinError::invalid("support spacing must be greater than 0 mm"));
+    }
+    sort_points(points);
     let spacing_sq = spacing * spacing;
     let mut kept: Vec<SupportPoint> = Vec::new();
-    for point in ordered {
-        let close = kept.iter().any(|other| {
+    for point in points.iter().copied() {
+        let close_existing = existing.iter().any(|other| {
             let dx = point.x - other.x;
             let dy = point.y - other.y;
             dx * dx + dy * dy <= spacing_sq
         });
-        if !close {
+        let close_kept = kept.iter().any(|other| {
+            let dx = point.x - other.x;
+            let dy = point.y - other.y;
+            dx * dx + dy * dy <= spacing_sq
+        });
+        if !close_existing && !close_kept {
             kept.push(point);
         }
     }
@@ -231,7 +319,10 @@ pub fn overhangs_are_covered(mesh: &Mesh, params: &SupportParams, points: &[Supp
     Ok(true)
 }
 
-/// Parse a points file: one `x y` or `x y z` per line, millimetres. Blank lines and `#` comments are ignored.
+/// Parse a points file: one `x y`, `x y z`, or `x y z preset` per line, millimetres.
+///
+/// Blank lines and `#` comments are ignored. The optional fourth token is a palette class name
+/// (no spaces). Older two- and three-column files still load.
 pub fn parse_points_text(text: &str) -> Result<Vec<InputPoint>> {
     let mut points = Vec::new();
     for (index, raw) in text.lines().enumerate() {
@@ -247,8 +338,9 @@ pub fn parse_points_text(text: &str) -> Result<Vec<InputPoint>> {
             return Err(ResinError::invalid(format!("support point on line {} needs at least x and y", index + 1)));
         };
         let z = parts.next();
+        let preset = parts.next();
         if parts.next().is_some() {
-            return Err(ResinError::invalid(format!("support point on line {} has more than three values", index + 1)));
+            return Err(ResinError::invalid(format!("support point on line {} has more than four values", index + 1)));
         }
         let parse = |s: &str, axis: &str| -> Result<f64> {
             s.parse::<f64>()
@@ -256,10 +348,88 @@ pub fn parse_points_text(text: &str) -> Result<Vec<InputPoint>> {
                 .filter(|v| v.is_finite())
                 .ok_or_else(|| ResinError::invalid(format!("support point on line {} has a bad {axis} value `{s}`", index + 1)))
         };
-        points.push(InputPoint { x: parse(x, "x")?, y: parse(y, "y")?, z: z.map(|s| parse(s, "z")).transpose()? });
+        let preset = match preset {
+            Some("") => None,
+            Some(name) => Some(name.to_string()),
+            None => None,
+        };
+        // A three-token line is `x y z`. A four-token line is `x y z preset`.
+        points.push(InputPoint {
+            x: parse(x, "x")?,
+            y: parse(y, "y")?,
+            z: z.map(|s| parse(s, "z")).transpose()?,
+            preset,
+            source: PointSource::Manual,
+        });
         if points.len() > MAX_SUPPORT_POINTS {
             return Err(ResinError::invalid(format!("too many support points: {} > {MAX_SUPPORT_POINTS}", points.len())));
         }
     }
     Ok(points)
+}
+
+/// Write a points file that [`parse_points_text`] will read back.
+///
+/// When `preset_names` is set, a fourth column is written for points that have a palette index.
+pub fn write_points_text(points: &[SupportPoint], preset_names: Option<&[String]>) -> String {
+    let mut out = String::from("# campanion support points, millimetres\n# columns: x y [z] [preset]\n");
+    for point in points {
+        let preset = point.preset_index.and_then(|index| preset_names.and_then(|names| names.get(index as usize)).cloned());
+        match preset {
+            Some(name) => {
+                out.push_str(&format!("{:.6} {:.6} {:.6} {name}\n", point.x, point.y, point.contact_z));
+            }
+            None => out.push_str(&format!("{:.6} {:.6} {:.6}\n", point.x, point.y, point.contact_z)),
+        }
+    }
+    out
+}
+
+/// Add a manual point at `(x, y)`, using `z` when given, otherwise the lowest hit above `z_min`.
+pub fn add_support_point(points: &mut Vec<SupportPoint>, mesh: &Mesh, x: f64, y: f64, z: Option<f64>, z_min: f64) -> Result<usize> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err(ResinError::invalid("a support point is not finite"));
+    }
+    let contact = match z {
+        Some(z) if z.is_finite() => SupportPoint::manual(x, y, z),
+        Some(_) => return Err(ResinError::invalid("a support point is not finite")),
+        None => match lowest_hit_above(mesh, x, y, z_min) {
+            Some((hit, _)) => SupportPoint::manual(hit.x, hit.y, hit.z),
+            None => return Err(ResinError::invalid(format!("support at ({x}, {y}) does not hit the part"))),
+        },
+    };
+    if contact.contact_z <= z_min {
+        return Err(ResinError::invalid("explicit support contact is at or below the raft"));
+    }
+    if points.len() >= MAX_SUPPORT_POINTS {
+        return Err(ResinError::invalid(format!("too many supports: {} > {MAX_SUPPORT_POINTS}", points.len() + 1)));
+    }
+    points.push(contact);
+    Ok(points.len() - 1)
+}
+
+/// Move the point at `index` to `(x, y)`, re-resolving Z when `z` is `None`.
+pub fn move_support_point(points: &mut [SupportPoint], index: usize, mesh: &Mesh, x: f64, y: f64, z: Option<f64>, z_min: f64) -> Result<()> {
+    let Some(existing) = points.get(index).copied() else {
+        return Err(ResinError::invalid(format!("support point {index} does not exist")));
+    };
+    let mut scratch = Vec::new();
+    add_support_point(&mut scratch, mesh, x, y, z, z_min)?;
+    let Some(mut moved) = scratch.pop() else {
+        return Err(ResinError::invalid("failed to move support point"));
+    };
+    moved.source = existing.source;
+    moved.preset_index = existing.preset_index;
+    if let Some(slot) = points.get_mut(index) {
+        *slot = moved;
+    }
+    Ok(())
+}
+
+/// Remove the point at `index`.
+pub fn delete_support_point(points: &mut Vec<SupportPoint>, index: usize) -> Result<SupportPoint> {
+    if index >= points.len() {
+        return Err(ResinError::invalid(format!("support point {index} does not exist")));
+    }
+    Ok(points.remove(index))
 }
