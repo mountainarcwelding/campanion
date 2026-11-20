@@ -1827,6 +1827,15 @@ impl JobFile {
         &self.setup_hooks
     }
 
+    /// Reorder operations in place. Used when `order_rules` apply and `cut_order` is empty.
+    pub(crate) fn sort_operations_by_key<K, F>(&mut self, key: F)
+    where
+        K: Ord,
+        F: FnMut(&Operation) -> K,
+    {
+        self.operations.sort_by_key(key);
+    }
+
     /// Translate every placement by `dx`, `dy` millimetres (used when a datum is applied).
     pub(crate) fn shift_placements(&mut self, dx: f64, dy: f64) {
         if let Some(placement) = self.placement {
@@ -2123,7 +2132,7 @@ fn parse_text(text: &str, job_path: &Path) -> Result<Body, JobFileError> {
         Some(value) => crate::job_parts::parse_contour_overrides(value)?,
         None => Vec::new(),
     };
-    let operation_extras = if is_v2 { parse_operation_extras_array(require(map, "operations").map_err(from_cli)?)? } else { Vec::new() };
+    let operation_extras = if is_v2 { parse_operation_extras_array(require(map, "operations").map_err(from_cli)?, scale)? } else { Vec::new() };
     if is_v2 {
         refuse_multi_head(map)?;
     }
@@ -2312,7 +2321,7 @@ fn refuse_multi_head(map: &serde_json::Map<String, Value>) -> Result<(), JobFile
     Ok(())
 }
 
-fn parse_operation_extras_array(value: &Value) -> Result<Vec<(String, crate::job_parts::OperationExtras)>, JobFileError> {
+fn parse_operation_extras_array(value: &Value, scale: f64) -> Result<Vec<(String, crate::job_parts::OperationExtras)>, JobFileError> {
     let Some(items) = value.as_array() else {
         return Ok(Vec::new());
     };
@@ -2346,7 +2355,15 @@ fn parse_operation_extras_array(value: &Value) -> Result<Vec<(String, crate::job
                 return Err(JobFileError::invalid(format!("{what}.power must be an object with unit and value, not a 0..=1 fraction")));
             }
         }
-        if extra.selector.is_some() || extra.power.is_some() || extra.passes.is_some() || !extra.overrides.names.is_empty() {
+        if let Some(value) = optional(map, "small_hole") {
+            extra.small_hole = Some(crate::job_parts::parse_small_hole(value, &format!("{what}.small_hole"), scale)?);
+        }
+        if extra.selector.is_some()
+            || extra.power.is_some()
+            || extra.passes.is_some()
+            || !extra.overrides.names.is_empty()
+            || extra.small_hole.is_some()
+        {
             extras.push((name.to_string(), extra));
         }
     }
@@ -3123,6 +3140,7 @@ fn parse_operation(value: &Value, scale: f64, tools: &[JobTool]) -> Result<Opera
             "selector",
             "passes",
             "overrides",
+            "small_hole",
         ],
         "operation",
     )

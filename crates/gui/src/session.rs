@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use campanion_cli::{
-    FORMAT_TAG, FORMAT_TAG_V2, ImportedPart, JobFile, LayerSummary, PlanOptions, SourceKind, builtin_posts, import_part, parse_job, plan_job,
-    post_job, suggested_post,
+    FORMAT_TAG, FORMAT_TAG_V2, ImportedPart, JobFile, LayerSummary, PlanCancel, PlanOptions, SourceKind, builtin_posts, import_part, parse_job,
+    plan_job, plan_job_cancellable, post_job, suggested_post,
 };
 use campanion_geom::Segment;
 use campanion_import::Drawing;
@@ -89,6 +89,28 @@ pub struct OpDraft {
     pub compensation: String,
     pub pierce_delay: String,
     pub post_delay: String,
+    /// `parts`, `layers`, or `contours`. Empty means layers on the operation.
+    pub assign: String,
+    /// Part ids for a parts/layers selector, comma-separated.
+    pub assign_parts: String,
+    /// Contour ids for a contours selector, comma-separated.
+    pub assign_contours: String,
+    /// Tab count, when entered. Mutually exclusive with spacing in the job file.
+    pub tabs_count: String,
+    /// Tab spacing, millimetres, when entered.
+    pub tabs_spacing: String,
+    /// Tab width, millimetres, when entered.
+    pub tabs_width: String,
+    /// Tab height, millimetres, when entered.
+    pub tabs_height: String,
+    /// Material preset name last applied to this operation, when any.
+    pub material_name: String,
+    /// Field names the user overrode after applying a preset (shown in orange).
+    pub override_fields: Vec<String>,
+    /// Plasma small-hole max diameter, millimetres, when the user entered one.
+    pub small_hole_max: String,
+    /// User-entered small-hole action (`pierce_only`, `thc_off`, or a recorded intent).
+    pub small_hole_action: String,
 }
 
 impl OpDraft {
@@ -113,6 +135,17 @@ impl OpDraft {
             compensation: String::new(),
             pierce_delay: String::new(),
             post_delay: String::new(),
+            assign: String::new(),
+            assign_parts: String::new(),
+            assign_contours: String::new(),
+            tabs_count: String::new(),
+            tabs_spacing: String::new(),
+            tabs_width: String::new(),
+            tabs_height: String::new(),
+            material_name: String::new(),
+            override_fields: Vec::new(),
+            small_hole_max: String::new(),
+            small_hole_action: String::new(),
         }
     }
 }
@@ -259,6 +292,12 @@ pub struct JobSession {
     pub sheet_height: String,
     /// Increment applied by the Setup Rotate command, degrees, when typed.
     pub rotate_by: String,
+    /// Job-level clearance height, millimetres, when entered.
+    pub clearance: String,
+    /// Job-level retract height, millimetres, when entered.
+    pub retract: String,
+    /// True when the user (or a loaded file) set an explicit `cut_order`.
+    pub cut_order_explicit: bool,
     pub dirty: bool,
     pub messages: Vec<SessionMessage>,
 }
@@ -302,6 +341,9 @@ impl JobSession {
             sheet_width: String::new(),
             sheet_height: String::new(),
             rotate_by: String::new(),
+            clearance: String::new(),
+            retract: String::new(),
+            cut_order_explicit: false,
             dirty: false,
             messages: Vec::new(),
         }
@@ -480,11 +522,11 @@ pub fn import_part_file(path: &Path) -> Result<ImportedPart, String> {
 
 fn session_from_job(path: &Path, value: Value, job: &JobFile) -> JobSession {
     let mut session = JobSession::new();
-    session.job_path = Some(path.to_path_buf());
+    session.job_path = Some(absolute_path(path));
     session.original_json = Some(value);
     session.loaded_job = Some(job.clone());
     session.units = job.units().to_string();
-    session.source_path = Some(campanion_cli::source_path(job));
+    session.source_path = Some(absolute_path(&campanion_cli::source_path(job)));
     session.source_hash = Some(job.source().hash().to_string());
     session.tools = job.tools().iter().map(tool_draft_from).collect();
     session.operations = job
@@ -509,6 +551,9 @@ fn session_from_job(path: &Path, value: Value, job: &JobFile) -> JobSession {
         session.placement_mirror = placement.mirror();
     }
     load_setup_fields(&mut session, job);
+    fill_operation_extras(&mut session, job);
+    load_height_fields(&mut session);
+    apply_loaded_cut_order(&mut session, job);
     if let Some(machine) = job.machine() {
         session.machine_profile = machine.profile.clone().unwrap_or_default();
         session.machine_path = machine.path.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
@@ -553,7 +598,7 @@ fn op_draft_from(op: &campanion_cli::Operation, original: Option<&Value>) -> OpD
     let power = op.params().power_value().map(format_number).unwrap_or_default();
     let pierce = if op.params().pierce_delay_s() > 0.0 { format_number(op.params().pierce_delay_s()) } else { String::new() };
     let post = if op.params().post_delay_s() > 0.0 { format_number(op.params().post_delay_s()) } else { String::new() };
-    OpDraft {
+    let mut draft = OpDraft {
         name: op.name().to_string(),
         kind: kind.to_string(),
         layers: op.layers().to_vec(),
@@ -572,6 +617,31 @@ fn op_draft_from(op: &campanion_cli::Operation, original: Option<&Value>) -> OpD
         compensation: compensation_label(op.compensation()).to_string(),
         pierce_delay: pierce,
         post_delay: post,
+        assign: String::new(),
+        assign_parts: String::new(),
+        assign_contours: String::new(),
+        tabs_count: String::new(),
+        tabs_spacing: String::new(),
+        tabs_width: String::new(),
+        tabs_height: String::new(),
+        material_name: String::new(),
+        override_fields: Vec::new(),
+        small_hole_max: String::new(),
+        small_hole_action: String::new(),
+    };
+    fill_tabs_from_op(&mut draft, op);
+    draft
+}
+
+fn fill_tabs_from_op(draft: &mut OpDraft, op: &campanion_cli::Operation) {
+    let Some(tabs) = op.tabs() else { return };
+    draft.tabs_width = format_number(tabs.width());
+    if let Some(height) = tabs.tab_height() {
+        draft.tabs_height = format_number(height);
+    }
+    match tabs.layout() {
+        campanion_path::TabLayout::Count(count) => draft.tabs_count = count.to_string(),
+        campanion_path::TabLayout::Spacing(spacing) => draft.tabs_spacing = format_number(spacing),
     }
 }
 
@@ -694,7 +764,7 @@ fn job_value_of(session: &JobSession) -> Result<Value, String> {
     for (index, op) in session.operations.iter().enumerate() {
         let original =
             session.original_json.as_ref().and_then(|value| value.get("operations")).and_then(Value::as_array).and_then(|ops| ops.get(index));
-        operations.push(operation_value(op, original, &session.units)?);
+        operations.push(operation_value(op, original, &session.units, save_as_v2(session))?);
     }
     obj.insert("operations".into(), Value::Array(operations));
     match machine_value(session) {
@@ -753,6 +823,15 @@ fn hooks_or_sheet_present(session: &JobSession) -> bool {
         || !session.start_from.trim().is_empty()
         || !session.job_origin.trim().is_empty()
         || session.order_rules_set
+        || session.cut_order_explicit
+        || !session.clearance.trim().is_empty()
+        || !session.retract.trim().is_empty()
+        || session.operations.iter().any(|op| {
+            !op.assign.trim().is_empty()
+                || !op.override_fields.is_empty()
+                || !op.small_hole_max.trim().is_empty()
+                || !op.material_name.trim().is_empty()
+        })
         || !session.sheet_width.trim().is_empty()
         || !session.sheet_height.trim().is_empty()
 }
@@ -767,6 +846,8 @@ fn write_v2_fields(session: &JobSession, obj: &mut Map<String, Value>) -> Result
     }
     obj.insert("parts".into(), Value::Array(parts));
     write_setup_hooks(session, obj)?;
+    write_heights(session, obj)?;
+    write_cut_order(session, obj);
     match crate::setup::sheet_bounds(session)? {
         Some([_, _, width, height]) => {
             obj.insert(
@@ -922,6 +1003,58 @@ fn write_setup_hooks(session: &JobSession, obj: &mut Map<String, Value>) -> Resu
     Ok(())
 }
 
+fn fill_operation_extras(session: &mut JobSession, job: &JobFile) {
+    for op in &mut session.operations {
+        let Some(extra) = job.operation_extras(&op.name) else { continue };
+        match &extra.selector {
+            Some(campanion_cli::OpSelector::Parts { parts }) => {
+                op.assign = "parts".to_string();
+                op.assign_parts = parts.join(", ");
+            }
+            Some(campanion_cli::OpSelector::Layers { parts, layers }) => {
+                op.assign = "layers".to_string();
+                op.assign_parts = parts.join(", ");
+                op.layers = layers.clone();
+            }
+            Some(campanion_cli::OpSelector::Contours { part, ids }) => {
+                op.assign = "contours".to_string();
+                op.assign_parts = part.clone();
+                op.assign_contours = ids.join(", ");
+            }
+            Some(campanion_cli::OpSelector::Color { .. }) | None => {}
+        }
+        op.override_fields = extra.overrides.names.clone();
+        if let Some(rule) = &extra.small_hole {
+            op.small_hole_max = format_number(rule.max_diameter);
+            op.small_hole_action = rule.action.clone();
+        }
+    }
+}
+
+fn load_height_fields(session: &mut JobSession) {
+    let Some(heights) = session.original_json.as_ref().and_then(|value| value.get("heights")).and_then(Value::as_object) else {
+        return;
+    };
+    if let Some(value) = heights.get("clearance").and_then(Value::as_f64) {
+        session.clearance = format_number(from_file_units(value, &session.units));
+    }
+    if let Some(value) = heights.get("retract").and_then(Value::as_f64) {
+        session.retract = format_number(from_file_units(value, &session.units));
+    }
+}
+
+fn apply_loaded_cut_order(session: &mut JobSession, job: &JobFile) {
+    if job.cut_order().is_empty() {
+        return;
+    }
+    session.cut_order_explicit = true;
+    session.operations.sort_by_key(|op| job.cut_order().iter().position(|name| name == &op.name).unwrap_or(usize::MAX));
+}
+
+fn from_file_units(value: f64, units: &str) -> f64 {
+    if units == "inch" { value * 25.4 } else { value }
+}
+
 fn load_setup_fields(session: &mut JobSession, job: &JobFile) {
     for part in job.parts() {
         let source_path = resolved_part_path(job, part.source.path());
@@ -975,10 +1108,103 @@ fn resolved_part_path(job: &JobFile, stored: &str) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
-    match job.path().parent() {
+    let joined = match job.path().parent() {
         Some(dir) => dir.join(path),
         None => path.to_path_buf(),
+    };
+    absolute_path(&joined)
+}
+
+fn write_heights(session: &JobSession, obj: &mut Map<String, Value>) -> Result<(), String> {
+    let clearance = session.clearance.trim();
+    let retract = session.retract.trim();
+    if clearance.is_empty() && retract.is_empty() {
+        obj.remove("heights");
+        return Ok(());
     }
+    let mut heights = Map::new();
+    if !clearance.is_empty() {
+        heights.insert("clearance".into(), json_number(to_file_units(parse_required_number(&session.clearance, "clearance")?, &session.units)));
+    }
+    if !retract.is_empty() {
+        heights.insert("retract".into(), json_number(to_file_units(parse_required_number(&session.retract, "retract")?, &session.units)));
+    }
+    obj.insert("heights".into(), Value::Object(heights));
+    Ok(())
+}
+
+fn write_cut_order(session: &JobSession, obj: &mut Map<String, Value>) {
+    if session.cut_order_explicit && session.operations.len() > 1 {
+        let names: Vec<Value> = session.operations.iter().map(|op| Value::String(op.name.clone())).collect();
+        obj.insert("cut_order".into(), Value::Array(names));
+    } else {
+        obj.remove("cut_order");
+    }
+}
+
+fn write_selector(map: &mut Map<String, Value>, op: &OpDraft, units: &str) -> Result<(), String> {
+    match op.assign.trim() {
+        "" => {
+            map.remove("selector");
+        }
+        "parts" => {
+            let parts = csv_list(&op.assign_parts);
+            if parts.is_empty() {
+                return Err(format!("operation `{}` assign-by-part needs at least one part id", op.name));
+            }
+            map.insert("selector".into(), serde_json::json!({ "type": "parts", "parts": parts }));
+        }
+        "layers" => {
+            if op.layers.is_empty() {
+                return Err(format!("operation `{}` assign-by-layer needs at least one layer", op.name));
+            }
+            let mut sel = serde_json::Map::new();
+            sel.insert("type".into(), Value::String("layers".into()));
+            sel.insert("layers".into(), Value::Array(op.layers.iter().map(|layer| Value::String(layer.clone())).collect()));
+            let parts = csv_list(&op.assign_parts);
+            if !parts.is_empty() {
+                sel.insert("parts".into(), Value::Array(parts.into_iter().map(Value::String).collect()));
+            }
+            map.insert("selector".into(), Value::Object(sel));
+        }
+        "contours" => {
+            let ids = csv_list(&op.assign_contours);
+            if ids.is_empty() {
+                return Err(format!("operation `{}` assign-by-contour needs at least one contour id", op.name));
+            }
+            let part = csv_list(&op.assign_parts).into_iter().next().unwrap_or_else(|| "part".to_string());
+            map.insert("selector".into(), serde_json::json!({ "type": "contours", "part": part, "ids": ids }));
+        }
+        other => return Err(format!("operation `{}` assign mode `{other}` is not valid", op.name)),
+    }
+    if op.override_fields.is_empty() {
+        map.remove("overrides");
+    } else {
+        map.insert("overrides".into(), Value::Array(op.override_fields.iter().map(|name| Value::String(name.clone())).collect()));
+    }
+    if op.small_hole_max.trim().is_empty() && op.small_hole_action.trim().is_empty() {
+        map.remove("small_hole");
+    } else {
+        if op.small_hole_max.trim().is_empty() || op.small_hole_action.trim().is_empty() {
+            return Err(format!("operation `{}` small-hole rule needs a max diameter and an action, both user-entered", op.name));
+        }
+        let max = parse_required_number(&op.small_hole_max, &format!("operation `{}` small-hole max diameter", op.name))?;
+        if max <= 0.0 {
+            return Err(format!("operation `{}` small-hole max diameter must be greater than zero", op.name));
+        }
+        map.insert(
+            "small_hole".into(),
+            serde_json::json!({
+                "max_diameter": to_file_units(max, units),
+                "action": op.small_hole_action.trim(),
+            }),
+        );
+    }
+    Ok(())
+}
+
+fn csv_list(text: &str) -> Vec<String> {
+    text.split(',').map(str::trim).filter(|item| !item.is_empty()).map(str::to_string).collect()
 }
 
 fn machine_value(session: &JobSession) -> Option<Value> {
@@ -1118,9 +1344,27 @@ fn source_object(session: &JobSession) -> Result<Value, String> {
 /// be formed, or the job has not been saved yet, the source path is stored as given,
 /// which for a GUI import is typically absolute.
 pub fn stored_source_path(job_path: Option<&Path>, source: &Path) -> String {
+    stored_source_path_in(job_path, source, &current_dir())
+}
+
+fn current_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Make `path` absolute against the process current directory when it is relative.
+pub fn absolute_path(path: &Path) -> PathBuf {
+    absolute_path_in(path, &current_dir())
+}
+
+fn absolute_path_in(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) }
+}
+
+fn stored_source_path_in(job_path: Option<&Path>, source: &Path, cwd: &Path) -> String {
+    let source = absolute_path_in(source, cwd);
     if let Some(job) = job_path
-        && let Some(job_dir) = job.parent()
-        && let Some(relative) = relative_to(source, job_dir)
+        && let Some(job_dir) = absolute_path_in(job, cwd).parent()
+        && let Some(relative) = relative_to(&source, job_dir)
     {
         return relative.to_string_lossy().into_owned();
     }
@@ -1173,7 +1417,7 @@ fn tool_value(tool: &ToolDraft, _units: &str) -> Result<Value, String> {
     Ok(Value::Object(map))
 }
 
-fn operation_value(op: &OpDraft, original: Option<&Value>, units: &str) -> Result<Value, String> {
+fn operation_value(op: &OpDraft, original: Option<&Value>, units: &str, v2: bool) -> Result<Value, String> {
     let mut map = match original.and_then(Value::as_object) {
         Some(existing) => existing.clone(),
         None => Map::new(),
@@ -1183,14 +1427,14 @@ fn operation_value(op: &OpDraft, original: Option<&Value>, units: &str) -> Resul
     }
     map.insert("name".into(), Value::String(op.name.clone()));
     map.insert("type".into(), Value::String(op.kind.clone()));
-    if op.kind == "profile" {
-        if op.layers.is_empty() {
-            return Err(format!("operation `{}` needs at least one layer", op.name));
-        }
+    if op.kind == "profile" && op.layers.is_empty() && op.assign != "contours" && op.assign != "parts" {
+        return Err(format!("operation `{}` needs at least one layer, or an assign-by-part or assign-by-contour selector", op.name));
+    }
+    if !op.layers.is_empty() {
         map.insert("layers".into(), Value::Array(op.layers.iter().map(|layer| Value::String(layer.clone())).collect()));
-        if !op.side.is_empty() {
-            map.insert("side".into(), Value::String(op.side.clone()));
-        }
+    }
+    if op.kind == "profile" && !op.side.is_empty() {
+        map.insert("side".into(), Value::String(op.side.clone()));
     }
     map.insert("tool_id".into(), Value::from(op.tool_id));
     let depth = parse_required_number(&op.depth, &format!("operation `{}` depth", op.name))?;
@@ -1205,7 +1449,19 @@ fn operation_value(op: &OpDraft, original: Option<&Value>, units: &str) -> Resul
         feeds.insert("plunge".into(), json_number(to_file_units(plunge, units)));
     }
     map.insert("feeds".into(), Value::Object(feeds));
-    set_optional_fraction(&mut map, "power", &op.power, &format!("operation `{}` power", op.name))?;
+    if v2 {
+        if op.power.trim().is_empty() {
+            map.remove("power");
+        } else {
+            let fraction = parse_required_number(&op.power, &format!("operation `{}` power", op.name))?;
+            if !(0.0..=1.0).contains(&fraction) {
+                return Err(format!("operation `{}` power must be a fraction in 0..=1", op.name));
+            }
+            map.insert("power".into(), serde_json::json!({ "unit": "percent", "value": fraction * 100.0 }));
+        }
+    } else {
+        set_optional_fraction(&mut map, "power", &op.power, &format!("operation `{}` power", op.name))?;
+    }
     set_optional_lead(&mut map, "lead_in", &op.lead_in, &op.lead_in_size, units, &op.name)?;
     set_optional_lead(&mut map, "lead_out", &op.lead_out, &op.lead_out_size, units, &op.name)?;
     if !op.direction.trim().is_empty() {
@@ -1228,7 +1484,46 @@ fn operation_value(op: &OpDraft, original: Option<&Value>, units: &str) -> Resul
     } else {
         map.insert("timing".into(), Value::Object(timing));
     }
+    write_selector(&mut map, op, units)?;
+    write_tabs(&mut map, op, units)?;
     Ok(Value::Object(map))
+}
+
+fn write_tabs(map: &mut Map<String, Value>, op: &OpDraft, units: &str) -> Result<(), String> {
+    let width = op.tabs_width.trim();
+    let count = op.tabs_count.trim();
+    let spacing = op.tabs_spacing.trim();
+    if width.is_empty() && count.is_empty() && spacing.is_empty() && op.tabs_height.trim().is_empty() {
+        map.remove("tabs");
+        return Ok(());
+    }
+    if width.is_empty() {
+        return Err(format!("operation `{}` tabs need a width", op.name));
+    }
+    let mut tabs = Map::new();
+    tabs.insert("width".into(), json_number(to_file_units(parse_required_number(width, &format!("operation `{}` tab width", op.name))?, units)));
+    if !count.is_empty() {
+        let value: u32 = count.parse().map_err(|_| format!("operation `{}` tab count is not an integer", op.name))?;
+        if value == 0 {
+            return Err(format!("operation `{}` tab count must be positive", op.name));
+        }
+        tabs.insert("count".into(), Value::from(value));
+    } else if !spacing.is_empty() {
+        tabs.insert(
+            "spacing".into(),
+            json_number(to_file_units(parse_required_number(spacing, &format!("operation `{}` tab spacing", op.name))?, units)),
+        );
+    } else {
+        return Err(format!("operation `{}` tabs need a count or a spacing", op.name));
+    }
+    if !op.tabs_height.trim().is_empty() {
+        tabs.insert(
+            "height".into(),
+            json_number(to_file_units(parse_required_number(&op.tabs_height, &format!("operation `{}` tab height", op.name))?, units)),
+        );
+    }
+    map.insert("tabs".into(), Value::Object(tabs));
+    Ok(())
 }
 
 fn set_optional_fraction(map: &mut Map<String, Value>, key: &str, text: &str, what: &str) -> Result<(), String> {
@@ -1319,6 +1614,32 @@ pub fn generate_toolpaths(session: &JobSession) -> Result<PlannedSession, String
     Ok(PlannedSession { document: planned.document, scene, messages })
 }
 
+/// Generate toolpaths, stopping when `cancel` is signalled.
+pub fn generate_toolpaths_cancellable(session: &JobSession, cancel: Option<&PlanCancel>) -> Result<PlannedSession, String> {
+    let job = planning_job(session)?;
+    let planned = plan_job_cancellable(&job, PlanOptions::default(), cancel).map_err(|err| err.to_string())?;
+    let mut messages = Vec::new();
+    for text in planned.warnings {
+        messages.push(warning(text));
+    }
+    for text in planned.notes {
+        messages.push(note(text));
+    }
+    if !planned.blocking.is_empty() {
+        for text in planned.blocking {
+            messages.push(error_msg(text));
+        }
+        return Err(messages_as_error(&messages));
+    }
+    if let Some(cancel) = cancel
+        && cancel.is_cancelled()
+    {
+        return Err("planning was cancelled".to_string());
+    }
+    let scene = campanion_view::build_scene(&planned.document, DEFAULT_ARC_TOL_MM);
+    Ok(PlannedSession { document: planned.document, scene, messages })
+}
+
 fn messages_as_error(messages: &[SessionMessage]) -> String {
     messages.iter().filter(|message| message.kind == MessageKind::Error).map(|message| message.text.as_str()).collect::<Vec<_>>().join("\n")
 }
@@ -1330,7 +1651,10 @@ pub fn post_session(session: &JobSession, document: &Document) -> Result<(String
     }
     let job = planning_job(session)?;
     let posted = post_job(&job, document, session.post_id.trim()).map_err(|err| err.to_string())?;
-    let messages = posted.warnings.into_iter().map(warning).collect();
+    let mut messages: Vec<SessionMessage> = posted.warnings.into_iter().map(warning).collect();
+    if session.operations.iter().any(|op| !op.small_hole_max.trim().is_empty()) {
+        messages.push(warning("small-hole rules are recorded as entered; this post does not emit uncited THC or pierce codes for them".to_string()));
+    }
     Ok((posted.text, messages))
 }
 
@@ -1519,6 +1843,112 @@ mod tests {
         assert_eq!(stored_source_path(Some(job), Path::new("/other/part.svg")), "../other/part.svg");
         assert_eq!(stored_source_path(Some(job), Path::new("/work/nested/part.svg")), "nested/part.svg");
         assert_eq!(stored_source_path(None, Path::new("/other/part.svg")), "/other/part.svg");
+    }
+
+    #[test]
+    fn stored_source_path_resolves_cwd_relative_job_and_source() {
+        let cwd = Path::new("/repo");
+        let stored = stored_source_path_in(Some(Path::new("examples/laser_rect.job.json")), Path::new("examples/laser_rect.svg"), cwd);
+        assert_eq!(stored, "laser_rect.svg");
+        let doubled = stored_source_path_in(Some(Path::new("examples/laser_rect.job.json")), Path::new("examples/examples/laser_rect.svg"), cwd);
+        assert_eq!(doubled, "examples/laser_rect.svg");
+    }
+
+    #[test]
+    fn opening_example_job_with_relative_path_does_not_look_under_examples_examples() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo");
+        let prev = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&root).expect("chdir");
+        let result = (|| {
+            let (session, _) = open_job_file(Path::new("examples/laser_rect.job.json"))?;
+            let source = session.source_path.as_deref().ok_or_else(|| "source".to_string())?;
+            assert!(source.is_absolute(), "{source:?}");
+            assert!(!source.ends_with("examples/examples/laser_rect.svg"), "{source:?}");
+            assert!(source.ends_with("examples/laser_rect.svg"), "{source:?}");
+            let stored = stored_source_path(session.job_path.as_deref(), source);
+            assert_eq!(stored, "laser_rect.svg", "{stored}");
+            generate_toolpaths(&session).map(|_| ())
+        })();
+        let _ = std::env::set_current_dir(&prev);
+        result.expect("open and plan laser_rect from repo root");
+    }
+
+    #[test]
+    fn operations_workflow_exports_gcode_that_reflects_order_override_and_z_zero() {
+        let dir = temp_dir("campanion-gui-g2-workflow");
+        fs::write(dir.join("a.svg"), PART_SVG).expect("a");
+        fs::write(dir.join("b.svg"), PART_SVG).expect("b");
+        let first = import_part_file(&dir.join("a.svg")).expect("import a");
+        let second = import_part_file(&dir.join("b.svg")).expect("import b");
+        let mut session = session_from_import(&first);
+        add_imported_part(&mut session, &second);
+        assert_eq!(session.parts.len(), 2);
+        session.tools.push(ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: "0.1".to_string() });
+        let layer = first.layers[0].name.clone();
+        let mut cut = OpDraft::new_profile("cut", 1);
+        cut.layers = vec![layer.clone()];
+        cut.side = "outside".to_string();
+        cut.depth = "0.26".to_string();
+        cut.step_down = "0.26".to_string();
+        cut.cut_feed = "300".to_string();
+        cut.power = "0.8".to_string();
+        cut.material_name = "example acrylic".to_string();
+        cut.override_fields = vec!["power".to_string()];
+        let mut mark = crate::operations::new_operation("mark", "engrave", 1);
+        mark.layers = vec![layer];
+        mark.depth = "0.26".to_string();
+        mark.step_down = "0.26".to_string();
+        mark.cut_feed = "400".to_string();
+        mark.power = "0.2".to_string();
+        session.operations = vec![cut, mark];
+        session.cut_order_explicit = true;
+        session.operations.swap(0, 1); // mark first
+        session.z_zero = "bed".to_string();
+        session.stock_thickness = "6".to_string();
+        session.post_id = "grbl_laser".to_string();
+        session.order_rules_set = true;
+        session.order_cuts_last = true;
+        let planned = generate_toolpaths(&session).expect("plan");
+        let names: Vec<_> = planned.document.program().toolpaths().iter().filter_map(|path| path.name().map(str::to_string)).collect();
+        let mark_at = names.iter().position(|name| name.contains("mark")).expect("mark path");
+        let cut_at = names.iter().position(|name| name.contains("cut")).expect("cut path");
+        assert!(mark_at < cut_at, "explicit cut_order should put mark before cut: {names:?}");
+        let (gcode, _) = post_session(&session, &planned.document).expect("post");
+        let mark_line = gcode.find("(toolpath mark)").expect("mark comment");
+        let cut_line = gcode.find("(toolpath cut)").expect("cut comment");
+        assert!(mark_line < cut_line, "gcode order {gcode}");
+        assert!(gcode.contains("S200"), "mark power {gcode}");
+        assert!(gcode.contains("S800"), "cut override power {gcode}");
+        let mut stock_top = session.clone();
+        stock_top.z_zero = "stock_top".to_string();
+        stock_top.stock_thickness.clear();
+        let top = generate_toolpaths(&stock_top).expect("stock top");
+        let raised = first_cut_z(&planned.document);
+        let baseline = first_cut_z(&top.document);
+        assert!((raised - (baseline + 6.0)).abs() < 1e-6, "raised {raised} baseline {baseline}");
+        // The stock-top G-code must stay different from the bed-zero program in IR. A laser
+        // post may omit Z when it never changes; the planned Z still moves.
+        let json = job_json_of(&session).expect("json");
+        assert!(json.contains("cut_order"), "{json}");
+        assert!(json.contains("overrides"), "{json}");
+        assert!(json.contains("z_zero"), "{json}");
+    }
+
+    fn first_cut_z(document: &Document) -> f64 {
+        for path in document.program().toolpaths() {
+            for block in path.blocks() {
+                let campanion_ir::ClBlock::Motion(motion) = block else { continue };
+                match motion {
+                    campanion_ir::ClMotion::Linear { to, role, .. } | campanion_ir::ClMotion::Arc { to, role, .. }
+                        if *role == campanion_ir::MoveRole::Cut =>
+                    {
+                        return to.tip().z();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        panic!("no cut");
     }
 
     fn laser_session(imported: &ImportedPart) -> JobSession {

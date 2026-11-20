@@ -46,9 +46,9 @@ lengths are millimetres and feeds are millimetres per minute.
 | `z_zero` | no | v2 only. `stock_top` (the existing convention: stock top is Z 0) or `bed` (the machine bed is Z 0). Omitted means stock top, and posted Z is unchanged from today. `bed` needs `stock_thickness` or a stock box with height. |
 | `stock_thickness` | no | v2 only. Stock thickness in `units`, greater than zero. Required when `z_zero` is `bed` unless a stock box already gives a height. |
 | `datum` | no | v2 only. `{ "anchor": "min_min"|"max_min"|"min_max"|"max_max"|"center", "offset"?: [x, y] }`. The named corner or centre of the sheet (or of the stock box when there is no sheet) is moved to X0,Y0, then `offset` is applied. `datum` without a sheet or stock box is refused. Omitted, posted XY is unchanged. |
-| `start_from` | no | v2 only. `absolute`, `current_position`, or `user_origin`. Stored so Run and Frame can agree later. Planning and posting do not change numbers from this field yet. |
-| `job_origin` | no | v2 only. Nine-position anchor of the job bounds: `min_min`, `mid_min`, `max_min`, `min_mid`, `center`, `max_mid`, `min_max`, `mid_max`, `max_max`. Stored with `start_from`; not applied to posted coordinates yet. |
-| `order_rules` | no | v2 only. `{ "inner_first"?: bool, "cuts_last"?: bool }`. At least one flag is required. Stored for later Operations planning. Omitted (and until Operations applies them), planning still follows `cut_order` or file order, so posted G-code stays byte-identical. |
+| `start_from` | no | v2 only. `absolute`, `current_position`, or `user_origin`. Omitted, posted XY is unchanged. `user_origin` or `current_position` together with `job_origin` shifts the planned program so the chosen anchor of the sheet, stock box, or toolpath bounds is at (0, 0). This does not invent G92 or other origin codes; it only translates planned coordinates. |
+| `job_origin` | no | v2 only. Nine-position anchor of the job bounds: `min_min`, `mid_min`, `max_min`, `min_mid`, `center`, `max_mid`, `min_max`, `mid_max`, `max_max`. Applied with `start_from` of `user_origin` or `current_position`. |
+| `order_rules` | no | v2 only. `{ "inner_first"?: bool, "cuts_last"?: bool }`. At least one flag is required. Applied when `cut_order` is empty: `cuts_last` runs marking/engrave/raster before through cuts; `inner_first` orders operations by containment depth of the selected contours (deeper first). Explicit `cut_order` still wins. Omitted, planning follows `cut_order` or file order, so posted G-code stays byte-identical. |
 
 `tolerance.linear` and `tolerance.chord` are lengths in `units`. `tolerance.angular` is radians either way.
 
@@ -200,10 +200,13 @@ These keys are omitted by default. A file that does not name them posts the same
 before.
 
 When `datum` is set, each instance placement is translated so the chosen corner or centre of
-the sheet or stock box sits at the origin, plus any typed offset. When `z_zero` is `bed`, the
-value is stored and shown in the Setup UI; posted Z still uses the stock-top-is-zero convention
-until a later change applies the thickness shift to the planned program. `start_from`,
-`job_origin`, and `order_rules` are stored and round-tripped; they do not change planning yet.
+the sheet or stock box sits at the origin, plus any typed offset. When `z_zero` is `bed`,
+planned and posted Z are raised by the user-entered `stock_thickness` (or the stock box
+height) so the bed is Z 0. `stock_top` and an omitted `z_zero` keep the stock-top-is-zero
+convention. When `start_from` is `user_origin` or `current_position` and `job_origin` is set,
+planned XY is translated so the chosen anchor is program (0, 0); no G92 or other origin codes
+are invented. When `order_rules` is set and `cut_order` is empty, operations are sorted as
+described above. Explicit `cut_order` still wins. Omitted hooks do not change posted numbers.
 
 A part that sits outside a named `sheet` produces a planning warning and is not refused at
 export. A part that sits outside the machine bed or work area is still a warning at plan time
@@ -229,7 +232,11 @@ as `value / max_power` using the user-entered head `max_power` in watts; if that
 missing, planning refuses rather than inventing a scale.
 
 Optional `passes` repeats the operation that many times (`name`, `name#2`, …). Optional
-`overrides` is a list of field names the user changed relative to a material preset; the
+`small_hole` is `{ "max_diameter": <length in units>, "action": "<token>" }`. Both fields are
+required when the object is present; `max_diameter` must be greater than zero. The values are
+recorded as entered. Until a cited controller dialect defines THC or pierce codes for the
+chosen action, posts do not invent those codes; planning and posting may warn that the rule
+was recorded only. Optional `overrides` is a list of field names the user changed relative to a material preset; the
 marks are stored and are not themselves numeric defaults.
 
 ### Cut order and per-contour overrides

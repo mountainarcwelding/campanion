@@ -717,8 +717,91 @@ pub fn apply_material(session: &mut JobSession, entry: &MaterialEntry) -> Result
             tool.size = format_number(value);
         }
     }
+    op.material_name = entry.name.clone();
+    op.override_fields.clear();
     session.dirty = true;
     Ok(format!("Applied material `{}`", entry.name))
+}
+
+/// Build a library entry from the selected operation's entered values only.
+pub fn material_from_selected_operation(session: &JobSession, name: &str) -> Result<MaterialEntry, String> {
+    let Some(crate::session::TreeSelection::Operation(index)) = session.selected else {
+        return Err("select an operation before saving a material".to_string());
+    };
+    let op = session.operations.get(index).ok_or_else(|| "no operation is selected".to_string())?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("enter a name before saving a material to the library".to_string());
+    }
+    let mut entry = MaterialEntry { name: name.to_string(), ..MaterialEntry::default() };
+    entry.depth = parse_opt_field(&op.depth)?;
+    entry.step_down = parse_opt_field(&op.step_down)?;
+    entry.cut_feed = parse_opt_field(&op.cut_feed)?;
+    entry.plunge_feed = parse_opt_field(&op.plunge_feed)?;
+    if let Some(fraction) = parse_opt_field(&op.power)? {
+        entry.power = Some(PowerValue::from_v1_fraction(fraction));
+    }
+    entry.pierce_delay = parse_opt_field(&op.pierce_delay)?;
+    entry.post_delay = parse_opt_field(&op.post_delay)?;
+    if let Some(tool) = session.tools.iter().find(|tool| tool.id == op.tool_id)
+        && let Some(size) = parse_opt_field(&tool.size)?
+    {
+        match tool.kind {
+            crate::session::ToolKind::Kerf => entry.kerf = Some(size),
+            crate::session::ToolKind::Diameter => entry.diameter = Some(size),
+            crate::session::ToolKind::Wire => entry.wire = Some(size),
+        }
+    }
+    Ok(entry)
+}
+
+fn parse_opt_field(text: &str) -> Result<Option<f64>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: f64 = trimmed.parse().map_err(|_| "a material field is not a number".to_string())?;
+    if !value.is_finite() {
+        return Err("a material field is not finite".to_string());
+    }
+    Ok(Some(value))
+}
+
+/// Append or replace a material on the selected machine profile.
+pub fn save_material(store: &ProfileStore, session: &JobSession, entry: MaterialEntry) -> Result<String, String> {
+    let Some((mut profile, head)) = session_profile(store, session)? else {
+        return Err("select a machine before saving a material to the library".to_string());
+    };
+    let head_id = head.id.clone();
+    let Some(head) = profile.heads.iter_mut().find(|item| item.id == head_id) else {
+        return Err("the selected head was not found on the machine profile".to_string());
+    };
+    if let Some(existing) = head.materials.iter_mut().find(|item| item.name == entry.name) {
+        *existing = entry.clone();
+    } else {
+        head.materials.push(entry.clone());
+    }
+    let id = if session.machine_profile.is_empty() {
+        return Err("select a machine profile before saving a material".to_string());
+    } else {
+        session.machine_profile.clone()
+    };
+    store.save(&id, &profile).map_err(|err| err.to_string())?;
+    Ok(format!("Saved material `{}` to the machine library", entry.name))
+}
+
+/// Load the machine a job session currently names, including resin profiles with no heads.
+pub fn session_machine(store: &ProfileStore, session: &JobSession) -> Result<Option<MachineFile>, String> {
+    if session.machine_profile.is_empty() && session.machine_path.is_empty() {
+        return Ok(None);
+    }
+    let reference = JobMachineRef {
+        profile: if session.machine_profile.is_empty() { None } else { Some(session.machine_profile.clone()) },
+        path: if session.machine_path.is_empty() { None } else { Some(std::path::PathBuf::from(&session.machine_path)) },
+        head: if session.machine_head.is_empty() { None } else { Some(session.machine_head.clone()) },
+    };
+    let profile = campanion_cli::load_job_ref(&reference, store).map_err(|err| err.to_string())?;
+    Ok(Some(profile))
 }
 
 /// Load the profile a job session currently names, if any.
@@ -781,6 +864,24 @@ pub fn screenshot_example(name: &str) -> MachineFile {
             }],
             changer: None,
         }],
+    }
+}
+
+/// A profile used only to populate a resin screenshot. It is not a shipped default.
+///
+/// No bed or screen size is filled in: those are machine limits and are not invented.
+pub fn screenshot_example_resin(name: &str) -> MachineFile {
+    MachineFile {
+        name: name.to_string(),
+        units: "mm".to_string(),
+        work_area: None,
+        controller: None,
+        post: None,
+        kind: MachineKind::Resin,
+        bed: None,
+        screen: None,
+        kinematics: None,
+        heads: Vec::new(),
     }
 }
 

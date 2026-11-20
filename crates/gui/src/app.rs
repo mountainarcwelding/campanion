@@ -15,10 +15,11 @@ use crate::edit::{self, SessionClipboard, SessionSnapshot};
 use crate::fields::{self, ProcessFields};
 use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_stem, resolve_user_path};
 use crate::machines::{self, MachinesUi};
+use crate::operations::{self, RegenState};
 use crate::session::{
-    GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, OpDraft, ToolDraft, ToolKind, TreeSelection, add_imported_part,
-    export_destination, format_number, generate_toolpaths, import_part_file, list_posts, open_job_file, parse_placement_mm, placed_scene_parts,
-    post_session, scene_from_drawing, suggested_post_for_process, write_gcode, write_job,
+    GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, ToolDraft, ToolKind, TreeSelection, add_imported_part, export_destination,
+    format_number, generate_toolpaths, import_part_file, list_posts, open_job_file, parse_placement_mm, placed_scene_parts, post_session,
+    scene_from_drawing, suggested_post_for_process, write_gcode, write_job,
 };
 use crate::setup::{self, AlignMode, ArraySpec};
 use crate::theme;
@@ -135,6 +136,12 @@ struct App {
     job_section_open: bool,
     parts_tree_open: bool,
     g1_demo_built: bool,
+    machine_menu_open: bool,
+    regen: RegenState,
+    material_save_name: String,
+    reveal_sheet_fields: bool,
+    reveal_material_fields: bool,
+    operations_tree_open: bool,
 }
 
 struct ScreenshotJob {
@@ -172,6 +179,12 @@ impl App {
             job_section_open: false,
             parts_tree_open: true,
             g1_demo_built: false,
+            machine_menu_open: false,
+            regen: RegenState::default(),
+            material_save_name: String::new(),
+            reveal_sheet_fields: false,
+            reveal_material_fields: false,
+            operations_tree_open: true,
         }
     }
 
@@ -395,7 +408,7 @@ impl App {
     }
 
     fn viewport_guides(&self) -> ViewportGuides {
-        ViewportGuides { bed: self.bed_bounds(), sheet: setup::sheet_bounds(&self.session).ok().flatten() }
+        ViewportGuides { bed: self.bed_bounds(), sheet: setup::sheet_bounds(&self.session).ok().flatten(), stale: self.regen.stale }
     }
 
     fn note_off_bed_parts(&mut self) {
@@ -619,9 +632,41 @@ impl App {
         }
     }
 
+    fn tick_regen(&mut self, ctx: &egui::Context) {
+        if self.screenshot.is_some() {
+            return;
+        }
+        if let Some((result, _current)) = self.regen.tick(&self.session) {
+            match result {
+                Ok(planned) => {
+                    self.session.messages = planned.messages;
+                    self.document = Some(planned.document);
+                    self.viewport = Some(Viewport::new(&planned.scene));
+                    let n = planned.scene.names.len();
+                    self.scene = Some(planned.scene);
+                    self.state.has_scene = true;
+                    self.state.pending_job = self.session.job_path.as_ref().map(|path| path.display().to_string());
+                    if self.session.messages.is_empty() {
+                        self.state.status = format!("Generated {n} toolpath(s)");
+                    } else {
+                        self.merge_session_messages();
+                    }
+                }
+                Err(err) if err.contains("cancelled") => {}
+                Err(err) => {
+                    self.state.status = err;
+                }
+            }
+        }
+        if self.regen.needs_repaint() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
     fn generate_paths(&mut self) {
         match generate_toolpaths(&self.session) {
             Ok(planned) => {
+                self.regen.stale = false;
                 self.session.messages = planned.messages;
                 self.document = Some(planned.document);
                 self.viewport = Some(Viewport::new(&planned.scene));
@@ -744,6 +789,11 @@ impl App {
 
     fn mark_dirty(&mut self) {
         self.session.dirty = true;
+        self.schedule_regen();
+    }
+
+    fn schedule_regen(&mut self) {
+        self.regen.note_edit(self.document.is_some());
     }
 
     fn open_sample_for_screenshot(&mut self) {
@@ -790,6 +840,9 @@ impl App {
                 (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-arrange.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-origin.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-off-bed.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Operations, "g2-operations.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Operations, "g2-cut-order.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Operations, "g2-material-override.png".to_string()),
             ],
             index: 0,
             frames_waited: 0,
@@ -812,31 +865,104 @@ impl App {
     }
 
     fn prepare_screenshot_frame(&mut self, name: Option<&str>) {
+        self.reveal_sheet_fields = name == Some("g1-setup-origin.png");
+        self.reveal_material_fields = name == Some("g2-material-override.png");
+        self.operations_tree_open = true;
         let g1 = name.is_some_and(|name| name.starts_with("g1-"));
         let Some(job) = self.screenshot.as_ref() else {
             return;
         };
         let store = campanion_cli::ProfileStore::from_dir(job.dir.join("config"));
         let example = machines::screenshot_example("Example shop laser (example values)");
+        let resin_example = machines::screenshot_example_resin("Example resin printer (example values)");
         let resin = name.is_some_and(|name| name.starts_with("resin-"));
-        if store.save("example-shop-laser", &example).is_ok() {
-            self.profile_store = store.clone();
-            if !resin {
-                self.session.machine_profile = "example-shop-laser".to_string();
-                self.session.machine_head = "laser".to_string();
-                self.apply_machine_selection();
-            }
-            if name == Some("machines-manager.png") {
-                let mut manager = MachinesUi::open(store);
-                manager.select_profile("example-shop-laser");
-                self.machines = Some(manager);
-            } else {
-                self.machines = None;
-            }
+        let _ = store.save("example-shop-laser", &example);
+        let _ = store.save("example-shop-resin", &resin_example);
+        self.profile_store = store.clone();
+        self.machine_menu_open = name == Some("job-machine-picker.png");
+        if resin {
+            self.session.machine_profile = "example-shop-resin".to_string();
+            self.session.machine_head.clear();
+            self.apply_machine_selection();
+        } else {
+            self.session.machine_profile = "example-shop-laser".to_string();
+            self.session.machine_head = "laser".to_string();
+            self.apply_machine_selection();
+        }
+        if name == Some("machines-manager.png") {
+            let mut manager = MachinesUi::open(store);
+            manager.select_profile("example-shop-laser");
+            self.machines = Some(manager);
+        } else {
+            self.machines = None;
         }
         if g1 {
             self.prepare_g1_screenshot(name);
         }
+        if name.is_some_and(|name| name.starts_with("g2-")) {
+            self.prepare_g2_screenshot(name);
+        }
+    }
+
+    fn prepare_g2_screenshot(&mut self, name: Option<&str>) {
+        self.ensure_g1_demo();
+        self.layout_tool = None;
+        self.job_section_open = false;
+        // Collapse the long Parts list so Operations and the cut-order list are on screen.
+        self.parts_tree_open = false;
+        self.operations_tree_open = true;
+        if self.session.operations.is_empty() {
+            self.add_session_operation("profile");
+            if let Some(op) = self.session.operations.last_mut() {
+                if let Some(layer) = self.session.layers.first() {
+                    op.layers = vec![layer.name.clone()];
+                }
+                op.side = "outside".to_string();
+                op.depth = "3".to_string();
+                op.step_down = "3".to_string();
+                op.cut_feed = "300".to_string();
+                op.power = "0.8".to_string();
+            }
+        }
+        if self.session.operations.len() == 1 {
+            self.add_session_operation("engrave");
+            if let Some(op) = self.session.operations.last_mut() {
+                if let Some(layer) = self.session.layers.first() {
+                    op.layers = vec![layer.name.clone()];
+                }
+                op.depth = "0.26".to_string();
+                op.step_down = "0.26".to_string();
+                op.cut_feed = "400".to_string();
+                op.power = "0.2".to_string();
+            }
+        }
+        self.session.order_rules_set = true;
+        self.session.order_inner_first = true;
+        self.session.order_cuts_last = true;
+        if name == Some("g2-cut-order.png") {
+            self.session.cut_order_explicit = true;
+        }
+        if name == Some("g2-material-override.png")
+            && let Some(op) = self.session.operations.first_mut()
+        {
+            op.material_name = "Example: 3 mm acrylic (example values)".to_string();
+            op.override_fields = vec!["cut_feed".to_string(), "power".to_string()];
+            op.cut_feed = "220".to_string();
+            op.power = "0.6".to_string();
+            self.session.selected = Some(TreeSelection::Operation(0));
+        }
+        if name == Some("g2-operations.png") {
+            self.session.selected = Some(TreeSelection::Operation(0));
+            if let Some(op) = self.session.operations.first_mut() {
+                op.tabs_count = "4".to_string();
+                op.tabs_width = "2".to_string();
+                op.lead_in = "line".to_string();
+                op.lead_in_size = "2".to_string();
+                op.assign = "layers".to_string();
+            }
+        }
+        self.generate_paths();
+        self.refresh_placed_scene();
     }
 
     fn prepare_g1_screenshot(&mut self, name: Option<&str>) {
@@ -989,9 +1115,13 @@ impl App {
             LayoutTool::Arrange => "Arrange",
             LayoutTool::Rotate => "Rotate",
         };
-        egui::Window::new(title).open(&mut open).collapsible(false).resizable(false).default_pos(egui::pos2(320.0, 140.0)).show(
-            ctx,
-            |ui| match tool {
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 120.0])
+            .default_pos(egui::pos2(1180.0, 130.0))
+            .show(ctx, |ui| match tool {
                 LayoutTool::Array => {
                     ui.label(RichText::new("Linked copies of the selected instance. Fields start empty.").color(theme::MUTED).size(11.0));
                     field_row(ui, "Columns", &mut self.state.array_x, self.state.dark_theme);
@@ -1023,8 +1153,7 @@ impl App {
                         self.run_rotate();
                     }
                 }
-            },
-        );
+            });
         if !open {
             self.layout_tool = None;
         }
@@ -1225,6 +1354,7 @@ impl eframe::App for App {
         self.body(ui);
         self.layout_tool_windows(&ctx);
         self.dialogs(&ctx);
+        self.tick_regen(&ctx);
         self.tick_screenshots(&ctx);
     }
 }
@@ -1412,7 +1542,10 @@ impl App {
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        egui::Popup::from_toggle_button_response(&response).width(340.0).show(|ui| {
+        if response.clicked() {
+            self.machine_menu_open = !self.machine_menu_open;
+        }
+        egui::Popup::from_toggle_button_response(&response).open(self.machine_menu_open).width(340.0).show(|ui| {
             ui.label(RichText::new("MACHINE").color(theme::MUTED).size(11.0).strong());
             ui.add_space(6.0);
             let listed = self.profile_store.list().ok().unwrap_or_default();
@@ -1425,6 +1558,7 @@ impl App {
                 let heading = if selected { format!("{label}  (current)") } else { label };
                 if ui.selectable_label(selected, RichText::new(heading).strong().size(13.0)).clicked() {
                     self.select_machine_profile(id);
+                    self.machine_menu_open = false;
                     ui.close();
                 }
                 ui.label(RichText::new(format!("{typ}  ·  {id}")).color(theme::MUTED).size(11.0));
@@ -1432,12 +1566,19 @@ impl App {
             }
             if ui.button("Manage…").clicked() {
                 self.open_machines_manager();
+                self.machine_menu_open = false;
                 ui.close();
             }
         });
     }
 
     fn machine_card_labels(&self) -> (String, String) {
+        if let Ok(Some(profile)) = machines::session_machine(&self.profile_store, &self.session)
+            && profile.kind == campanion_cli::MachineKind::Resin
+        {
+            let name = if profile.name.is_empty() { self.session.machine_profile.clone() } else { profile.name };
+            return (name, "Resin".to_string());
+        }
         match machines::session_profile(&self.profile_store, &self.session) {
             Ok(Some((profile, head))) => {
                 let typ = machines::process_from_id(&head.process)
@@ -1455,6 +1596,10 @@ impl App {
     fn profile_card_labels(&self, id: &str) -> (String, String) {
         match self.profile_store.load(id) {
             Ok(profile) => {
+                if profile.kind == campanion_cli::MachineKind::Resin {
+                    let name = if profile.name.is_empty() { id.to_string() } else { profile.name };
+                    return (name, "Resin".to_string());
+                }
                 let typ = profile
                     .heads
                     .iter()
@@ -1581,14 +1726,13 @@ impl App {
                 });
                 ribbon_group_separator(ui);
                 ribbon_group(ui, "Operations", |ui| {
-                    if ribbon_command(ui, "Add profile", false).clicked() {
-                        self.add_session_profile();
-                    }
+                    self.add_operation_menu(ui);
                 });
                 ribbon_group_separator(ui);
-                ribbon_group(ui, "Toolpaths", |ui| {
-                    if ribbon_command(ui, "Regenerate (temporary)", false).clicked() {
-                        self.generate_paths();
+                ribbon_group(ui, "Order", |ui| {
+                    if ribbon_command(ui, "Reset order", false).clicked() {
+                        operations::reset_cut_order(&mut self.session);
+                        self.schedule_regen();
                     }
                 });
             }
@@ -1691,12 +1835,32 @@ impl App {
         self.mark_dirty();
     }
 
-    fn add_session_profile(&mut self) {
+    fn add_session_operation(&mut self, kind: &str) {
+        if !operations::kind_allowed(self.state.process, kind) {
+            self.state.status = format!("`{kind}` is not a valid operation for the selected head");
+            return;
+        }
         let tool_id = self.session.tools.first().map(|tool| tool.id).unwrap_or(1);
-        let name = crate::session::next_operation_name(&self.session.operations, "profile");
-        self.session.operations.push(OpDraft::new_profile(name, tool_id));
+        let stem = if kind == "profile" { "profile" } else { kind };
+        let name = crate::session::next_operation_name(&self.session.operations, stem);
+        self.session.operations.push(operations::new_operation(name, kind, tool_id));
         self.session.selected = Some(TreeSelection::Operation(self.session.operations.len() - 1));
         self.mark_dirty();
+    }
+
+    fn add_operation_menu(&mut self, ui: &mut egui::Ui) {
+        let kinds = operations::kinds_for_process(self.state.process);
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("add-operation").selected_text("Add Operation").show_ui(ui, |ui| {
+            for (kind, label) in kinds {
+                if ui.selectable_label(false, *label).clicked() {
+                    chosen = Some(*kind);
+                }
+            }
+        });
+        if let Some(kind) = chosen {
+            self.add_session_operation(kind);
+        }
     }
 
     fn preview_banner(&mut self, ui: &mut egui::Ui) {
@@ -1777,12 +1941,14 @@ impl App {
             });
         }
         if show_props {
-            egui::Panel::right("props").resizable(true).default_size(280.0).frame(panel_frame()).show(ui, |ui| match self.state.tab {
-                ModeTab::Run => self.run_right(ui),
-                ModeTab::Export => self.export_form(ui),
-                ModeTab::Orient => self.orient_properties(ui),
-                ModeTab::Supports => self.supports_properties(ui),
-                _ => self.default_properties(ui),
+            egui::Panel::right("props").resizable(true).default_size(280.0).frame(panel_frame()).show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.state.tab {
+                    ModeTab::Run => self.run_right(ui),
+                    ModeTab::Export => self.export_form(ui),
+                    ModeTab::Orient => self.orient_properties(ui),
+                    ModeTab::Supports => self.supports_properties(ui),
+                    _ => self.default_properties(ui),
+                });
             });
         }
         if self.state.tab == ModeTab::Run {
@@ -1810,6 +1976,16 @@ impl App {
     }
 
     fn apply_machine_selection(&mut self) {
+        if let Ok(Some(profile)) = machines::session_machine(&self.profile_store, &self.session)
+            && profile.kind == campanion_cli::MachineKind::Resin
+        {
+            self.state.set_workspace(Workspace::Resin);
+            let _ = self.state.set_process(SubProcess::Sla);
+            self.session.dirty = true;
+            self.state.status = format!("Machine: {} (Resin)", profile.name);
+            self.refresh_placed_scene();
+            return;
+        }
         match machines::session_profile(&self.profile_store, &self.session) {
             Ok(Some((profile, head))) => {
                 if let Some((workspace, process)) = machines::process_from_id(&head.process) {
@@ -2007,7 +2183,8 @@ impl App {
                 self.add_session_tool();
             }
         });
-        ui.collapsing("Operations", |ui| {
+        let ops_open = Some(self.operations_tree_open);
+        let ops_header = egui::CollapsingHeader::new("Operations").id_salt("ops-tree").default_open(true).open(ops_open).show(ui, |ui| {
             let count = self.session.operations.len();
             for index in 0..count {
                 let op = &self.session.operations[index];
@@ -2022,10 +2199,78 @@ impl App {
             if self.session.operations.is_empty() {
                 ui.label(RichText::new("No operations yet").color(theme::MUTED).size(12.0));
             }
-            if ui.button("Add profile").clicked() {
-                self.add_session_profile();
-            }
+            self.add_operation_menu(ui);
+            self.cut_order_list(ui);
         });
+        if ops_header.header_response.clicked() {
+            self.operations_tree_open = !self.operations_tree_open;
+        }
+    }
+
+    fn cut_order_list(&mut self, ui: &mut egui::Ui) {
+        if self.session.operations.len() < 2 {
+            return;
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("Cut order").strong().size(13.0));
+        ui.checkbox(&mut self.session.order_rules_set, "Use automatic rules");
+        if self.session.order_rules_set {
+            if ui.checkbox(&mut self.session.order_inner_first, "Inner first").changed() {
+                self.mark_dirty();
+            }
+            if ui.checkbox(&mut self.session.order_cuts_last, "Cuts last").changed() {
+                self.mark_dirty();
+            }
+        }
+        if self.session.cut_order_explicit {
+            ui.label(RichText::new("Drag or use the arrows to override automatic order.").color(theme::OVERRIDE).size(11.0));
+        } else {
+            ui.label(RichText::new("Drag or use the arrows to set an explicit order.").color(theme::MUTED).size(11.0));
+        }
+        let count = self.session.operations.len();
+        let mut reorder = None;
+        for index in 0..count {
+            let id = ui.scope_id().with("cut-order").with(index);
+            let name = if self.session.operations[index].name.is_empty() {
+                format!("Operation {}", index + 1)
+            } else {
+                self.session.operations[index].name.clone()
+            };
+            let response = ui
+                .dnd_drag_source(id, index, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("☰");
+                        ui.label(&name);
+                        if ui.small_button("↑").clicked() && index > 0 {
+                            // handled after the source returns
+                        }
+                        if ui.small_button("↓").clicked() && index + 1 < count {}
+                    });
+                })
+                .response;
+            if ui.input(|input| input.pointer.any_released())
+                && let Some(from) = response.dnd_hover_payload::<usize>()
+                && *from != index
+            {
+                reorder = Some((*from, index));
+            }
+            ui.horizontal(|ui| {
+                if ui.small_button("↑").clicked() && index > 0 {
+                    reorder = Some((index, index - 1));
+                }
+                if ui.small_button("↓").clicked() && index + 1 < count {
+                    reorder = Some((index, index + 1));
+                }
+            });
+        }
+        if let Some((from, to)) = reorder {
+            operations::reorder_operation(&mut self.session, from, to);
+            self.schedule_regen();
+        }
+        if ui.button("Reset to rules").clicked() {
+            operations::reset_cut_order(&mut self.session);
+            self.schedule_regen();
+        }
     }
 
     fn default_properties(&mut self, ui: &mut egui::Ui) {
@@ -2046,7 +2291,11 @@ impl App {
             Some(TreeSelection::Layer(name)) => {
                 ui.label(format!("Layer: {name}"));
                 ui.label(RichText::new("Assign this layer to a profile in the operation properties.").color(theme::MUTED).size(12.0));
-                ui.label(RichText::new("Per-contour kerf and lead-in overrides are not in the job format yet.").color(theme::MUTED).size(11.0));
+                ui.label(
+                    RichText::new("Overridden material fields are shown in orange. Reset restores the last applied preset.")
+                        .color(theme::MUTED)
+                        .size(11.0),
+                );
             }
             _ => {
                 if self.state.tab != ModeTab::Setup {
@@ -2203,20 +2452,40 @@ impl App {
                         self.refresh_placed_scene();
                     }
                 });
+                if self.reveal_sheet_fields {
+                    ui.scroll_to_cursor(Some(Align::BOTTOM));
+                }
+                ui.separator();
+                ui.label(RichText::new("Heights").strong().size(13.0));
+                ui.label(
+                    RichText::new("Clearance and retract stay empty until typed. The planner uses its own defaults only when the job omits them.")
+                        .color(theme::MUTED)
+                        .size(11.0),
+                );
+                ui.label("Clearance (mm)");
+                if ui.add(egui::TextEdit::singleline(&mut self.session.clearance).desired_width(70.0).hint_text("optional")).changed() {
+                    self.mark_dirty();
+                }
+                ui.label("Retract (mm)");
+                if ui.add(egui::TextEdit::singleline(&mut self.session.retract).desired_width(70.0).hint_text("optional")).changed() {
+                    self.mark_dirty();
+                }
                 if !self.session.order_rules_set {
                     if ui.button("Set order rules").clicked() {
                         self.session.order_rules_set = true;
-                        self.session.dirty = true;
+                        self.mark_dirty();
                     }
                 } else {
                     if ui.checkbox(&mut self.session.order_inner_first, "Inner contours first").changed() {
-                        self.session.dirty = true;
+                        self.mark_dirty();
                     }
                     if ui.checkbox(&mut self.session.order_cuts_last, "Cuts last").changed() {
-                        self.session.dirty = true;
+                        self.mark_dirty();
                     }
                     ui.label(
-                        RichText::new("Stored now; planning still follows cut_order or file order until Operations.").color(theme::MUTED).size(11.0),
+                        RichText::new("Automatic rules apply when cut_order is empty. An explicit cut-order list still wins.")
+                            .color(theme::MUTED)
+                            .size(11.0),
                     );
                 }
             });
@@ -2276,6 +2545,15 @@ impl App {
             self.session.dirty = true;
         }
         ui.label(format!("Type: {}", self.session.operations[index].kind));
+        if self.reveal_material_fields && !self.session.operations[index].override_fields.is_empty() {
+            ui.label(
+                RichText::new(format!("Orange overrides: {}", self.session.operations[index].override_fields.join(", ")))
+                    .color(theme::OVERRIDE)
+                    .strong()
+                    .size(13.0),
+            );
+        }
+        self.assign_editor(ui, index);
         let fields = self.process_fields();
         if self.session.operations[index].kind == "profile" {
             if fields.side {
@@ -2333,7 +2611,9 @@ impl App {
         .flatten()
         .collect();
         for (label, field) in op_fields {
-            ui.label(label);
+            let name = field_name(field);
+            let color = self.override_color(index, name);
+            ui.label(RichText::new(label).color(color));
             let value = match field {
                 0 => &mut self.session.operations[index].depth,
                 1 => &mut self.session.operations[index].step_down,
@@ -2341,8 +2621,9 @@ impl App {
                 3 => &mut self.session.operations[index].plunge_feed,
                 _ => &mut self.session.operations[index].power,
             };
-            if ui.add(egui::TextEdit::singleline(value).desired_width(180.0).hint_text("enter a value")).changed() {
-                self.session.dirty = true;
+            if ui.add(egui::TextEdit::singleline(value).desired_width(180.0).hint_text("enter a value").text_color(color)).changed() {
+                operations::mark_override(&mut self.session.operations[index], name);
+                self.mark_dirty();
             }
         }
         if fields.leads {
@@ -2351,7 +2632,11 @@ impl App {
             self.lead_editor(ui, index, true);
             ui.label("Lead out");
             self.lead_editor(ui, index, false);
-            ui.label(RichText::new("Per-contour kerf and lead-in overrides are not in the job format yet.").color(theme::MUTED).size(11.0));
+            ui.label(
+                RichText::new("Overridden material fields are shown in orange. Reset restores the last applied preset.")
+                    .color(theme::MUTED)
+                    .size(11.0),
+            );
         }
         if fields.direction {
             ui.label("Direction");
@@ -2392,8 +2677,162 @@ impl App {
             ui.label("Post delay (s)");
             if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].post_delay).desired_width(180.0).hint_text("optional")).changed()
             {
-                self.session.dirty = true;
+                self.mark_dirty();
             }
+        }
+        self.tabs_editor(ui, index);
+        if self.state.process == Some(SubProcess::Plasma) {
+            self.small_hole_editor(ui, index);
+        }
+        self.material_editor(ui, index);
+    }
+
+    fn override_color(&self, index: usize, field: &str) -> Color32 {
+        if self.session.operations.get(index).is_some_and(|op| op.override_fields.iter().any(|name| name == field)) {
+            theme::OVERRIDE
+        } else {
+            theme::TEXT
+        }
+    }
+
+    fn assign_editor(&mut self, ui: &mut egui::Ui, index: usize) {
+        ui.label("Assign");
+        ui.horizontal(|ui| {
+            for (id, label) in [("", "layers"), ("parts", "part"), ("layers", "layer"), ("contours", "contour")] {
+                let selected = self.session.operations[index].assign == id;
+                if ui.selectable_label(selected, label).clicked() {
+                    self.session.operations[index].assign = id.to_string();
+                    self.mark_dirty();
+                }
+            }
+        });
+        if self.session.operations[index].assign == "parts" || self.session.operations[index].assign == "contours" {
+            ui.label(if self.session.operations[index].assign == "parts" { "Part ids (comma-separated)" } else { "Part id" });
+            if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].assign_parts).desired_width(180.0)).changed() {
+                self.mark_dirty();
+            }
+        }
+        if self.session.operations[index].assign == "contours" {
+            ui.label("Contour ids (comma-separated)");
+            if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].assign_contours).desired_width(180.0)).changed() {
+                self.mark_dirty();
+            }
+        }
+    }
+
+    fn tabs_editor(&mut self, ui: &mut egui::Ui, index: usize) {
+        if self.session.operations[index].kind != "profile" {
+            return;
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("Tabs / bridges").strong().size(13.0));
+        ui.label(
+            RichText::new("Leave these empty until you want tabs. Width is required when a count or spacing is set.").color(theme::MUTED).size(11.0),
+        );
+        ui.label("Count");
+        if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].tabs_count).desired_width(80.0).hint_text("optional")).changed() {
+            self.mark_dirty();
+        }
+        ui.label("Spacing (mm)");
+        if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].tabs_spacing).desired_width(80.0).hint_text("optional")).changed() {
+            self.mark_dirty();
+        }
+        ui.label("Width (mm)");
+        if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].tabs_width).desired_width(80.0).hint_text("optional")).changed() {
+            self.mark_dirty();
+        }
+        ui.label("Height (mm)");
+        if ui.add(egui::TextEdit::singleline(&mut self.session.operations[index].tabs_height).desired_width(80.0).hint_text("optional")).changed() {
+            self.mark_dirty();
+        }
+    }
+
+    fn small_hole_editor(&mut self, ui: &mut egui::Ui, index: usize) {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Plasma small-hole rules").strong().size(13.0));
+        ui.label(
+            RichText::new("Enter both a max diameter and an action. Values are recorded as entered. Posts do not invent THC codes.")
+                .color(theme::MUTED)
+                .size(11.0),
+        );
+        ui.label("Max diameter (mm)");
+        if ui
+            .add(egui::TextEdit::singleline(&mut self.session.operations[index].small_hole_max).desired_width(80.0).hint_text("user-entered"))
+            .changed()
+        {
+            self.mark_dirty();
+        }
+        ui.label("Action");
+        ui.horizontal(|ui| {
+            for action in ["", "pierce_only", "thc_off"] {
+                let label = if action.is_empty() { "unset" } else { action };
+                let selected = self.session.operations[index].small_hole_action == action;
+                if ui.selectable_label(selected, label).clicked() {
+                    self.session.operations[index].small_hole_action = action.to_string();
+                    self.mark_dirty();
+                }
+            }
+        });
+    }
+
+    fn material_editor(&mut self, ui: &mut egui::Ui, index: usize) {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Material").strong().size(13.0));
+        let materials =
+            machines::session_profile(&self.profile_store, &self.session).ok().flatten().map(|(_, head)| head.materials).unwrap_or_default();
+        if materials.is_empty() {
+            ui.label(RichText::new("No materials on the selected head. Enter values, then Save to library.").color(theme::MUTED).size(11.0));
+        } else {
+            let current = self.session.operations[index].material_name.clone();
+            let mut applied = None;
+            egui::ComboBox::from_id_salt("material-preset")
+                .selected_text(if current.is_empty() { "Select a preset".to_string() } else { current })
+                .show_ui(ui, |ui| {
+                    for entry in &materials {
+                        if ui.selectable_label(self.session.operations[index].material_name == entry.name, &entry.name).clicked() {
+                            applied = Some(entry.clone());
+                        }
+                    }
+                });
+            if let Some(entry) = applied {
+                self.session.selected = Some(TreeSelection::Operation(index));
+                match machines::apply_material(&mut self.session, &entry) {
+                    Ok(msg) => {
+                        self.state.status = msg;
+                        self.schedule_regen();
+                    }
+                    Err(err) => self.state.status = err,
+                }
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Reset").clicked() {
+                let name = self.session.operations[index].material_name.clone();
+                operations::reset_overrides(&mut self.session.operations[index]);
+                if let Some(entry) = materials.iter().find(|item| item.name == name).cloned() {
+                    self.session.selected = Some(TreeSelection::Operation(index));
+                    let _ = machines::apply_material(&mut self.session, &entry);
+                }
+                self.schedule_regen();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Save as");
+            ui.add(egui::TextEdit::singleline(&mut self.material_save_name).desired_width(140.0).hint_text("library name"));
+            if ui.button("Save to library").clicked() {
+                self.session.selected = Some(TreeSelection::Operation(index));
+                match machines::material_from_selected_operation(&self.session, &self.material_save_name)
+                    .and_then(|entry| machines::save_material(&self.profile_store, &self.session, entry))
+                {
+                    Ok(msg) => self.state.status = msg,
+                    Err(err) => self.state.status = err,
+                }
+            }
+        });
+        if !self.session.operations[index].override_fields.is_empty() {
+            ui.label(
+                RichText::new(format!("Overrides: {}", self.session.operations[index].override_fields.join(", "))).color(theme::OVERRIDE).size(11.0),
+            );
         }
     }
 
@@ -3154,4 +3593,14 @@ fn draw_timeline_segments(ui: &mut egui::Ui, scene: Option<&Scene>, position: f6
     }
     let x = rect.left() + ((position / total).clamp(0.0, 1.0) as f32) * rect.width();
     painter.line_segment([egui::Pos2::new(x, rect.top()), egui::Pos2::new(x, rect.bottom())], Stroke::new(1.5, theme::TOOL));
+}
+
+fn field_name(field: usize) -> &'static str {
+    match field {
+        0 => "depth",
+        1 => "step_down",
+        2 => "cut_feed",
+        3 => "plunge_feed",
+        _ => "power",
+    }
 }
