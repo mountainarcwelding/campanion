@@ -58,8 +58,9 @@ A `.step` or `.stp` lathe source is sectioned through the spindle by `solidcraft
 
 ### Graphical workspace
 
-`campanion-gui` is a preview of the same planning and posting path as the CLI. It does not talk
-to a machine. From an empty config directory:
+`campanion-gui` is a preview of the same planning and posting path as the CLI. The Run tab can
+stream to a Grbl-class controller over USB serial. **That path is NOT hardware-tested. First
+run: low power, hand on the power switch.** From an empty config directory:
 
 1. Open **Machines…**, click **New**, and enter the bed, head, post, and material values you
    have measured. CAMpanion does not ship machine defaults.
@@ -73,10 +74,21 @@ to a machine. From an empty config directory:
    checks block on errors such as a part off the bed or an empty operation, and warn on
    unused contours or a part off the sheet. Export writes the same G-code as
    `campanion run JOB.json -o OUT.nc --post POST`.
+6. On **Run**, select a serial port and baud rate (Grbl documents 115200 8-N-1; nothing is
+   assumed). Character-counting streaming needs a serial RX buffer size entered on the machine
+   profile; send-response safe mode does not. Connect, then Frame or Start. Pause uses `!`,
+   resume uses `~`, and STOP sends a soft-reset (`0x18`) and then verifies `M5`. `$X` unlock
+   requires confirm. On Linux, the account that opens the port typically needs to be in the
+   `dialout` group (`sudo usermod -aG dialout $USER`, then sign in again).
 
 ```sh
 cargo run -p campanion-gui
 ```
+
+`campanion stream FILE.nc --port /dev/ttyUSB0 --baud 115200 --rx-buffer 128` sends posted G-code
+with the same protocols. Use `--send-response` instead of `--rx-buffer` for safe mode, or
+`--machine FILE.json` to read `rx_buffer` from a profile. `--list` prints ports. **NOT
+hardware-tested. First run: low power, hand on the power switch.**
 
 ## Usage
 
@@ -232,8 +244,10 @@ automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
 
 CAMpanion is primarily command-line driven. `campanion-gui` is still in development: a preview
 of the workspace that can already run a 2D cutting job through the existing backend, not a
-finished CAM interface. It does not talk to a machine. The Run tab, STOP, and all machine I/O
-stay inert. Resin (SLA) tabs and FDM remain placeholders. The machine selector sits at the
+finished CAM interface. The Run tab can stream posted G-code to a Grbl-class controller over
+USB serial. **That path is NOT hardware-tested. First run: low power, hand on the power
+switch.** On Linux, membership in the `dialout` group is typically required to open a USB
+serial device. Resin (SLA) tabs and FDM remain placeholders. The machine selector sits at the
 top-left of the ribbon (machine name and type, a profile dropdown, and Manage…), the CAM stage
 tabs are beside it, and tool and operation actions are grouped under the selected tab. The
 process comes from the selected machine head. You can define machine profiles (`campanion-machine/1`) in the

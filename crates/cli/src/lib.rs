@@ -43,6 +43,7 @@ mod supports;
 mod run;
 mod safety;
 mod stock;
+mod stream;
 mod surface;
 mod toolaxis;
 mod waterline;
@@ -73,7 +74,7 @@ pub use jobfile::{
 pub use profiles::{
     BedSize, ChangerTool, FORMAT_TAG_V1, HeadChanger, HeadOffset, JobMachineRef, JobType, MachineFile, MachineHead, MachineKind, MaterialEntry,
     PROCESS_IDS, PowerUnit, PowerValue, ProfileStore, WorkArea, effective_post, job_type_for, kind_from_process, load_job_ref, load_path,
-    parse_profile, profile_to_json, selected_head, valid_profile_id,
+    parse_profile, profile_to_json, selected_head, valid_profile_id, with_store,
 };
 
 const HELP: &str = "\
@@ -171,7 +172,15 @@ view    Open the toolpath preview (the campanion-view program) for an IR JSON fi
         --machine draws boxes and cylinders from the kinematics model. M toggles that sketch.
 gui     Open the graphical workspace preview (the campanion-gui program). FILE may be a job file,
         a part, IR JSON, or G-code. CAMpanion is primarily command-line driven; the GUI is still
-        in development. It can generate toolpaths and export G-code. It does not talk to a machine.
+        in development. The Run tab can stream to a Grbl-class controller over USB serial.
+        That path is NOT hardware-tested. First run: low power, hand on the power switch.
+stream  Stream a posted G-code file to a Grbl-class controller over a serial port.
+        --port PATH --baud RATE are required (Grbl documents 115200 8-N-1; nothing is assumed).
+        --rx-buffer N uses character-counting with a size you enter; --machine FILE.json can
+        supply that size from a profile. --send-response uses send-response safe mode and does
+        not need a buffer size. --list prints serial ports. On Linux, the user typically needs
+        to be in the dialout group to open a USB serial device.
+        NOT hardware-tested. First run: low power, hand on the power switch.
 schema  Print the JSON Schema for campanion-ir/1.
 
 --job FILE
@@ -234,6 +243,7 @@ pub fn try_main() -> Result<ExitCode, CliError> {
         name if name == "verify" => verify(rest),
         name if name == "view" => view(rest),
         name if name == "gui" => gui(rest),
+        name if name == "stream" => stream::stream(rest),
         name if name == "schema" => schema(rest),
         _ => Err(CliError::usage("unknown command")),
     }

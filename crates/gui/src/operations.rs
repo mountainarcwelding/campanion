@@ -78,7 +78,7 @@ impl RegenState {
     }
 
     /// Start a cancelled-able plan when the debounce has elapsed. Call once per frame.
-    pub fn tick(&mut self, session: &JobSession) -> Option<(Result<PlannedSession, String>, bool)> {
+    pub fn tick(&mut self, session: &JobSession, store: &campanion_cli::ProfileStore) -> Option<(Result<PlannedSession, String>, bool)> {
         if let Some(receiver) = &self.receiver
             && let Ok(outcome) = receiver.try_recv()
         {
@@ -109,8 +109,9 @@ impl RegenState {
         self.cancel = Some(Arc::clone(&cancel));
         self.receiver = Some(receiver);
         let session = session.clone();
+        let store = store.clone();
         thread::spawn(move || {
-            let result = generate_toolpaths_cancellable(&session, Some(cancel.as_ref()));
+            let result = campanion_cli::with_store(&store, || generate_toolpaths_cancellable(&session, Some(cancel.as_ref())));
             let _ = sender.send(RegenOutcome { generation, result });
         });
         None

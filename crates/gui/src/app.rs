@@ -1,14 +1,14 @@
 //! The egui window: menus, toolbars, viewports and job session panels.
 //!
-//! CAMpanion is primarily command-line driven. This GUI is still in development and does not talk
-//! to a machine.
+//! CAMpanion is primarily command-line driven. This GUI is still in development. The Run tab can
+//! stream to a Grbl-class controller; that path is not hardware-tested.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use campanion_ir::Document;
-use campanion_view::{Playback, Scene, StrokeKind, find_system_font};
+use campanion_view::{Playback, Projection, Scene, StrokeKind, find_system_font, projected_bounds};
 use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Layout, RichText, Stroke, Vec2};
 
 use crate::edit::{self, SessionClipboard, SessionSnapshot};
@@ -16,6 +16,7 @@ use crate::fields::{self, ProcessFields};
 use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_stem, resolve_user_path};
 use crate::machines::{self, MachinesUi};
 use crate::operations::{self, RegenState};
+use crate::run_stream::{self, RunConnection, STREAM_HARDWARE_NOTICE};
 use crate::session::{
     GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, ToolDraft, ToolKind, TreeSelection, add_imported_part, all_part_ids,
     all_part_layers, export_destination, format_number, generate_toolpaths, import_part_file, layer_parts_label, list_posts, list_posts_for_process,
@@ -30,6 +31,8 @@ use crate::{
     DEFAULT_ARC_TOL_MM, GuiState, JOG_STEPS_MM, ModeTab, OpenedDocument, ROTATE_STEPS_DEG, RunPhase, SubProcess, UserField, Workspace,
     gcode_line_count, open_path,
 };
+use campanion_stream::mock::MOCK_PORT_NAME;
+use campanion_stream::{Bounds as FrameBounds, JobKind, frame_program};
 
 const WINDOW_SIZE: [f32; 2] = [1600.0, 900.0];
 const MAX_RECENT: usize = 8;
@@ -48,7 +51,7 @@ pub struct Launch {
 
 /// Native window entry used by the `campanion-gui` binary.
 ///
-/// The window does not open a serial port or move a machine.
+/// The Run tab may open a user-selected serial port. Streaming is not hardware-tested.
 pub fn run(launch: Launch) -> Result<(), String> {
     let title = "CAMpanion";
     let native_options = eframe::NativeOptions {
@@ -144,6 +147,7 @@ struct App {
     operations_tree_open: bool,
     play_index: Option<PlayIndex>,
     preview_speed_mult: f32,
+    run_conn: Option<RunConnection>,
 }
 
 struct ScreenshotJob {
@@ -189,6 +193,7 @@ impl App {
             operations_tree_open: true,
             play_index: None,
             preview_speed_mult: 1.0,
+            run_conn: None,
         }
     }
 
@@ -565,7 +570,8 @@ impl App {
             (self.session.source_drawing.is_some() || self.session.parts.iter().any(|part| part.drawing.is_some())) && self.document.is_none();
         let guides = self.viewport_guides();
         if let Some(viewport) = self.viewport.as_mut() {
-            let want_content = self.document.is_some() && matches!(self.state.tab, ModeTab::Operations | ModeTab::Simulate | ModeTab::Export);
+            let want_content =
+                self.document.is_some() && matches!(self.state.tab, ModeTab::Operations | ModeTab::Simulate | ModeTab::Export | ModeTab::Run);
             if viewport.fit_content != want_content {
                 viewport.fit_content = want_content;
                 if !viewport.user_adjusted {
@@ -657,7 +663,7 @@ impl App {
         if self.screenshot.is_some() {
             return;
         }
-        if let Some((result, _current)) = self.regen.tick(&self.session) {
+        if let Some((result, _current)) = self.regen.tick(&self.session, &self.profile_store) {
             match result {
                 Ok(planned) => {
                     self.session.messages = planned.messages;
@@ -684,7 +690,7 @@ impl App {
     }
 
     fn generate_paths(&mut self) -> bool {
-        match generate_toolpaths(&self.session) {
+        match campanion_cli::with_store(&self.profile_store, || generate_toolpaths(&self.session)) {
             Ok(planned) => {
                 self.regen.stale = false;
                 self.session.messages = planned.messages;
@@ -727,7 +733,7 @@ impl App {
             self.state.status = "Generate toolpaths before previewing G-code".to_string();
             return;
         };
-        match post_session(&self.session, document) {
+        match campanion_cli::with_store(&self.profile_store, || post_session(&self.session, document)) {
             Ok((text, messages)) => {
                 self.state.gcode = text;
                 self.state.run_lines = gcode_line_count(&self.state.gcode);
@@ -859,15 +865,10 @@ impl App {
         self.screenshot = Some(ScreenshotJob {
             dir,
             plan: vec![
-                (Workspace::ThermalJet, ModeTab::Process, "g3-machines-empty.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Process, "g3-machines-new.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Process, "g3-job-new.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "g3-setup-import.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "g3-operations.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Simulate, "g3-simulate.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Simulate, "g3-simulate-scrub.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Export, "g3-export.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Export, "g3-export-blocked.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Run, "g5-run-connected.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Run, "g5-run-streaming.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Run, "g5-run-paused.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Run, "g5-run-alarm.png".to_string()),
             ],
             index: 0,
             frames_waited: 0,
@@ -893,6 +894,10 @@ impl App {
         self.reveal_sheet_fields = name == Some("g1-setup-origin.png");
         self.reveal_material_fields = name == Some("g2-material-override.png");
         self.operations_tree_open = true;
+        if name.is_some_and(|name| name.starts_with("g5-")) {
+            self.prepare_g5_screenshot(name);
+            return;
+        }
         if name.is_some_and(|name| name.starts_with("g3-")) {
             self.prepare_g3_screenshot(name);
             return;
@@ -931,6 +936,110 @@ impl App {
         if name.is_some_and(|name| name.starts_with("g2-")) {
             self.prepare_g2_screenshot(name);
         }
+    }
+
+    fn prepare_g5_screenshot(&mut self, name: Option<&str>) {
+        let Some(job) = self.screenshot.as_ref() else {
+            return;
+        };
+        let store = campanion_cli::ProfileStore::from_dir(job.dir.join("config"));
+        let mut profile = machines::first_user_laser_profile();
+        // A size the screenshot user typed; not a shipped default.
+        profile.rx_buffer = Some(128);
+        let _ = store.save("my-laser", &profile);
+        self.profile_store = store.clone();
+        self.machines = None;
+        self.machine_menu_open = false;
+        self.state.set_workspace(Workspace::ThermalJet);
+        let _ = self.state.set_process(SubProcess::Laser);
+        self.session.machine_profile = "my-laser".to_string();
+        self.session.machine_head = "laser".to_string();
+        self.apply_machine_selection();
+        if self.session.parts.is_empty()
+            && let Some(path) = screenshot_part_path("laser_rect.svg")
+        {
+            match import_part_file(&path) {
+                Ok(part) => add_imported_part(&mut self.session, &part),
+                Err(err) => self.state.status = err,
+            }
+        }
+        if let Some(instance) = self.session.parts.first_mut().and_then(|part| part.instances.first_mut()) {
+            instance.x = "20".to_string();
+            instance.y = "20".to_string();
+        }
+        if self.session.operations.is_empty() {
+            if self.session.tools.is_empty() {
+                self.session.tools = vec![ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: String::new() }];
+            }
+            self.add_session_operation("profile");
+            if let Some(op) = self.session.operations.last_mut() {
+                op.name = "outline".to_string();
+                op.side = "outside".to_string();
+            }
+            self.session.selected = Some(TreeSelection::Operation(0));
+            if let Some(entry) = profile.heads.first().and_then(|head| head.materials.first()) {
+                let _ = machines::apply_material(&mut self.session, entry);
+            }
+        }
+        self.generate_and_post();
+        self.state.port = MOCK_PORT_NAME.to_string();
+        self.state.baud = "115200".to_string();
+        self.state.safe_mode = false;
+        self.state.frame_feed = "1500".to_string();
+        self.state.jog_feed = "300".to_string();
+        self.state.dro_work = true;
+        if self.run_conn.is_some() {
+            self.stream_disconnect();
+        }
+        self.stream_connect();
+        if let Some(conn) = self.run_conn.as_mut()
+            && let Some(mock) = conn.mock_mut()
+        {
+            mock.set_position([25.0, 15.0, 0.0], [0.0, 0.0, 0.0]);
+        }
+        let _ = self.tick_stream_once(true);
+
+        if name == Some("g5-run-connected.png") {
+            self.state.status = "Connected to mock-grbl (in-process simulator)".to_string();
+            return;
+        }
+
+        if let Some(conn) = self.run_conn.as_mut()
+            && let Some(mock) = conn.mock_mut()
+        {
+            mock.defer_ok(true);
+        }
+        self.stream_start();
+        if let Some(conn) = self.run_conn.as_mut()
+            && let Some(mock) = conn.mock_mut()
+        {
+            mock.release_ok(4);
+        }
+        let _ = self.tick_stream_once(true);
+        if let Some(line) = self.run_conn.as_ref().and_then(|conn| conn.last_acked_program_line()) {
+            self.seek_gcode_line(line);
+        }
+
+        if name == Some("g5-run-streaming.png") {
+            self.state.status = "Streaming; playhead follows acknowledged lines".to_string();
+            return;
+        }
+
+        self.stream_pause();
+        let _ = self.tick_stream_once(true);
+        if name == Some("g5-run-paused.png") {
+            self.state.status = "Feed hold — jog is locked; Resume and STOP stay available".to_string();
+            return;
+        }
+
+        if let Some(conn) = self.run_conn.as_mut()
+            && let Some(mock) = conn.mock_mut()
+        {
+            mock.set_in_motion(true);
+        }
+        self.stream_stop();
+        let _ = self.tick_stream_once(true);
+        self.state.status = "ALARM:3 after STOP mid-motion — $X requires confirm".to_string();
     }
 
     fn prepare_g3_screenshot(&mut self, name: Option<&str>) {
@@ -1464,7 +1573,7 @@ impl eframe::App for App {
         {
             viewport.playback.step(f64::from(ctx.input(|input| input.stable_dt)), scene.total_length);
         }
-        if self.state.run == RunPhase::Running {
+        if self.state.run == RunPhase::Running && self.run_conn.is_none() {
             let dt = ctx.input(|input| input.stable_dt);
             if dt.is_finite() && dt > 0.0 {
                 let total = self.state.run_lines.max(1);
@@ -1488,6 +1597,7 @@ impl eframe::App for App {
         self.layout_tool_windows(&ctx);
         self.dialogs(&ctx);
         self.tick_regen(&ctx);
+        self.tick_stream(&ctx);
         self.tick_screenshots(&ctx);
     }
 }
@@ -1787,8 +1897,12 @@ impl App {
     fn stop_button(&mut self, ui: &mut egui::Ui) {
         let stop =
             egui::Button::new(RichText::new("STOP").strong().color(Color32::WHITE).size(15.0)).fill(theme::STOP).min_size(Vec2::new(88.0, 30.0));
-        if ui.add(stop).clicked() {
-            self.state.stop_run();
+        let response = ui.add_enabled(self.state.can_stop(), stop);
+        if response.clicked() {
+            self.stream_stop();
+        }
+        if !self.state.can_stop() {
+            response.on_hover_text("STOP is live once a controller is connected.");
         }
     }
 
@@ -1943,16 +2057,16 @@ impl App {
                 ribbon_group(ui, "Run", |ui| {
                     ui.add_enabled_ui(self.state.can_start(), |ui| {
                         if ribbon_command(ui, "Start", false).clicked() {
-                            let _ = self.state.start_run();
+                            self.stream_start();
                         }
                     });
                     ui.add_enabled_ui(self.state.can_pause() || self.state.run == RunPhase::Paused, |ui| {
                         let label = if self.state.run == RunPhase::Paused { "Resume" } else { "Pause" };
                         if ribbon_command(ui, label, false).clicked() {
                             if self.state.run == RunPhase::Paused {
-                                let _ = self.state.resume_run();
+                                self.stream_resume();
                             } else {
-                                let _ = self.state.pause_run();
+                                self.stream_pause();
                             }
                         }
                     });
@@ -2194,6 +2308,8 @@ impl App {
             ui.horizontal_centered(|ui| {
                 ui.add_space(8.0);
                 ui.label(RichText::new(GUI_PREVIEW_NOTICE).color(theme::OVERRIDE).size(12.0));
+                ui.separator();
+                ui.label(RichText::new(STREAM_HARDWARE_NOTICE).color(theme::OVERRIDE).size(12.0));
             });
         });
     }
@@ -3501,16 +3617,287 @@ impl App {
         self.show_messages(ui);
     }
 
+    fn stream_connect(&mut self) {
+        match run_stream::stream_mode_from_session(&self.session, &self.profile_store, self.state.safe_mode) {
+            Ok(mode) => match RunConnection::connect(&self.state.port, &self.state.baud, mode) {
+                Ok((mut conn, events)) => {
+                    run_stream::apply_events(&mut self.state, &events, &mut conn);
+                    self.state.connected = true;
+                    self.state.status = "Connected".to_string();
+                    self.run_conn = Some(conn);
+                }
+                Err(err) => self.state.status = err,
+            },
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn stream_disconnect(&mut self) {
+        if let Some(mut conn) = self.run_conn.take() {
+            match conn.close() {
+                Ok(events) => run_stream::apply_events(&mut self.state, &events, &mut conn),
+                Err(err) => self.state.status = err,
+            }
+        }
+        self.state.connected = false;
+        if !self.state.status.contains("not complete") {
+            self.state.status = "Disconnected".to_string();
+        }
+    }
+
+    fn preflight_blocks_motion(&self) -> Option<String> {
+        let checks = session_checks(&self.session, self.document.as_ref(), Some(&self.profile_store), self.current_process_id());
+        if blocks_export(&checks) { Some("pre-flight has errors; no motion is sent until they are fixed".to_string()) } else { None }
+    }
+
+    fn handle_stream_result(&mut self, result: Result<Vec<campanion_stream::StreamEvent>, String>) {
+        match result {
+            Ok(events) => {
+                if let Some(conn) = self.run_conn.as_mut() {
+                    run_stream::apply_events(&mut self.state, &events, conn);
+                }
+                if let Some(line) = self.run_conn.as_ref().and_then(|conn| conn.last_acked_program_line()) {
+                    self.seek_gcode_line(line);
+                }
+            }
+            Err(err) => {
+                self.state.status = err;
+                if self.state.status.contains("disconnected") {
+                    self.state.connected = false;
+                    self.run_conn = None;
+                }
+            }
+        }
+    }
+
+    fn stream_start(&mut self) {
+        if let Some(err) = self.preflight_blocks_motion() {
+            self.state.status = err;
+            return;
+        }
+        if self.state.gcode.trim().is_empty() {
+            self.generate_and_post();
+        }
+        if self.state.gcode.trim().is_empty() {
+            self.state.status = "Start needs posted G-code; plan and post the job first".to_string();
+            return;
+        }
+        let lines: Vec<String> = self.state.gcode.lines().map(str::to_string).collect();
+        self.state.run_lines = crate::gcode_line_count(&self.state.gcode);
+        self.state.run_line = 0;
+        let result = match self.run_conn.as_mut() {
+            Some(conn) => conn.start(lines, JobKind::Program),
+            None => Err("Start needs a connected controller".to_string()),
+        };
+        if result.is_ok() {
+            let _ = self.state.start_run();
+        }
+        self.handle_stream_result(result);
+    }
+
+    fn stream_frame(&mut self) {
+        if let Some(err) = self.preflight_blocks_motion() {
+            self.state.status = err;
+            return;
+        }
+        let feed = match run_stream::parse_jog_or_frame_feed(&self.state.frame_feed) {
+            Ok(feed) => feed,
+            Err(err) => {
+                self.state.status = err;
+                return;
+            }
+        };
+        let Some(scene) = self.scene.as_ref() else {
+            self.state.status = "Frame needs a planned toolpath".to_string();
+            return;
+        };
+        let Some((min, max)) = projected_bounds(scene, Projection::Top).or(scene.bounds) else {
+            self.state.status = "Frame needs a planned toolpath with bounds".to_string();
+            return;
+        };
+        let bounds = match FrameBounds::new(min[0], min[1], max[0], max[1]) {
+            Ok(bounds) => bounds,
+            Err(err) => {
+                self.state.status = err;
+                return;
+            }
+        };
+        let lines = match frame_program(bounds, feed) {
+            Ok(lines) => lines,
+            Err(err) => {
+                self.state.status = err;
+                return;
+            }
+        };
+        let result = match self.run_conn.as_mut() {
+            Some(conn) => conn.start(lines, JobKind::Frame),
+            None => Err("Frame needs a connected controller".to_string()),
+        };
+        self.handle_stream_result(result);
+    }
+
+    fn stream_pause(&mut self) {
+        let result = match self.run_conn.as_mut() {
+            Some(conn) => conn.pause(),
+            None => Err("Pause needs a connected controller".to_string()),
+        };
+        self.handle_stream_result(result);
+    }
+
+    fn stream_resume(&mut self) {
+        let result = match self.run_conn.as_mut() {
+            Some(conn) => conn.resume(),
+            None => Err("Resume needs a connected controller".to_string()),
+        };
+        self.handle_stream_result(result);
+    }
+
+    fn stream_stop(&mut self) {
+        let result = match self.run_conn.as_mut() {
+            Some(conn) => conn.stop(),
+            None => {
+                self.state.stop_run();
+                return;
+            }
+        };
+        self.handle_stream_result(result);
+    }
+
+    fn stream_jog(&mut self, axis: usize, sign: i32) {
+        let feed = match run_stream::parse_jog_or_frame_feed(&self.state.jog_feed) {
+            Ok(feed) => feed,
+            Err(err) => {
+                self.state.status = err;
+                return;
+            }
+        };
+        let delta = self.state.jog_step_mm * f64::from(sign.signum());
+        let result = match self.run_conn.as_mut() {
+            Some(conn) => conn.jog(axis, delta, feed),
+            None => Err("Jog needs a connected controller".to_string()),
+        };
+        self.handle_stream_result(result);
+    }
+
+    fn stream_unlock(&mut self) {
+        let result = match self.run_conn.as_mut() {
+            Some(conn) => conn.unlock_after_confirm(),
+            None => Err("$X needs a connected controller".to_string()),
+        };
+        self.handle_stream_result(result);
+    }
+
+    fn tick_stream(&mut self, ctx: &egui::Context) {
+        if self.run_conn.is_none() {
+            return;
+        }
+        let _ = self.tick_stream_once(false);
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+
+    fn tick_stream_once(&mut self, force_status: bool) -> Result<(), String> {
+        let events = match self.run_conn.as_mut() {
+            Some(conn) => conn.tick(force_status)?,
+            None => return Ok(()),
+        };
+        if let Some(conn) = self.run_conn.as_mut() {
+            run_stream::apply_events(&mut self.state, &events, conn);
+        }
+        if let Some(line) = self.run_conn.as_ref().and_then(|conn| conn.last_acked_program_line()) {
+            self.seek_gcode_line(line);
+        }
+        Ok(())
+    }
+
+    fn run_alarm_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(conn) = self.run_conn.as_ref() else {
+            return;
+        };
+        if conn.phase() != campanion_stream::HostPhase::Alarm && !self.state.in_alarm {
+            return;
+        }
+        ui.label(RichText::new("Alarm").strong().color(theme::OFF_BED).size(13.0));
+        if let Some((code, text)) = conn.last_alarm() {
+            ui.label(RichText::new(format!("ALARM:{code}")).color(theme::OFF_BED).size(12.0).monospace());
+            ui.label(RichText::new(text).color(theme::OFF_BED).size(11.0));
+        } else {
+            ui.label(RichText::new("Controller is in alarm.").color(theme::OFF_BED).size(11.0));
+        }
+        if let Some((code, text)) = conn.last_error() {
+            ui.label(RichText::new(format!("error:{code}")).color(theme::OFF_BED).size(12.0).monospace());
+            ui.label(RichText::new(text).color(theme::OFF_BED).size(11.0));
+        }
+        ui.label(RichText::new("$X unlock requires confirm.").color(theme::OFF_BED).size(11.0));
+        if ui.button("Confirm $X unlock").clicked()
+            && let Some(conn) = self.run_conn.as_mut()
+        {
+            conn.confirm_unlock = true;
+        }
+        let confirmed = self.run_conn.as_ref().is_some_and(|conn| conn.confirm_unlock);
+        ui.add_enabled_ui(confirmed, |ui| {
+            if ui.button("Send $X").clicked() {
+                self.stream_unlock();
+            }
+        });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(4.0);
+    }
+
     fn run_left(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Machine").strong().size(14.0));
         ui.add_space(4.0);
-        ui.label(RichText::new("Connection — layout only, no port is opened").color(theme::MUTED).size(11.0));
+        ui.label(RichText::new(STREAM_HARDWARE_NOTICE).color(theme::OVERRIDE).size(11.0));
         ui.label("Port");
-        ui.add(egui::TextEdit::singleline(&mut self.state.port).desired_width(180.0).hint_text(""));
+        let ports = run_stream::available_ports(self.screenshot.is_some());
+        let current_port = self.state.port.clone();
+        egui::ComboBox::from_id_salt("run-port")
+            .selected_text(if current_port.is_empty() { "Select a port".to_string() } else { current_port })
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for port in &ports {
+                    if ui.selectable_label(self.state.port == *port, port).clicked() {
+                        self.state.port = port.clone();
+                    }
+                }
+            });
+        if ui.button("Refresh ports").clicked() {
+            self.state.status = format!("{} port(s) found", run_stream::available_ports(self.screenshot.is_some()).len());
+        }
+        ui.label(
+            RichText::new("On Linux, membership in the dialout group is typically required to open a USB serial device.")
+                .color(theme::MUTED)
+                .size(11.0),
+        );
         ui.label("Baud");
-        ui.add(egui::TextEdit::singleline(&mut self.state.baud).desired_width(180.0).hint_text(""));
-        ui.label(RichText::new("Not connected").color(theme::MUTED));
-        ui.add_enabled(false, egui::Button::new("Disconnect"));
+        let baud_choices = ["115200 (Grbl documented)", "57600", "38400", "19200", "9600"];
+        let baud_label = if self.state.baud.is_empty() { "Select or type a baud rate".to_string() } else { self.state.baud.clone() };
+        egui::ComboBox::from_id_salt("run-baud").selected_text(baud_label).width(180.0).show_ui(ui, |ui| {
+            for choice in baud_choices {
+                if ui.selectable_label(self.state.baud == choice, choice).clicked() {
+                    self.state.baud = choice.to_string();
+                }
+            }
+        });
+        ui.add(egui::TextEdit::singleline(&mut self.state.baud).desired_width(180.0).hint_text("baud rate"));
+        ui.checkbox(&mut self.state.safe_mode, "Send-response safe mode (no RX buffer required)");
+        ui.label(
+            RichText::new(
+                "Character-counting needs a serial RX buffer entered on the machine profile. Safe mode waits for ok or error after each line.",
+            )
+            .color(theme::MUTED)
+            .size(11.0),
+        );
+        ui.horizontal(|ui| {
+            if self.state.connected {
+                if ui.button("Disconnect").clicked() {
+                    self.stream_disconnect();
+                }
+                ui.label(RichText::new("Connected").color(theme::START));
+            } else if ui.button("Connect").clicked() {
+                self.stream_connect();
+            }
+        });
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Position");
@@ -3528,33 +3915,35 @@ impl App {
         }
         ui.separator();
         ui.label(RichText::new("Jog").strong().size(13.0));
+        ui.label("Jog feed (mm/min)");
+        ui.add(egui::TextEdit::singleline(&mut self.state.jog_feed).desired_width(180.0).hint_text("required, not assumed"));
         let enabled = self.state.can_jog();
         ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 if ui.button("↑").clicked() {
-                    let _ = self.state.jog(1, 1);
+                    self.stream_jog(1, 1);
                 }
             });
             ui.horizontal(|ui| {
                 if ui.button("←").clicked() {
-                    let _ = self.state.jog(0, -1);
+                    self.stream_jog(0, -1);
                 }
                 if ui.button("→").clicked() {
-                    let _ = self.state.jog(0, 1);
+                    self.stream_jog(0, 1);
                 }
             });
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
                 if ui.button("↓").clicked() {
-                    let _ = self.state.jog(1, -1);
+                    self.stream_jog(1, -1);
                 }
                 ui.add_space(12.0);
                 if ui.button("Z+").clicked() {
-                    let _ = self.state.jog(2, 1);
+                    self.stream_jog(2, 1);
                 }
                 if ui.button("Z−").clicked() {
-                    let _ = self.state.jog(2, -1);
+                    self.stream_jog(2, -1);
                 }
             });
         });
@@ -3569,59 +3958,77 @@ impl App {
             ui.label("mm");
         });
         ui.horizontal(|ui| {
-            ui.add_enabled_ui(self.state.can_home(), |ui| {
-                if ui.button("Home").clicked() {
-                    let _ = self.state.home();
-                }
-            });
-            ui.add_enabled_ui(self.state.can_set_origin(), |ui| {
-                if ui.button("Set Origin").clicked() {
-                    let _ = self.state.set_origin();
-                }
+            ui.add_enabled_ui(false, |ui| {
+                let _ = ui.button("Home");
+                let _ = ui.button("Set Origin");
             });
         });
-        if !enabled {
-            ui.label(RichText::new("Jog is locked while a preview run is active. Stop first.").color(theme::MUTED).size(11.0));
+        ui.label(RichText::new("Home ($H) and Set Origin are not sent in this slice.").color(theme::MUTED).size(11.0));
+        if !self.state.connected {
+            ui.label(RichText::new("Connect a controller to jog, frame, start, or use STOP.").color(theme::MUTED).size(11.0));
+        } else if !enabled {
+            ui.label(RichText::new("Jog is locked while running or in hold. Only Pause and STOP stay available.").color(theme::MUTED).size(11.0));
         }
     }
 
     fn run_right(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Job").strong().size(14.0));
         ui.add_space(4.0);
+        self.run_alarm_panel(ui);
+        ui.label("Frame feed (mm/min)");
+        ui.add(egui::TextEdit::singleline(&mut self.state.frame_feed).desired_width(180.0).hint_text("required, laser stays off"));
         ui.add_enabled_ui(self.state.can_frame(), |ui| {
             if ui.add(egui::Button::new("Frame").min_size(Vec2::new(180.0, 26.0))).clicked() {
-                self.state.status = "Frame is a preview only; no machine connection".to_string();
+                self.stream_frame();
             }
         });
-        ui.add_enabled_ui(self.state.can_start(), |ui| {
-            let start = egui::Button::new(RichText::new("Start").color(Color32::WHITE)).fill(theme::START).min_size(Vec2::new(180.0, 28.0));
+        ui.label(RichText::new("Frame traces the job bounding box with M5/S0 at the feed you entered.").color(theme::MUTED).size(11.0));
+        let can_start = self.state.can_start();
+        ui.add_enabled_ui(can_start, |ui| {
+            let fill = if can_start { theme::START } else { theme::MUTED };
+            let start = egui::Button::new(RichText::new("Start").color(Color32::WHITE)).fill(fill).min_size(Vec2::new(180.0, 28.0));
             if ui.add(start).clicked() {
-                let _ = self.state.start_run();
+                self.stream_start();
             }
         });
         ui.add_enabled_ui(self.state.can_pause() || self.state.run == RunPhase::Paused, |ui| {
             let label = if self.state.run == RunPhase::Paused { "Resume" } else { "Pause" };
             if ui.add(egui::Button::new(label).min_size(Vec2::new(180.0, 28.0))).clicked() {
                 if self.state.run == RunPhase::Paused {
-                    let _ = self.state.resume_run();
+                    self.stream_resume();
                 } else {
-                    let _ = self.state.pause_run();
+                    self.stream_pause();
                 }
             }
         });
-        let phase = match self.state.run {
-            RunPhase::Idle => "Idle — no machine connection",
-            RunPhase::Running => "Running (preview only)",
-            RunPhase::Paused => "Paused (preview only)",
-            RunPhase::Stopped => "Stopped",
-            RunPhase::Finished => "Finished",
+        let phase = if !self.state.connected {
+            "Not connected".to_string()
+        } else {
+            match self.state.run {
+                RunPhase::Idle => "Idle".to_string(),
+                RunPhase::Running => "Running".to_string(),
+                RunPhase::Paused => "Hold".to_string(),
+                RunPhase::Stopped => "Stopped — last line kept".to_string(),
+                RunPhase::Finished => "Finished".to_string(),
+            }
         };
         ui.label(RichText::new(phase).color(theme::MUTED).size(12.0));
         ui.label(format!("Line {} / {}", self.state.run_line, self.state.run_lines));
+        self.show_preflight_checks(ui);
         ui.separator();
         ui.label(RichText::new("Console").strong().size(13.0));
-        egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-            ui.label(RichText::new("Not connected. Machine I/O is not available in this GUI preview.").color(theme::MUTED).size(11.0).monospace());
+        egui::ScrollArea::vertical().max_height(180.0).stick_to_bottom(true).show(ui, |ui| {
+            if let Some(conn) = &self.run_conn {
+                if conn.console.is_empty() {
+                    ui.label(RichText::new("Connected. Waiting for messages.").color(theme::MUTED).size(11.0).monospace());
+                } else {
+                    for line in &conn.console {
+                        ui.label(RichText::new(line).size(11.0).monospace());
+                    }
+                }
+            } else {
+                ui.label(RichText::new("Not connected.").color(theme::MUTED).size(11.0).monospace());
+            }
         });
     }
 
@@ -3662,7 +4069,10 @@ impl App {
             ui.label("Machine-neutral CAM companion.");
             ui.add_space(6.0);
             ui.label(GUI_PREVIEW_NOTICE);
-            ui.label("It does not talk to a machine. The Run tab, STOP, and all machine I/O stay inert.");
+            ui.label(STREAM_HARDWARE_NOTICE);
+            ui.label(
+                "The Run tab can stream to a Grbl-class controller over USB serial when you connect. Home and Set Origin are not sent in this slice.",
+            );
             ui.add_space(6.0);
             ui.label("Licence: MIT OR Apache-2.0");
         });

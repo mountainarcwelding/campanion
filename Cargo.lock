@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-cli"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -220,6 +220,7 @@ dependencies = [
  "campanion-path",
  "campanion-post",
  "campanion-resin",
+ "campanion-stream",
  "campanion-testsupport",
  "campanion-turn",
  "proptest",
@@ -228,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-geom"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "cavalier_contours",
  "proptest",
@@ -237,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-gui"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-cli",
  "campanion-geom",
@@ -245,6 +246,7 @@ dependencies = [
  "campanion-ir",
  "campanion-path",
  "campanion-post",
+ "campanion-stream",
  "campanion-view",
  "eframe",
  "image",
@@ -255,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-import"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-geom",
  "kurbo",
@@ -267,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-ir"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-geom",
  "campanion-path",
@@ -281,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-mesh"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-geom",
  "proptest",
@@ -291,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-path"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-geom",
  "proptest",
@@ -300,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-post"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -315,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-resin"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-mesh",
  "miniz_oxide 0.8.9",
@@ -326,15 +328,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "campanion-stream"
+version = "0.26.0"
+dependencies = [
+ "nix",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "campanion-testsupport"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "campanion-turn"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -347,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-view"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "campanion-ir",
  "campanion-mesh",
@@ -1416,6 +1426,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]

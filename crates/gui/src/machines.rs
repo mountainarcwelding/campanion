@@ -40,6 +40,7 @@ struct ProfileDraft {
     head_index: usize,
     material_index: Option<usize>,
     kinematics: String,
+    rx_buffer: String,
 }
 
 #[derive(Clone)]
@@ -327,6 +328,8 @@ impl MachinesUi {
         labeled_field(ui, "Controller", &mut draft.controller);
         labeled_field(ui, "Post", &mut draft.post);
         labeled_field(ui, "Kinematics file (optional path)", &mut draft.kinematics);
+        labeled_field(ui, "Serial RX buffer (characters, for character-counting streaming)", &mut draft.rx_buffer);
+        ui.label(egui::RichText::new("Leave blank if unset. Character-counting streaming needs a size you enter; send-response safe mode does not. Grbl documents 128, but that value is not assumed.").color(crate::theme::MUTED).size(11.0));
         ui.label(RichText::new("Work area (leave blank if you have not measured a limit)").color(theme::MUTED).size(11.0));
         ui.horizontal(|ui| {
             area_field(ui, "X min", &mut draft.x_min);
@@ -482,6 +485,7 @@ impl ProfileDraft {
             head_index: 0,
             material_index: None,
             kinematics: profile.kinematics.clone().unwrap_or_default(),
+            rx_buffer: profile.rx_buffer.map(|n| n.to_string()).unwrap_or_default(),
         }
     }
 
@@ -509,8 +513,21 @@ impl ProfileDraft {
             post: nonempty(&self.post),
             heads,
             kinematics: nonempty(&self.kinematics),
+            rx_buffer: parse_rx_buffer_field(&self.rx_buffer)?,
         })
     }
+}
+
+fn parse_rx_buffer_field(text: &str) -> Result<Option<usize>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: usize = trimmed.parse().map_err(|_| "serial RX buffer must be a positive integer number of characters".to_string())?;
+    if value == 0 {
+        return Err("serial RX buffer must be a positive integer number of characters".to_string());
+    }
+    Ok(Some(value))
 }
 
 fn parse_work_area(draft: &ProfileDraft) -> Result<Option<WorkArea>, String> {
@@ -839,6 +856,7 @@ pub fn screenshot_example(name: &str) -> MachineFile {
         bed: Some(campanion_cli::BedSize { x: 600.0, y: 400.0, z: None }),
         screen: None,
         kinematics: None,
+        rx_buffer: None,
         heads: vec![MachineHead {
             id: "laser".to_string(),
             name: "CO2".to_string(),
@@ -883,6 +901,7 @@ pub fn first_user_laser_profile() -> MachineFile {
         bed: Some(campanion_cli::BedSize { x: 600.0, y: 400.0, z: None }),
         screen: None,
         kinematics: None,
+        rx_buffer: None,
         heads: vec![MachineHead {
             id: "laser".to_string(),
             name: "CO2".to_string(),
@@ -925,6 +944,7 @@ pub fn screenshot_example_resin(name: &str) -> MachineFile {
         bed: None,
         screen: None,
         kinematics: None,
+        rx_buffer: None,
         heads: Vec::new(),
     }
 }
