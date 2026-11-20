@@ -14,8 +14,8 @@ This file is only the GUI sequence and the data-model hooks it needs.
 
 ## Principles
 
-1. **No redesign.** Keep the v0.18.2 chrome: SolidCraft-like dark theme, workspace selector
-   at the top-left of the ribbon, stage tabs beside it, actions grouped under the selected
+1. **No redesign.** Keep the v0.18.2 chrome: SolidCraft-like dark theme, machine selector
+   at the top-left of the ribbon (name, type, profile dropdown, Manage…), stage tabs beside it, actions grouped under the selected
    tab, a CLI-first banner, and STOP pinned on every tab. Add or fill controls inside that
    shell. Do not move the chrome to new corners or invent a new navigation model.
 2. **CLI first, GUI second.** Each GUI milestone exposes behaviour the library and CLI
@@ -73,9 +73,9 @@ The GUI already compiles against that model, but the editor is still a preview:
 
 | v0.4 stage | Where it lives in the current shell |
 | --- | --- |
-| New Job (machine, head, material, units, save location) | First cutting tab, today labelled Process. Keep its place. Expand it to the New Job step and relabel the tab **Job**. The workspace card still chooses the family (Mill/Route, Thermal/Jet, and so on). The Job ribbon keeps the sub-process chips and adds machine, head, material, units, and save location. |
+| New Job (machine, head, material, units, save location) | First cutting tab, today labelled Process. Keep its place. Expand it to the New Job step and relabel the tab **Job**. The top-left card is the machine selector. The process comes from the selected machine head; the Job tab records machine, head, material, units, and save location. |
 | Setup | Existing Setup tab and its Source / Machine ribbon groups, plus layout tools on the bed viewport and the parts list in the tree. |
-| Operations | Existing Operations tab. Remove the Generate toolpaths button once auto-regenerate ships. |
+| Operations | Existing Operations tab. Until auto-regenerate ships, a temporary regenerate action lives only here, labelled as temporary. There is no Generate button on Setup, in the tree, or on Export. |
 | Simulate | New stage tab on cutting workspaces, between Operations and Export. Same tab row, same typography, no new window type. |
 | Export | Existing Export tab, with pre-flight checks before write. |
 | Run | Existing Run tab (Frame, Start, Pause, jog, DRO). STOP stays pinned on every tab. |

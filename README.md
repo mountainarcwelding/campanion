@@ -211,9 +211,10 @@ automatically; otherwise set `CAMPANION_VIEW_FONT` to a .ttf file).
 CAMpanion is primarily command-line driven. `campanion-gui` is still in development: a preview
 of the workspace that can already run a 2D cutting job through the existing backend, not a
 finished CAM interface. It does not talk to a machine. The Run tab, STOP, and all machine I/O
-stay inert. Resin (SLA) tabs and FDM remain placeholders. The workspace selector sits at the
-top-left of the ribbon, the CAM stage tabs are beside it, and tool and operation actions are
-grouped under the selected tab. You can define machine profiles (`campanion-machine/1`) in the
+stay inert. Resin (SLA) tabs and FDM remain placeholders. The machine selector sits at the
+top-left of the ribbon (machine name and type, a profile dropdown, and Manage…), the CAM stage
+tabs are beside it, and tool and operation actions are grouped under the selected tab. The
+process comes from the selected machine head. You can define machine profiles (`campanion-machine/1`) in the
 user config directory, each with one or more heads, a process, an optional post, and a
 user-entered material library. A job can name a profile; planning checks toolpaths against
 limits you entered. No machine limits or material values are shipped.

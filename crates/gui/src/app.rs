@@ -8,8 +8,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use campanion_ir::Document;
-use campanion_view::{Scene, StrokeKind, find_system_font};
-use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Layout, RichText, Stroke, Vec2};
+use campanion_view::{Playback, Scene, StrokeKind, find_system_font};
+use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Layout, RichText, Stroke, Vec2};
 
 use crate::edit::{self, SessionClipboard, SessionSnapshot};
 use crate::fields::{self, ProcessFields};
@@ -24,13 +24,13 @@ use crate::setup::{self, AlignMode, ArraySpec};
 use crate::theme;
 use crate::viewport::{self, Viewport, ViewportGuides};
 use crate::{
-    DEFAULT_ARC_TOL_MM, GuiState, JOG_STEPS_MM, ModeTab, OpenedDocument, ParkedWorkspace, ROTATE_STEPS_DEG, RunPhase, SubProcess, UserField,
-    Workspace, gcode_line_count, open_path,
+    DEFAULT_ARC_TOL_MM, GuiState, JOG_STEPS_MM, ModeTab, OpenedDocument, ROTATE_STEPS_DEG, RunPhase, SubProcess, UserField, Workspace,
+    gcode_line_count, open_path,
 };
 
 const WINDOW_SIZE: [f32; 2] = [1600.0, 900.0];
 const MAX_RECENT: usize = 8;
-const WORKSPACE_CARD_WIDTH: f32 = 112.0;
+const MACHINE_CARD_WIDTH: f32 = 210.0;
 const RIBBON_TAB_ROW: f32 = 30.0;
 const RIBBON_GROUP_ROW: f32 = 58.0;
 const RIBBON_HEIGHT: f32 = RIBBON_TAB_ROW + RIBBON_GROUP_ROW + 10.0;
@@ -108,6 +108,13 @@ enum FileDialogKind {
     ExportGcode,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayoutTool {
+    Array,
+    Arrange,
+    Rotate,
+}
+
 struct App {
     state: GuiState,
     session: JobSession,
@@ -124,6 +131,10 @@ struct App {
     profile_store: campanion_cli::ProfileStore,
     clipboard: Option<SessionClipboard>,
     undo: Vec<SessionSnapshot>,
+    layout_tool: Option<LayoutTool>,
+    job_section_open: bool,
+    parts_tree_open: bool,
+    g1_demo_built: bool,
 }
 
 struct ScreenshotJob {
@@ -157,6 +168,10 @@ impl App {
             clipboard: None,
             undo: Vec::new(),
             profile_store: campanion_cli::ProfileStore::from_env().unwrap_or_else(|_| campanion_cli::ProfileStore::from_dir(PathBuf::from("."))),
+            layout_tool: None,
+            job_section_open: false,
+            parts_tree_open: true,
+            g1_demo_built: false,
         }
     }
 
@@ -324,20 +339,40 @@ impl App {
                 if let Ok(Some(sheet)) = setup::sheet_bounds(&self.session) {
                     scene.bounds = expand_bounds(scene.bounds, Some(sheet));
                 }
-                if let Some(viewport) = self.viewport.as_mut() {
-                    viewport.fitted = false;
-                    viewport.user_adjusted = false;
-                    viewport.last_size = None;
-                } else {
-                    self.viewport = Some(Viewport::new(&scene));
-                }
-                self.scene = Some(scene);
-                self.state.has_scene = true;
+                self.assign_scene(scene);
                 self.note_off_bed_parts();
             }
-            Ok(None) => {}
-            Err(err) => self.state.status = err,
+            Ok(None) => self.show_bed_scene(),
+            Err(err) => {
+                self.state.status = err;
+                self.show_bed_scene();
+            }
         }
+    }
+
+    fn show_bed_scene(&mut self) {
+        let Some(bed) = self.bed_bounds() else {
+            return;
+        };
+        let mut scene = empty_scene_with_bounds(bed);
+        if let Ok(Some(sheet)) = setup::sheet_bounds(&self.session) {
+            scene.bounds = expand_bounds(scene.bounds, Some(sheet));
+        }
+        self.assign_scene(scene);
+        self.note_off_bed_parts();
+    }
+
+    fn assign_scene(&mut self, scene: Scene) {
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.fitted = false;
+            viewport.user_adjusted = false;
+            viewport.last_size = None;
+            viewport.playback = Playback::new(scene.total_length);
+        } else {
+            self.viewport = Some(Viewport::new(&scene));
+        }
+        self.scene = Some(scene);
+        self.state.has_scene = true;
     }
 
     fn bed_bounds(&self) -> Option<[f64; 4]> {
@@ -766,31 +801,31 @@ impl App {
             finished: false,
         });
         if let Some(job) = &self.screenshot {
-            let (workspace, tab, _) = &job.plan[0];
+            let (workspace, tab, name) = &job.plan[0];
             let workspace = *workspace;
             let tab = *tab;
+            let name = name.clone();
             self.state.set_workspace(workspace);
             let _ = self.state.set_tab(tab);
+            self.prepare_screenshot_frame(Some(name.as_str()));
         }
     }
 
     fn prepare_screenshot_frame(&mut self, name: Option<&str>) {
         let g1 = name.is_some_and(|name| name.starts_with("g1-"));
-        let machine_shot = name == Some("machines-manager.png") || name == Some("job-machine-picker.png") || g1;
-        if !machine_shot {
-            self.machines = None;
-            return;
-        }
         let Some(job) = self.screenshot.as_ref() else {
             return;
         };
         let store = campanion_cli::ProfileStore::from_dir(job.dir.join("config"));
         let example = machines::screenshot_example("Example shop laser (example values)");
+        let resin = name.is_some_and(|name| name.starts_with("resin-"));
         if store.save("example-shop-laser", &example).is_ok() {
             self.profile_store = store.clone();
-            self.session.machine_profile = "example-shop-laser".to_string();
-            self.session.machine_head = "laser".to_string();
-            self.apply_machine_selection();
+            if !resin {
+                self.session.machine_profile = "example-shop-laser".to_string();
+                self.session.machine_head = "laser".to_string();
+                self.apply_machine_selection();
+            }
             if name == Some("machines-manager.png") {
                 let mut manager = MachinesUi::open(store);
                 manager.select_profile("example-shop-laser");
@@ -805,40 +840,126 @@ impl App {
     }
 
     fn prepare_g1_screenshot(&mut self, name: Option<&str>) {
-        self.session.sheet_width = "300".to_string();
-        self.session.sheet_height = "200".to_string();
-        self.session.z_zero = "stock_top".to_string();
-        self.session.datum_anchor = "min_min".to_string();
-        self.session.start_from = "absolute".to_string();
-        if self.session.parts.is_empty() {
-            // keep the opened sample part if present
-        }
-        if name == Some("g1-setup-array.png")
-            && self.session.parts.len() == 1
-            && self.session.parts[0].instances.len() == 1
-            && let Ok(spec) = ArraySpec::parse("2", "2", "40", "30")
-        {
-            let _ = setup::array_copies(&mut self.session, spec);
+        self.ensure_g1_demo();
+        self.layout_tool = None;
+        self.job_section_open = false;
+        self.parts_tree_open = true;
+        self.restore_g1_demo_placements();
+        if name == Some("g1-setup-array.png") {
+            self.state.array_x.value = "3".to_string();
+            self.state.array_y.value = "2".to_string();
+            self.state.array_spacing_mm.value = "110".to_string();
+            self.state.array_spacing_y_mm.value = "70".to_string();
+            self.layout_tool = Some(LayoutTool::Array);
         }
         if name == Some("g1-setup-arrange.png") {
-            if self.session.parts.first().is_some_and(|part| part.instances.len() < 2) {
-                let _ = setup::linked_copy(&mut self.session);
-            }
-            let _ = setup::arrange(&mut self.session, "5", Some(300.0));
+            self.state.arrange_gap_mm.value = "8".to_string();
+            let width = self.viewport_guides().sheet.or(self.viewport_guides().bed).map(|bounds| bounds[2] - bounds[0]);
+            let _ = setup::arrange(&mut self.session, "8", width);
+            self.layout_tool = Some(LayoutTool::Arrange);
         }
         if name == Some("g1-setup-origin.png") {
             self.session.z_zero = "bed".to_string();
             self.session.stock_thickness = "6".to_string();
             self.session.datum_anchor = "center".to_string();
+            self.job_section_open = true;
         }
-        if name == Some("g1-setup-off-bed.png") && !self.session.parts.is_empty() {
-            if let Some(instance) = self.session.parts[0].instances.first_mut() {
-                instance.x = "700".to_string();
-                instance.y = "0".to_string();
-            }
-            self.session.sync_placement_from_selection();
+        if name == Some("g1-setup-off-bed.png") {
+            self.move_g1_part_off_bed();
         }
+        self.document = None;
+        self.state.gcode.clear();
         self.refresh_placed_scene();
+        self.parts_tree_open = true;
+    }
+
+    fn ensure_g1_demo(&mut self) {
+        if self.g1_demo_built {
+            return;
+        }
+        self.session.sheet_width = "500".to_string();
+        self.session.sheet_height = "320".to_string();
+        self.session.z_zero = "stock_top".to_string();
+        self.session.datum_anchor = "min_min".to_string();
+        self.session.start_from = "absolute".to_string();
+        self.session.parts.clear();
+        self.session.messages.clear();
+        self.document = None;
+        self.state.gcode.clear();
+        for name in ["sample.svg", "curves.svg", "nest.dxf"] {
+            if let Some(path) = screenshot_part_path(name) {
+                match import_part_file(&path) {
+                    Ok(part) => add_imported_part(&mut self.session, &part),
+                    Err(err) => self.state.status = err,
+                }
+            }
+        }
+        self.apply_g1_demo_layout();
+        self.g1_demo_built = true;
+        self.parts_tree_open = true;
+    }
+
+    fn apply_g1_demo_layout(&mut self) {
+        // Place three different imported parts, then array the first 3×2 and add a linked copy of the last.
+        if let Some(instance) = self.session.parts.first_mut().and_then(|part| part.instances.first_mut()) {
+            instance.x = "10".to_string();
+            instance.y = "10".to_string();
+        }
+        if !self.session.parts.is_empty() {
+            self.session.select_instance(0, 0);
+            if let Ok(spec) = ArraySpec::parse("3", "2", "110", "70") {
+                let _ = setup::array_copies(&mut self.session, spec);
+            }
+        }
+        if let Some(instance) = self.session.parts.get_mut(1).and_then(|part| part.instances.first_mut()) {
+            instance.x = "360".to_string();
+            instance.y = "20".to_string();
+        }
+        if let Some(instance) = self.session.parts.get_mut(2).and_then(|part| part.instances.first_mut()) {
+            instance.x = "360".to_string();
+            instance.y = "220".to_string();
+        }
+        if self.session.parts.len() >= 3 {
+            self.session.select_instance(2, 0);
+            let _ = setup::linked_copy(&mut self.session);
+        }
+        if !self.session.parts.is_empty() {
+            self.session.select_instance(0, 0);
+        }
+    }
+
+    fn restore_g1_demo_placements(&mut self) {
+        if !self.g1_demo_built {
+            return;
+        }
+        // Rebuild the known demo placements so later frames are not left in an arrange or off-bed state.
+        let first_id = self.session.parts.first().map(|part| part.id.clone());
+        let second_id = self.session.parts.get(1).map(|part| part.id.clone());
+        let third_id = self.session.parts.get(2).map(|part| part.id.clone());
+        self.session
+            .parts
+            .retain(|part| Some(&part.id) == first_id.as_ref() || Some(&part.id) == second_id.as_ref() || Some(&part.id) == third_id.as_ref());
+        for part in self.session.parts.iter_mut().take(3) {
+            part.instances.truncate(1);
+        }
+        self.apply_g1_demo_layout();
+        self.session.z_zero = "stock_top".to_string();
+        self.session.stock_thickness.clear();
+        self.session.datum_anchor = "min_min".to_string();
+        self.session.sheet_width = "500".to_string();
+        self.session.sheet_height = "320".to_string();
+    }
+
+    fn move_g1_part_off_bed(&mut self) {
+        // Move the unique nest part so it crosses the 600 mm example bed edge and stays in view.
+        let part_index = if self.session.parts.len() >= 3 { 2 } else { self.session.parts.len().saturating_sub(1) };
+        if let Some(part) = self.session.parts.get_mut(part_index)
+            && let Some(instance) = part.instances.first_mut()
+        {
+            instance.x = "590".to_string();
+            instance.y = "40".to_string();
+            self.session.select_instance(part_index, 0);
+        }
     }
 
     fn apply_setup_result(&mut self, result: Result<String, String>) {
@@ -854,12 +975,71 @@ impl App {
         }
     }
 
+    fn toggle_layout_tool(&mut self, tool: LayoutTool) {
+        self.layout_tool = if self.layout_tool == Some(tool) { None } else { Some(tool) };
+    }
+
+    fn layout_tool_windows(&mut self, ctx: &egui::Context) {
+        let Some(tool) = self.layout_tool else {
+            return;
+        };
+        let mut open = true;
+        let title = match tool {
+            LayoutTool::Array => "Array",
+            LayoutTool::Arrange => "Arrange",
+            LayoutTool::Rotate => "Rotate",
+        };
+        egui::Window::new(title).open(&mut open).collapsible(false).resizable(false).default_pos(egui::pos2(320.0, 140.0)).show(
+            ctx,
+            |ui| match tool {
+                LayoutTool::Array => {
+                    ui.label(RichText::new("Linked copies of the selected instance. Fields start empty.").color(theme::MUTED).size(11.0));
+                    field_row(ui, "Columns", &mut self.state.array_x, self.state.dark_theme);
+                    field_row(ui, "Rows", &mut self.state.array_y, self.state.dark_theme);
+                    field_row(ui, "Spacing X (mm)", &mut self.state.array_spacing_mm, self.state.dark_theme);
+                    field_row(ui, "Spacing Y (mm)", &mut self.state.array_spacing_y_mm, self.state.dark_theme);
+                    ui.add_space(6.0);
+                    if ui.button("Apply array").clicked() {
+                        self.run_array();
+                    }
+                }
+                LayoutTool::Arrange => {
+                    ui.label(
+                        RichText::new("Packs selected instances, or every instance when fewer than two are selected. An empty gap is 0 mm.")
+                            .color(theme::MUTED)
+                            .size(11.0),
+                    );
+                    field_row(ui, "Gap (mm)", &mut self.state.arrange_gap_mm, self.state.dark_theme);
+                    ui.add_space(6.0);
+                    if ui.button("Apply arrange").clicked() {
+                        self.run_arrange();
+                    }
+                }
+                LayoutTool::Rotate => {
+                    ui.label("Rotate by (deg, CCW)");
+                    ui.add(egui::TextEdit::singleline(&mut self.session.rotate_by).desired_width(180.0).hint_text("enter an angle"));
+                    ui.add_space(6.0);
+                    if ui.button("Apply rotate").clicked() {
+                        self.run_rotate();
+                    }
+                }
+            },
+        );
+        if !open {
+            self.layout_tool = None;
+        }
+    }
+
     fn run_array(&mut self) {
         match ArraySpec::parse(
             &self.state.array_x.value,
             &self.state.array_y.value,
             &self.state.array_spacing_mm.value,
-            &self.state.array_spacing_mm.value,
+            if self.state.array_spacing_y_mm.value.trim().is_empty() {
+                &self.state.array_spacing_mm.value
+            } else {
+                &self.state.array_spacing_y_mm.value
+            },
         ) {
             Ok(spec) => {
                 let result = setup::array_copies(&mut self.session, spec);
@@ -1043,6 +1223,7 @@ impl eframe::App for App {
             self.timeline(ui);
         }
         self.body(ui);
+        self.layout_tool_windows(&ctx);
         self.dialogs(&ctx);
         self.tick_screenshots(&ctx);
     }
@@ -1179,14 +1360,13 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        // Workspace card on the left, CAM stage tabs beside it, grouped commands under the
-        // tabs, pinned STOP on the right. This follows the same chrome corners as SolidCraft
-        // (workspace left, mode tabs, then tool groups) without sharing any of its code.
+        // Machine selector on the left, CAM stage tabs beside it, grouped commands under the
+        // tabs, pinned STOP on the right.
         egui::Panel::top("toolbar").frame(bar_frame()).show(ui, |ui| {
             ui.set_height(RIBBON_HEIGHT);
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
-                self.workspace_selector(ui);
+                self.machine_selector(ui);
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(6.0);
@@ -1212,40 +1392,101 @@ impl App {
         });
     }
 
-    fn workspace_selector(&mut self, ui: &mut egui::Ui) {
+    fn machine_selector(&mut self, ui: &mut egui::Ui) {
         let height = ui.available_height().max(RIBBON_HEIGHT - 8.0);
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(WORKSPACE_CARD_WIDTH, height), egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(MACHINE_CARD_WIDTH, height), egui::Sense::click());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::same(4), theme::WIDGET);
         let stroke = if response.hovered() { theme::ACCENT_HOVER } else { theme::BORDER };
         painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
         let text_color = ui.visuals().text_color();
-        painter.text(
-            rect.center() - Vec2::new(0.0, 10.0),
-            Align2::CENTER_CENTER,
-            self.state.workspace.short_label(),
-            FontId::proportional(13.0),
-            text_color,
-        );
-        painter.text(rect.center() + Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, "Workspace ▾", FontId::proportional(11.0), theme::MUTED);
+        let (name, typ) = self.machine_card_labels();
+        let text_rect = rect.shrink2(Vec2::new(8.0, 8.0));
+        let name_galley = painter.layout(name, FontId::proportional(12.0), text_color, text_rect.width());
+        let type_galley = painter.layout(format!("{typ} ▾"), FontId::proportional(11.0), theme::MUTED, text_rect.width());
+        let total_h = name_galley.size().y + 4.0 + type_galley.size().y;
+        let name_pos = egui::pos2(text_rect.center().x - name_galley.size().x / 2.0, text_rect.center().y - total_h / 2.0);
+        let type_pos = egui::pos2(text_rect.center().x - type_galley.size().x / 2.0, name_pos.y + name_galley.size().y + 4.0);
+        painter.galley(name_pos, name_galley, text_color);
+        painter.galley(type_pos, type_galley, theme::MUTED);
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        egui::Popup::from_toggle_button_response(&response).width(320.0).show(|ui| {
-            ui.label(RichText::new("WORKSPACE").color(theme::MUTED).size(11.0).strong());
+        egui::Popup::from_toggle_button_response(&response).width(340.0).show(|ui| {
+            ui.label(RichText::new("MACHINE").color(theme::MUTED).size(11.0).strong());
             ui.add_space(6.0);
-            for workspace in Workspace::all() {
-                let selected = self.state.workspace == workspace;
-                let heading = if selected { format!("{}  (current)", workspace.label()) } else { workspace.label().to_string() };
+            let listed = self.profile_store.list().ok().unwrap_or_default();
+            if listed.is_empty() {
+                ui.label(RichText::new("No machine profiles yet. Use Manage… to add one.").color(theme::MUTED).size(12.0));
+            }
+            for (id, _) in &listed {
+                let (label, typ) = self.profile_card_labels(id);
+                let selected = self.session.machine_profile == *id;
+                let heading = if selected { format!("{label}  (current)") } else { label };
                 if ui.selectable_label(selected, RichText::new(heading).strong().size(13.0)).clicked() {
-                    self.state.set_workspace(workspace);
+                    self.select_machine_profile(id);
                     ui.close();
                 }
-                ui.label(RichText::new(workspace.description()).color(theme::MUTED).size(11.0));
+                ui.label(RichText::new(format!("{typ}  ·  {id}")).color(theme::MUTED).size(11.0));
                 ui.add_space(6.0);
             }
-            ui.add_enabled(false, egui::Button::new(format!("{} (planned)", parked_label(ParkedWorkspace::Custom))));
+            if ui.button("Manage…").clicked() {
+                self.open_machines_manager();
+                ui.close();
+            }
         });
+    }
+
+    fn machine_card_labels(&self) -> (String, String) {
+        match machines::session_profile(&self.profile_store, &self.session) {
+            Ok(Some((profile, head))) => {
+                let typ = machines::process_from_id(&head.process)
+                    .map(|(_, process)| process.label().to_string())
+                    .filter(|label| !label.is_empty())
+                    .unwrap_or_else(|| if head.process.is_empty() { "Machine".to_string() } else { head.process.clone() });
+                let name = if profile.name.is_empty() { self.session.machine_profile.clone() } else { profile.name };
+                (name, typ)
+            }
+            _ if !self.session.machine_profile.is_empty() => (self.session.machine_profile.clone(), "Select…".to_string()),
+            _ => ("No machine".to_string(), "Select…".to_string()),
+        }
+    }
+
+    fn profile_card_labels(&self, id: &str) -> (String, String) {
+        match self.profile_store.load(id) {
+            Ok(profile) => {
+                let typ = profile
+                    .heads
+                    .iter()
+                    .find(|head| self.session.machine_head == head.id || self.session.machine_head.is_empty())
+                    .and_then(|head| machines::process_from_id(&head.process).map(|(_, process)| process.label().to_string()))
+                    .or_else(|| {
+                        profile
+                            .heads
+                            .first()
+                            .and_then(|head| machines::process_from_id(&head.process).map(|(_, process)| process.label().to_string()))
+                    })
+                    .unwrap_or_else(|| "Machine".to_string());
+                let name = if profile.name.is_empty() { id.to_string() } else { profile.name };
+                (name, typ)
+            }
+            Err(_) => (id.to_string(), "Machine".to_string()),
+        }
+    }
+
+    fn select_machine_profile(&mut self, id: &str) {
+        self.session.machine_profile = id.to_string();
+        self.session.machine_path.clear();
+        self.session.machine_head.clear();
+        self.apply_machine_selection();
+    }
+
+    fn current_process_label(&self) -> Option<String> {
+        machines::session_profile(&self.profile_store, &self.session)
+            .ok()
+            .flatten()
+            .and_then(|(_, head)| machines::process_from_id(&head.process).map(|(_, process)| process.label().to_string()))
+            .or_else(|| self.state.process.map(|process| process.label().to_string()))
     }
 
     fn stage_tabs(&mut self, ui: &mut egui::Ui) {
@@ -1276,17 +1517,14 @@ impl App {
     fn command_groups(&mut self, ui: &mut egui::Ui) {
         match self.state.tab {
             ModeTab::Process => {
-                ribbon_group(ui, "Process", |ui| {
-                    let processes: Vec<SubProcess> = self.state.workspace.sub_processes().to_vec();
-                    for process in processes {
-                        let selected = self.state.process == Some(process);
-                        if ribbon_command(ui, process.label(), selected).clicked() {
-                            self.apply_sub_process(process);
-                        }
-                    }
-                    for planned in self.state.workspace.planned_sub_processes() {
-                        ui.add_enabled(false, ribbon_command_widget(planned.label(), false));
-                    }
+                ribbon_group(ui, "Machine", |ui| {
+                    let text =
+                        self.current_process_label().map(|label| format!("Process: {label}")).unwrap_or_else(|| "Select a machine".to_string());
+                    ui.vertical(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(text).size(12.0));
+                        ui.label(RichText::new("Process comes from the selected machine head.").color(theme::MUTED).size(10.0));
+                    });
                 });
             }
             ModeTab::Setup => {
@@ -1304,11 +1542,11 @@ impl App {
                         let result = setup::linked_copy(&mut self.session);
                         self.apply_setup_result(result);
                     }
-                    if ribbon_command(ui, "Array", false).clicked() {
-                        self.run_array();
+                    if ribbon_command(ui, "Array", self.layout_tool == Some(LayoutTool::Array)).clicked() {
+                        self.toggle_layout_tool(LayoutTool::Array);
                     }
-                    if ribbon_command(ui, "Arrange", false).clicked() {
-                        self.run_arrange();
+                    if ribbon_command(ui, "Arrange", self.layout_tool == Some(LayoutTool::Arrange)).clicked() {
+                        self.toggle_layout_tool(LayoutTool::Arrange);
                     }
                     if ribbon_command(ui, "Align left", false).clicked() {
                         self.run_align(AlignMode::Left);
@@ -1320,8 +1558,8 @@ impl App {
                         let result = setup::mirror_targets(&mut self.session);
                         self.apply_setup_result(result);
                     }
-                    if ribbon_command(ui, "Rotate", false).clicked() {
-                        self.run_rotate();
+                    if ribbon_command(ui, "Rotate", self.layout_tool == Some(LayoutTool::Rotate)).clicked() {
+                        self.toggle_layout_tool(LayoutTool::Rotate);
                     }
                     if ribbon_command(ui, "Place at origin", false).clicked() {
                         let result = setup::place_at_origin(&mut self.session);
@@ -1349,7 +1587,7 @@ impl App {
                 });
                 ribbon_group_separator(ui);
                 ribbon_group(ui, "Toolpaths", |ui| {
-                    if ribbon_command(ui, "Generate toolpaths", false).clicked() {
+                    if ribbon_command(ui, "Regenerate (temporary)", false).clicked() {
                         self.generate_paths();
                     }
                 });
@@ -1410,10 +1648,7 @@ impl App {
                         }
                     });
                 } else {
-                    ribbon_group(ui, "Toolpaths", |ui| {
-                        if ribbon_command(ui, "Generate toolpaths", false).clicked() {
-                            self.generate_paths();
-                        }
+                    ribbon_group(ui, "Preview", |ui| {
                         if ribbon_command(ui, "Preview G-code", false).clicked() {
                             self.preview_gcode();
                         }
@@ -1445,15 +1680,6 @@ impl App {
                     });
                 });
             }
-        }
-    }
-
-    fn apply_sub_process(&mut self, process: SubProcess) {
-        let _ = self.state.set_process(process);
-        if let Some(id) = suggested_post_for_process(process.label())
-            && (self.session.post_id.is_empty() || suggested_post_for_process_ids().contains(&self.session.post_id.as_str()))
-        {
-            self.session.post_id = id.to_string();
         }
     }
 
@@ -1596,6 +1822,9 @@ impl App {
                     self.session.post_id = post;
                 }
                 self.session.dirty = true;
+                let process = machines::process_from_id(&head.process).map(|(_, process)| process.label()).unwrap_or(head.process.as_str());
+                self.state.status = format!("Machine: {} ({process})", profile.name);
+                self.refresh_placed_scene();
             }
             Ok(None) => {}
             Err(err) => self.state.status = err,
@@ -1709,7 +1938,8 @@ impl App {
             return;
         }
         ui.separator();
-        ui.collapsing("Parts", |ui| {
+        let parts_open = Some(self.parts_tree_open);
+        let parts_header = egui::CollapsingHeader::new("Parts").id_salt("parts-tree").default_open(true).open(parts_open).show(ui, |ui| {
             if self.session.parts.is_empty() {
                 ui.label(RichText::new("Import a part on the Setup tab").color(theme::MUTED).size(12.0));
             }
@@ -1724,13 +1954,18 @@ impl App {
                 }
                 for inst in 0..inst_count {
                     let inst_id = self.session.parts[part_index].instances[inst].id.clone();
+                    let x = self.session.parts[part_index].instances[inst].x.clone();
+                    let y = self.session.parts[part_index].instances[inst].y.clone();
                     let selected = self.session.selected == Some(TreeSelection::Instance(part_index, inst));
-                    if ui.selectable_label(selected, format!("    {id} / {inst_id}")).clicked() {
+                    if ui.selectable_label(selected, format!("    {inst_id}  ({x}, {y})")).clicked() {
                         self.session.select_instance(part_index, inst);
                     }
                 }
             }
         });
+        if parts_header.header_response.clicked() {
+            self.parts_tree_open = !self.parts_tree_open;
+        }
         if let Some(label) = self.session.source_path.as_ref().map(|path| path.display().to_string()) {
             let selected = self.session.selected == Some(TreeSelection::Source);
             let response = ui.selectable_label(selected, format!("Source: {label}"));
@@ -1791,10 +2026,6 @@ impl App {
                 self.add_session_profile();
             }
         });
-        ui.add_space(8.0);
-        if ui.button("Generate toolpaths").clicked() {
-            self.generate_paths();
-        }
     }
 
     fn default_properties(&mut self, ui: &mut egui::Ui) {
@@ -1818,20 +2049,32 @@ impl App {
                 ui.label(RichText::new("Per-contour kerf and lead-in overrides are not in the job format yet.").color(theme::MUTED).size(11.0));
             }
             _ => {
-                ui.label(RichText::new("Select a tool, an operation, or the imported part in the process tree.").color(theme::MUTED).size(12.0));
+                if self.state.tab != ModeTab::Setup {
+                    ui.label(RichText::new("Select a tool, an operation, or the imported part in the process tree.").color(theme::MUTED).size(12.0));
+                }
             }
-        }
-        if ui.button("Generate toolpaths").clicked() {
-            self.generate_paths();
         }
         self.show_messages(ui);
     }
 
     fn placement_properties(&mut self, ui: &mut egui::Ui) {
-        if self.session.source_drawing.is_none() {
+        if self.session.source_drawing.is_none() && self.session.parts.is_empty() {
+            if self.state.tab == ModeTab::Setup {
+                ui.label(RichText::new("Import a part on the Setup tab to edit its placement.").color(theme::MUTED).size(12.0));
+                ui.separator();
+                self.job_section(ui);
+            }
             return;
         }
+        let selected = match self.session.selected {
+            Some(TreeSelection::Instance(part, inst)) => format!("Instance {}.{}", part + 1, inst + 1),
+            Some(TreeSelection::Part(part)) => {
+                self.session.parts.get(part).map(|part| format!("Part `{}`", part.id)).unwrap_or_else(|| "Part".to_string())
+            }
+            _ => self.session.parts.first().map(|part| format!("Part `{}`", part.id)).unwrap_or_else(|| "Selected part".to_string()),
+        };
         ui.label(RichText::new("Placement").strong().size(13.0));
+        ui.label(RichText::new(selected).color(theme::MUTED).size(11.0));
         let mut changed = false;
         changed |= self.placement_field(ui, "X (mm)", 0);
         changed |= self.placement_field(ui, "Y (mm)", 1);
@@ -1855,127 +2098,131 @@ impl App {
             self.state.gcode.clear();
             self.refresh_placed_scene();
         }
-        ui.separator();
-        self.setup_properties(ui);
+        if self.state.tab == ModeTab::Setup {
+            ui.separator();
+            self.job_section(ui);
+        }
     }
 
-    fn setup_properties(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Origin").strong().size(13.0));
-        ui.label("Z-zero");
-        ui.horizontal(|ui| {
-            for (value, label) in [("", "unset"), ("stock_top", "stock top"), ("bed", "bed")] {
-                if ui.selectable_label(self.session.z_zero == value, label).clicked() {
-                    self.session.z_zero = value.to_string();
-                    self.session.dirty = true;
-                }
-            }
-        });
-        if self.session.z_zero == "bed" {
-            ui.label("Stock thickness (mm)");
-            if ui.add(egui::TextEdit::singleline(&mut self.session.stock_thickness).desired_width(180.0).hint_text("required")).changed() {
-                self.session.dirty = true;
-            }
-        }
-        ui.label("XY datum");
-        ui.horizontal_wrapped(|ui| {
-            for (value, label) in
-                [("", "unset"), ("min_min", "min/min"), ("max_min", "max/min"), ("min_max", "min/max"), ("max_max", "max/max"), ("center", "centre")]
-            {
-                if ui.selectable_label(self.session.datum_anchor == value, label).clicked() {
-                    self.session.datum_anchor = value.to_string();
-                    self.session.dirty = true;
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Offset X");
-            if ui.add(egui::TextEdit::singleline(&mut self.session.datum_offset_x).desired_width(70.0)).changed() {
-                self.session.dirty = true;
-            }
-            ui.label("Y");
-            if ui.add(egui::TextEdit::singleline(&mut self.session.datum_offset_y).desired_width(70.0)).changed() {
-                self.session.dirty = true;
-            }
-        });
-        ui.label("Start-from");
-        ui.horizontal_wrapped(|ui| {
-            for (value, label) in [("", "unset"), ("absolute", "absolute"), ("current_position", "current position"), ("user_origin", "user origin")]
-            {
-                if ui.selectable_label(self.session.start_from == value, label).clicked() {
-                    self.session.start_from = value.to_string();
-                    self.session.dirty = true;
-                }
-            }
-        });
-        if self.session.start_from == "current_position" || self.session.start_from == "user_origin" {
-            ui.label("Job origin");
-            ui.horizontal_wrapped(|ui| {
-                for (value, label) in [
-                    ("", "unset"),
-                    ("min_min", "SW"),
-                    ("mid_min", "S"),
-                    ("max_min", "SE"),
-                    ("min_mid", "W"),
-                    ("center", "centre"),
-                    ("max_mid", "E"),
-                    ("min_max", "NW"),
-                    ("mid_max", "N"),
-                    ("max_max", "NE"),
-                ] {
-                    if ui.selectable_label(self.session.job_origin == value, label).clicked() {
-                        self.session.job_origin = value.to_string();
+    fn job_section(&mut self, ui: &mut egui::Ui) {
+        let response =
+            egui::CollapsingHeader::new("Job").id_salt("job-section").default_open(false).open(Some(self.job_section_open)).show(ui, |ui| {
+                ui.label(RichText::new("Origin").strong().size(13.0));
+                ui.label("Z-zero");
+                ui.horizontal(|ui| {
+                    for (value, label) in [("", "unset"), ("stock_top", "stock top"), ("bed", "bed")] {
+                        if ui.selectable_label(self.session.z_zero == value, label).clicked() {
+                            self.session.z_zero = value.to_string();
+                            self.session.dirty = true;
+                        }
+                    }
+                });
+                if self.session.z_zero == "bed" {
+                    ui.label("Stock thickness (mm)");
+                    if ui.add(egui::TextEdit::singleline(&mut self.session.stock_thickness).desired_width(180.0).hint_text("required")).changed() {
                         self.session.dirty = true;
                     }
                 }
+                ui.label("XY datum");
+                ui.horizontal_wrapped(|ui| {
+                    for (value, label) in [
+                        ("", "unset"),
+                        ("min_min", "min/min"),
+                        ("max_min", "max/min"),
+                        ("min_max", "min/max"),
+                        ("max_max", "max/max"),
+                        ("center", "centre"),
+                    ] {
+                        if ui.selectable_label(self.session.datum_anchor == value, label).clicked() {
+                            self.session.datum_anchor = value.to_string();
+                            self.session.dirty = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Offset X");
+                    if ui.add(egui::TextEdit::singleline(&mut self.session.datum_offset_x).desired_width(70.0)).changed() {
+                        self.session.dirty = true;
+                    }
+                    ui.label("Y");
+                    if ui.add(egui::TextEdit::singleline(&mut self.session.datum_offset_y).desired_width(70.0)).changed() {
+                        self.session.dirty = true;
+                    }
+                });
+                ui.label("Start-from");
+                ui.horizontal_wrapped(|ui| {
+                    for (value, label) in
+                        [("", "unset"), ("absolute", "absolute"), ("current_position", "current position"), ("user_origin", "user origin")]
+                    {
+                        if ui.selectable_label(self.session.start_from == value, label).clicked() {
+                            self.session.start_from = value.to_string();
+                            self.session.dirty = true;
+                        }
+                    }
+                });
+                if self.session.start_from == "current_position" || self.session.start_from == "user_origin" {
+                    ui.label("Job origin");
+                    ui.horizontal_wrapped(|ui| {
+                        for (value, label) in [
+                            ("", "unset"),
+                            ("min_min", "SW"),
+                            ("mid_min", "S"),
+                            ("max_min", "SE"),
+                            ("min_mid", "W"),
+                            ("center", "centre"),
+                            ("max_mid", "E"),
+                            ("min_max", "NW"),
+                            ("mid_max", "N"),
+                            ("max_max", "NE"),
+                        ] {
+                            if ui.selectable_label(self.session.job_origin == value, label).clicked() {
+                                self.session.job_origin = value.to_string();
+                                self.session.dirty = true;
+                            }
+                        }
+                    });
+                } else {
+                    ui.label(RichText::new("Job origin is used with current-position or user-origin starts.").color(theme::MUTED).size(11.0));
+                }
+                ui.separator();
+                ui.label(RichText::new("Sheet").strong().size(13.0));
+                ui.label(
+                    RichText::new("The sheet is the stock rectangle. The bed comes from the machine profile and is not invented.")
+                        .color(theme::MUTED)
+                        .size(11.0),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Width (mm)");
+                    if ui.add(egui::TextEdit::singleline(&mut self.session.sheet_width).desired_width(70.0)).changed() {
+                        self.session.dirty = true;
+                        self.refresh_placed_scene();
+                    }
+                    ui.label("Height");
+                    if ui.add(egui::TextEdit::singleline(&mut self.session.sheet_height).desired_width(70.0)).changed() {
+                        self.session.dirty = true;
+                        self.refresh_placed_scene();
+                    }
+                });
+                if !self.session.order_rules_set {
+                    if ui.button("Set order rules").clicked() {
+                        self.session.order_rules_set = true;
+                        self.session.dirty = true;
+                    }
+                } else {
+                    if ui.checkbox(&mut self.session.order_inner_first, "Inner contours first").changed() {
+                        self.session.dirty = true;
+                    }
+                    if ui.checkbox(&mut self.session.order_cuts_last, "Cuts last").changed() {
+                        self.session.dirty = true;
+                    }
+                    ui.label(
+                        RichText::new("Stored now; planning still follows cut_order or file order until Operations.").color(theme::MUTED).size(11.0),
+                    );
+                }
             });
-        } else {
-            ui.label(RichText::new("Job origin is used with current-position or user-origin starts.").color(theme::MUTED).size(11.0));
+        if response.header_response.clicked() {
+            self.job_section_open = !self.job_section_open;
         }
-        ui.separator();
-        ui.label(RichText::new("Sheet").strong().size(13.0));
-        ui.label(
-            RichText::new("The sheet is the stock rectangle. The bed comes from the machine profile and is not invented.")
-                .color(theme::MUTED)
-                .size(11.0),
-        );
-        ui.horizontal(|ui| {
-            ui.label("Width (mm)");
-            if ui.add(egui::TextEdit::singleline(&mut self.session.sheet_width).desired_width(70.0)).changed() {
-                self.session.dirty = true;
-                self.refresh_placed_scene();
-            }
-            ui.label("Height");
-            if ui.add(egui::TextEdit::singleline(&mut self.session.sheet_height).desired_width(70.0)).changed() {
-                self.session.dirty = true;
-                self.refresh_placed_scene();
-            }
-        });
-        ui.separator();
-        ui.label(RichText::new("Array / Arrange").strong().size(13.0));
-        field_row(ui, "Columns", &mut self.state.array_x, self.state.dark_theme);
-        field_row(ui, "Rows", &mut self.state.array_y, self.state.dark_theme);
-        field_row(ui, "Spacing (mm)", &mut self.state.array_spacing_mm, self.state.dark_theme);
-        field_row(ui, "Arrange gap (mm)", &mut self.state.arrange_gap_mm, self.state.dark_theme);
-        ui.label(RichText::new("Empty arrange gap is treated as 0 mm.").color(theme::MUTED).size(11.0));
-        ui.label("Rotate by (deg, CCW)");
-        if ui.add(egui::TextEdit::singleline(&mut self.session.rotate_by).desired_width(180.0).hint_text("enter an angle")).changed() {
-            // typed only; applied by the Rotate command
-        }
-        if !self.session.order_rules_set {
-            if ui.button("Set order rules").clicked() {
-                self.session.order_rules_set = true;
-                self.session.dirty = true;
-            }
-        } else {
-            if ui.checkbox(&mut self.session.order_inner_first, "Inner contours first").changed() {
-                self.session.dirty = true;
-            }
-            if ui.checkbox(&mut self.session.order_cuts_last, "Cuts last").changed() {
-                self.session.dirty = true;
-            }
-            ui.label(RichText::new("Stored now; planning still follows cut_order or file order until Operations.").color(theme::MUTED).size(11.0));
-        }
-        ui.separator();
     }
 
     fn placement_field(&mut self, ui: &mut egui::Ui, label: &str, field: usize) -> bool {
@@ -2175,27 +2422,26 @@ impl App {
     fn process_tab(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("New Job").strong().size(16.0));
         ui.add_space(6.0);
-        ui.label(RichText::new("Pick a process, a machine and units, then go to Setup to import parts.").color(theme::MUTED).size(12.0));
+        ui.label(
+            RichText::new("Select a machine and units, then go to Setup to import parts. The process comes from the selected machine head.")
+                .color(theme::MUTED)
+                .size(12.0),
+        );
         ui.add_space(10.0);
-        ui.label(RichText::new("Process").strong().size(13.0));
-        ui.horizontal_wrapped(|ui| {
-            let processes: Vec<SubProcess> = self.state.workspace.sub_processes().to_vec();
-            for process in processes {
-                let selected = self.state.process == Some(process);
-                if ui.selectable_label(selected, process.label()).clicked() {
-                    self.apply_sub_process(process);
-                }
+        if let Some(label) = self.current_process_label() {
+            ui.label(RichText::new("Process").strong().size(13.0));
+            ui.label(RichText::new(label).size(13.0));
+            if let Some(process) = self.state.process
+                && let Some(id) = suggested_post_for_process(process.label())
+            {
+                ui.label(RichText::new(format!("Suggested post: {id} (you can change this on the Export tab)")).color(theme::MUTED).size(12.0));
             }
-            for planned in self.state.workspace.planned_sub_processes() {
-                ui.add_enabled(false, egui::Button::new(planned.label()));
-            }
-        });
-        if let Some(process) = self.state.process
-            && let Some(id) = suggested_post_for_process(process.label())
-        {
-            ui.label(RichText::new(format!("Suggested post: {id} (you can change this on the Export tab)")).color(theme::MUTED).size(12.0));
+            ui.add_space(10.0);
+        } else {
+            ui.label(RichText::new("Process").strong().size(13.0));
+            ui.label(RichText::new("Select a machine to set the process from its head.").color(theme::MUTED).size(12.0));
+            ui.add_space(10.0);
         }
-        ui.add_space(10.0);
         ui.label(RichText::new("Machine").strong().size(13.0));
         self.machine_job_picker(ui);
         ui.add_space(8.0);
@@ -2417,9 +2663,6 @@ impl App {
                 }
             }
         });
-        if ui.button("Generate toolpaths").clicked() {
-            self.generate_paths();
-        }
         if ui.button("Preview G-code").clicked() {
             self.preview_gcode();
         }
@@ -2693,6 +2936,30 @@ impl App {
     }
 }
 
+fn empty_scene_with_bounds(bounds: [f64; 4]) -> Scene {
+    Scene {
+        strokes: Vec::new(),
+        pierces: Vec::new(),
+        labels: Vec::new(),
+        bounds: Some(([bounds[0], bounds[1]], [bounds[2], bounds[3]])),
+        z_range: None,
+        total_length: 0.0,
+        names: Vec::new(),
+        rotary: None,
+        lathe: None,
+        timeline: Vec::new(),
+    }
+}
+
+fn screenshot_part_path(name: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("examples").join(name));
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
 fn save_screenshot(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
@@ -2738,10 +3005,6 @@ fn tool_kind_label(kind: ToolKind) -> &'static str {
         ToolKind::Diameter => "diameter",
         ToolKind::Wire => "wire",
     }
-}
-
-fn suggested_post_for_process_ids() -> &'static [&'static str] {
-    &["grbl_laser", "plasma", "waterjet", "oxyfuel", "wire_edm"]
 }
 
 fn screenshot_ir_candidates() -> Vec<PathBuf> {
@@ -2848,12 +3111,6 @@ fn show_placeholder_window(ctx: &egui::Context, title: &str, open: &mut bool, bo
         return;
     }
     egui::Window::new(title).open(open).collapsible(false).resizable(false).show(ctx, body);
-}
-
-fn parked_label(parked: ParkedWorkspace) -> &'static str {
-    match parked {
-        ParkedWorkspace::Custom => "Custom",
-    }
 }
 
 fn draw_timeline_segments(ui: &mut egui::Ui, scene: Option<&Scene>, position: f64, total: f64) {
