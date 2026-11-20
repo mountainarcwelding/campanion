@@ -6,9 +6,9 @@
 
 use campanion_mesh::{Aabb, Mesh, Vec3};
 use campanion_resin::{
-    BuildReport, CalibrationProfile, DetectedFeatures, GenerateOptions, InputPoint, IslandDetectParams, M7_MAX, MissingConstant, Placement,
-    PointSource, ResinSettings, SupportParams, SupportPoint, SupportedMesh, build_pm7m, generate_supports_with, load_print_settings,
-    parse_calibration, rebuild_supported,
+    BuildReport, CalibrationProfile, CancelFlag, DetectedFeatures, GenerateOptions, GenerateProgress, InputPoint, IslandDetectParams, M7_MAX,
+    MeshPose, MissingConstant, Placement, PointSource, ResinSettings, SupportParams, SupportPoint, SupportedMesh, apply_mesh_pose, build_pm7m,
+    generate_supports_with, load_print_settings, parse_calibration, rebuild_supported, snap_to_step,
 };
 use campanion_view::{BuildVolume, MeshRole, PointMarker, Scene3, ShadedMesh};
 use campanion_view::{Scene, Stroke, StrokeKind};
@@ -178,6 +178,10 @@ pub struct ResinSession {
     pub last_export_path: Option<std::path::PathBuf>,
     /// Cached shaded solids (part, raft, pillars, island boxes). Markers are rebuilt each frame.
     pub solid_meshes: Vec<ShadedMesh>,
+    /// Pose applied to [`Self::mesh`] for the viewport, generate, and slice.
+    pub pose: MeshPose,
+    /// Cached result of applying [`Self::pose`] to [`Self::mesh`].
+    posed_cache: Option<Mesh>,
 }
 
 /// Snapshot for resin undo (points and selection only).
@@ -200,6 +204,37 @@ impl ResinSession {
 
     pub fn has_part(&self) -> bool {
         self.mesh.is_some()
+    }
+
+    /// Drop the posed-mesh cache. Call when [`Self::pose`] or [`Self::mesh`] changes.
+    pub fn invalidate_pose(&mut self) {
+        self.posed_cache = None;
+        self.supported = None;
+        self.features = None;
+        self.points.clear();
+        self.selected_point = None;
+        self.dragging = None;
+        self.points_dirty = false;
+        self.last_generate_note = None;
+        self.optimize_summary = None;
+        self.invalidate_solids();
+        self.invalidate_slice();
+    }
+
+    /// The imported mesh after [`Self::pose`] is applied.
+    pub fn posed_part(&mut self) -> Result<&Mesh, String> {
+        if self.posed_cache.is_none() {
+            let source = self.mesh.as_ref().ok_or_else(|| "open a part first".to_string())?;
+            let posed = apply_mesh_pose(source, self.pose).map_err(|err| err.to_string())?;
+            self.posed_cache = Some(posed);
+        }
+        self.posed_cache.as_ref().ok_or_else(|| "open a part first".to_string())
+    }
+
+    /// The mesh drawn in the viewport: the posed part when the cache is warm, otherwise the import.
+    #[must_use]
+    pub fn display_mesh(&self) -> Option<&Mesh> {
+        self.posed_cache.as_ref().or(self.mesh.as_ref())
     }
 
     pub fn has_print_settings(&self) -> bool {
@@ -232,6 +267,135 @@ pub fn parse_optional(field: &UserField, label: &str) -> Result<Option<f64>, Str
     }
     let value = text.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("{label} (not a number)"))?;
     Ok(Some(value))
+}
+
+/// Read Orient position and rotation fields. Empty means "as imported" on that axis.
+pub fn pose_from_fields(position_mm: &[UserField; 3], rotation_deg: &[UserField; 3]) -> Result<MeshPose, String> {
+    Ok(MeshPose {
+        position_mm: [
+            parse_optional(&position_mm[0], "position X (mm)")?,
+            parse_optional(&position_mm[1], "position Y (mm)")?,
+            parse_optional(&position_mm[2], "position Z (mm)")?,
+        ],
+        rotation_deg: [
+            parse_optional(&rotation_deg[0], "rotation X (deg)")?,
+            parse_optional(&rotation_deg[1], "rotation Y (deg)")?,
+            parse_optional(&rotation_deg[2], "rotation Z (deg)")?,
+        ],
+    })
+}
+
+/// Write a pose back into the Orient fields. `None` axes stay empty.
+pub fn write_pose_fields(pose: MeshPose, position_mm: &mut [UserField; 3], rotation_deg: &mut [UserField; 3]) {
+    for (field, value) in position_mm.iter_mut().zip(pose.position_mm) {
+        field.value = value.map(format_pose_value).unwrap_or_default();
+    }
+    for (field, value) in rotation_deg.iter_mut().zip(pose.rotation_deg) {
+        field.value = value.map(format_pose_value).unwrap_or_default();
+    }
+}
+
+fn format_pose_value(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 { format!("{:.0}", value.round()) } else { format!("{value:.3}") }
+}
+
+/// Apply the typed pose to `session`. No-op when the pose is unchanged.
+pub fn apply_pose_fields(session: &mut ResinSession, position_mm: &[UserField; 3], rotation_deg: &[UserField; 3]) -> Result<(), String> {
+    let pose = pose_from_fields(position_mm, rotation_deg)?;
+    if session.pose != pose {
+        session.pose = pose;
+        session.invalidate_pose();
+    }
+    Ok(())
+}
+
+/// Centre the part's bounding box on the plate origin (X = 0, Y = 0).
+pub fn center_session_on_plate(
+    session: &mut ResinSession,
+    position_mm: &mut [UserField; 3],
+    rotation_deg: &mut [UserField; 3],
+) -> Result<(), String> {
+    if !session.has_part() {
+        return Err("Center on plate is disabled: open a part first.".to_string());
+    }
+    session.pose.position_mm[0] = Some(0.0);
+    session.pose.position_mm[1] = Some(0.0);
+    session.invalidate_pose();
+    write_pose_fields(session.pose, position_mm, rotation_deg);
+    Ok(())
+}
+
+/// Lower the part so its lowest point sits at Z = 0.
+pub fn drop_session_to_plate(session: &mut ResinSession, position_mm: &mut [UserField; 3], rotation_deg: &mut [UserField; 3]) -> Result<(), String> {
+    let source = session.mesh.as_ref().ok_or_else(|| "Drop to plate is disabled: open a part first.".to_string())?;
+    let rotated = apply_mesh_pose(source, MeshPose { position_mm: [None, None, None], rotation_deg: session.pose.rotation_deg })
+        .map_err(|err| err.to_string())?;
+    let bounds = rotated.bounds().map_err(|err| err.to_string())?;
+    let (min, max) = (bounds.min(), bounds.max());
+    session.pose.position_mm[2] = Some((max.z - min.z) / 2.0);
+    session.invalidate_pose();
+    write_pose_fields(session.pose, position_mm, rotation_deg);
+    Ok(())
+}
+
+fn current_center(mesh: &Mesh, pose: MeshPose) -> Result<campanion_mesh::Vec3, String> {
+    let posed = apply_mesh_pose(mesh, pose).map_err(|err| err.to_string())?;
+    let bounds = posed.bounds().map_err(|err| err.to_string())?;
+    let (min, max) = (bounds.min(), bounds.max());
+    Ok(campanion_mesh::Vec3::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0, (min.z + max.z) / 2.0))
+}
+
+/// Nudge the posed centre in X and Y and snap to `step_mm`.
+/// Move the bounding-box centre to snapped world `(x, y)`, keeping Z.
+pub fn place_session_xy(
+    session: &mut ResinSession,
+    x: f64,
+    y: f64,
+    step_mm: f64,
+    position_mm: &mut [UserField; 3],
+    rotation_deg: &mut [UserField; 3],
+) -> Result<(), String> {
+    let source = session.mesh.as_ref().ok_or_else(|| "open a part first".to_string())?;
+    let cx = current_center(source, session.pose)?;
+    let x = snap_to_step(x, step_mm).map_err(|err| err.to_string())?;
+    let y = snap_to_step(y, step_mm).map_err(|err| err.to_string())?;
+    session.pose.position_mm[0] = Some(x);
+    session.pose.position_mm[1] = Some(y);
+    if session.pose.position_mm[2].is_none() {
+        session.pose.position_mm[2] = Some(cx.z);
+    }
+    session.invalidate_pose();
+    write_pose_fields(session.pose, position_mm, rotation_deg);
+    Ok(())
+}
+
+pub fn translate_session_xy(
+    session: &mut ResinSession,
+    dx: f64,
+    dy: f64,
+    step_mm: f64,
+    position_mm: &mut [UserField; 3],
+    rotation_deg: &mut [UserField; 3],
+) -> Result<(), String> {
+    let source = session.mesh.as_ref().ok_or_else(|| "open a part first".to_string())?;
+    let cx = current_center(source, session.pose)?;
+    let x = snap_to_step(cx.x + dx, step_mm).map_err(|err| err.to_string())?;
+    let y = snap_to_step(cx.y + dy, step_mm).map_err(|err| err.to_string())?;
+    let mut pose = session.pose;
+    pose.position_mm[0] = Some(x);
+    pose.position_mm[1] = Some(y);
+    if pose.position_mm[2].is_none() {
+        pose.position_mm[2] = Some(cx.z);
+    }
+    session.pose = pose;
+    session.invalidate_pose();
+    write_pose_fields(session.pose, position_mm, rotation_deg);
+    Ok(())
+}
+
+/// Why Center / Drop are disabled.
+pub fn pose_action_disabled_reason(session: &ResinSession, action: &str) -> Option<String> {
+    if session.has_part() { None } else { Some(format!("{action} is disabled: open a part (File → Import part…, STL, millimetres).")) }
 }
 
 /// Fields Generate supports needs, in the order shown on the tab.
@@ -422,13 +586,31 @@ fn include_pt(min: &mut [f64; 2], max: &mut [f64; 2], p: [f64; 2]) {
     max[1] = max[1].max(p[1]);
 }
 
-pub fn apply_generate(session: &mut ResinSession, support: &SupportFields, lift_mm: &UserField, optimize: bool) -> Result<SupportedMesh, String> {
+pub fn apply_generate(
+    session: &mut ResinSession,
+    support: &SupportFields,
+    lift_mm: &UserField,
+    optimize: bool,
+    cancel: Option<&CancelFlag>,
+    progress: Option<&GenerateProgress>,
+) -> Result<SupportedMesh, String> {
+    apply_generate_inner(session, support, lift_mm, optimize, cancel, progress)
+}
+
+fn apply_generate_inner(
+    session: &mut ResinSession,
+    support: &SupportFields,
+    lift_mm: &UserField,
+    optimize: bool,
+    cancel: Option<&CancelFlag>,
+    progress: Option<&GenerateProgress>,
+) -> Result<SupportedMesh, String> {
     if let Some(reason) =
         if optimize { optimize_disabled_reason(session, support, lift_mm) } else { generate_disabled_reason(session, support, lift_mm) }
     {
         return Err(reason);
     }
-    let mesh = session.mesh.as_ref().ok_or_else(|| "open a part first".to_string())?;
+    let mesh = session.posed_part()?.clone();
     let params = support_params_from_fields(support, lift_mm)?;
     let detect = detect_params_from_fields(support)?;
     let extra: Vec<InputPoint> = session
@@ -445,7 +627,9 @@ pub fn apply_generate(session: &mut ResinSession, support: &SupportFields, lift_
     options.optimize = optimize;
     let profile_owned = session.calibration.as_ref().and_then(|state| state.profile.clone());
     options.calibration = profile_owned.as_ref();
-    let result = generate_supports_with(mesh, &params, options).map_err(|err| err.to_string())?;
+    options.cancel = cancel;
+    options.progress = progress;
+    let result = generate_supports_with(&mesh, &params, options).map_err(|err| err.to_string())?;
     session.points = result.points.clone();
     session.features = result.features.clone();
     session.warnings = result.warnings.clone();
@@ -487,9 +671,9 @@ pub fn load_params_file(session: &mut ResinSession, path: std::path::PathBuf) ->
 
 /// Mesh the slicer should cut: the supported solid (raft and pillars included) when supports exist.
 pub fn print_mesh(session: &mut ResinSession, support: &SupportFields, lift_mm: &UserField) -> Result<campanion_mesh::Mesh, String> {
-    let source = session.mesh.as_ref().ok_or_else(|| "open a part first".to_string())?;
+    let source = session.posed_part()?.clone();
     if session.points.is_empty() && session.supported.is_none() {
-        return Ok(source.clone());
+        return Ok(source);
     }
     if !session.points_dirty
         && let Some(supported) = &session.supported
@@ -499,7 +683,7 @@ pub fn print_mesh(session: &mut ResinSession, support: &SupportFields, lift_mm: 
     }
     let params = support_params_from_fields(support, lift_mm)?;
     let palette: Vec<_> = session.calibration.as_ref().and_then(|state| state.profile.as_ref()).map(|p| p.tip_palette.clone()).unwrap_or_default();
-    let rebuilt = rebuild_supported(source, &params, &session.points, &palette).map_err(|err| err.to_string())?;
+    let rebuilt = rebuild_supported(&source, &params, &session.points, &palette).map_err(|err| err.to_string())?;
     let mesh = rebuilt.mesh.clone();
     session.supported = Some(rebuilt);
     session.points_dirty = false;
@@ -514,7 +698,8 @@ pub fn apply_slice(session: &mut ResinSession, support: &SupportFields, lift_mm:
     }
     let settings = session.settings.clone().ok_or_else(|| "choose a sample or params .pm7m first".to_string())?;
     let mesh = print_mesh(session, support, lift_mm)?;
-    let (bytes, report) = build_pm7m(&mesh, &M7_MAX, &settings, Placement::Center).map_err(|err| err.to_string())?;
+    let placement = if session.pose.is_empty() { Placement::Center } else { Placement::Keep };
+    let (bytes, report) = build_pm7m(&mesh, &M7_MAX, &settings, placement).map_err(|err| err.to_string())?;
     let back = campanion_resin::read_pm7m(&bytes).map_err(|err| format!("read-back failed: {err}"))?;
     if back.layers.len() != report.layers || back.machine_name != M7_MAX.name {
         return Err("read-back does not match what was built".to_string());
@@ -693,7 +878,7 @@ impl ResinSession {
             meshes.push(ShadedMesh::from_mesh(&supported.part, COLOR_PART, MeshRole::Part));
             meshes.push(ShadedMesh::from_mesh(&supported.raft, COLOR_RAFT, MeshRole::Raft));
             meshes.push(ShadedMesh::from_mesh(&supported.pillars, COLOR_SUPPORT, MeshRole::Support));
-        } else if let Some(mesh) = &self.mesh {
+        } else if let Ok(mesh) = self.posed_part() {
             meshes.push(ShadedMesh::from_mesh(mesh, COLOR_PART, MeshRole::Part));
         }
         if let Some(features) = &self.features {
@@ -1064,6 +1249,117 @@ pub fn selected_count(session: &ResinSession) -> u32 {
     u32::try_from(session.selected_point.map(|_| 1).unwrap_or(0)).unwrap_or(0)
 }
 
+/// Background Generate / Optimize work, with progress and cancel.
+#[derive(Default)]
+pub struct ResinGenerateJob {
+    cancel: Option<std::sync::Arc<CancelFlag>>,
+    progress: Option<std::sync::Arc<GenerateProgress>>,
+    receiver: Option<std::sync::mpsc::Receiver<Result<ResinSession, String>>>,
+}
+
+impl ResinGenerateJob {
+    /// True while a worker is outstanding.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.receiver.is_some()
+    }
+
+    /// Start generation on a background thread. Refuses if a run is already in flight.
+    pub fn start(&mut self, session: &ResinSession, support: SupportFields, lift_mm: UserField, optimize: bool) -> Result<(), String> {
+        if self.is_running() {
+            return Err("Generate supports is already running.".to_string());
+        }
+        let reason =
+            if optimize { optimize_disabled_reason(session, &support, &lift_mm) } else { generate_disabled_reason(session, &support, &lift_mm) };
+        if let Some(reason) = reason {
+            return Err(reason);
+        }
+        let cancel = std::sync::Arc::new(CancelFlag::new());
+        let progress = std::sync::Arc::new(GenerateProgress::new());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut worker_session = session.clone();
+        let cancel_w = std::sync::Arc::clone(&cancel);
+        let progress_w = std::sync::Arc::clone(&progress);
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                apply_generate(&mut worker_session, &support, &lift_mm, optimize, Some(cancel_w.as_ref()), Some(progress_w.as_ref()))
+            }));
+            let result = match outcome {
+                Ok(Ok(_)) => Ok(worker_session),
+                Ok(Err(err)) => Err(err),
+                Err(payload) => Err(crate::crash::log_caught_panic(payload.as_ref()).0),
+            };
+            let _ = sender.send(result);
+        });
+        self.cancel = Some(cancel);
+        self.progress = Some(progress);
+        self.receiver = Some(receiver);
+        Ok(())
+    }
+
+    /// Ask the worker to stop at the next layer or stage check.
+    pub fn cancel(&self) {
+        if let Some(flag) = &self.cancel {
+            flag.cancel();
+        }
+    }
+
+    /// Take a finished result, if any.
+    pub fn tick(&mut self) -> Option<Result<ResinSession, String>> {
+        let receiver = self.receiver.as_ref()?;
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.receiver = None;
+                self.cancel = None;
+                self.progress = None;
+                Some(result)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.receiver = None;
+                self.cancel = None;
+                self.progress = None;
+                Some(Err("Generate supports stopped unexpectedly.".to_string()))
+            }
+        }
+    }
+
+    /// Status line while a run is in flight.
+    #[must_use]
+    pub fn progress_text(&self) -> Option<String> {
+        let progress = self.progress.as_ref()?;
+        let stage = progress.stage();
+        let layer = progress.layer();
+        let layers = progress.layers();
+        if layers > 0 {
+            Some(format!("{stage} — layer {layer} / {layers}. Cancel stops at the next layer."))
+        } else if stage.is_empty() {
+            Some("Generating supports…".to_string())
+        } else {
+            Some(format!("{stage}…"))
+        }
+    }
+}
+
+/// Copy generate outputs from a worker session onto the live session, keeping the user's view and tool.
+pub fn commit_generate_session(live: &mut ResinSession, worker: ResinSession) {
+    live.points = worker.points;
+    live.features = worker.features;
+    live.warnings = worker.warnings;
+    live.selected_point = worker.selected_point;
+    live.optimize_summary = worker.optimize_summary;
+    live.last_generate_note = worker.last_generate_note;
+    live.supported = worker.supported;
+    live.points_dirty = worker.points_dirty;
+    live.solid_meshes = worker.solid_meshes;
+    live.sliced = worker.sliced;
+    live.pm7m = worker.pm7m;
+    live.slice_report = worker.slice_report;
+    live.layer_images = worker.layer_images;
+    live.slice_width = worker.slice_width;
+    live.slice_height = worker.slice_height;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,5 +1434,107 @@ mod tests {
         assert_eq!(campanion_resin::constant_label("suction_coefficient_n_per_mm2"), "Suction force per area (N/mm²)");
         assert_eq!(campanion_resin::constant_label("resin_density_g_per_cm3"), "Resin density (g/cm³)");
         assert!((campanion_resin::STANDARD_GRAVITY_M_S2 - 9.80665).abs() < 1e-12);
+    }
+
+    fn off_center_box() -> Mesh {
+        use campanion_mesh::{Aabb, Vec3};
+        Mesh::new(Aabb::from_corners(Vec3::new(135.0, 70.0, 0.0), Vec3::new(163.0, 96.0, 61.0)).face_triangles().to_vec()).expect("box")
+    }
+
+    fn filled_support() -> (SupportFields, UserField) {
+        let mut support = SupportFields::default();
+        let set = |field: &mut UserField, value: &str| field.value = value.to_string();
+        set(&mut support.layer_height_mm, "0.50");
+        set(&mut support.detect_cell_mm, "0.50");
+        set(&mut support.support_spacing_mm, "4.00");
+        set(&mut support.overhang_angle_deg, "45");
+        set(&mut support.tip_diameter_mm, "0.60");
+        set(&mut support.tip_length_mm, "1.20");
+        set(&mut support.pillar_diameter_mm, "1.20");
+        set(&mut support.foot_diameter_mm, "3.00");
+        set(&mut support.foot_height_mm, "0.80");
+        set(&mut support.raft_thickness_mm, "1.50");
+        set(&mut support.raft_chamfer_angle_deg, "30");
+        set(&mut support.raft_margin_mm, "3.00");
+        set(&mut support.raft_corner_relief_mm, "0");
+        let mut lift = UserField::empty();
+        lift.value = "5.00".to_string();
+        (support, lift)
+    }
+
+    #[test]
+    fn empty_pose_fields_leave_the_imported_part_in_place() {
+        let mut session = ResinSession { mesh: Some(off_center_box()), ..ResinSession::default() };
+        let position = [UserField::empty(), UserField::empty(), UserField::empty()];
+        let rotation = [UserField::empty(), UserField::empty(), UserField::empty()];
+        apply_pose_fields(&mut session, &position, &rotation).expect("pose");
+        assert!(session.pose.is_empty());
+        let posed = session.posed_part().expect("posed");
+        let bounds = posed.bounds().expect("bounds");
+        assert!((bounds.min().x - 135.0).abs() < 1e-9, "{}", bounds.min().x);
+        assert!((bounds.min().y - 70.0).abs() < 1e-9, "{}", bounds.min().y);
+    }
+
+    #[test]
+    fn typed_pose_and_center_on_plate_move_an_off_center_part() {
+        let mut session = ResinSession { mesh: Some(off_center_box()), ..ResinSession::default() };
+        let mut position = [UserField::empty(), UserField::empty(), UserField::empty()];
+        let mut rotation = [UserField::empty(), UserField::empty(), UserField::empty()];
+        position[0].value = "0".to_string();
+        position[1].value = "0".to_string();
+        apply_pose_fields(&mut session, &position, &rotation).expect("pose");
+        let posed = session.posed_part().expect("posed");
+        let bounds = posed.bounds().expect("bounds");
+        assert!(((bounds.min().x + bounds.max().x) / 2.0).abs() < 1e-9);
+        assert!(((bounds.min().y + bounds.max().y) / 2.0).abs() < 1e-9);
+
+        let mut session = ResinSession { mesh: Some(off_center_box()), ..ResinSession::default() };
+        center_session_on_plate(&mut session, &mut position, &mut rotation).expect("center");
+        assert_eq!(position[0].value, "0");
+        assert_eq!(position[1].value, "0");
+        let posed = session.posed_part().expect("posed");
+        let bounds = posed.bounds().expect("bounds");
+        assert!(((bounds.min().x + bounds.max().x) / 2.0).abs() < 1e-9);
+        assert!(((bounds.min().y + bounds.max().y) / 2.0).abs() < 1e-9);
+        assert!((bounds.min().z - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drop_to_plate_lifts_a_part_that_sits_below_z_zero() {
+        use campanion_mesh::{Aabb, Vec3};
+        let mesh = Mesh::new(Aabb::from_corners(Vec3::new(-10.0, -10.0, -42.0), Vec3::new(10.0, 10.0, 54.0)).face_triangles().to_vec()).expect("box");
+        let mut session = ResinSession { mesh: Some(mesh), ..ResinSession::default() };
+        let mut position = [UserField::empty(), UserField::empty(), UserField::empty()];
+        let mut rotation = [UserField::empty(), UserField::empty(), UserField::empty()];
+        drop_session_to_plate(&mut session, &mut position, &mut rotation).expect("drop");
+        let posed = session.posed_part().expect("posed");
+        let bounds = posed.bounds().expect("bounds");
+        assert!((bounds.min().z).abs() < 1e-9, "min z {}", bounds.min().z);
+        assert!((bounds.max().z - 96.0).abs() < 1e-9, "max z {}", bounds.max().z);
+    }
+
+    #[test]
+    fn generate_uses_the_posed_mesh_and_honours_cancel() {
+        let mut session = ResinSession { mesh: Some(off_center_box()), ..ResinSession::default() };
+        let mut position = [UserField::empty(), UserField::empty(), UserField::empty()];
+        let mut rotation = [UserField::empty(), UserField::empty(), UserField::empty()];
+        center_session_on_plate(&mut session, &mut position, &mut rotation).expect("center");
+        let (support, lift) = filled_support();
+        let result = apply_generate(&mut session, &support, &lift, false, None, None).expect("generate");
+        let bounds = result.part.bounds().expect("bounds");
+        assert!(((bounds.min().x + bounds.max().x) / 2.0).abs() < 1e-6, "generated part was not centred");
+
+        let cancel = campanion_resin::CancelFlag::new();
+        cancel.cancel();
+        let err = apply_generate(&mut session, &support, &lift, false, Some(&cancel), None).expect_err("cancelled");
+        assert!(err == "cancelled" || err.contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn pose_buttons_explain_why_they_are_disabled() {
+        let session = ResinSession::default();
+        let reason = pose_action_disabled_reason(&session, "Center on plate").expect("disabled");
+        assert!(reason.contains("Center on plate is disabled"), "{reason}");
+        assert!(reason.contains("open a part"), "{reason}");
     }
 }

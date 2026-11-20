@@ -14,6 +14,7 @@
 use campanion_mesh::{Mesh, Triangle};
 
 use crate::error::{ResinError, Result};
+use crate::supports::cancel::{CancelFlag, GenerateProgress, check_cancel};
 
 /// Hard cap on occupancy grid width or height, in cells.
 pub const MAX_GRID_SIDE: u32 = 2048;
@@ -172,6 +173,17 @@ impl DetectedFeatures {
 
 /// Detect first-appearance islands and related layer features.
 pub fn detect_islands(mesh: &Mesh, params: &IslandDetectParams) -> Result<DetectedFeatures> {
+    detect_islands_with(mesh, params, None, None)
+}
+
+/// [`detect_islands`] with a cancel flag and optional progress reporting.
+pub fn detect_islands_with(
+    mesh: &Mesh,
+    params: &IslandDetectParams,
+    cancel: Option<&CancelFlag>,
+    progress: Option<&GenerateProgress>,
+) -> Result<DetectedFeatures> {
+    check_cancel(cancel)?;
     params.validate()?;
     let bounds = mesh.bounds().map_err(|err| ResinError::invalid(format!("part: {err}")))?;
     let z_min = bounds.min().z;
@@ -227,12 +239,21 @@ pub fn detect_islands(mesh: &Mesh, params: &IslandDetectParams) -> Result<Detect
         }
     }
 
+    if let Some(progress) = progress {
+        progress.set_layers(layer_count);
+        progress.set_layer(0);
+    }
     for i in 0..layer_count {
+        check_cancel(cancel)?;
+        if let Some(progress) = progress {
+            progress.set_layer(i + 1);
+        }
         let z = z_min + (f64::from(i) + 0.5) * params.layer_height_mm;
         let bucket = buckets.get(i as usize).map_or(&[][..], Vec::as_slice);
         let bitmap = rasterize_layer(triangles, bucket, z, &grid);
         grid.layers.push(bitmap);
     }
+    check_cancel(cancel)?;
 
     let cell_area = params.cell_mm * params.cell_mm;
     let mut islands = Vec::new();

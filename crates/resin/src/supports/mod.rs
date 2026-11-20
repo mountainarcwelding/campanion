@@ -7,11 +7,13 @@
 //! are not implemented.
 
 mod calibration;
+mod cancel;
 mod classify;
 mod islands;
 mod optimize;
 mod params;
 mod place;
+mod pose;
 mod raft;
 mod solid;
 
@@ -19,10 +21,11 @@ pub use calibration::{
     CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, MissingConstant, REQUIRED_CONSTANTS, REQUIRED_TIP_FIELDS,
     STANDARD_GRAVITY_M_S2, constant_label, import_calibration, load_calibration, missing_constants_in, parse_calibration,
 };
+pub use cancel::{CancelFlag, GenerateProgress};
 pub use classify::{ClassifiedRegion, ClassifyThresholds, FeatureClass, classify_features};
 pub use islands::{
-    DetectGrid, DetectedFeatures, Island, IslandDetectParams, LayerStats, MAX_DETECT_LAYERS, MAX_GRID_SIDE, detect_islands, island_fill_points,
-    thin_components,
+    DetectGrid, DetectedFeatures, Island, IslandDetectParams, LayerStats, MAX_DETECT_LAYERS, MAX_GRID_SIDE, detect_islands, detect_islands_with,
+    island_fill_points, thin_components,
 };
 pub use optimize::{ForceBreakdown, OptimizeInput, OptimizeResult, optimize_supports, place_with_islands};
 pub use params::{REQUIRED_FLAGS, SupportParams, SupportParamsOverlay, parse_support_params_json};
@@ -30,6 +33,7 @@ pub use place::{
     InputPoint, PointSource, SupportPoint, add_support_point, delete_support_point, is_overhang, move_support_point, overhangs_are_covered,
     parse_points_text, place_supports, thin_points_with, write_points_text,
 };
+pub use pose::{MeshPose, apply_mesh_pose, center_on_plate, drop_to_plate, snap_to_step};
 pub use raft::{RaftOutlines, edge_insets, raft_outlines};
 pub use solid::{combine_meshes, is_watertight, signed_volume, translate_mesh};
 
@@ -67,6 +71,10 @@ pub struct GenerateOptions<'a> {
     /// When true, the optimizer runs and requires a complete [`calibration`].
     pub optimize: bool,
     pub calibration: Option<&'a CalibrationProfile>,
+    /// When set, generation stops at the next layer or stage check.
+    pub cancel: Option<&'a CancelFlag>,
+    /// When set, the worker publishes the current stage and layer index.
+    pub progress: Option<&'a GenerateProgress>,
 }
 
 impl<'a> GenerateOptions<'a> {
@@ -80,6 +88,8 @@ impl<'a> GenerateOptions<'a> {
             lowest_band_spacing_mm: None,
             optimize: false,
             calibration: None,
+            cancel: None,
+            progress: None,
         }
     }
 
@@ -130,12 +140,19 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
     {
         return Err(ResinError::invalid("island ignore area must be 0 mm² or greater"));
     }
+    crate::supports::cancel::check_cancel(options.cancel)?;
+    if let Some(progress) = options.progress {
+        progress.set_stage("Lifting part");
+        progress.set_layer(0);
+        progress.set_layers(0);
+    }
     let bounds = part.bounds().map_err(|err| ResinError::invalid(format!("part: {err}")))?;
     let lift_z = params.raft_thickness_mm + params.part_lift_mm - bounds.min().z;
     if !lift_z.is_finite() {
         return Err(ResinError::invalid("part lift is not finite"));
     }
     let part = translate_mesh(part, Vec3::new(0.0, 0.0, lift_z))?;
+    crate::supports::cancel::check_cancel(options.cancel)?;
     let raft_top = params.raft_thickness_mm;
     let band = match (options.lowest_band_height_mm, options.lowest_band_spacing_mm) {
         (Some(height), Some(spacing)) => Some((height, spacing)),
@@ -162,10 +179,21 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         })?;
         (result.points, Some(result.features), Some(result.forces), result.warnings)
     } else if let Some(detect) = options.detect {
-        let features = detect_islands(&part, &detect)?;
+        if let Some(progress) = options.progress {
+            progress.set_stage("Detecting islands");
+        }
+        let features = detect_islands_with(&part, &detect, options.cancel, options.progress)?;
+        crate::supports::cancel::check_cancel(options.cancel)?;
+        if let Some(progress) = options.progress {
+            progress.set_stage("Placing supports");
+        }
         let points = place_with_islands(&part, params, &features, options.extra, options.auto, options.island_ignore_area_mm2, band, raft_top)?;
         (points, Some(features), None, Vec::new())
     } else {
+        crate::supports::cancel::check_cancel(options.cancel)?;
+        if let Some(progress) = options.progress {
+            progress.set_stage("Placing supports");
+        }
         let mut points = place_supports(&part, params, options.extra, options.auto, raft_top)?;
         if let Some((height, spacing)) = band {
             let z_cut = part.bounds().map_err(|err| ResinError::invalid(format!("part: {err}")))?.min().z + height;
@@ -173,6 +201,10 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         }
         (points, None, None, Vec::new())
     };
+    crate::supports::cancel::check_cancel(options.cancel)?;
+    if let Some(progress) = options.progress {
+        progress.set_stage("Building solids");
+    }
     let palette = options.calibration.map(|profile| profile.tip_palette.as_slice()).unwrap_or(&[]);
     assemble_supported(part, params, points, features, optimize, warnings, palette)
 }

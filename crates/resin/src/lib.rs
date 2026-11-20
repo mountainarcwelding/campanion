@@ -32,10 +32,11 @@ pub use pm7m::{
 };
 pub use slice::{Placement, PreparedMesh, SliceGrid, Span, encode_spans};
 pub use supports::{
-    CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, ClassifiedRegion, DetectedFeatures, FeatureClass, ForceBreakdown,
-    GenerateOptions, InputPoint, Island, IslandDetectParams, MissingConstant, OptimizeInput, OptimizeResult, PointSource, REQUIRED_CONSTANTS,
-    REQUIRED_FLAGS, REQUIRED_TIP_FIELDS, STANDARD_GRAVITY_M_S2, SupportParams, SupportParamsOverlay, SupportPoint, SupportedMesh, add_support_point,
-    classify_features, constant_label, delete_support_point, detect_islands, generate_supports, generate_supports_with, import_calibration,
-    is_watertight, load_calibration, missing_constants_in, move_support_point, optimize_supports, parse_calibration, parse_points_text,
-    parse_support_params_json, rebuild_supported, render_supported_png, write_points_text,
+    CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, CancelFlag, ClassifiedRegion, DetectedFeatures, FeatureClass,
+    ForceBreakdown, GenerateOptions, GenerateProgress, InputPoint, Island, IslandDetectParams, MeshPose, MissingConstant, OptimizeInput,
+    OptimizeResult, PointSource, REQUIRED_CONSTANTS, REQUIRED_FLAGS, REQUIRED_TIP_FIELDS, STANDARD_GRAVITY_M_S2, SupportParams, SupportParamsOverlay,
+    SupportPoint, SupportedMesh, add_support_point, apply_mesh_pose, center_on_plate, classify_features, constant_label, delete_support_point,
+    detect_islands, detect_islands_with, drop_to_plate, generate_supports, generate_supports_with, import_calibration, is_watertight,
+    load_calibration, missing_constants_in, move_support_point, optimize_supports, parse_calibration, parse_points_text, parse_support_params_json,
+    rebuild_supported, render_supported_png, snap_to_step, write_points_text,
 };
