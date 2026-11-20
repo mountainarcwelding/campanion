@@ -3,9 +3,11 @@
 //! This module builds a watertight raft with a sloped perimeter and vertical pillar supports.
 //! It does not invent parameter values; every length and angle comes from [`SupportParams`] or,
 //! for the optimizer, from a user calibration profile. The undercut chamfered raft (narrow on
-//! the bed) is unchanged. Branching tree supports, painted no-support zones, and scaffolding
-//! are not implemented.
+//! the bed) is unchanged. Painted support and no-support zones, cross-bracing, tip penetration and
+//! user-saved tip presets are optional and take their values from the user. Branching tree
+//! supports and scaffolding are not implemented.
 
+mod bracing;
 mod calibration;
 mod cancel;
 mod classify;
@@ -15,10 +17,13 @@ mod optimize;
 mod params;
 mod place;
 mod pose;
+mod presets;
 mod profile;
 mod raft;
 mod solid;
+mod zones;
 
+pub use bracing::{BracingParams, MAX_STRUTS, Shaft, Strut, plan_braces, spanning_links, strut_solid};
 pub use calibration::{
     CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, MissingConstant, REQUIRED_CONSTANTS, REQUIRED_TIP_FIELDS,
     STANDARD_GRAVITY_M_S2, constant_label, import_calibration, load_calibration, missing_constants_in, parse_calibration,
@@ -36,12 +41,18 @@ pub use place::{
     parse_points_text, place_supports, thin_points_with, write_points_text,
 };
 pub use pose::{MeshPose, apply_mesh_pose, center_on_plate, drop_to_plate, snap_to_step};
+pub use presets::{
+    MAX_PRESETS, PRESETS_SCHEMA, PresetMix, SupportRole, TipGeometry, TipPreset, apply_mix, check_penetration, forget_preset, parse_presets,
+    preset_index, resolve_named_points, role_of, write_presets,
+};
 pub use raft::{RaftOutlines, edge_insets, raft_outlines};
 pub use solid::{combine_meshes, is_watertight, signed_volume, translate_mesh};
+pub use zones::{FaceZones, ZONES_SCHEMA, ZoneMark, ZoneReport, apply_zones, remove_blocked};
 
 use campanion_mesh::{Mesh, Vec3};
 
 use crate::error::{ResinError, Result};
+use crate::supports::presets::params_for_point;
 use crate::supports::solid::{RING_SIDES, loft_outlines, profile_solid};
 
 /// The lifted part, the raft, the pillars, and the combined mesh.
@@ -51,6 +62,8 @@ pub struct SupportedMesh {
     pub part: Mesh,
     pub raft: Mesh,
     pub pillars: Mesh,
+    /// Cross-bracing struts, empty when bracing is off.
+    pub braces: Mesh,
     pub points: Vec<SupportPoint>,
     pub outlines: RaftOutlines,
     /// Island detection results, when detection was requested.
@@ -58,6 +71,34 @@ pub struct SupportedMesh {
     /// Holding-force breakdown, when the optimizer ran.
     pub optimize: Option<ForceBreakdown>,
     pub warnings: Vec<String>,
+    /// Geometry that each point's `preset_index` refers to, and the names shown for it.
+    pub palette: Vec<TipGeometry>,
+    pub palette_names: Vec<String>,
+    /// What painted zones changed, when zones were given.
+    pub zone_report: Option<ZoneReport>,
+    /// Struts built, and struts left out because they would touch the part.
+    pub brace_count: usize,
+    pub braces_skipped: usize,
+}
+
+/// Optional solid-building settings. Each is off when `None`; nothing is assumed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SolidOptions {
+    /// Depth the tip continues straight into the part past the contact, millimetres.
+    pub tip_penetration_mm: Option<f64>,
+    pub bracing: Option<BracingParams>,
+}
+
+impl SolidOptions {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(depth) = self.tip_penetration_mm {
+            check_penetration(depth)?;
+        }
+        if let Some(bracing) = &self.bracing {
+            bracing.validate()?;
+        }
+        Ok(())
+    }
 }
 
 /// Options for [`generate_supports_with`]. Uniform and manual modes work without a calibration profile.
@@ -77,6 +118,15 @@ pub struct GenerateOptions<'a> {
     pub cancel: Option<&'a CancelFlag>,
     /// When set, the worker publishes the current stage and layer index.
     pub progress: Option<&'a GenerateProgress>,
+    /// Painted zones, one mark per part triangle.
+    pub zones: Option<&'a FaceZones>,
+    /// XY spacing inside painted support zones. Required when any support face is painted.
+    pub zone_spacing_mm: Option<f64>,
+    /// User-saved tip presets that the mix and points-file names refer to.
+    pub presets: &'a [TipPreset],
+    /// Which preset each kind of support uses. Not allowed with the optimizer, which picks its own tips.
+    pub mix: Option<&'a PresetMix>,
+    pub solids: SolidOptions,
 }
 
 impl<'a> GenerateOptions<'a> {
@@ -92,6 +142,11 @@ impl<'a> GenerateOptions<'a> {
             calibration: None,
             cancel: None,
             progress: None,
+            zones: None,
+            zone_spacing_mm: None,
+            presets: &[],
+            mix: None,
+            solids: SolidOptions::default(),
         }
     }
 
@@ -117,12 +172,29 @@ pub fn generate_supports(part: &Mesh, params: &SupportParams, extra: &[InputPoin
 /// Lift `part`, add the undercut chamfered raft, and place supports according to `options`.
 pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: GenerateOptions<'_>) -> Result<SupportedMesh> {
     params.validate()?;
+    options.solids.validate()?;
+    if options.optimize && options.mix.is_some_and(|mix| !mix.is_empty()) {
+        return Err(ResinError::invalid(
+            "the optimizer picks its own tips from the calibration palette; clear the preset mix or turn the optimizer off",
+        ));
+    }
+    if let Some(mix) = options.mix {
+        mix.check(options.presets)?;
+    }
+    let painted_support = options.zones.is_some_and(|zones| zones.counts().0 > 0);
+    if painted_support {
+        match options.zone_spacing_mm {
+            Some(spacing) if spacing.is_finite() && spacing > 0.0 => {}
+            Some(_) => return Err(ResinError::invalid("painted zone spacing must be greater than 0 mm")),
+            None => return Err(ResinError::invalid("support zones are painted; enter the painted zone spacing")),
+        }
+    }
     if options.optimize && options.calibration.is_none() {
         return Err(ResinError::invalid(
             "optimizer requires a complete calibration profile; load a profile or use uniform / manual supports without --optimize",
         ));
     }
-    if !options.auto && options.extra.is_empty() && !options.optimize {
+    if !options.auto && options.extra.is_empty() && !options.optimize && !painted_support {
         return Err(ResinError::invalid("auto generation is off and no explicit --points were given"));
     }
     match (options.lowest_band_height_mm, options.lowest_band_spacing_mm) {
@@ -155,6 +227,9 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
     }
     let t_gen = std::time::Instant::now();
     let part = translate_mesh(part, Vec3::new(0.0, 0.0, lift_z))?;
+    if let Some(zones) = options.zones {
+        zones.check_mesh(&part)?;
+    }
     crate::supports::profile::log("lift part", t_gen);
     crate::supports::cancel::check_cancel(options.cancel)?;
     let raft_top = params.raft_thickness_mm;
@@ -162,7 +237,7 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         (Some(height), Some(spacing)) => Some((height, spacing)),
         _ => None,
     };
-    let (points, features, optimize, warnings) = if options.optimize {
+    let (mut points, features, mut optimize, mut warnings) = if options.optimize {
         let calibration = options.calibration.ok_or_else(|| {
             ResinError::invalid(
                 "optimizer requires a complete calibration profile; load a profile or use uniform / manual supports without --optimize",
@@ -202,7 +277,11 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         if let Some(progress) = options.progress {
             progress.set_stage("Placing supports");
         }
-        let mut points = place_supports(&part, params, options.extra, options.auto, raft_top)?;
+        let mut points = if !options.auto && options.extra.is_empty() {
+            Vec::new()
+        } else {
+            place_supports(&part, params, options.extra, options.auto, raft_top)?
+        };
         if let Some((height, spacing)) = band {
             let z_cut = part.bounds().map_err(|err| ResinError::invalid(format!("part: {err}")))?.min().z + height;
             points = thin_points_with(&points, params.support_spacing_mm, Some((z_cut, spacing)))?;
@@ -210,12 +289,83 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         (points, None, None, Vec::new())
     };
     crate::supports::cancel::check_cancel(options.cancel)?;
+    let mut zone_report = None;
+    if let Some(zones) = options.zones
+        && !zones.is_empty()
+    {
+        if let Some(progress) = options.progress {
+            progress.set_stage("Applying painted zones");
+        }
+        let t_zones = std::time::Instant::now();
+        let spacing = options.zone_spacing_mm.unwrap_or(params.support_spacing_mm);
+        let (kept, report) = apply_zones(&part, zones, points, spacing, raft_top)?;
+        points = kept;
+        crate::supports::profile::log("generate zones", t_zones);
+        if report.blocked_removed > 0 {
+            warnings.push(format!("{} automatic support(s) removed by no-support zones", report.blocked_removed));
+        }
+        if report.painted_unreachable > 0 {
+            warnings.push(format!(
+                "{} painted support face(s) face up or sideways, or have part below them, and cannot take a vertical support",
+                report.painted_unreachable
+            ));
+        }
+        zone_report = Some(report);
+    }
+    let (palette, palette_names): (Vec<TipGeometry>, Vec<String>) = if options.optimize {
+        let tips = options.calibration.map(|profile| profile.tip_palette.as_slice()).unwrap_or(&[]);
+        (tips.iter().map(TipGeometry::from).collect(), tips.iter().map(|tip| tip.name.clone()).collect())
+    } else {
+        (options.presets.iter().map(TipGeometry::from).collect(), options.presets.iter().map(|preset| preset.name.clone()).collect())
+    };
+    if options.optimize {
+        if let Some(forces) = optimize.as_mut()
+            && zone_report.is_some()
+        {
+            let chosen = palette_names.iter().position(|name| *name == forces.preset_name);
+            let per_tip = options
+                .calibration
+                .and_then(|profile| chosen.and_then(|index| profile.tip_palette.get(index)))
+                .map(|tip| (tip.tip_capacity_n, tip.contact_area_mm2));
+            if let (Some(index), Some((capacity, area))) = (chosen, per_tip) {
+                for point in points.iter_mut().filter(|p| p.preset_index.is_none()) {
+                    point.preset_index = u16::try_from(index).ok();
+                }
+                forces.tip_count = points.len();
+                forces.capacity_n = points.len() as f64 * capacity;
+                forces.scar_area_mm2 = points.len() as f64 * area;
+                forces.sufficient = forces.capacity_n + 1e-12 >= forces.demand_n;
+                if !forces.sufficient {
+                    warnings.push(format!(
+                        "after painted zones, capacity {:.4} N is below the demand {:.4} N; paint fewer no-support faces or use a stronger tip",
+                        forces.capacity_n, forces.demand_n
+                    ));
+                }
+            }
+        }
+    } else {
+        if !options.presets.is_empty() {
+            resolve_named_points(&mut points, options.extra, options.presets)?;
+        }
+        if let Some(mix) = options.mix {
+            let band_z = match (options.lowest_band_height_mm, part.bounds()) {
+                (Some(height), Ok(bounds)) => Some(bounds.min().z + height),
+                _ => None,
+            };
+            apply_mix(&mut points, mix, options.presets, band_z)?;
+        }
+    }
+    if points.is_empty() && !options.auto && !options.optimize {
+        return Err(ResinError::invalid("no support points were placed; paint a reachable support zone, give --points, or enable auto generation"));
+    }
+    crate::supports::cancel::check_cancel(options.cancel)?;
     if let Some(progress) = options.progress {
         progress.set_stage("Building solids");
     }
-    let palette = options.calibration.map(|profile| profile.tip_palette.as_slice()).unwrap_or(&[]);
     let t_assemble = std::time::Instant::now();
-    let out = assemble_supported(part, params, points, features, optimize, warnings, palette)?;
+    let mut out = assemble_supported(part, params, points, features, optimize, warnings, &palette, &options.solids)?;
+    out.palette_names = palette_names;
+    out.zone_report = zone_report;
     crate::supports::profile::log("generate assemble", t_assemble);
     crate::supports::profile::log("generate total", t_gen);
     Ok(out)
@@ -225,7 +375,22 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
 ///
 /// Point Z values must already be in the lifted frame used by [`generate_supports_with`].
 pub fn rebuild_supported(part: &Mesh, params: &SupportParams, points: &[SupportPoint], palette: &[CalibratedTip]) -> Result<SupportedMesh> {
+    let geometry: Vec<TipGeometry> = palette.iter().map(TipGeometry::from).collect();
+    let names: Vec<String> = palette.iter().map(|tip| tip.name.clone()).collect();
+    rebuild_supported_with(part, params, points, &geometry, &names, &SolidOptions::default())
+}
+
+/// [`rebuild_supported`] with an explicit tip palette and optional penetration and bracing.
+pub fn rebuild_supported_with(
+    part: &Mesh,
+    params: &SupportParams,
+    points: &[SupportPoint],
+    palette: &[TipGeometry],
+    palette_names: &[String],
+    solids: &SolidOptions,
+) -> Result<SupportedMesh> {
     params.validate()?;
+    solids.validate()?;
     let bounds = part.bounds().map_err(|err| ResinError::invalid(format!("part: {err}")))?;
     let lift_z = params.raft_thickness_mm + params.part_lift_mm - bounds.min().z;
     if !lift_z.is_finite() {
@@ -234,21 +399,25 @@ pub fn rebuild_supported(part: &Mesh, params: &SupportParams, points: &[SupportP
     let t_gen = std::time::Instant::now();
     let part = translate_mesh(part, Vec3::new(0.0, 0.0, lift_z))?;
     crate::supports::profile::log("lift part", t_gen);
-    assemble_supported(part, params, points.to_vec(), None, None, Vec::new(), palette)
+    let mut out = assemble_supported(part, params, points.to_vec(), None, None, Vec::new(), palette, solids)?;
+    out.palette_names = palette_names.to_vec();
+    Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assemble_supported(
     part: Mesh,
     params: &SupportParams,
     points: Vec<SupportPoint>,
     features: Option<DetectedFeatures>,
     optimize: Option<ForceBreakdown>,
-    warnings: Vec<String>,
-    palette: &[CalibratedTip],
+    mut warnings: Vec<String>,
+    palette: &[TipGeometry],
+    solids: &SolidOptions,
 ) -> Result<SupportedMesh> {
     let raft_top = params.raft_thickness_mm;
     for point in &points {
-        let used = params_for_point(params, point, palette)?;
+        let (used, _) = params_for_point(params, point, palette)?;
         let needed = raft_top + used.foot_height_mm + used.tip_length_mm;
         if point.contact_z + 1e-9 < needed {
             return Err(ResinError::invalid(format!(
@@ -268,39 +437,52 @@ fn assemble_supported(
     }
     let outlines = raft_outlines(&footprint, params)?;
     let raft = loft_outlines(&outlines.bottom, &outlines.top, 0.0, params.raft_thickness_mm)?;
-    let mut pillar_meshes = Vec::new();
+    let mut pillar_triangles = Vec::new();
+    let mut shafts = Vec::with_capacity(points.len());
     for point in &points {
-        let used = params_for_point(params, point, palette)?;
-        pillar_meshes.push(pillar_solid(point, &used, raft_top)?);
+        let (used, preset_depth) = params_for_point(params, point, palette)?;
+        let depth = preset_depth.or(solids.tip_penetration_mm).unwrap_or(0.0);
+        check_penetration(depth)?;
+        let pillar = pillar_solid(point, &used, raft_top, depth)?;
+        pillar_triangles.extend_from_slice(pillar.triangles());
+        shafts.push(Shaft { x: point.x, y: point.y, z_bottom: raft_top + used.foot_height_mm, z_top: point.contact_z - used.tip_length_mm });
     }
-    let pillars = if pillar_meshes.is_empty() {
-        Mesh::new(Vec::new()).map_err(|err| ResinError::invalid(format!("supports: {err}")))?
-    } else {
-        let refs: Vec<&Mesh> = pillar_meshes.iter().collect();
-        combine_meshes(&refs)?
+    let pillars = Mesh::new(pillar_triangles).map_err(|err| ResinError::invalid(format!("supports: {err}")))?;
+    let (braces, brace_count, braces_skipped) = match &solids.bracing {
+        Some(bracing) => {
+            let (struts, skipped) = plan_braces(&shafts, &part, raft_top, bracing)?;
+            let mut triangles = Vec::with_capacity(struts.len() * 32);
+            for strut in &struts {
+                triangles.extend(strut_solid(strut, bracing.diameter_mm)?);
+            }
+            if skipped > 0 {
+                warnings.push(format!("{skipped} brace(s) left out because they would touch the part"));
+            }
+            (Mesh::new(triangles).map_err(|err| ResinError::invalid(format!("braces: {err}")))?, struts.len(), skipped)
+        }
+        None => (Mesh::new(Vec::new()).map_err(|err| ResinError::invalid(format!("braces: {err}")))?, 0, 0),
     };
-    let mesh = combine_meshes(&[&part, &raft, &pillars])?;
-    Ok(SupportedMesh { mesh, part, raft, pillars, points, outlines, features, optimize, warnings })
+    let mesh = combine_meshes(&[&part, &raft, &pillars, &braces])?;
+    Ok(SupportedMesh {
+        mesh,
+        part,
+        raft,
+        pillars,
+        braces,
+        points,
+        outlines,
+        features,
+        optimize,
+        warnings,
+        palette: palette.to_vec(),
+        palette_names: Vec::new(),
+        zone_report: None,
+        brace_count,
+        braces_skipped,
+    })
 }
 
-fn params_for_point(base: &SupportParams, point: &SupportPoint, palette: &[CalibratedTip]) -> Result<SupportParams> {
-    let Some(index) = point.preset_index else {
-        return Ok(base.clone());
-    };
-    let Some(tip) = palette.get(index as usize) else {
-        return Err(ResinError::invalid(format!("support preset index {index} is not in the calibration palette")));
-    };
-    let mut used = base.clone();
-    used.tip_diameter_mm = tip.tip_diameter_mm;
-    used.tip_length_mm = tip.tip_length_mm;
-    used.pillar_diameter_mm = tip.pillar_diameter_mm;
-    used.foot_diameter_mm = tip.foot_diameter_mm;
-    used.foot_height_mm = tip.foot_height_mm;
-    used.validate()?;
-    Ok(used)
-}
-
-fn pillar_solid(point: &SupportPoint, params: &SupportParams, raft_top: f64) -> Result<Mesh> {
+fn pillar_solid(point: &SupportPoint, params: &SupportParams, raft_top: f64, penetration_mm: f64) -> Result<Mesh> {
     let foot_r = params.foot_diameter_mm / 2.0;
     let pillar_r = params.pillar_diameter_mm / 2.0;
     let tip_r = params.tip_diameter_mm / 2.0;
@@ -330,6 +512,10 @@ fn pillar_solid(point: &SupportPoint, params: &SupportParams, raft_top: f64) -> 
     }
     push(&mut rings, point.contact_z - params.tip_length_mm, pillar_r)?;
     push(&mut rings, point.contact_z, tip_r)?;
+    if penetration_mm > 0.0 {
+        // The tip continues straight into the part, at the tip diameter.
+        push(&mut rings, point.contact_z + penetration_mm, tip_r)?;
+    }
     profile_solid(point.x, point.y, &rings, RING_SIDES)
 }
 
@@ -406,6 +592,7 @@ pub fn render_supported_png(result: &SupportedMesh, width: u32, height: u32) -> 
     };
     draw(&result.raft, [0.72, 0.74, 0.78], &mut depth, &mut rgba);
     draw(&result.pillars, [0.95, 0.72, 0.22], &mut depth, &mut rgba);
+    draw(&result.braces, [0.95, 0.60, 0.18], &mut depth, &mut rgba);
     draw(&result.part, [0.40, 0.74, 0.90], &mut depth, &mut rgba);
     encode_png(width, height, &rgba)
 }

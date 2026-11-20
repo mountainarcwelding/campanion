@@ -305,6 +305,17 @@ pub struct SupportFields {
     pub island_ignore_area_mm2: UserField,
     pub lowest_band_height_mm: UserField,
     pub lowest_band_spacing_mm: UserField,
+    /// Optional. Depth each tip continues into the part. Empty means tips stop at the surface.
+    pub tip_penetration_mm: UserField,
+    /// XY spacing inside painted support zones. Required once a support zone is painted.
+    pub zone_spacing_mm: UserField,
+    /// Paint brush radius. Required to paint.
+    pub brush_radius_mm: UserField,
+    /// Cross-bracing is on. All three brace values are required when it is.
+    pub bracing_on: bool,
+    pub brace_diameter_mm: UserField,
+    pub brace_span_mm: UserField,
+    pub brace_pitch_mm: UserField,
     /// How many supports are selected. Zero until a point is selected.
     pub selected_count: u32,
 }

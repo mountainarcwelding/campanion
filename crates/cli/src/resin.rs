@@ -222,6 +222,18 @@ pub(crate) fn resin(args: &[OsString]) -> Result<ExitCode, CliError> {
     if report.empty_layers > 0 {
         writeln!(err, "warning: {} layers have no exposed pixels (a gap in the model)", report.empty_layers)?;
     }
+    if report.islands.total() > 0 {
+        let mut layers: Vec<usize> = report.islands.islands.iter().map(|island| island.layer + 1).collect();
+        layers.dedup();
+        let shown: Vec<String> = layers.iter().take(12).map(usize::to_string).collect();
+        let more = if layers.len() > shown.len() { format!(" and {} more", layers.len() - shown.len()) } else { String::new() };
+        writeln!(
+            err,
+            "warning: {} region(s) start with nothing under them and may not print (layer {}{more}); add supports there",
+            report.islands.total(),
+            shown.join(", ")
+        )?;
+    }
     if let Some(count) = support_report {
         writeln!(err, "sliced with a chamfered raft and {count} supports")?;
     } else {

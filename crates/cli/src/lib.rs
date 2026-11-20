@@ -91,11 +91,15 @@ Usage:
                   [--supports --support-params FILE.json | support flags] [--supports-out FILE.stl] [--preview FILE.png] [--points FILE] [--points-only]
                   [--detect-cell MM] [--island-ignore-area MM2] [--lowest-band-height MM] [--lowest-band-spacing MM]
                   [--calibration FILE.json] [--optimize] [--points-out FILE]
+                  [--zones FILE.json --zone-spacing MM] [--tip-penetration MM] [--brace-diameter MM --brace-span MM --brace-pitch MM]
+                  [--presets FILE.json] [--preset-mix ROLE=PRESET,...]
   campanion supports MODEL.stl -o OUT.stl [--support-params FILE.json] [--raft-chamfer-angle DEG] [--raft-thickness MM] [--raft-margin MM]
                   [--raft-corner-relief MM] [--overhang-angle DEG] [--support-spacing MM] [--tip-diameter MM] [--tip-length MM]
                   [--pillar-diameter MM] [--foot-diameter MM] [--foot-height MM] [--part-lift MM] [--points FILE] [--points-only] [--preview FILE.png]
                   [--layer-height MM] [--detect-cell MM] [--island-ignore-area MM2] [--lowest-band-height MM] [--lowest-band-spacing MM]
                   [--calibration FILE.json] [--optimize] [--points-out FILE]
+                  [--zones FILE.json --zone-spacing MM] [--tip-penetration MM] [--brace-diameter MM --brace-span MM --brace-pitch MM]
+                  [--presets FILE.json] [--preset-mix ROLE=PRESET,...]
   campanion resin-info FILE.pm7m
   campanion verify FILE [--mesh PART.stl [--tool ball:3|flat:3|bull:3,1]]
   campanion view IR.json
@@ -173,6 +177,14 @@ supports    Write a watertight STL with a chamfered raft and vertical pillar sup
         --lowest-band-height and --lowest-band-spacing must be given together for denser spacing near the first contact.
         --optimize runs the holding-force optimizer and requires --calibration FILE.json (a complete profile; no
         shipped defaults). Fitting measurements to constants is not implemented: enter fitted constants in the file.
+        --zones FILE.json (campanion-resin-zones/1, painted in the GUI) marks part faces: support faces get supports at
+        --zone-spacing even below the overhang angle; no-support faces never get an automatic support (--points stay).
+        --tip-penetration sinks each tip straight into the part by that depth (optional; tips stop at the surface without it).
+        --brace-diameter, --brace-span and --brace-pitch together add zig-zag cross-bracing between neighbouring pillars
+        no farther apart than the span; struts that would touch the part are left out.
+        --presets FILE.json (campanion-resin-presets/1) holds tip presets you saved; --preset-mix assigns them by role
+        (overhang, island, lowest-band, painted, manual), e.g. island=Heavy,overhang=Light. A points file may name a
+        preset in its fourth column. Roles left out use the base tip and pillar values. Not allowed with --optimize.
 resin-info  Print the machine, layer count, height and layer settings of a .pm7m, after checking every layer image.
 verify  Verify an IR JSON file and print a report. The status is 1 when the report has errors.
         --mesh checks cutting moves using IR tool shapes. --tool overrides all cutters and needs --mesh.

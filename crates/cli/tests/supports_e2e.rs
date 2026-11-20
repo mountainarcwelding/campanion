@@ -141,3 +141,81 @@ fn resin_can_slice_generated_supports() {
     // 1.5 + 5 + 3 = 9.5 mm at 0.5 mm layers -> 19 layers
     assert!(text.contains("layers: 19"), "{text}");
 }
+
+#[test]
+fn zones_presets_penetration_and_bracing_flags() {
+    let stl = tmp("supports_p1.stl");
+    let out = tmp("supports_p1_out.stl");
+    let zones = tmp("supports_p1_zones.json");
+    let presets = tmp("supports_p1_presets.json");
+    box_stl(&stl, [0.0, 0.0, 0.0], [10.0, 8.0, 3.0]);
+    // Faces 0 and 1 are the bottom of the box.
+    std::fs::write(&zones, r#"{"schema":"campanion-resin-zones/1","triangle_count":12,"support":[[0,2]]}"#).expect("zones");
+    std::fs::write(
+        &presets,
+        r#"{"schema":"campanion-resin-presets/1","presets":[{"name":"fine","tip_diameter_mm":0.4,"tip_length_mm":1.0,"pillar_diameter_mm":0.8,"foot_diameter_mm":2.5,"foot_height_mm":0.6}]}"#,
+    )
+    .expect("presets");
+    let (s, o, z, p) = (stl.to_str().unwrap(), out.to_str().unwrap(), zones.to_str().unwrap(), presets.to_str().unwrap());
+
+    let lone_spacing = {
+        let mut args = vec!["supports", s, "-o", o, "--zone-spacing", "2"];
+        args.extend_from_slice(&SUPPORT);
+        run(&args)
+    };
+    assert_eq!(lone_spacing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&lone_spacing.stderr).contains("--zones"), "{}", String::from_utf8_lossy(&lone_spacing.stderr));
+
+    let partial_brace = {
+        let mut args = vec!["supports", s, "-o", o, "--brace-diameter", "0.5"];
+        args.extend_from_slice(&SUPPORT);
+        run(&args)
+    };
+    assert_eq!(partial_brace.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&partial_brace.stderr).contains("--brace-span"));
+
+    let mix_alone = {
+        let mut args = vec!["supports", s, "-o", o, "--preset-mix", "painted=fine"];
+        args.extend_from_slice(&SUPPORT);
+        run(&args)
+    };
+    assert_eq!(mix_alone.status.code(), Some(2));
+
+    let zones_no_spacing = {
+        let mut args = vec!["supports", s, "-o", o, "--zones", z];
+        args.extend_from_slice(&SUPPORT);
+        run(&args)
+    };
+    assert!(!zones_no_spacing.status.success(), "painted support faces need a zone spacing");
+
+    let mut args = vec![
+        "supports",
+        s,
+        "-o",
+        o,
+        "--zones",
+        z,
+        "--zone-spacing",
+        "2",
+        "--presets",
+        p,
+        "--preset-mix",
+        "painted=fine",
+        "--tip-penetration",
+        "0.2",
+        "--brace-diameter",
+        "0.5",
+        "--brace-span",
+        "6",
+        "--brace-pitch",
+        "2",
+    ];
+    args.extend_from_slice(&SUPPORT);
+    let result = run(&args);
+    let err = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{err}");
+    assert!(err.contains("painted zones:"), "{err}");
+    assert!(err.contains("cross-bracing:"), "{err}");
+    let mesh = campanion_mesh::parse_stl(&std::fs::read(&out).expect("stl")).expect("parse");
+    assert!(mesh.triangles().len() > 12);
+}

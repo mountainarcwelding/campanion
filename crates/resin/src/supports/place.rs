@@ -22,6 +22,8 @@ pub enum PointSource {
     Island,
     /// Added by the optimizer to meet the holding-force check.
     Optimizer,
+    /// Auto-placed on a painted support zone.
+    Painted,
 }
 
 /// A contact where a support tip meets the part.
@@ -166,7 +168,7 @@ fn is_self_supported_with(mesh: &Mesh, grid: Option<&VerticalHitGrid>, point: Ve
     }
 }
 
-fn sample_triangle(triangle: Triangle, spacing: f64, out: &mut Vec<(Vec3, usize)>, index: usize) -> Result<()> {
+pub(crate) fn sample_triangle(triangle: Triangle, spacing: f64, out: &mut Vec<(Vec3, usize)>, index: usize) -> Result<()> {
     let ab = triangle.b.sub(triangle.a).length();
     let bc = triangle.c.sub(triangle.b).length();
     let ca = triangle.a.sub(triangle.c).length();

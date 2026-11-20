@@ -7,8 +7,9 @@ use std::process::ExitCode;
 
 use campanion_mesh::write_stl_binary;
 use campanion_resin::{
-    CalibrationProfile, GenerateOptions, InputPoint, IslandDetectParams, SupportParams, SupportParamsOverlay, SupportedMesh, generate_supports_with,
-    load_calibration, parse_points_text, parse_support_params_json, render_supported_png, write_points_text,
+    BracingParams, CalibrationProfile, FaceZones, GenerateOptions, InputPoint, IslandDetectParams, PresetMix, SolidOptions, SupportParams,
+    SupportParamsOverlay, SupportedMesh, TipPreset, generate_supports_with, load_calibration, parse_points_text, parse_presets,
+    parse_support_params_json, render_supported_png, write_points_text,
 };
 
 use crate::error::CliError;
@@ -33,6 +34,14 @@ pub(crate) struct SupportCli {
     pub calibration: Option<PathBuf>,
     pub optimize: bool,
     pub points_out: Option<PathBuf>,
+    pub zones: Option<PathBuf>,
+    pub zone_spacing_mm: Option<f64>,
+    pub tip_penetration_mm: Option<f64>,
+    pub brace_diameter_mm: Option<f64>,
+    pub brace_span_mm: Option<f64>,
+    pub brace_pitch_mm: Option<f64>,
+    pub presets: Option<PathBuf>,
+    pub preset_mix: Option<String>,
 }
 
 pub(crate) fn value<'a>(args: &'a [OsString], index: &mut usize, flag: &str) -> Result<&'a str, CliError> {
@@ -144,6 +153,33 @@ pub(crate) fn apply_flag(flag: &str, args: &[OsString], index: &mut usize, a: &m
             a.enabled = true;
             Ok(true)
         }
+        "--zones" | "--presets" => {
+            let slot = if flag == "--zones" { &mut a.zones } else { &mut a.presets };
+            dup(slot.is_some())?;
+            *slot = Some(PathBuf::from(value(args, index, flag)?));
+            a.enabled = true;
+            Ok(true)
+        }
+        "--preset-mix" => {
+            dup(a.preset_mix.is_some())?;
+            a.preset_mix = Some(value(args, index, flag)?.to_string());
+            a.enabled = true;
+            Ok(true)
+        }
+        "--zone-spacing" | "--tip-penetration" | "--brace-diameter" | "--brace-span" | "--brace-pitch" => {
+            let v = number(value(args, index, flag)?, flag)?;
+            let slot = match flag {
+                "--zone-spacing" => &mut a.zone_spacing_mm,
+                "--tip-penetration" => &mut a.tip_penetration_mm,
+                "--brace-diameter" => &mut a.brace_diameter_mm,
+                "--brace-span" => &mut a.brace_span_mm,
+                _ => &mut a.brace_pitch_mm,
+            };
+            dup(slot.is_some())?;
+            *slot = Some(v);
+            a.enabled = true;
+            Ok(true)
+        }
         "--points-out" => {
             dup(a.points_out.is_some())?;
             a.points_out = Some(PathBuf::from(value(args, index, flag)?));
@@ -234,6 +270,34 @@ pub(crate) fn generate(model: &Path, a: &SupportCli) -> Result<(SupportedMesh, S
     if a.optimize && detect.is_none() {
         return Err(CliError::usage("--optimize requires --layer-height (and --detect-cell, or --support-spacing as the cell size)"));
     }
+    let bracing = match (a.brace_diameter_mm, a.brace_span_mm, a.brace_pitch_mm) {
+        (None, None, None) => None,
+        (Some(diameter_mm), Some(max_span_mm), Some(pitch_mm)) => Some(BracingParams { diameter_mm, max_span_mm, pitch_mm }),
+        _ => return Err(CliError::usage("cross-bracing needs all of --brace-diameter, --brace-span and --brace-pitch")),
+    };
+    let zones = match &a.zones {
+        Some(path) => Some(FaceZones::parse(&read_text(path, "--zones")?, mesh.triangles().len()).map_err(|err| CliError::run(err.to_string()))?),
+        None => None,
+    };
+    if a.zone_spacing_mm.is_some() && zones.is_none() {
+        return Err(CliError::usage("--zone-spacing needs --zones FILE.json"));
+    }
+    let presets: Vec<TipPreset> = match &a.presets {
+        Some(path) => parse_presets(&read_text(path, "--presets")?).map_err(|err| CliError::run(err.to_string()))?,
+        None => Vec::new(),
+    };
+    let mix = match &a.preset_mix {
+        Some(text) => {
+            if a.presets.is_none() {
+                return Err(CliError::usage("--preset-mix needs --presets FILE.json"));
+            }
+            Some(PresetMix::parse(text).map_err(|err| CliError::usage(err.to_string()))?)
+        }
+        None => None,
+    };
+    if a.presets.is_none() && extra.iter().any(|point| point.preset.is_some()) && !a.optimize {
+        crate::run::warn("the --points file names tip presets; without --presets FILE.json those points use the base tip and pillar values")?;
+    }
     let mut options = if auto { GenerateOptions::auto(&extra) } else { GenerateOptions::manual(&extra) };
     options.detect = detect;
     options.island_ignore_area_mm2 = a.island_ignore_area_mm2;
@@ -241,8 +305,21 @@ pub(crate) fn generate(model: &Path, a: &SupportCli) -> Result<(SupportedMesh, S
     options.lowest_band_spacing_mm = a.lowest_band_spacing_mm;
     options.optimize = a.optimize;
     options.calibration = profile.as_ref();
+    options.zones = zones.as_ref();
+    options.zone_spacing_mm = a.zone_spacing_mm;
+    options.presets = &presets;
+    options.mix = mix.as_ref();
+    options.solids = SolidOptions { tip_penetration_mm: a.tip_penetration_mm, bracing };
     let result = generate_supports_with(&mesh, &params, options).map_err(|err| CliError::run(err.to_string()))?;
     Ok((result, params))
+}
+
+fn read_text(path: &Path, flag: &str) -> Result<String, CliError> {
+    let bytes = read_bytes(path)?;
+    if bytes.len() > MAX_TEXT_BYTES {
+        return Err(CliError::run(format!("{flag} file is too large")));
+    }
+    String::from_utf8(bytes).map_err(|_| CliError::run(format!("{flag} file is not UTF-8")))
 }
 
 fn detect_params(a: &SupportCli, params: &SupportParams) -> Result<Option<IslandDetectParams>, CliError> {
@@ -285,8 +362,8 @@ pub(crate) fn write_outputs(result: &SupportedMesh, params: &SupportParams, stl_
 
 pub(crate) fn write_points_and_report(result: &SupportedMesh, a: &SupportCli) -> Result<(), CliError> {
     if let Some(path) = &a.points_out {
-        let names: Option<Vec<String>> = result.optimize.as_ref().map(|forces| vec![forces.preset_name.clone()]);
-        let text = write_points_text(&result.points, names.as_deref());
+        let names: Option<&[String]> = if result.palette_names.is_empty() { None } else { Some(&result.palette_names) };
+        let text = write_points_text(&result.points, names);
         std::fs::write(path, text)?;
         let mut err = io::stderr().lock();
         writeln!(err, "wrote points {}", path.display())?;
@@ -301,6 +378,12 @@ pub(crate) fn write_points_and_report(result: &SupportedMesh, a: &SupportCli) ->
             "optimizer preset `{}`: demand {:.6} N, capacity {:.6} N, scar {:.6} mm², {} tips, sufficient={}",
             forces.preset_name, forces.demand_n, forces.capacity_n, forces.scar_area_mm2, forces.tip_count, forces.sufficient
         )?;
+    }
+    if let Some(zones) = &result.zone_report {
+        writeln!(err, "painted zones: {} support(s) added, {} automatic support(s) removed", zones.painted_added, zones.blocked_removed)?;
+    }
+    if result.brace_count > 0 || result.braces_skipped > 0 {
+        writeln!(err, "cross-bracing: {} strut(s), {} left out near the part", result.brace_count, result.braces_skipped)?;
     }
     for warning in &result.warnings {
         writeln!(err, "{warning}")?;

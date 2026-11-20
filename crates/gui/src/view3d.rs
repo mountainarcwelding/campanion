@@ -28,6 +28,9 @@ pub struct View3d {
     pub pending_orbit: Option<(f64, f64)>,
     /// On the next frame, fit the full scene including the build volume.
     pub pending_fit_all: bool,
+    /// After the next auto-fit and orbit, zoom by this factor about a point given as a
+    /// fraction of the viewport `(factor, x, y)`.
+    pub pending_zoom: Option<(f64, f64, f64)>,
 }
 
 impl Default for View3d {
@@ -39,6 +42,7 @@ impl Default for View3d {
             last_frame_ms: 0.0,
             pending_orbit: None,
             pending_fit_all: false,
+            pending_zoom: None,
         }
     }
 }
@@ -156,6 +160,11 @@ pub fn show(ui: &mut egui::Ui, view: &mut View3d, scene: &Scene3) -> View3dOutpu
     }
     if let Some((dx, dy)) = view.pending_orbit.take() {
         view.camera.orbit(dx, dy);
+        view.user_adjusted = true;
+    }
+    if let Some((factor, fx, fy)) = view.pending_zoom.take() {
+        let (w, h) = (f64::from(raster_w), f64::from(raster_h));
+        view.camera.zoom_at(factor, fx * w, fy * h, w, h);
         view.user_adjusted = true;
     }
 

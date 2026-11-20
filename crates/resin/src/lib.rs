@@ -17,6 +17,7 @@
 
 mod build;
 mod error;
+pub mod layer_islands;
 pub mod pm7m;
 pub mod preview;
 pub mod pw0;
@@ -26,17 +27,20 @@ pub mod zip;
 
 pub use build::{BuildReport, build_pm7m};
 pub use error::ResinError;
+pub use layer_islands::{SliceIsland, SliceIslands};
 pub use pm7m::{
     LayerParams, LayerRecord, M7_MAX, MachineSpec, Pm7mFile, ResinSettings, WriteInput, load_print_settings, make_previews, read_pm7m,
     settings_from_pm7m_bytes, write_pm7m,
 };
 pub use slice::{Placement, PreparedMesh, SliceGrid, Span, encode_spans};
 pub use supports::{
-    CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, CancelFlag, ClassifiedRegion, DetectedFeatures, FeatureClass,
-    ForceBreakdown, GenerateOptions, GenerateProgress, InputPoint, Island, IslandDetectParams, MeshPose, MissingConstant, OptimizeInput,
-    OptimizeResult, PointSource, REQUIRED_CONSTANTS, REQUIRED_FLAGS, REQUIRED_TIP_FIELDS, STANDARD_GRAVITY_M_S2, SupportParams, SupportParamsOverlay,
-    SupportPoint, SupportedMesh, add_support_point, apply_mesh_pose, center_on_plate, classify_features, constant_label, delete_support_point,
-    detect_islands, detect_islands_with, drop_to_plate, generate_supports, generate_supports_with, import_calibration, is_watertight,
-    load_calibration, missing_constants_in, move_support_point, optimize_supports, parse_calibration, parse_points_text, parse_support_params_json,
-    rebuild_supported, render_supported_png, snap_to_step, write_points_text,
+    BracingParams, CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, CancelFlag, ClassifiedRegion, DetectedFeatures,
+    FaceZones, FeatureClass, ForceBreakdown, GenerateOptions, GenerateProgress, InputPoint, Island, IslandDetectParams, MeshPose, MissingConstant,
+    OptimizeInput, OptimizeResult, PRESETS_SCHEMA, PointSource, PresetMix, REQUIRED_CONSTANTS, REQUIRED_FLAGS, REQUIRED_TIP_FIELDS,
+    STANDARD_GRAVITY_M_S2, SolidOptions, SupportParams, SupportParamsOverlay, SupportPoint, SupportRole, SupportedMesh, TipGeometry, TipPreset,
+    ZONES_SCHEMA, ZoneMark, ZoneReport, add_support_point, apply_mesh_pose, apply_mix, center_on_plate, classify_features, constant_label,
+    delete_support_point, detect_islands, detect_islands_with, drop_to_plate, forget_preset, generate_supports, generate_supports_with,
+    import_calibration, is_watertight, load_calibration, missing_constants_in, move_support_point, optimize_supports, parse_calibration,
+    parse_points_text, parse_presets, parse_support_params_json, preset_index, rebuild_supported, rebuild_supported_with, render_supported_png,
+    snap_to_step, write_points_text, write_presets,
 };

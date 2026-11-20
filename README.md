@@ -194,7 +194,7 @@ only checks that the motion matches the toolpath.
 **Not printer-tested.** The resin output and the supports it can add have been checked against one
 exported sample file, by reading output back, and by geometry tests, but nothing has been printed
 or physically tested yet. Treat the first print as a test. CAMpanion is primarily command-line
-driven; resin output and support generation are CLI commands, not GUI features yet.
+driven; the GUI Resin workspace is a work-in-progress front end to the same resin and support code.
 
 ```
 campanion supports part.stl -o part_supported.stl --support-params supports.json --preview preview.png
@@ -213,7 +213,9 @@ part; it is not the same as resin's `--lift-height` (the printer's peel move).
 `Anycubic Photon Mono M7 Max`. No exposure, lift or layer value has a default: pass each flag, or
 take them from an existing `.pm7m` with `--params-from` (flags override it). `--supports` generates
 the raft and pillars before slicing. There is no anti-aliasing yet. See [docs/resin.md](docs/resin.md)
-for the flags, format notes, assumptions and open gaps.
+for the flags, format notes, assumptions and open gaps. Painted support and no-support zones,
+saved tip presets with a per-role mix, tip penetration, cross-bracing, and slice island warnings are
+described there too; all of them are off until you give their values.
 
 ## Preview
 
@@ -247,7 +249,7 @@ of the workspace that can already run a 2D cutting job through the existing back
 finished CAM interface. The Run tab can stream posted G-code to a Grbl-class controller over
 USB serial. **That path is NOT hardware-tested. First run: low power, hand on the power
 switch.** On Linux, membership in the `dialout` group is typically required to open a USB
-serial device. Resin (SLA) tabs and FDM remain placeholders. The machine selector sits at the
+serial device. FDM remains a placeholder; the Resin tabs are a work in progress. The machine selector sits at the
 top-left of the ribbon (machine name and type, a profile dropdown, and Manage…), the CAM stage
 tabs are beside it, and tool and operation actions are grouped under the selected tab. The
 process comes from the selected machine head. You can define machine profiles (`campanion-machine/1`) in the

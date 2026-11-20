@@ -3,6 +3,7 @@
 use campanion_mesh::Mesh;
 
 use crate::error::Result;
+use crate::layer_islands::{IslandTracker, SliceIslands};
 use crate::pm7m::{MachineSpec, ResinSettings, WriteInput, make_previews, write_pm7m};
 use crate::slice::{Placement, PreparedMesh, encode_spans};
 
@@ -15,6 +16,10 @@ pub struct BuildReport {
     pub xy_shift_mm: (f64, f64),
     pub empty_layers: usize,
     pub bytes: usize,
+    /// Regions that start with nothing lit under them, from the exact layer images written.
+    pub islands: SliceIslands,
+    /// Area of one pixel, square millimetres.
+    pub pixel_area_mm2: f64,
 }
 
 /// Slice `mesh` at `settings.layer_height_mm` and write a `.pm7m` for `machine`.
@@ -25,6 +30,7 @@ pub fn build_pm7m(mesh: &Mesh, machine: &MachineSpec, settings: &ResinSettings, 
     let mut images = Vec::with_capacity(prepared.layer_count());
     let mut lit = 0u64;
     let mut empty = 0usize;
+    let mut tracker = IslandTracker::new();
     for layer in 0..prepared.layer_count() {
         let spans = prepared.layer_spans(layer);
         if spans.is_empty() {
@@ -32,6 +38,7 @@ pub fn build_pm7m(mesh: &Mesh, machine: &MachineSpec, settings: &ResinSettings, 
         }
         lit += PreparedMesh::lit_pixels(&spans);
         images.push(encode_spans(&spans, grid.width, grid.height)?);
+        tracker.push(spans);
     }
     let volume_mm3 = lit as f64 * grid.pitch_x_mm * grid.pitch_y_mm * settings.layer_height_mm;
     let volume_ml = volume_mm3 / 1000.0;
@@ -44,6 +51,8 @@ pub fn build_pm7m(mesh: &Mesh, machine: &MachineSpec, settings: &ResinSettings, 
         xy_shift_mm: prepared.xy_shift_mm(),
         empty_layers: empty,
         bytes: bytes.len(),
+        islands: tracker.finish(),
+        pixel_area_mm2: grid.pitch_x_mm * grid.pitch_y_mm,
     };
     Ok((bytes, report))
 }
