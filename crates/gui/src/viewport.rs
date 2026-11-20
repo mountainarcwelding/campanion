@@ -29,6 +29,10 @@ pub struct Viewport {
     pub show_rapids: bool,
     /// When true, fit to the toolpath (or an off-bed part plus the bed) instead of the full bed.
     pub fit_content: bool,
+    /// When true, draw the whole planned toolpath and highlight only the completed prefix.
+    pub show_planned_path: bool,
+    /// Optional live tool position in work millimetres, from DRO/status reports.
+    pub live_head: Option<[f64; 3]>,
 }
 
 /// Result of drawing the viewport for one frame.
@@ -60,6 +64,8 @@ impl Viewport {
             last_size: None,
             show_rapids: true,
             fit_content: false,
+            show_planned_path: false,
+            live_head: None,
         }
     }
 
@@ -204,17 +210,20 @@ pub fn show_with(
             }
         }
         if let Some(scene) = scene {
+            if viewport.show_planned_path {
+                for stroke in &scene.strokes {
+                    let color = stroke_color(stroke, guides).gamma_multiply(0.35);
+                    draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color);
+                }
+            }
             let shown = visible(scene, viewport.playback.position);
             for stroke in &shown {
                 let color = stroke_color(stroke, guides);
                 draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color);
             }
-            if let Some(tool) = tool_position(scene, viewport.playback.position) {
-                let z = scene.z_range.map(|(lo, _)| lo).unwrap_or(0.0);
-                let point = to_screen(&viewport.view, rect, project(tool, z, viewport.projection));
-                let size = 6.0;
-                painter.line_segment([Pos2::new(point.x - size, point.y), Pos2::new(point.x + size, point.y)], UiStroke::new(1.2, theme::TOOL));
-                painter.line_segment([Pos2::new(point.x, point.y - size), Pos2::new(point.x, point.y + size)], UiStroke::new(1.2, theme::TOOL));
+            let head = live_or_playhead(scene, viewport);
+            if let Some((xy, z)) = head {
+                draw_live_head(&painter, &viewport.view, rect, xy, z, viewport.projection);
             }
             for label in &scene.labels {
                 let pos = to_screen(&viewport.view, rect, project(label.at, 0.0, viewport.projection));
@@ -317,7 +326,7 @@ fn draw_stroke_colored(painter: &egui::Painter, view: &View, rect: Rect, stroke:
     match stroke.kind {
         StrokeKind::Rapid => {
             if show_rapids {
-                painter.extend(egui::Shape::dashed_line(&points, UiStroke::new(1.0, theme::RAPID), 6.0, 4.0));
+                painter.extend(egui::Shape::dashed_line(&points, UiStroke::new(1.0, color), 6.0, 4.0));
             }
         }
         StrokeKind::Cut => {
@@ -421,6 +430,25 @@ fn grid_start(min: f64) -> Option<f64> {
     if start.is_finite() { Some(start) } else { None }
 }
 
+fn live_or_playhead(scene: &Scene, viewport: &Viewport) -> Option<([f64; 2], f64)> {
+    if let Some(head) = viewport.live_head
+        && head.iter().all(|value| value.is_finite())
+    {
+        return Some(([head[0], head[1]], head[2]));
+    }
+    let tool = tool_position(scene, viewport.playback.position)?;
+    let z = scene.z_range.map(|(lo, _)| lo).unwrap_or(0.0);
+    Some((tool, z))
+}
+
+fn draw_live_head(painter: &egui::Painter, view: &View, rect: Rect, xy: [f64; 2], z: f64, projection: Projection) {
+    let point = to_screen(view, rect, project(xy, z, projection));
+    let size = 8.0;
+    painter.circle_stroke(point, 5.0, UiStroke::new(1.4, theme::TOOL));
+    painter.line_segment([Pos2::new(point.x - size, point.y), Pos2::new(point.x + size, point.y)], UiStroke::new(1.4, theme::TOOL));
+    painter.line_segment([Pos2::new(point.x, point.y - size), Pos2::new(point.x, point.y + size)], UiStroke::new(1.4, theme::TOOL));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +490,37 @@ mod tests {
         assert!((viewport.view.scale - bed_fit.scale).abs() < 1e-9);
         assert!((viewport.view.center[0] - 300.0).abs() < 1e-6);
         assert!((viewport.view.center[1] - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fit_content_frames_the_toolpath_when_it_sits_on_the_bed() {
+        let scene = cut_scene(vec![[20.0, 20.0], [40.0, 40.0]]);
+        let mut viewport = Viewport::new(&scene);
+        viewport.fit_content = true;
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let guides = ViewportGuides { bed: Some([0.0, 0.0, 600.0, 400.0]), sheet: None, stale: false };
+        viewport.fit_with_guides(Some(&scene), rect, Some(&guides));
+        let content_fit = View::fit(([20.0, 20.0], [40.0, 40.0]), 400.0, 300.0, FIT_MARGIN_PX);
+        let bed_fit = View::fit(([0.0, 0.0], [600.0, 400.0]), 400.0, 300.0, FIT_MARGIN_PX);
+        assert!((viewport.view.scale - content_fit.scale).abs() < 1e-9);
+        assert!(viewport.view.scale > bed_fit.scale);
+        assert!((viewport.view.center[0] - 30.0).abs() < 1e-6);
+        assert!((viewport.view.center[1] - 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn live_or_playhead_prefers_a_finite_dro_position() {
+        let scene = cut_scene(vec![[0.0, 0.0], [10.0, 0.0]]);
+        let mut viewport = Viewport::new(&scene);
+        viewport.playback.position = 0.0;
+        viewport.live_head = Some([21.0, 22.9, 0.0]);
+        let (xy, z) = live_or_playhead(&scene, &viewport).expect("head");
+        assert!((xy[0] - 21.0).abs() < 1e-12);
+        assert!((xy[1] - 22.9).abs() < 1e-12);
+        assert!((z - 0.0).abs() < 1e-12);
+        viewport.live_head = Some([f64::NAN, 0.0, 0.0]);
+        let (xy, _) = live_or_playhead(&scene, &viewport).expect("playhead");
+        assert!((xy[0] - 0.0).abs() < 1e-9);
+        assert!((xy[1] - 0.0).abs() < 1e-9);
     }
 }

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## 0.26.1 — 2026-11-19
+
+Run-tab viewport follows the planned job while streaming. **NOT hardware-tested. First run: low
+power, hand on the power switch.**
+
+### Fixed
+
+- The Run view now draws the planned toolpath, fitted to the job, instead of clipping the
+  viewport to only the few millimetres already acknowledged. The completed prefix is highlighted
+  from acknowledged lines, and a live head marks the DRO/status work position. The same view
+  holds when idle, paused, in alarm, and after Stop.
+- Jog pad buttons and the jog-feed field are visibly disabled, with a lock message, while the
+  controller is running or in hold.
+
 ## 0.26.0 — 2026-11-19
 
 Grbl-class laser streaming on the Run tab and a `campanion stream` command, following the public

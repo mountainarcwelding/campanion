@@ -569,6 +569,9 @@ impl App {
         let allow_drag =
             (self.session.source_drawing.is_some() || self.session.parts.iter().any(|part| part.drawing.is_some())) && self.document.is_none();
         let guides = self.viewport_guides();
+        let run_tab = self.state.tab == ModeTab::Run;
+        let live_head = if run_tab && self.state.connected { Some(self.state.work_pos) } else { None };
+        let reset_idle_playhead = run_tab && self.state.run == RunPhase::Idle && self.state.run_line == 0;
         if let Some(viewport) = self.viewport.as_mut() {
             let want_content =
                 self.document.is_some() && matches!(self.state.tab, ModeTab::Operations | ModeTab::Simulate | ModeTab::Export | ModeTab::Run);
@@ -577,6 +580,12 @@ impl App {
                 if !viewport.user_adjusted {
                     viewport.fitted = false;
                 }
+            }
+            viewport.show_planned_path = run_tab;
+            viewport.live_head = live_head;
+            if reset_idle_playhead {
+                viewport.playback.playing = false;
+                viewport.playback.position = 0.0;
             }
             let output = viewport::show_with(ui, viewport, self.scene.as_ref(), allow_drag, Some(&guides));
             if let Some(delta) = output.part_delta {
@@ -3915,34 +3924,46 @@ impl App {
         }
         ui.separator();
         ui.label(RichText::new("Jog").strong().size(13.0));
-        ui.label("Jog feed (mm/min)");
-        ui.add(egui::TextEdit::singleline(&mut self.state.jog_feed).desired_width(180.0).hint_text("required, not assumed"));
         let enabled = self.state.can_jog();
+        if !self.state.connected {
+            ui.label(RichText::new("Connect a controller to jog, frame, start, or use STOP.").color(theme::MUTED).size(11.0));
+        } else if !enabled {
+            ui.label(RichText::new("Jog is locked while running or in hold.").color(theme::MUTED).size(11.0));
+        }
+        ui.label("Jog feed (mm/min)");
         ui.add_enabled_ui(enabled, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.state.jog_feed).desired_width(180.0).hint_text("required, not assumed"));
+        });
+        ui.add_enabled_ui(enabled, |ui| {
+            if !enabled {
+                ui.visuals_mut().widgets.inactive.fg_stroke.color = theme::MUTED;
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = theme::PANEL;
+                ui.visuals_mut().override_text_color = Some(theme::MUTED);
+            }
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
-                if ui.button("↑").clicked() {
+                if jog_pad_button(ui, "↑", enabled).clicked() {
                     self.stream_jog(1, 1);
                 }
             });
             ui.horizontal(|ui| {
-                if ui.button("←").clicked() {
+                if jog_pad_button(ui, "←", enabled).clicked() {
                     self.stream_jog(0, -1);
                 }
-                if ui.button("→").clicked() {
+                if jog_pad_button(ui, "→", enabled).clicked() {
                     self.stream_jog(0, 1);
                 }
             });
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
-                if ui.button("↓").clicked() {
+                if jog_pad_button(ui, "↓", enabled).clicked() {
                     self.stream_jog(1, -1);
                 }
                 ui.add_space(12.0);
-                if ui.button("Z+").clicked() {
+                if jog_pad_button(ui, "Z+", enabled).clicked() {
                     self.stream_jog(2, 1);
                 }
-                if ui.button("Z−").clicked() {
+                if jog_pad_button(ui, "Z−", enabled).clicked() {
                     self.stream_jog(2, -1);
                 }
             });
@@ -3964,11 +3985,6 @@ impl App {
             });
         });
         ui.label(RichText::new("Home ($H) and Set Origin are not sent in this slice.").color(theme::MUTED).size(11.0));
-        if !self.state.connected {
-            ui.label(RichText::new("Connect a controller to jog, frame, start, or use STOP.").color(theme::MUTED).size(11.0));
-        } else if !enabled {
-            ui.label(RichText::new("Jog is locked while running or in hold. Only Pause and STOP stay available.").color(theme::MUTED).size(11.0));
-        }
     }
 
     fn run_right(&mut self, ui: &mut egui::Ui) {
@@ -4270,6 +4286,15 @@ fn ribbon_group_separator(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, RIBBON_GROUP_ROW - 10.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::BORDER);
     ui.add_space(8.0);
+}
+
+fn jog_pad_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    let text = if enabled { RichText::new(label) } else { RichText::new(label).color(theme::MUTED) };
+    let mut button = egui::Button::new(text);
+    if !enabled {
+        button = button.fill(theme::PANEL).stroke(egui::Stroke::new(1.0, theme::MUTED));
+    }
+    ui.add(button)
 }
 
 fn draw_wordmark(ui: &mut egui::Ui) {
