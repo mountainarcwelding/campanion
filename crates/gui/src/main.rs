@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use campanion_gui::app::{self, Launch};
+use campanion_gui::crash;
 
 fn main() -> ExitCode {
     match try_main() {
@@ -33,6 +34,7 @@ fn try_main() -> Result<(), String> {
         return Ok(());
     }
     let launch = parse_args(&args)?;
+    crash::install_panic_hook();
     app::run(launch)
 }
 

@@ -7,6 +7,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod app;
+pub mod crash;
 pub mod edit;
 pub mod fields;
 pub mod files;
@@ -255,6 +256,8 @@ pub struct GuiState {
     pub run_lines: u32,
     /// Selected rotate step on the Resin Orient tab, degrees.
     pub rotate_step_deg: u32,
+    /// Selected move snap increment on the Resin Orient tab, millimetres.
+    pub move_step_mm: f64,
     /// Typed model pose, millimetres and degrees. Starts empty.
     pub position_mm: [UserField; 3],
     /// Typed model rotation, degrees. Starts empty.
@@ -350,6 +353,7 @@ impl GuiState {
             run_line: 0,
             run_lines: 0,
             rotate_step_deg: 15,
+            move_step_mm: 1.0,
             position_mm: [UserField::empty(), UserField::empty(), UserField::empty()],
             rotation_deg: [UserField::empty(), UserField::empty(), UserField::empty()],
             lift_mm: UserField::empty(),

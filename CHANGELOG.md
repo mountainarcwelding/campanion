@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+## 0.28.1 — 2026-11-20
+
+**NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.
+Check any `.pm7m` on the printer screen and print a test before a real job. CAMpanion is still
+primarily command-line driven; the GUI is in development.
+
+The resin Orient tab can now move a part: typed X/Y/Z with snap, left-drag in the 3D
+viewport, Center on plate, and Drop to plate. Generate supports runs on a background
+thread with progress and cancel, so a long detection walk no longer freezes the window.
+A panic hook writes a crash log under `~/.cache/campanion/crash-*.log` (or
+`$CAMPANION_CACHE_DIR`) and prints the path.
+
+### Fixed
+
+- Orient Position and Rotation fields were displayed but never applied to the mesh,
+  the viewport, generate, or slice, so a part could not be translated. Empty fields
+  still mean "as imported." Once a pose is set, slice keeps that XY instead of
+  recentring the plate.
+- Generate supports (and Optimize) ran on the UI thread. Island detection on a
+  fine, many-triangle mesh can take well over a minute; the window would stop
+  responding and look as if the program had crashed. Work now runs in the
+  background, reports the current stage and layer, and can be cancelled at the next
+  layer or stage check. Errors are shown as plain messages. A panic during this
+  work writes a crash log and names its path rather than vanishing.
+
+### Known limits
+
+- Nothing in this release has been printer-tested. Image orientation is unverified until
+  an asymmetric test part is printed.
+- Paint-on supports, no-support zones, branching trees, hollowing, auto-orient, and
+  calibration-print geometry are not included.
+- The undercut chamfered raft is unchanged and still unprinted. The only `.pm7m` format
+  written is the Anycubic Photon Mono M7 Max layout derived from the sample file.
+- The GUI is still in development. CAMpanion remains primarily command-line driven.
+- Cutting processes still use the 2D viewport. FDM toolpath drawing is not wired up yet.
+
+
 ## 0.28.0 — 2026-11-20
 
 **NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.

@@ -65,6 +65,8 @@ pub struct View3dOutput {
     pub primary_dragging: bool,
     pub primary_drag_started: bool,
     pub primary_drag_stopped: bool,
+    /// Pointer position in screen pixels, when the pointer is over the viewport.
+    pub pointer: Option<egui::Pos2>,
 }
 
 /// Draw standard-view chips, Fit all, and the 3D viewport.
@@ -197,7 +199,8 @@ pub fn show(ui: &mut egui::Ui, view: &mut View3d, scene: &Scene3) -> View3dOutpu
     let primary_drag_started = response.drag_started_by(PointerButton::Primary);
     let primary_drag_stopped = response.drag_stopped();
 
-    View3dOutput { response, rect, hover_hit, hover_mesh_hit, click_hit, primary_dragging, primary_drag_started, primary_drag_stopped }
+    let pointer = response.interact_pointer_pos().or(response.hover_pos());
+    View3dOutput { response, rect, hover_hit, hover_mesh_hit, click_hit, primary_dragging, primary_drag_started, primary_drag_stopped, pointer }
 }
 
 fn clamp_raster(width: u32, height: u32) -> (u32, u32) {

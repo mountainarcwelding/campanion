@@ -16,7 +16,7 @@ use crate::fields::{self, ProcessFields};
 use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_stem, resolve_user_path};
 use crate::machines::{self, MachinesUi};
 use crate::operations::{self, RegenState};
-use crate::resin_ui::{self, ResinSession, ResinSnapshot, SupportEditTool, SupportView};
+use crate::resin_ui::{self, ResinGenerateJob, ResinSession, ResinSnapshot, SupportEditTool, SupportView};
 use crate::run_stream::{self, RunConnection, STREAM_HARDWARE_NOTICE};
 use crate::session::{
     GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, ToolDraft, ToolKind, TreeSelection, add_imported_part, all_part_ids,
@@ -157,6 +157,16 @@ struct App {
     resin: ResinSession,
     resin_undo: Vec<ResinSnapshot>,
     resin_view3d: View3d,
+    resin_generate: ResinGenerateJob,
+    orient_drag: Option<OrientDrag>,
+}
+
+#[derive(Clone, Copy)]
+struct OrientDrag {
+    start_x: f64,
+    start_y: f64,
+    origin_x: f64,
+    origin_y: f64,
 }
 
 struct ScreenshotJob {
@@ -206,6 +216,8 @@ impl App {
             resin: ResinSession::default(),
             resin_undo: Vec::new(),
             resin_view3d: View3d::default(),
+            resin_generate: ResinGenerateJob::default(),
+            orient_drag: None,
         }
     }
 
@@ -901,7 +913,14 @@ impl App {
         let dir_name = dir.file_name().and_then(|name| name.to_str());
         let resin_set = set == Some("resin") || dir_name == Some("gui-shots-g4") || dir_name == Some("gui-shots-g4b");
         let three_d_set = set == Some("3d") || dir_name == Some("gui-shots-3d");
-        let plan = if three_d_set {
+        let fix281_set = set == Some("fix281") || dir_name == Some("gui-shots-fix281");
+        let plan = if fix281_set {
+            vec![
+                (Workspace::Resin, ModeTab::Orient, "resin-fix281-offcenter.png".to_string()),
+                (Workspace::Resin, ModeTab::Orient, "resin-fix281-centered.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-fix281-generate.png".to_string()),
+            ]
+        } else if three_d_set {
             vec![
                 (Workspace::Resin, ModeTab::Supports, "resin-3d-orbit.png".to_string()),
                 (Workspace::Resin, ModeTab::Supports, "resin-3d-edit.png".to_string()),
@@ -1008,7 +1027,9 @@ impl App {
             let mut resin_example = machines::screenshot_example_resin("Example resin printer (example values)");
             // Screenshot stand-ins only, taken from the sample M7 Max machine already used by the
             // `.pm7m` writer. They are not shipped defaults and are not written into user profiles.
-            let three_d = name.unwrap_or("").contains("3d") || job.dir.file_name().is_some_and(|n| n == "gui-shots-3d");
+            let three_d = name.unwrap_or("").contains("3d")
+                || name.unwrap_or("").contains("fix281")
+                || job.dir.file_name().is_some_and(|n| n == "gui-shots-3d" || n == "gui-shots-fix281");
             if three_d {
                 let spec = &campanion_resin::M7_MAX;
                 resin_example.bed = Some(campanion_cli::BedSize { x: spec.bed_x_mm, y: spec.bed_y_mm, z: Some(spec.bed_z_mm) });
@@ -1020,21 +1041,29 @@ impl App {
             self.session.machine_head.clear();
             self.apply_machine_selection();
         }
-        let mesh = screenshot_resin_part();
+        let name = name.unwrap_or("");
+        let is_fix281 = name.contains("fix281");
+        let mesh = if is_fix281 { screenshot_offcenter_resin_part() } else { screenshot_resin_part() };
         self.resin = ResinSession::default();
         self.resin.mesh = Some(mesh);
         self.resin.mesh_path = Some(PathBuf::from("screenshot-part.stl"));
         fill_screenshot_support_fields(&mut self.state);
-        let name = name.unwrap_or("");
-        let is_3d = name.contains("3d");
+        let is_3d = name.contains("3d") || is_fix281;
         if name.contains("calibration-missing") {
             self.resin.calibration = Some(resin_ui::load_calibration_text(
                 PathBuf::from("partial-calibration.json"),
                 r#"{"schema":"campanion-resin-calibration/1","name":"partial-screenshot"}"#,
             ));
-            let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false);
-        } else if name.contains("supports") || name.contains("slice") || name.contains("export") || is_3d {
-            let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false);
+            let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false, None, None);
+        } else if name.contains("supports")
+            || name.contains("slice")
+            || name.contains("export")
+            || (is_3d && !name.contains("offcenter") && !name.contains("centered"))
+        {
+            if is_fix281 && (name.contains("centered") || name.contains("generate")) {
+                let _ = resin_ui::center_session_on_plate(&mut self.resin, &mut self.state.position_mm, &mut self.state.rotation_deg);
+            }
+            let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false, None, None);
         }
         if name.contains("side") || is_3d {
             self.resin.view = SupportView::ThreeQuarter;
@@ -1050,6 +1079,14 @@ impl App {
         }
         if is_3d && name.contains("bed") {
             self.resin_view3d.pending_fit_all = true;
+        }
+        if is_fix281 && name.contains("offcenter") {
+            // Fit the machine volume so the off-centre import is visible against the plate.
+            self.resin_view3d.pending_fit_all = true;
+        }
+        if is_fix281 && name.contains("centered") {
+            let _ = resin_ui::center_session_on_plate(&mut self.resin, &mut self.state.position_mm, &mut self.state.rotation_deg);
+            self.resin.invalidate_solids();
         }
         if name.contains("edit") && !self.resin.points.is_empty() {
             self.resin.selected_point = Some(0);
@@ -1775,6 +1812,7 @@ impl eframe::App for App {
         self.layout_tool_windows(&ctx);
         self.dialogs(&ctx);
         self.tick_regen(&ctx);
+        self.tick_resin_generate(&ctx);
         self.tick_stream(&ctx);
         self.tick_screenshots(&ctx);
     }
@@ -2174,7 +2212,7 @@ impl App {
                         .on_hover_text("Clear typed position, rotation and lift. No values are filled in.")
                         .clicked()
                     {
-                        self.state.reset_orient();
+                        self.reset_resin_orient();
                     }
                     let _ = ui.add_enabled(false, ribbon_command_widget("Lay flat on face", false)).on_hover_text("Lay flat is not in this release.");
                     let _ = ui.add_enabled(false, ribbon_command_widget("Auto orient", false)).on_hover_text("Auto orient is not in this release.");
@@ -2182,7 +2220,15 @@ impl App {
             }
             ModeTab::Supports => {
                 ribbon_group(ui, "Generate", |ui| {
-                    if ribbon_command(ui, "Generate supports", false)
+                    if self.resin_generate.is_running() {
+                        if ribbon_command(ui, "Cancel generate", false)
+                            .on_hover_text("Stop support generation at the next layer or stage check.")
+                            .clicked()
+                        {
+                            self.resin_generate.cancel();
+                            self.state.status = "Cancelling support generation…".to_string();
+                        }
+                    } else if ribbon_command(ui, "Generate supports", false)
                         .on_hover_text("Place supports on islands and overhangs using the values on the right. No sizes are assumed.")
                         .clicked()
                     {
@@ -3670,12 +3716,44 @@ impl App {
                 }
             }
         });
+        ui.add_space(6.0);
+        ui.label(RichText::new("Move snap (mm)").color(theme::MUTED).size(12.0));
+        ui.horizontal(|ui| {
+            for step in JOG_STEPS_MM {
+                let selected = (self.state.move_step_mm - step).abs() < 1e-12;
+                let label = format!("{step}");
+                if ui.selectable_label(selected, label).clicked() {
+                    self.state.move_step_mm = step;
+                }
+            }
+        });
         field_row(ui, "Lift from plate (mm)", &mut self.state.lift_mm, self.state.dark_theme);
+        if let Err(err) = resin_ui::apply_pose_fields(&mut self.resin, &self.state.position_mm, &self.state.rotation_deg) {
+            ui.label(RichText::new(err).color(theme::OFF_BED).size(11.0));
+        }
         ui.add_space(8.0);
+        let pose_reason = resin_ui::pose_action_disabled_reason(&self.resin, "Center on plate");
+        if resin_ui::primary_button(ui, "Center on plate", pose_reason.as_deref()) {
+            match resin_ui::center_session_on_plate(&mut self.resin, &mut self.state.position_mm, &mut self.state.rotation_deg) {
+                Ok(()) => self.state.status = "Part centred on the plate.".to_string(),
+                Err(err) => self.state.status = err,
+            }
+        }
+        let drop_reason = resin_ui::pose_action_disabled_reason(&self.resin, "Drop to plate");
+        if resin_ui::primary_button(ui, "Drop to plate", drop_reason.as_deref()) {
+            match resin_ui::drop_session_to_plate(&mut self.resin, &mut self.state.position_mm, &mut self.state.rotation_deg) {
+                Ok(()) => self.state.status = "Part dropped to the plate.".to_string(),
+                Err(err) => self.state.status = err,
+            }
+        }
+        resin_ui::show_disabled_reason(ui, pose_reason.as_deref().or(drop_reason.as_deref()));
+        ui.label(
+            RichText::new("Left-drag in the viewport to move the part in X and Y. Move snap applies while dragging.").color(theme::MUTED).size(11.0),
+        );
         let _ = ui.add_enabled(false, egui::Button::new("Lay flat on face")).on_hover_text("Lay flat is not in this release.");
         let _ = ui.add_enabled(false, egui::Button::new("Auto orient")).on_hover_text("Auto orient is not in this release.");
         if ui.button("Reset").on_hover_text("Clear typed position, rotation and lift. No values are filled in.").clicked() {
-            self.state.reset_orient();
+            self.reset_resin_orient();
         }
         ui.add_space(10.0);
         if resin_ui::primary_button(ui, "Continue to Supports", None) {
@@ -3714,7 +3792,12 @@ impl App {
         let gen_reason = resin_ui::generate_disabled_reason(&self.resin, &self.state.support, &self.state.lift_mm);
         let opt_reason = resin_ui::optimize_disabled_reason(&self.resin, &self.state.support, &self.state.lift_mm);
         ui.horizontal(|ui| {
-            if resin_ui::primary_button(ui, "Generate supports", gen_reason.as_deref()) {
+            if self.resin_generate.is_running() {
+                if ui.button("Cancel generate").on_hover_text("Stop support generation at the next layer or stage check.").clicked() {
+                    self.resin_generate.cancel();
+                    self.state.status = "Cancelling support generation…".to_string();
+                }
+            } else if resin_ui::primary_button(ui, "Generate supports", gen_reason.as_deref()) {
                 self.generate_resin_supports(false);
             }
             ui.add_space(8.0);
@@ -3723,6 +3806,9 @@ impl App {
             }
         });
         resin_ui::show_disabled_reason(ui, opt_reason.as_deref().or(gen_reason.as_deref()));
+        if let Some(text) = self.resin_generate.progress_text() {
+            ui.label(RichText::new(text).size(12.0));
+        }
         if let Some(note) = &self.resin.last_generate_note {
             ui.label(RichText::new(note).size(12.0));
         }
@@ -4457,6 +4543,10 @@ impl App {
                     self.state.has_scene = true;
                     self.resin.mesh = Some(mesh);
                     self.resin.mesh_path = Some(path.to_path_buf());
+                    self.resin.pose = campanion_resin::MeshPose::empty();
+                    self.resin.invalidate_pose();
+                    self.state.position_mm = [UserField::empty(), UserField::empty(), UserField::empty()];
+                    self.state.rotation_deg = [UserField::empty(), UserField::empty(), UserField::empty()];
                     self.resin.points.clear();
                     self.resin.features = None;
                     self.resin.supported = None;
@@ -4513,14 +4603,42 @@ impl App {
     }
 
     fn generate_resin_supports(&mut self, optimize: bool) {
-        match resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, optimize) {
-            Ok(_) => {
-                self.refresh_resin_view();
-                if let Some(note) = &self.resin.last_generate_note {
-                    self.state.status = note.clone();
-                }
-            }
+        if self.resin_generate.is_running() {
+            return;
+        }
+        match self.resin_generate.start(&self.resin, self.state.support.clone(), self.state.lift_mm.clone(), optimize) {
+            Ok(()) => self.state.status = "Generating supports…".to_string(),
             Err(err) => self.state.status = err,
+        }
+    }
+
+    fn tick_resin_generate(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.resin_generate.progress_text() {
+            self.state.status = text;
+        }
+        if let Some(result) = self.resin_generate.tick() {
+            match result {
+                Ok(worker) => {
+                    resin_ui::commit_generate_session(&mut self.resin, worker);
+                    self.refresh_resin_view();
+                    if let Some(note) = &self.resin.last_generate_note {
+                        self.state.status = note.clone();
+                    }
+                }
+                Err(err) if err == "cancelled" => self.state.status = "Generate supports cancelled.".to_string(),
+                Err(err) => self.state.status = err,
+            }
+        }
+        if self.resin_generate.is_running() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn reset_resin_orient(&mut self) {
+        self.state.reset_orient();
+        self.resin.pose = campanion_resin::MeshPose::empty();
+        if self.resin.has_part() {
+            self.resin.invalidate_pose();
         }
     }
 
@@ -4640,7 +4758,7 @@ impl App {
     }
 
     fn resin_edit_mesh(&self) -> Option<&campanion_mesh::Mesh> {
-        self.resin.supported.as_ref().map(|supported| &supported.part).or(self.resin.mesh.as_ref())
+        self.resin.supported.as_ref().map(|supported| &supported.part).or_else(|| self.resin.display_mesh())
     }
 
     fn show_resin_layer_image(&mut self, ui: &mut egui::Ui) {
@@ -4692,8 +4810,61 @@ impl App {
         self.handle_resin_pointer(&output);
     }
 
+    fn handle_orient_drag(&mut self, output: &view3d::View3dOutput) {
+        let Some(pointer) = output.pointer else {
+            if output.primary_drag_stopped {
+                self.orient_drag = None;
+            }
+            return;
+        };
+        let width = f64::from(output.rect.width());
+        let height = f64::from(output.rect.height());
+        let px = f64::from(pointer.x - output.rect.left());
+        let py = f64::from(pointer.y - output.rect.top());
+        let z = self.resin.display_mesh().and_then(|mesh| mesh.bounds().ok()).map(|bounds| (bounds.min().z + bounds.max().z) / 2.0).unwrap_or(0.0);
+        let Some((wx, wy)) = plane_xy_at_z(self.resin_view3d.camera, px, py, width, height, z) else {
+            return;
+        };
+        if output.primary_drag_started {
+            let Some(source) = self.resin.mesh.as_ref() else {
+                return;
+            };
+            let Ok(posed) = campanion_resin::apply_mesh_pose(source, self.resin.pose) else {
+                return;
+            };
+            let Ok(bounds) = posed.bounds() else {
+                return;
+            };
+            let ox = (bounds.min().x + bounds.max().x) / 2.0;
+            let oy = (bounds.min().y + bounds.max().y) / 2.0;
+            self.orient_drag = Some(OrientDrag { start_x: wx, start_y: wy, origin_x: ox, origin_y: oy });
+        }
+        if output.primary_dragging
+            && let Some(drag) = self.orient_drag
+        {
+            let step = if self.state.move_step_mm > 0.0 { self.state.move_step_mm } else { 1.0 };
+            if let Err(err) = resin_ui::place_session_xy(
+                &mut self.resin,
+                drag.origin_x + (wx - drag.start_x),
+                drag.origin_y + (wy - drag.start_y),
+                step,
+                &mut self.state.position_mm,
+                &mut self.state.rotation_deg,
+            ) {
+                self.state.status = err;
+            }
+        }
+        if output.primary_drag_stopped {
+            self.orient_drag = None;
+        }
+    }
+
     fn handle_resin_pointer(&mut self, output: &view3d::View3dOutput) {
         if self.resin.mesh.is_none() {
+            return;
+        }
+        if self.state.workspace == Workspace::Resin && self.state.tab == ModeTab::Orient {
+            self.handle_orient_drag(output);
             return;
         }
         let raft_top = self.state.support.raft_thickness_mm.value.trim().parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
@@ -4946,6 +5117,22 @@ fn screenshot_resin_part() -> campanion_mesh::Mesh {
     }
 }
 
+fn screenshot_offcenter_resin_part() -> campanion_mesh::Mesh {
+    // Screenshot stand-in only. Mirrors an imported CAD part whose XY is not plate-centred.
+    use campanion_mesh::{Aabb, Mesh, Vec3};
+    let mut tris = Vec::new();
+    if let Ok(base) = Mesh::new(Aabb::from_corners(Vec3::new(135.0, 70.0, 0.0), Vec3::new(163.0, 96.0, 20.0)).face_triangles().to_vec()) {
+        tris.extend_from_slice(base.triangles());
+    }
+    if let Ok(island) = Mesh::new(Aabb::from_corners(Vec3::new(150.0, 88.0, 28.0), Vec3::new(156.0, 94.0, 32.0)).face_triangles().to_vec()) {
+        tris.extend_from_slice(island.triangles());
+    }
+    match Mesh::new(tris) {
+        Ok(mesh) => mesh,
+        Err(_) => screenshot_resin_part(),
+    }
+}
+
 fn screenshot_resin_params_mesh() -> campanion_mesh::Mesh {
     use campanion_mesh::{Aabb, Mesh, Vec3};
     match Mesh::new(Aabb::from_corners(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 2.0, 1.0)).face_triangles().to_vec()) {
@@ -5120,6 +5307,22 @@ fn placeholder_pane(ui: &mut egui::Ui, message: &str) {
     painter.rect_filled(rect, 4.0, theme::VIEWPORT);
     painter.rect_stroke(rect, 4.0, Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
     painter.text(rect.center(), egui::Align2::CENTER_CENTER, message, egui::FontId::proportional(13.0), theme::MUTED);
+}
+
+fn plane_xy_at_z(camera: campanion_view::Camera, px: f64, py: f64, width: f64, height: f64, z: f64) -> Option<(f64, f64)> {
+    let ray = camera.ray_through(px, py, width, height)?;
+    if !ray.direction.z.is_finite() {
+        return None;
+    }
+    if ray.direction.z.abs() < 1e-12 {
+        return Some((ray.origin.x, ray.origin.y));
+    }
+    let t = (z - ray.origin.z) / ray.direction.z;
+    let point = ray.origin.add(ray.direction.scale(t));
+    if !point.x.is_finite() || !point.y.is_finite() {
+        return None;
+    }
+    Some((point.x, point.y))
 }
 
 fn field_row(ui: &mut egui::Ui, label: &str, field: &mut UserField, dark: bool) {
