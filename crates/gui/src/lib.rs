@@ -11,6 +11,7 @@ pub mod edit;
 pub mod fields;
 pub mod files;
 pub mod machines;
+pub mod operations;
 pub mod session;
 pub mod setup;
 pub mod theme;

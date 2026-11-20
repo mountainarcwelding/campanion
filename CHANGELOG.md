@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## 0.24.0 — 2026-11-19
+
+Setup bug fixes and the first Operations milestone (G2) for the graphical workspace.
+**Not physically tested.** CAMpanion is still primarily command-line driven; this release
+does not talk to a machine.
+
+### Added
+
+- Operations: Add Operation is limited to the types the selected head can run (laser cut /
+  score / fill, plasma and jet profile, spindle face / profile / pocket / drill first). Assign
+  by part, layer, or contour. Automatic cut-order rules (`inner_first`, `cuts_last`) with a
+  drag-or-arrow override in an ordered list; explicit `cut_order` still wins. Tabs/bridges,
+  lead-ins, and job-level clearance/retract fields stay empty until typed. Real-unit material
+  presets with orange per-field overrides, Reset, and Save to library. Plasma small-hole
+  rules are stored as entered; posts do not invent THC codes.
+- Auto-regenerate after edits (about 300 ms debounce, background thread, cancel on newer
+  edits, stale toolpaths drawn dimmed). The temporary Regenerate button is gone.
+- Planning applies stored Setup hooks when they are set: `z_zero` of `bed` raises posted Z by
+  the user-entered stock thickness; `start_from` of `user_origin` or `current_position` with a
+  `job_origin` shifts XY so that anchor is program (0, 0); `order_rules` sort operations when
+  `cut_order` is empty. Omitted keys stay byte-identical to previous releases.
+
+### Fixed
+
+- Array and Arrange tool windows no longer cover the bed-size label.
+- The properties panel scrolls, so Origin and Sheet fields stay reachable.
+- Opening `examples/laser_rect.job.json` from the repository root no longer looks for
+  `examples/examples/laser_rect.svg`.
+- Resin screenshot frames show a labelled example resin machine, not the example laser card.
+- `job-machine-picker.png` now captures the open machine-profile dropdown.
+
+### Known limits
+
+- Movable start-point markers in the viewport, visual height planes, and applying colour
+  selectors are not in this slice. Laser fill still needs a raster source. A laser post may
+  omit Z when it does not emit height words; planned IR Z still follows `z_zero`.
+- 3D place-on-face is not in the job format. Off-sheet is a warning, not an export refusal.
+  Off-bed export is still refused. Run, and resin Orient/Supports, remain later milestones.
+- This release has not been physically tested.
+
 ## 0.23.1 — 2026-11-19
 
 Setup review fixes for the graphical workspace. **Not physically tested.** CAMpanion is still

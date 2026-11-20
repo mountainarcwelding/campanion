@@ -42,6 +42,8 @@ pub struct ViewportOutput {
 pub struct ViewportGuides {
     pub bed: Option<[f64; 4]>,
     pub sheet: Option<[f64; 4]>,
+    /// When true, toolpaths are from an older plan and are drawn dimmed.
+    pub stale: bool,
 }
 
 impl Viewport {
@@ -207,6 +209,12 @@ pub fn show_with(
 }
 
 fn stroke_color(stroke: &Stroke, guides: Option<&ViewportGuides>) -> Color32 {
+    let stale = guides.is_some_and(|guides| guides.stale);
+    let color = stroke_color_fresh(stroke, guides);
+    if stale { color.gamma_multiply(0.4) } else { color }
+}
+
+fn stroke_color_fresh(stroke: &Stroke, guides: Option<&ViewportGuides>) -> Color32 {
     if stroke.kind != StrokeKind::Cut {
         return if stroke.kind == StrokeKind::Plunge { theme::PLUNGE } else { theme::RAPID };
     }
@@ -421,7 +429,7 @@ mod tests {
         let scene = cut_scene(vec![[0.0, 0.0], [20.0, 10.0]]);
         let mut viewport = Viewport::new(&scene);
         let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0));
-        let guides = ViewportGuides { bed: Some([0.0, 0.0, 600.0, 400.0]), sheet: Some([0.0, 0.0, 300.0, 200.0]) };
+        let guides = ViewportGuides { bed: Some([0.0, 0.0, 600.0, 400.0]), sheet: Some([0.0, 0.0, 300.0, 200.0]), stale: false };
         viewport.fit_with_guides(Some(&scene), rect, Some(&guides));
         // A fit to the 20×10 part would use a much larger scale than a fit to the 600×400 bed.
         let bed_fit = View::fit(([0.0, 0.0], [600.0, 400.0]), 400.0, 300.0, FIT_MARGIN_PX);

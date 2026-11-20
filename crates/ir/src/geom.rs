@@ -43,6 +43,11 @@ impl Vec3 {
         self.z
     }
 
+    /// Translate by `dx`, `dy`, `dz` millimetres.
+    pub fn translated(self, dx: f64, dy: f64, dz: f64) -> Result<Self> {
+        Self::new(self.x + dx, self.y + dy, self.z + dz)
+    }
+
     /// Components as given. The caller must pass finite values when they will be checked later.
     pub(crate) fn from_xyz(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
@@ -111,6 +116,16 @@ impl Pose {
     pub fn with_rotary(self, deg: f64) -> Result<Self> {
         let pose = Self { rotary: Some(deg), ..self };
         pose.check()?;
+        Ok(pose)
+    }
+
+    /// Translate the tip by `dx`, `dy`, `dz` millimetres. The tool axis is unchanged.
+    pub fn translated(self, dx: f64, dy: f64, dz: f64) -> Result<Self> {
+        let tip = self.tip.translated(dx, dy, dz)?;
+        let mut pose = Self::new(tip, self.axis)?;
+        if let Some(deg) = self.rotary {
+            pose = pose.with_rotary(deg)?;
+        }
         Ok(pose)
     }
 

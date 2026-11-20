@@ -226,6 +226,23 @@ pub enum ClMotion {
 }
 
 impl ClMotion {
+    /// Translate endpoints and centres by `dx`, `dy`, `dz` millimetres.
+    pub fn translated(&self, dx: f64, dy: f64, dz: f64) -> Result<Self> {
+        let pose = |to: Pose| to.translated(dx, dy, dz);
+        let point = |center: Vec3| center.translated(dx, dy, dz);
+        Ok(match *self {
+            Self::Rapid { to, feed } => Self::Rapid { to: pose(to)?, feed },
+            Self::Linear { to, feed, role, power } => Self::Linear { to: pose(to)?, feed, role, power },
+            Self::Arc { to, plane, center, sense, feed, role, power } => {
+                Self::Arc { to: pose(to)?, plane, center: point(center)?, sense, feed, role, power }
+            }
+            Self::Helix { to, plane, center, sense, sweep, feed, role, power } => {
+                Self::Helix { to: pose(to)?, plane, center: point(center)?, sense, sweep, feed, role, power }
+            }
+            Self::Thread { to, lead } => Self::Thread { to: pose(to)?, lead },
+        })
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
         match self {
             Self::Rapid { to, feed } => {
@@ -421,6 +438,21 @@ impl ClPath {
 
     pub fn blocks(&self) -> &[ClBlock] {
         &self.blocks
+    }
+
+    /// Translate pierce and motion geometry by `dx`, `dy`, `dz` millimetres.
+    pub fn translated(&self, dx: f64, dy: f64, dz: f64) -> Result<Self> {
+        let mut path = self.clone();
+        if let Some(pierce) = path.pierce {
+            path.pierce = Some(pierce.translated(dx, dy, dz)?);
+        }
+        for block in &mut path.blocks {
+            if let ClBlock::Motion(motion) = block {
+                *motion = motion.translated(dx, dy, dz)?;
+            }
+        }
+        path.check()?;
+        Ok(path)
     }
 
     pub(crate) fn check(&self) -> Result<()> {

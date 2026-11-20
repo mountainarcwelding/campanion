@@ -1,9 +1,9 @@
 //! Optional Setup hooks on `campanion-job/2` and helpers that do not change omitted files.
 //!
 //! These fields are omitted by default. A job that does not name them plans and posts the same
-//! way as before. When present, they are stored and round-tripped. Datum and Z-zero are applied
-//! at planning time only when set. Automatic `order_rules` are stored for the Operations
-//! milestone and do not change planning yet.
+//! way as before. When present, they are stored and round-tripped. Datum, Z-zero, start-from /
+//! job origin, and automatic `order_rules` are applied at planning time only when set.
+//! Explicit `cut_order` still wins over `order_rules`.
 
 use serde_json::{Map, Value};
 
@@ -167,8 +167,8 @@ impl JobOriginAnchor {
     }
 }
 
-/// Default cut-order rules. Stored now; planning still follows `cut_order` or file order until
-/// the Operations milestone applies them.
+/// Default cut-order rules. Applied when present and `cut_order` is empty. Explicit `cut_order`
+/// still wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OrderRules {
     /// Cut inner contours before outer ones.
@@ -259,6 +259,42 @@ pub fn bed_z_shift(hooks: &SetupHooks, stock_height: Option<f64>) -> f64 {
         return 0.0;
     }
     hooks.stock_thickness.or(stock_height).unwrap_or(0.0)
+}
+
+/// Point of a nine-position `job_origin` on `rect` (`min_x`, `min_y`, `max_x`, `max_y`).
+#[must_use]
+pub fn job_origin_point(anchor: JobOriginAnchor, rect: [f64; 4]) -> [f64; 2] {
+    let [min_x, min_y, max_x, max_y] = rect;
+    let mid_x = (min_x + max_x) * 0.5;
+    let mid_y = (min_y + max_y) * 0.5;
+    match anchor {
+        JobOriginAnchor::MinMin => [min_x, min_y],
+        JobOriginAnchor::MidMin => [mid_x, min_y],
+        JobOriginAnchor::MaxMin => [max_x, min_y],
+        JobOriginAnchor::MinMid => [min_x, mid_y],
+        JobOriginAnchor::Center => [mid_x, mid_y],
+        JobOriginAnchor::MaxMid => [max_x, mid_y],
+        JobOriginAnchor::MinMax => [min_x, max_y],
+        JobOriginAnchor::MidMax => [mid_x, max_y],
+        JobOriginAnchor::MaxMax => [max_x, max_y],
+    }
+}
+
+/// XY addend that places the chosen job-origin anchor at program (0, 0).
+#[must_use]
+pub fn job_origin_shift(anchor: JobOriginAnchor, rect: [f64; 4]) -> [f64; 2] {
+    let [x, y] = job_origin_point(anchor, rect);
+    [-x, -y]
+}
+
+/// Rank for `order_rules.cuts_last`: marking and engraving first, then through cuts.
+#[must_use]
+pub fn cuts_last_rank(kind: &crate::jobfile::OperationKind) -> u8 {
+    use crate::jobfile::OperationKind;
+    match kind {
+        OperationKind::Engrave | OperationKind::LaserRaster => 0,
+        _ => 1,
+    }
 }
 
 fn parse_datum(value: &Value, scale: f64) -> Result<Datum, JobFileError> {

@@ -808,6 +808,44 @@ impl Document {
         &self.program
     }
 
+    /// Translate every tool-space pose and centre by `dx`, `dy`, `dz` millimetres.
+    pub fn translate(&self, dx: f64, dy: f64, dz: f64) -> Result<Self> {
+        if dx == 0.0 && dy == 0.0 && dz == 0.0 {
+            return Ok(self.clone());
+        }
+        let mut program = self.program.clone();
+        let mut toolpaths = Vec::with_capacity(program.toolpaths.len());
+        for path in &program.toolpaths {
+            toolpaths.push(path.translated(dx, dy, dz)?);
+        }
+        program.toolpaths = toolpaths;
+        Self::new(program)
+    }
+
+    /// Axis-aligned XY bounds of tool tips, or `None` when the program has no motions.
+    pub fn tip_bounds_xy(&self) -> Option<[f64; 4]> {
+        let mut bounds: Option<[f64; 4]> = None;
+        for path in &self.program.toolpaths {
+            for block in path.blocks() {
+                let ClBlock::Motion(motion) = block else { continue };
+                let tip = match motion {
+                    ClMotion::Rapid { to, .. }
+                    | ClMotion::Linear { to, .. }
+                    | ClMotion::Arc { to, .. }
+                    | ClMotion::Helix { to, .. }
+                    | ClMotion::Thread { to, .. } => to.tip(),
+                };
+                let x = tip.x();
+                let y = tip.y();
+                bounds = Some(match bounds {
+                    None => [x, y, x, y],
+                    Some([min_x, min_y, max_x, max_y]) => [min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y)],
+                });
+            }
+        }
+        bounds
+    }
+
     /// Concatenate `other`'s toolpaths onto this document. Tools must match by id.
     pub fn append_toolpaths(self, other: &Document) -> Result<Self> {
         let program = self.program.extend_toolpaths(other.program.toolpaths.clone())?;

@@ -60,6 +60,17 @@ pub struct OperationExtras {
     pub power: Option<PowerValue>,
     pub passes: Option<u32>,
     pub overrides: FieldOverrides,
+    /// Plasma small-hole rule, when the user entered both a diameter and an action.
+    pub small_hole: Option<SmallHoleRule>,
+}
+
+/// User-entered plasma small-hole intent. Posts do not invent THC codes for this.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmallHoleRule {
+    /// Maximum hole diameter, millimetres, as entered.
+    pub max_diameter: f64,
+    /// Recorded action (`pierce_only`, `thc_off`, or another user-entered token).
+    pub action: String,
 }
 
 /// Build the default single-part list from a v1 source and placement.
@@ -140,6 +151,21 @@ fn parse_instances(value: &Value, scale: f64, part: &str) -> Result<Vec<JobInsta
         instances.push(JobInstance { id, placement });
     }
     Ok(instances)
+}
+
+/// Parse a user-entered small-hole rule. Both a positive `max_diameter` and an `action` are required.
+pub fn parse_small_hole(value: &Value, what: &str, scale: f64) -> Result<SmallHoleRule, JobFileError> {
+    let map = object(value, what).map_err(from_cli)?;
+    check_keys(map, &["max_diameter", "action"], what).map_err(from_cli)?;
+    let max = crate::job::as_f64(require(map, "max_diameter").map_err(from_cli)?, &format!("{what}.max_diameter")).map_err(from_cli)? * scale;
+    if !max.is_finite() || max <= 0.0 {
+        return Err(JobFileError::invalid(format!("{what}.max_diameter must be greater than zero")));
+    }
+    let action = as_str(require(map, "action").map_err(from_cli)?, &format!("{what}.action")).map_err(from_cli)?.trim().to_string();
+    if action.is_empty() {
+        return Err(JobFileError::invalid(format!("{what}.action is empty")));
+    }
+    Ok(SmallHoleRule { max_diameter: max, action })
 }
 
 /// Parse a v2 operation selector.
