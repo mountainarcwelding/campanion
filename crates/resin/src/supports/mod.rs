@@ -17,7 +17,7 @@ mod solid;
 
 pub use calibration::{
     CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, MissingConstant, REQUIRED_CONSTANTS, REQUIRED_TIP_FIELDS,
-    import_calibration, load_calibration, missing_constants_in, parse_calibration,
+    STANDARD_GRAVITY_M_S2, constant_label, import_calibration, load_calibration, missing_constants_in, parse_calibration,
 };
 pub use classify::{ClassifiedRegion, ClassifyThresholds, FeatureClass, classify_features};
 pub use islands::{
@@ -174,6 +174,33 @@ pub fn generate_supports_with(part: &Mesh, params: &SupportParams, options: Gene
         (points, None, None, Vec::new())
     };
     let palette = options.calibration.map(|profile| profile.tip_palette.as_slice()).unwrap_or(&[]);
+    assemble_supported(part, params, points, features, optimize, warnings, palette)
+}
+
+/// Lift `part` and rebuild the raft and pillars from already-placed `points`.
+///
+/// Point Z values must already be in the lifted frame used by [`generate_supports_with`].
+pub fn rebuild_supported(part: &Mesh, params: &SupportParams, points: &[SupportPoint], palette: &[CalibratedTip]) -> Result<SupportedMesh> {
+    params.validate()?;
+    let bounds = part.bounds().map_err(|err| ResinError::invalid(format!("part: {err}")))?;
+    let lift_z = params.raft_thickness_mm + params.part_lift_mm - bounds.min().z;
+    if !lift_z.is_finite() {
+        return Err(ResinError::invalid("part lift is not finite"));
+    }
+    let part = translate_mesh(part, Vec3::new(0.0, 0.0, lift_z))?;
+    assemble_supported(part, params, points.to_vec(), None, None, Vec::new(), palette)
+}
+
+fn assemble_supported(
+    part: Mesh,
+    params: &SupportParams,
+    points: Vec<SupportPoint>,
+    features: Option<DetectedFeatures>,
+    optimize: Option<ForceBreakdown>,
+    warnings: Vec<String>,
+    palette: &[CalibratedTip],
+) -> Result<SupportedMesh> {
+    let raft_top = params.raft_thickness_mm;
     for point in &points {
         let used = params_for_point(params, point, palette)?;
         let needed = raft_top + used.foot_height_mm + used.tip_length_mm;

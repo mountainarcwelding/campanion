@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
-Resin island detection, a calibration-backed support optimizer, and a first Supports tab.
-**NOT printer-tested.** CAMpanion is still primarily command-line driven; the GUI is in
-development. No v0.27.0 release has been cut.
+## 0.27.0 — 2026-11-20
+
+**NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.
+Check any `.pm7m` on the printer screen and print a test before a real job. CAMpanion is still
+primarily command-line driven; the GUI is in development.
+
+Resin island detection, a calibration-backed support optimizer, a first Supports tab, and GUI
+Slice/Export that write a real `.pm7m` with the same slicer as `campanion resin`.
+
 
 ### Added
 
@@ -30,17 +36,31 @@ development. No v0.27.0 release has been cut.
 - Resin GUI (v0.4 theme): Orient, Supports, Slice, and Export with a clear primary action
   on each tab. The Supports tab lists and colours islands, edits tips by click and drag
   with undo, has a palette editor that stays empty until a preset is saved, and a
-  Calibration panel that lists missing constants and keeps Optimize disabled with a
-  reason until the profile is complete. Disabled controls say why and what to enter.
-  Fields have units and tooltips. No numeric defaults are shipped.
+  Calibration panel that lists missing constants (plain labels with units, not JSON keys)
+  and keeps Optimize disabled with a wrapped reason until the profile is complete.
+  Disabled controls say why and what to enter. Fields have units and tooltips. No numeric
+  defaults are shipped. A Top / Front / Side / 3D view shows pillar heights and mid-air
+  islands. The laser-style operation timeline is hidden on resin tabs. The machine
+  selector is used; Export names the target printer. Hover readouts sit next to the cursor
+  in the viewport.
+- The Slice tab runs the same slicer as `campanion resin`. Export writes a real `.pm7m`,
+  including supports and the raft when they were generated. Print settings come from a
+  user-chosen sample `.pm7m` (the same file `--params-from` uses); missing settings are
+  refused. For the same inputs, GUI export bytes match the CLI. The LCD layer view is the
+  real raster, zoomed to exposed pixels.
+- Standard gravity is the physical constant 9.80665 m/s². It is not a user calibration
+  value and is not listed as missing.
 
 ### Known limits
 
-- GUI Slice does not write layer images yet; GUI Export does not write a `.pm7m`. Use
-  `campanion resin` for a printable file.
+- Nothing in this release has been printer-tested. Image orientation is unverified until
+  an asymmetric test part is printed.
 - Paint-on supports, no-support zones, branching trees, hollowing, auto-orient, and
-  calibration-print geometry are not included.
-- The undercut chamfered raft is unchanged and still unprinted.
+  calibration-print geometry are not included. Fitting measurements to constants is not
+  implemented.
+- The undercut chamfered raft is unchanged and still unprinted. The only `.pm7m` format
+  written is the Anycubic Photon Mono M7 Max layout derived from the sample file.
+- The GUI is still in development. CAMpanion remains primarily command-line driven.
 
 ## 0.26.1 — 2026-11-19
 

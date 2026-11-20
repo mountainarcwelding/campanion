@@ -14,6 +14,7 @@
 use campanion_mesh::Mesh;
 
 use crate::error::{ResinError, Result};
+use crate::supports::calibration::STANDARD_GRAVITY_M_S2;
 use crate::supports::calibration::{CalibratedTip, CalibrationProfile};
 use crate::supports::classify::{ClassifiedRegion, ClassifyThresholds, classify_features};
 use crate::supports::islands::{DetectedFeatures, IslandDetectParams, detect_islands, island_fill_points};
@@ -172,7 +173,7 @@ fn demand_forces(mesh: &Mesh, features: &DetectedFeatures, calibration: &Calibra
     let suction_n = calibration.suction_coefficient_n_per_mm2 * max_cup_area;
     let volume_mm3 = signed_volume(mesh).abs();
     // density g/cm³ × (mm³ / 1000) = grams; grams / 1000 = kilograms; × gravity = newtons.
-    let weight_n = calibration.resin_density_g_per_cm3 * volume_mm3 / 1_000_000.0 * calibration.gravity_m_s2;
+    let weight_n = calibration.resin_density_g_per_cm3 * volume_mm3 / 1_000_000.0 * STANDARD_GRAVITY_M_S2;
     if ![peel_n, suction_n, weight_n].iter().all(|v| v.is_finite()) {
         return Err(ResinError::invalid("holding-force terms are not finite"));
     }

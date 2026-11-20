@@ -6,8 +6,9 @@
 
 use campanion_mesh::{Mesh, Vec3};
 use campanion_resin::{
-    CalibrationProfile, DetectedFeatures, GenerateOptions, InputPoint, IslandDetectParams, MissingConstant, PointSource, SupportParams, SupportPoint,
-    SupportedMesh, generate_supports_with, parse_calibration,
+    BuildReport, CalibrationProfile, DetectedFeatures, GenerateOptions, InputPoint, IslandDetectParams, M7_MAX, MissingConstant, Placement,
+    PointSource, ResinSettings, SupportParams, SupportPoint, SupportedMesh, build_pm7m, generate_supports_with, load_print_settings,
+    parse_calibration, rebuild_supported,
 };
 use campanion_view::{Scene, Stroke, StrokeKind};
 use eframe::egui::{self, Color32, RichText, Stroke as UiStroke};
@@ -16,6 +17,67 @@ use crate::theme;
 use crate::{SupportFields, UserField};
 
 /// How the Supports viewport interprets a click.
+/// Camera used in the Supports viewport.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SupportView {
+    /// Looking down the Z axis (build-plate plan).
+    #[default]
+    Top,
+    /// Looking along Y, X horizontal, Z up.
+    Front,
+    /// Looking along X, Y horizontal, Z up.
+    Side,
+    /// Low side angle so pillar heights and mid-air islands read in depth.
+    ThreeQuarter,
+}
+
+impl SupportView {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Top => "Top",
+            Self::Front => "Front",
+            Self::Side => "Side",
+            Self::ThreeQuarter => "3D",
+        }
+    }
+
+    pub fn caption(self) -> &'static str {
+        match self {
+            Self::Top => "Build plate, top view — supports and islands",
+            Self::Front => "Front view (X–Z) — pillar heights",
+            Self::Side => "Side view (Y–Z) — pillar heights",
+            Self::ThreeQuarter => "3D view — pillars and mid-air islands",
+        }
+    }
+
+    pub fn allows_edit(self) -> bool {
+        self == Self::Top
+    }
+
+    pub fn project(self, x: f64, y: f64, z: f64) -> [f64; 2] {
+        match self {
+            Self::Top => [x, y],
+            Self::Front => [x, z],
+            Self::Side => [y, z],
+            Self::ThreeQuarter => project_three_quarter(x, y, z),
+        }
+    }
+}
+
+fn project_three_quarter(x: f64, y: f64, z: f64) -> [f64; 2] {
+    // Same camera basis as render_supported_png: look from a low side angle, slightly upward.
+    let look = normalize3(-1.35, 1.7, 0.22);
+    let (lx, ly, lz) = look;
+    let (rx, ry, rz) = normalize3(ly * 1.0 - lz * 0.0, lz * 0.0 - lx * 1.0, lx * 0.0 - ly * 0.0); // look × world_up (0,0,1)
+    let (ux, uy, uz) = normalize3(ry * lz - rz * ly, rz * lx - rx * lz, rx * ly - ry * lx); // right × look
+    [x * rx + y * ry + z * rz, x * ux + y * uy + z * uz]
+}
+
+fn normalize3(x: f64, y: f64, z: f64) -> (f64, f64, f64) {
+    let n = (x * x + y * y + z * z).sqrt();
+    if n > 0.0 { (x / n, y / n, z / n) } else { (0.0, 0.0, 1.0) }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SupportEditTool {
     /// Click empty space to add, drag a point to move, Delete removes the selection.
@@ -59,7 +121,7 @@ impl CalibrationState {
             let name = self.profile.as_ref().map(|p| p.name.as_str()).unwrap_or("profile");
             return format!("{} (`{name}`): all required constants are set", self.path.display());
         }
-        let list = self.missing.iter().map(|item| format!("{} ({})", item.name, item.reason)).collect::<Vec<_>>().join("; ");
+        let list = self.missing.iter().map(|item| format!("{} ({})", item.label(), item.reason)).collect::<Vec<_>>().join("; ");
         format!("{}: missing {list}", self.path.display())
     }
 }
@@ -78,12 +140,23 @@ pub struct ResinSession {
     pub palettes: Vec<SavedTipPreset>,
     pub preset_draft: SavedTipPreset,
     pub calibration: Option<CalibrationState>,
-    pub supported: Option<String>,
+    pub supported: Option<SupportedMesh>,
     pub last_generate_note: Option<String>,
     pub warnings: Vec<String>,
     pub optimize_summary: Option<String>,
     pub sliced: bool,
     pub advanced_open: bool,
+    pub view: SupportView,
+    pub params_from: Option<std::path::PathBuf>,
+    pub settings: Option<ResinSettings>,
+    pub settings_error: Option<String>,
+    pub pm7m: Option<Vec<u8>>,
+    pub slice_report: Option<BuildReport>,
+    pub layer_images: Vec<Vec<u8>>,
+    pub slice_width: u32,
+    pub slice_height: u32,
+    pub points_dirty: bool,
+    pub last_export_path: Option<std::path::PathBuf>,
 }
 
 /// Snapshot for resin undo (points and selection only).
@@ -106,6 +179,19 @@ impl ResinSession {
 
     pub fn has_part(&self) -> bool {
         self.mesh.is_some()
+    }
+
+    pub fn has_print_settings(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    pub fn invalidate_slice(&mut self) {
+        self.sliced = false;
+        self.pm7m = None;
+        self.slice_report = None;
+        self.layer_images.clear();
+        self.slice_width = 0;
+        self.slice_height = 0;
     }
 }
 
@@ -169,7 +255,7 @@ pub fn optimize_disabled_reason(session: &ResinSession, support: &SupportFields,
             let list = if state.missing.is_empty() {
                 state.error.clone().unwrap_or_else(|| "the profile is incomplete".to_string())
             } else {
-                state.missing.iter().map(|item| item.name.as_str()).collect::<Vec<_>>().join(", ")
+                state.missing.iter().map(|item| item.label()).collect::<Vec<_>>().join(", ")
             };
             Some(format!("Optimize supports is disabled: the calibration profile is incomplete. Missing: {list}."))
         }
@@ -177,18 +263,30 @@ pub fn optimize_disabled_reason(session: &ResinSession, support: &SupportFields,
     }
 }
 
-pub fn slice_disabled_reason(session: &ResinSession, layer_height: &UserField) -> Option<String> {
+pub fn slice_disabled_reason(session: &ResinSession, machine_selected: bool) -> Option<String> {
     if !session.has_part() {
         return Some("Slice is disabled: open a part first (File → Import part…).".to_string());
     }
-    if layer_height.value.trim().is_empty() {
-        return Some("Slice is disabled: enter layer height (mm).".to_string());
+    if !machine_selected {
+        return Some("Slice is disabled: select a resin printer in the machine selector (Manage… to add one).".to_string());
+    }
+    if session.settings.is_none() {
+        return Some(
+            "Slice is disabled: choose a sample or params .pm7m (the same file `campanion resin --params-from` uses). No exposure, lift, or layer values are assumed."
+                .to_string(),
+        );
     }
     None
 }
 
-pub fn export_disabled_reason(session: &ResinSession) -> Option<String> {
-    if !session.sliced { Some("Export .pm7m is disabled: slice the part on the Slice tab first.".to_string()) } else { None }
+pub fn export_disabled_reason(session: &ResinSession, machine_selected: bool) -> Option<String> {
+    if let Some(reason) = slice_disabled_reason(session, machine_selected) {
+        return Some(reason.replace("Slice is disabled", "Export .pm7m is disabled"));
+    }
+    if !session.sliced || session.pm7m.is_none() {
+        return Some("Export .pm7m is disabled: slice the part on the Slice tab first.".to_string());
+    }
+    None
 }
 
 /// Collect validated support parameters from the form. All required fields must already be present.
@@ -246,22 +344,33 @@ pub fn island_color(id: u32) -> Color32 {
     COLOURS[(id.saturating_sub(1) as usize) % COLOURS.len()]
 }
 
+/// Scene of triangle edges projected for `view`.
+pub fn mesh_view_scene(mesh: &Mesh, view: SupportView) -> Scene {
+    mesh_scene_with(mesh, |p| view.project(p.x, p.y, p.z))
+}
+
 /// Top-view scene of triangle edges, for the plan viewport.
 pub fn mesh_xy_scene(mesh: &Mesh) -> Scene {
+    mesh_scene_with(mesh, |p| [p.x, p.y])
+}
+
+fn mesh_scene_with(mesh: &Mesh, project: impl Fn(Vec3) -> [f64; 2]) -> Scene {
     let mut strokes = Vec::new();
     let mut min = [f64::INFINITY, f64::INFINITY];
     let mut max = [f64::NEG_INFINITY, f64::NEG_INFINITY];
     let mut total = 0.0;
     for tri in mesh.triangles() {
         for (a, b) in [(tri.a, tri.b), (tri.b, tri.c), (tri.c, tri.a)] {
-            include_xy(&mut min, &mut max, a);
-            include_xy(&mut min, &mut max, b);
-            let length = (b.x - a.x).hypot(b.y - a.y);
+            let pa = project(a);
+            let pb = project(b);
+            include_pt(&mut min, &mut max, pa);
+            include_pt(&mut min, &mut max, pb);
+            let length = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
             total += length;
             strokes.push(Stroke {
                 kind: StrokeKind::Cut,
                 toolpath: 0,
-                points: vec![[a.x, a.y], [b.x, b.y]],
+                points: vec![pa, pb],
                 zs: vec![a.z, b.z],
                 z_start: a.z,
                 z_end: b.z,
@@ -285,11 +394,11 @@ pub fn mesh_xy_scene(mesh: &Mesh) -> Scene {
     }
 }
 
-fn include_xy(min: &mut [f64; 2], max: &mut [f64; 2], p: Vec3) {
-    min[0] = min[0].min(p.x);
-    min[1] = min[1].min(p.y);
-    max[0] = max[0].max(p.x);
-    max[1] = max[1].max(p.y);
+fn include_pt(min: &mut [f64; 2], max: &mut [f64; 2], p: [f64; 2]) {
+    min[0] = min[0].min(p[0]);
+    min[1] = min[1].min(p[1]);
+    max[0] = max[0].max(p[0]);
+    max[1] = max[1].max(p[1]);
 }
 
 pub fn apply_generate(session: &mut ResinSession, support: &SupportFields, lift_mm: &UserField, optimize: bool) -> Result<SupportedMesh, String> {
@@ -328,7 +437,159 @@ pub fn apply_generate(session: &mut ResinSession, support: &SupportFields, lift_
     });
     let islands = session.features.as_ref().map(|f| f.islands.len()).unwrap_or(0);
     session.last_generate_note = Some(format!("Placed {} support(s), {} island(s) detected. NOT printer-tested.", session.points.len(), islands));
+    session.supported = Some(result.clone());
+    session.points_dirty = false;
+    session.invalidate_slice();
     Ok(result)
+}
+
+/// Load print settings from a user-chosen sample `.pm7m`, the same file `campanion resin --params-from` uses.
+pub fn load_params_file(session: &mut ResinSession, path: std::path::PathBuf) -> Result<ResinSettings, String> {
+    match load_print_settings(&path) {
+        Ok(settings) => {
+            session.params_from = Some(path);
+            session.settings = Some(settings.clone());
+            session.settings_error = None;
+            session.invalidate_slice();
+            Ok(settings)
+        }
+        Err(err) => {
+            session.params_from = Some(path);
+            session.settings = None;
+            session.settings_error = Some(err.to_string());
+            session.invalidate_slice();
+            Err(err.to_string())
+        }
+    }
+}
+
+/// Mesh the slicer should cut: the supported solid (raft and pillars included) when supports exist.
+pub fn print_mesh(session: &mut ResinSession, support: &SupportFields, lift_mm: &UserField) -> Result<campanion_mesh::Mesh, String> {
+    let source = session.mesh.as_ref().ok_or_else(|| "open a part first".to_string())?;
+    if session.points.is_empty() && session.supported.is_none() {
+        return Ok(source.clone());
+    }
+    if !session.points_dirty
+        && let Some(supported) = &session.supported
+        && supported.points == session.points
+    {
+        return Ok(supported.mesh.clone());
+    }
+    let params = support_params_from_fields(support, lift_mm)?;
+    let palette: Vec<_> = session.calibration.as_ref().and_then(|state| state.profile.as_ref()).map(|p| p.tip_palette.clone()).unwrap_or_default();
+    let rebuilt = rebuild_supported(source, &params, &session.points, &palette).map_err(|err| err.to_string())?;
+    let mesh = rebuilt.mesh.clone();
+    session.supported = Some(rebuilt);
+    session.points_dirty = false;
+    Ok(mesh)
+}
+
+/// Run the same slicer `campanion resin` uses and keep the `.pm7m` bytes for export.
+pub fn apply_slice(session: &mut ResinSession, support: &SupportFields, lift_mm: &UserField, machine_selected: bool) -> Result<BuildReport, String> {
+    if let Some(reason) = slice_disabled_reason(session, machine_selected) {
+        return Err(reason);
+    }
+    let settings = session.settings.clone().ok_or_else(|| "choose a sample or params .pm7m first".to_string())?;
+    let mesh = print_mesh(session, support, lift_mm)?;
+    let (bytes, report) = build_pm7m(&mesh, &M7_MAX, &settings, Placement::Center).map_err(|err| err.to_string())?;
+    let back = campanion_resin::read_pm7m(&bytes).map_err(|err| format!("read-back failed: {err}"))?;
+    if back.layers.len() != report.layers || back.machine_name != M7_MAX.name {
+        return Err("read-back does not match what was built".to_string());
+    }
+    session.layer_images = back.layer_images;
+    session.slice_width = back.width;
+    session.slice_height = back.height;
+    session.pm7m = Some(bytes);
+    session.slice_report = Some(report.clone());
+    session.sliced = true;
+    Ok(report)
+}
+
+/// Write the already-sliced `.pm7m` bytes. Call [`apply_slice`] first.
+pub fn write_export(session: &mut ResinSession, path: &std::path::Path, machine_selected: bool) -> Result<(), String> {
+    if let Some(reason) = export_disabled_reason(session, machine_selected) {
+        return Err(reason);
+    }
+    let bytes = session.pm7m.as_ref().ok_or_else(|| "slice the part on the Slice tab first".to_string())?;
+    std::fs::write(path, bytes).map_err(|err| format!("write {}: {err}", path.display()))?;
+    session.last_export_path = Some(path.to_path_buf());
+    Ok(())
+}
+
+/// Downscale one LCD layer (gray 0–15) to an RGBA preview, width capped at `max_side`.
+pub fn layer_preview_rgba(image: &[u8], width: u32, height: u32, max_side: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    if width == 0 || height == 0 {
+        return Err("layer has no pixels".to_string());
+    }
+    let pixels = campanion_resin::pw0::decode(image, width, height).map_err(|err| err.to_string())?;
+    let (x0, y0, x1, y1) = lit_bounds(&pixels, width, height).unwrap_or((0, 0, width.saturating_sub(1), height.saturating_sub(1)));
+    let crop_w = x1.saturating_sub(x0).saturating_add(1).max(1);
+    let crop_h = y1.saturating_sub(y0).saturating_add(1).max(1);
+    let max_side = max_side.max(1);
+    let scale = crop_w.max(crop_h).div_ceil(max_side).max(1);
+    let out_w = crop_w.div_ceil(scale);
+    let out_h = crop_h.div_ceil(scale);
+    let mut rgba = vec![0u8; (out_w as usize).saturating_mul(out_h as usize).saturating_mul(4)];
+    let sw = scale as usize;
+    for oy in 0..out_h as usize {
+        for ox in 0..out_w as usize {
+            let mut acc = 0u32;
+            let mut n = 0u32;
+            for dy in 0..sw {
+                let iy = y0 as usize + oy * sw + dy;
+                if iy >= height as usize || iy > y1 as usize {
+                    break;
+                }
+                let row = iy * width as usize;
+                for dx in 0..sw {
+                    let ix = x0 as usize + ox * sw + dx;
+                    if ix >= width as usize || ix > x1 as usize {
+                        break;
+                    }
+                    if let Some(v) = pixels.get(row + ix) {
+                        acc += u32::from(*v);
+                        n += 1;
+                    }
+                }
+            }
+            let gray = acc.checked_div(n).map(|v| (v * 17).min(255) as u8).unwrap_or(0);
+            let i = (oy * out_w as usize + ox) * 4;
+            if let Some(dst) = rgba.get_mut(i..i + 4) {
+                dst.copy_from_slice(&[gray, gray, gray, 255]);
+            }
+        }
+    }
+    Ok((out_w, out_h, rgba))
+}
+
+fn lit_bounds(pixels: &[u8], width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut any = false;
+    for y in 0..height {
+        let row = y as usize * width as usize;
+        for x in 0..width {
+            if pixels.get(row + x as usize).is_some_and(|v| *v > 0) {
+                any = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    let pad_x = (max_x.saturating_sub(min_x) / 8).max(8);
+    let pad_y = (max_y.saturating_sub(min_y) / 8).max(8);
+    let x0 = min_x.saturating_sub(pad_x);
+    let y0 = min_y.saturating_sub(pad_y);
+    let x1 = (max_x + pad_x).min(width.saturating_sub(1));
+    let y1 = (max_y + pad_y).min(height.saturating_sub(1));
+    Some((x0, y0, x1, y1))
 }
 
 pub fn primary_button(ui: &mut egui::Ui, label: &str, reason: Option<&str>) -> bool {
@@ -337,10 +598,16 @@ pub fn primary_button(ui: &mut egui::Ui, label: &str, reason: Option<&str>) -> b
     let response = ui.add_enabled(enabled, button);
     if let Some(reason) = reason {
         response.clone().on_hover_text(reason);
-        ui.label(RichText::new(reason).color(theme::OFF_BED).size(11.0));
         false
     } else {
         response.clicked()
+    }
+}
+
+/// Full-width wrapped reason under a disabled control, so the text is not clipped.
+pub fn show_disabled_reason(ui: &mut egui::Ui, reason: Option<&str>) {
+    if let Some(reason) = reason {
+        ui.add(egui::Label::new(RichText::new(reason).color(theme::OFF_BED).size(11.0)).wrap());
     }
 }
 
@@ -388,6 +655,8 @@ pub fn paint_support_overlay(
     points: &[SupportPoint],
     selected_point: Option<usize>,
     selected_island: Option<u32>,
+    view: SupportView,
+    raft_top_mm: f64,
     to_screen: impl Fn([f64; 2]) -> egui::Pos2,
 ) {
     if let Some(features) = features {
@@ -396,21 +665,57 @@ pub fn paint_support_overlay(
             if selected_island == Some(island.id) {
                 color = Color32::from_rgb(255, 230, 80);
             }
-            let a = to_screen([island.min.0, island.min.1]);
-            let b = to_screen([island.max.0, island.max.1]);
-            let rect = egui::Rect::from_two_pos(a, b).expand(2.0);
-            painter.rect_filled(rect, 2.0, color.gamma_multiply(0.28));
-            painter.rect_stroke(rect, 2.0, UiStroke::new(1.5, color), egui::StrokeKind::Inside);
+            let z = island.z_mm;
+            let corners = [
+                view.project(island.min.0, island.min.1, z),
+                view.project(island.max.0, island.min.1, z),
+                view.project(island.max.0, island.max.1, z),
+                view.project(island.min.0, island.max.1, z),
+            ];
+            let screen: Vec<egui::Pos2> = corners.iter().copied().map(&to_screen).collect();
+            if screen.len() == 4 {
+                let mut min = screen[0];
+                let mut max = screen[0];
+                for p in &screen {
+                    min.x = min.x.min(p.x);
+                    min.y = min.y.min(p.y);
+                    max.x = max.x.max(p.x);
+                    max.y = max.y.max(p.y);
+                }
+                let rect = egui::Rect::from_min_max(min, max).expand(2.0);
+                painter.rect_filled(rect, 2.0, color.gamma_multiply(0.28));
+                painter.rect_stroke(rect, 2.0, UiStroke::new(1.5, color), egui::StrokeKind::Inside);
+            }
+        }
+    }
+    if view != SupportView::Top {
+        for point in points {
+            let a = to_screen(view.project(point.x, point.y, raft_top_mm));
+            let b = to_screen(view.project(point.x, point.y, point.contact_z));
+            painter.line_segment([a, b], UiStroke::new(2.0, Color32::from_rgb(240, 140, 40)));
         }
     }
     for (index, point) in points.iter().enumerate() {
-        let pos = to_screen([point.x, point.y]);
+        let pos = to_screen(view.project(point.x, point.y, point.contact_z));
         let selected = selected_point == Some(index);
         let fill = if selected { Color32::from_rgb(255, 220, 80) } else { Color32::from_rgb(240, 140, 40) };
         let radius = if selected { 6.5 } else { 5.0 };
         painter.circle_filled(pos, radius, fill);
         painter.circle_stroke(pos, radius, UiStroke::new(1.2, Color32::from_rgb(30, 30, 30)));
     }
+}
+
+/// Nearest support in the current view, in projected millimetres.
+pub fn hit_point_in_view(points: &[SupportPoint], x: f64, y: f64, tol_mm: f64, view: SupportView) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (index, point) in points.iter().enumerate() {
+        let p = view.project(point.x, point.y, point.contact_z);
+        let d = (p[0] - x).hypot(p[1] - y);
+        if d <= tol_mm && best.is_none_or(|(_, best_d)| d < best_d) {
+            best = Some((index, d));
+        }
+    }
+    best.map(|(index, _)| index)
 }
 
 pub fn show_supports_properties(ui: &mut egui::Ui, session: &mut ResinSession, support: &mut SupportFields, lift: &mut UserField, dark: bool) {
@@ -424,7 +729,7 @@ pub fn show_supports_properties(ui: &mut egui::Ui, session: &mut ResinSession, s
         if !state.is_complete() {
             ui.label(RichText::new("Missing or invalid constants:").color(theme::OFF_BED).size(12.0));
             for item in &state.missing {
-                ui.label(RichText::new(format!("• {} — {}", item.name, item.reason)).color(theme::OFF_BED).size(11.0));
+                ui.label(RichText::new(format!("• {} — {}", item.label(), item.reason)).color(theme::OFF_BED).size(11.0));
             }
             if state.missing.is_empty()
                 && let Some(error) = &state.error
@@ -653,7 +958,7 @@ fn show_calibration_panel(ui: &mut egui::Ui, session: &mut ResinSession, support
             } else {
                 ui.label(RichText::new("Missing or invalid constants:").color(theme::OFF_BED).size(12.0));
                 for item in &state.missing {
-                    ui.label(RichText::new(format!("• {} — {}", item.name, item.reason)).color(theme::OFF_BED).size(11.0));
+                    ui.label(RichText::new(format!("• {} — {}", item.label(), item.reason)).color(theme::OFF_BED).size(11.0));
                 }
                 if state.missing.is_empty()
                     && let Some(error) = &state.error
@@ -663,7 +968,7 @@ fn show_calibration_panel(ui: &mut egui::Ui, session: &mut ResinSession, support
             }
         } else {
             ui.label(RichText::new("No calibration profile loaded.").color(theme::MUTED).size(12.0));
-            ui.label(RichText::new("Load a campanion-resin-calibration/1 JSON file. Required: schema, name, tip_palette (with tip_capacity_n and contact_area_mm2), peel_coefficient_n_per_mm2, suction_coefficient_n_per_mm2, safety_factor, resin_density_g_per_cm3, gravity_m_s2.").color(theme::MUTED).size(11.0));
+            ui.label(RichText::new("Load a campanion-resin-calibration/1 JSON file. Required: schema, profile name, tip palette (geometry and tip capacity in N, contact area in mm²), peel force per area (N/mm²), suction force per area (N/mm²), safety factor, and resin density (g/cm³). Standard gravity (9.80665 m/s²) is a physical constant and is not entered.").color(theme::MUTED).size(11.0));
         }
         ui.add_space(4.0);
         let reason = optimize_disabled_reason(session, support, lift);
@@ -700,8 +1005,10 @@ mod tests {
         let reason = optimize_disabled_reason(&session, &support, &lift).expect("opt");
         assert!(reason.contains("Optimize supports is disabled"), "{reason}");
 
-        let export = export_disabled_reason(&session).expect("export");
-        assert!(export.contains("slice"), "{export}");
+        let export = export_disabled_reason(&session, true).expect("export");
+        assert!(export.contains("params") || export.contains("slice") || export.contains("part"), "{export}");
+        let machine = slice_disabled_reason(&session, false).expect("machine");
+        assert!(machine.contains("resin printer"), "{machine}");
     }
 
     #[test]
@@ -738,6 +1045,15 @@ mod tests {
         lift.value = "5".into();
         let reason = optimize_disabled_reason(&session, &support, &lift).expect("incomplete");
         assert!(reason.contains("incomplete"), "{reason}");
-        assert!(reason.contains("tip_palette") || reason.contains("Missing"), "{reason}");
+        assert!(reason.contains("Tip palette") || reason.contains("Peel force per area"), "{reason}");
+        assert!(!reason.contains("gravity_m_s2"), "{reason}");
+    }
+
+    #[test]
+    fn constant_labels_use_units() {
+        assert_eq!(campanion_resin::constant_label("peel_coefficient_n_per_mm2"), "Peel force per area (N/mm²)");
+        assert_eq!(campanion_resin::constant_label("suction_coefficient_n_per_mm2"), "Suction force per area (N/mm²)");
+        assert_eq!(campanion_resin::constant_label("resin_density_g_per_cm3"), "Resin density (g/cm³)");
+        assert!((campanion_resin::STANDARD_GRAVITY_M_S2 - 9.80665).abs() < 1e-12);
     }
 }

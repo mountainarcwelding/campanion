@@ -15,6 +15,10 @@ pub enum DialogKind {
     SaveJob,
     /// Export posted G-code.
     ExportGcode,
+    /// Choose a sample `.pm7m` for print settings (`--params-from`).
+    ParamsFrom,
+    /// Write a sliced `.pm7m`.
+    ExportPm7m,
 }
 
 /// Outcome of a native file chooser request.
@@ -75,8 +79,8 @@ pub fn pick_path(kind: DialogKind, start_dir: Option<&Path>, suggested_name: Opt
     }
     let start = Instant::now();
     let picked = match kind {
-        DialogKind::Open | DialogKind::Import => build_dialog(kind, start_dir, suggested_name).pick_file(),
-        DialogKind::SaveJob | DialogKind::ExportGcode => build_dialog(kind, start_dir, suggested_name).save_file(),
+        DialogKind::Open | DialogKind::Import | DialogKind::ParamsFrom => build_dialog(kind, start_dir, suggested_name).pick_file(),
+        DialogKind::SaveJob | DialogKind::ExportGcode | DialogKind::ExportPm7m => build_dialog(kind, start_dir, suggested_name).save_file(),
     };
     match picked {
         Some(path) => DialogResult::Picked(path),
@@ -91,7 +95,7 @@ fn build_dialog(kind: DialogKind, start_dir: Option<&Path>, suggested_name: Opti
         dialog = dialog.set_directory(dir);
     }
     if let Some(name) = suggested_name
-        && matches!(kind, DialogKind::SaveJob | DialogKind::ExportGcode)
+        && matches!(kind, DialogKind::SaveJob | DialogKind::ExportGcode | DialogKind::ExportPm7m)
     {
         dialog = dialog.set_file_name(name);
     }
@@ -107,6 +111,10 @@ fn build_dialog(kind: DialogKind, start_dir: Option<&Path>, suggested_name: Opti
         }
         DialogKind::SaveJob => dialog.add_filter("Job JSON", &["json"]).add_filter("All files", &["*"]).set_title("Save job"),
         DialogKind::ExportGcode => dialog.add_filter("G-code", &["ngc", "gcode", "nc"]).add_filter("All files", &["*"]).set_title("Export G-code"),
+        DialogKind::ParamsFrom => {
+            dialog.add_filter("Photon Mono M7 Max", &["pm7m"]).add_filter("All files", &["*"]).set_title("Print settings from sample .pm7m")
+        }
+        DialogKind::ExportPm7m => dialog.add_filter("Photon Mono M7 Max", &["pm7m"]).add_filter("All files", &["*"]).set_title("Export .pm7m"),
     }
 }
 

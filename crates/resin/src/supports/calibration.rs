@@ -16,17 +16,17 @@ use crate::error::{ResinError, Result};
 /// Schema identifier for this profile version.
 pub const CALIBRATION_SCHEMA: &str = "campanion-resin-calibration/1";
 
+/// Standard gravity in metres per second squared (standard acceleration of free fall).
+///
+/// This is a physical constant, not a user calibration value. The optimizer always uses it.
+/// A `gravity_m_s2` field in a profile file is ignored.
+pub const STANDARD_GRAVITY_M_S2: f64 = 9.80665;
+
 /// Required fields of [`CalibrationProfile`] that the optimizer needs.
-pub const REQUIRED_CONSTANTS: &[&str] = &[
-    "schema",
-    "name",
-    "tip_palette",
-    "peel_coefficient_n_per_mm2",
-    "suction_coefficient_n_per_mm2",
-    "safety_factor",
-    "resin_density_g_per_cm3",
-    "gravity_m_s2",
-];
+///
+/// `gravity_m_s2` is not required: standard gravity is [`STANDARD_GRAVITY_M_S2`].
+pub const REQUIRED_CONSTANTS: &[&str] =
+    &["schema", "name", "tip_palette", "peel_coefficient_n_per_mm2", "suction_coefficient_n_per_mm2", "safety_factor", "resin_density_g_per_cm3"];
 
 /// Required fields of each [`CalibratedTip`] entry.
 pub const REQUIRED_TIP_FIELDS: &[&str] =
@@ -124,6 +124,9 @@ pub struct CalibrationProfile {
     /// Multiplier applied to (peel + suction + weight) in the holding-force check.
     pub safety_factor: f64,
     pub resin_density_g_per_cm3: f64,
+    /// Always [`STANDARD_GRAVITY_M_S2`]. Kept on the struct so existing readers compile.
+    /// A value in the JSON file is ignored.
+    #[serde(default = "standard_gravity", skip_serializing)]
     pub gravity_m_s2: f64,
     /// Islands at or below this area, millimetres squared, are ignored when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,51 @@ pub struct MissingConstant {
 impl MissingConstant {
     fn new(name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self { name: name.into(), reason: reason.into() }
+    }
+
+    /// Plain-language label with units, for UI and error text. `name` stays the schema key.
+    pub fn label(&self) -> String {
+        constant_label(&self.name)
+    }
+}
+
+fn standard_gravity() -> f64 {
+    STANDARD_GRAVITY_M_S2
+}
+
+/// Human-readable label for a calibration field or tip-palette key, with units.
+pub fn constant_label(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("tip_palette[")
+        && let Some((index, field)) = rest.split_once("].")
+    {
+        let n = index.parse::<usize>().map(|i| i + 1).unwrap_or(0);
+        let field_label = match field {
+            "name" => "name",
+            "tip_diameter_mm" => "tip diameter (mm)",
+            "tip_length_mm" => "tip length (mm)",
+            "pillar_diameter_mm" => "pillar diameter (mm)",
+            "foot_diameter_mm" => "foot diameter (mm)",
+            "foot_height_mm" => "foot height (mm)",
+            "tip_capacity_n" => "tip capacity (N)",
+            "contact_area_mm2" => "contact area (mm²)",
+            other => other,
+        };
+        return format!("Tip {n} {field_label}");
+    }
+    match name {
+        "schema" => "Schema".to_string(),
+        "name" => "Profile name".to_string(),
+        "tip_palette" => "Tip palette (at least one tip class with geometry and tip capacity, N)".to_string(),
+        "peel_coefficient_n_per_mm2" => "Peel force per area (N/mm²)".to_string(),
+        "suction_coefficient_n_per_mm2" => "Suction force per area (N/mm²)".to_string(),
+        "safety_factor" => "Safety factor".to_string(),
+        "resin_density_g_per_cm3" => "Resin density (g/cm³)".to_string(),
+        "island_ignore_area_mm2" => "Island ignore area (mm²)".to_string(),
+        "thin_width_mm" => "Thin feature width (mm)".to_string(),
+        "area_jump_ratio" => "Area jump ratio".to_string(),
+        "lowest_band_height_mm" => "Lowest-band height (mm)".to_string(),
+        "lowest_band_spacing_mm" => "Lowest-band spacing (mm)".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -197,7 +245,6 @@ impl CalibrationProfile {
         push_non_negative("suction_coefficient_n_per_mm2", self.suction_coefficient_n_per_mm2, &mut missing);
         push_positive("safety_factor", self.safety_factor, &mut missing);
         push_positive("resin_density_g_per_cm3", self.resin_density_g_per_cm3, &mut missing);
-        push_positive("gravity_m_s2", self.gravity_m_s2, &mut missing);
         push_optional_positive("island_ignore_area_mm2", self.island_ignore_area_mm2, &mut missing);
         push_optional_positive("thin_width_mm", self.thin_width_mm, &mut missing);
         push_optional_positive("area_jump_ratio", self.area_jump_ratio, &mut missing);
@@ -248,7 +295,7 @@ pub fn import_calibration(path: &Path, fit_measurements: bool) -> Result<Calibra
 }
 
 fn incomplete_error(missing: &[MissingConstant]) -> ResinError {
-    let list = missing.iter().map(|item| format!("{} ({})", item.name, item.reason)).collect::<Vec<_>>().join("; ");
+    let list = missing.iter().map(|item| format!("{} ({})", item.label(), item.reason)).collect::<Vec<_>>().join("; ");
     ResinError::invalid(format!("calibration profile is incomplete: {list}"))
 }
 
@@ -277,7 +324,6 @@ fn missing_from_raw(raw: &CalibrationProfileRaw) -> Vec<MissingConstant> {
     push_required_non_negative("suction_coefficient_n_per_mm2", raw.suction_coefficient_n_per_mm2, &mut missing);
     push_required_positive("safety_factor", raw.safety_factor, &mut missing);
     push_required_positive("resin_density_g_per_cm3", raw.resin_density_g_per_cm3, &mut missing);
-    push_required_positive("gravity_m_s2", raw.gravity_m_s2, &mut missing);
     push_optional_positive("island_ignore_area_mm2", raw.island_ignore_area_mm2, &mut missing);
     push_optional_positive("thin_width_mm", raw.thin_width_mm, &mut missing);
     push_optional_positive("area_jump_ratio", raw.area_jump_ratio, &mut missing);
@@ -316,7 +362,7 @@ fn profile_from_raw(raw: CalibrationProfileRaw) -> Result<CalibrationProfile> {
         suction_coefficient_n_per_mm2: raw.suction_coefficient_n_per_mm2.unwrap_or(f64::NAN),
         safety_factor: raw.safety_factor.unwrap_or(f64::NAN),
         resin_density_g_per_cm3: raw.resin_density_g_per_cm3.unwrap_or(f64::NAN),
-        gravity_m_s2: raw.gravity_m_s2.unwrap_or(f64::NAN),
+        gravity_m_s2: STANDARD_GRAVITY_M_S2,
         island_ignore_area_mm2: raw.island_ignore_area_mm2,
         thin_width_mm: raw.thin_width_mm,
         area_jump_ratio: raw.area_jump_ratio,

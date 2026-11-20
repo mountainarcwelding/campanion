@@ -34,7 +34,7 @@ This file is only the GUI sequence and the data-model hooks it needs.
    behaviour has been physically tested. A code-generation error is fixed, with a
    regression test, before the next feature.
 
-## Current baseline (v0.26.1, with resin Supports P0 in progress on `feat/resin-supports-p0`)
+## Current baseline (v0.27.0)
 
 The backend and CLI already carry the v0.4 data model:
 
@@ -60,7 +60,7 @@ The GUI already compiles against that model, but the editor is still a preview:
   that stays empty until the user saves a preset, and a Calibration panel that loads a
   profile and keeps Optimize disabled (with the reason and any missing constants) until
   the profile is complete. Uniform generate works without a profile. Slice and `.pm7m`
-  export in the GUI still defer to `campanion resin`. Paint-on zones, trees, hollowing,
+  export in the GUI run the same slicer and writer as `campanion resin`, with print settings from a user-chosen sample `.pm7m`. Paint-on zones, trees, hollowing,
   and auto-orient are not in this slice.
 - FDM shows Orient, Slice, Export, and Run.
 - A 2D cutting job can be opened, a part imported and placed, profile operations edited,
@@ -207,7 +207,7 @@ sheet versus bed.
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -276,7 +276,7 @@ overrides, and auto-regenerate.
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -323,7 +323,7 @@ remain later work. The undercut raft is unchanged. Nothing has been printer-test
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -380,7 +380,7 @@ raft, on the existing resin tabs.
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -425,7 +425,7 @@ remain later work. The undercut raft is unchanged. Nothing has been printer-test
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -472,7 +472,7 @@ MMU-style).
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -527,7 +527,7 @@ the library, not only in the editor.
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -567,7 +567,7 @@ remain later work. The undercut raft is unchanged. Nothing has been printer-test
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -609,7 +609,7 @@ exist or are in progress, not a new engine.
 bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
 refuses to run without a complete user calibration profile. The Supports tab exposes that
 work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
-remain later work. The undercut raft is unchanged. Nothing has been printer-tested.
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 

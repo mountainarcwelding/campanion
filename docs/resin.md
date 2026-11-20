@@ -5,7 +5,10 @@ been printed or physically tested. The format was derived from one file, so some
 rather than understood. CAMpanion is primarily command-line driven; the GUI is still in development. The resin
 Supports tab can detect and colour islands, edit support points in the viewport with
 undo, and load a calibration profile. Optimize stays disabled until that profile is
-complete. Slice images and `.pm7m` export are still written by this CLI, not by the GUI.
+complete. The Slice tab runs the same slicer as this command, and Export writes a
+`.pm7m` (supports and raft included when they were generated). Print settings come from
+a user-chosen sample `.pm7m`, the same file `--params-from` uses; missing settings are
+refused. Image orientation is unverified until an asymmetric test part is printed.
 
 ## Commands
 
@@ -139,7 +142,8 @@ The sample is not committed (it is a user file). Without the variable, those tes
   fields: `schema`, `name`, `tip_palette` (each entry needs `name`, `tip_diameter_mm`,
   `tip_length_mm`, `pillar_diameter_mm`, `foot_diameter_mm`, `foot_height_mm`, `tip_capacity_n`,
   `contact_area_mm2`), `peel_coefficient_n_per_mm2`, `suction_coefficient_n_per_mm2`,
-  `safety_factor`, `resin_density_g_per_cm3`, `gravity_m_s2`. Optional: `island_ignore_area_mm2`,
+  `safety_factor`, `resin_density_g_per_cm3`. Standard gravity (9.80665 m/s²) is a physical
+  constant, not a calibration field; a `gravity_m_s2` key in a file is ignored. Optional: `island_ignore_area_mm2`,
   `thin_width_mm`, `area_jump_ratio`, `lowest_band_height_mm` with `lowest_band_spacing_mm`, and
   `measurements` (recorded observations; unused until fitting is implemented). No example numeric
   values are shipped.

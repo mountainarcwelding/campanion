@@ -208,13 +208,18 @@ fn calibration_profile_lists_missing_constants_and_refuses_to_fit() {
     let err = missing.expect_err("incomplete");
     let text = err.to_string();
     assert!(text.contains("incomplete"), "{text}");
-    assert!(text.contains("tip_palette"), "{text}");
-    assert!(text.contains("peel_coefficient_n_per_mm2"), "{text}");
-    assert!(text.contains("safety_factor"), "{text}");
-    assert!(text.contains("gravity_m_s2"), "{text}");
+    assert!(text.contains("Tip palette") || text.contains("tip_palette"), "{text}");
+    assert!(text.contains("Peel force per area (N/mm²)"), "{text}");
+    assert!(text.contains("Safety factor"), "{text}");
+    assert!(!text.contains("gravity_m_s2"), "gravity is a physical constant, not a missing calibration field: {text}");
 
     let profile = parse_calibration(&fixture_profile(0.2)).expect("complete fixture");
     assert!(profile.is_complete());
+    assert!((profile.gravity_m_s2 - campanion_resin::STANDARD_GRAVITY_M_S2).abs() < 1e-12);
+
+    let without_g = fixture_profile(0.2).replace(",\n        \"gravity_m_s2\": 9.80665", "");
+    let also = parse_calibration(&without_g).expect("gravity is optional");
+    assert!(also.is_complete());
     let fit = profile.fit_from_measurements().expect_err("stub");
     assert!(fit.to_string().contains("not implemented"), "{fit}");
 }

@@ -280,6 +280,21 @@ pub fn write_pm7m(input: &WriteInput<'_>) -> Result<Vec<u8>> {
     zip.finish()
 }
 
+/// Read print settings from a sample `.pm7m`. The file must be for [`M7_MAX`].
+pub fn settings_from_pm7m_bytes(bytes: &[u8]) -> Result<ResinSettings> {
+    let file = read_pm7m(bytes)?;
+    if file.machine_name != M7_MAX.name {
+        return Err(ResinError::invalid(format!("sample is for `{}`, not `{}`", file.machine_name, M7_MAX.name)));
+    }
+    file.settings()
+}
+
+/// Load print settings from a sample `.pm7m` path (the same file `campanion resin --params-from` uses).
+pub fn load_print_settings(path: &std::path::Path) -> Result<ResinSettings> {
+    let bytes = std::fs::read(path).map_err(|err| ResinError::invalid(format!("{}: {err}", path.display())))?;
+    settings_from_pm7m_bytes(&bytes)
+}
+
 fn parse_json(entries: &[crate::zip::ZipEntry], name: &str) -> Result<Value> {
     let entry = entries.iter().find(|e| e.name == name).ok_or_else(|| ResinError::Format(format!("missing `{name}`")))?;
     serde_json::from_slice(&entry.data).map_err(|err| ResinError::Format(format!("`{name}`: {err}")))
