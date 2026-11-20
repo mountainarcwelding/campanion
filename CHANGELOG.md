@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## 0.24.1 — 2026-11-19
+
+Operations review fixes for the graphical workspace. **Not physically tested.** CAMpanion is still
+primarily command-line driven; this release does not talk to a machine.
+
+### Fixed
+
+- New operations are assigned to every imported part by default, not to a layer that may exist on
+  only one file. The layer list shows names from every part (for example `OUTER` from an SVG and
+  `LEFT` / `RIGHT` from a DXF). An operation that matches no geometry shows an inline warning on
+  the operation itself, not only in the status bar.
+- Multi-part planning skips a part that has no geometry for a selected layer, with a warning,
+  instead of failing the whole job. A typo layer that matches nothing on any part is still refused.
+- The Operations screenshot and demo job now assign by part and keep the planned toolpaths in the
+  viewport (stale toolpaths stay dimmed). Previously a leftover layer filter and a scene refresh
+  could leave the viewport with part outlines only.
+- Switching to a resin machine clears the previous cutting job's post id and export file name.
+- Cut-order up/down buttons stay on one row with the operation name.
+
+### Known limits
+
+- Movable start-point markers in the viewport, visual height planes, and applying colour
+  selectors are not in this slice. Laser fill still needs a raster source. A laser post may
+  omit Z when it does not emit height words; planned IR Z still follows `z_zero`.
+- 3D place-on-face is not in the job format. Off-sheet is a warning, not an export refusal.
+  Off-bed export is still refused. Run, and resin Orient/Supports, remain later milestones.
+- This release has not been physically tested.
+
 ## 0.24.0 — 2026-11-19
 
 Setup bug fixes and the first Operations milestone (G2) for the graphical workspace.
