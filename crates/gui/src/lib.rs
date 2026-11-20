@@ -14,6 +14,7 @@ pub mod machines;
 pub mod operations;
 pub mod session;
 pub mod setup;
+pub mod simulate;
 pub mod theme;
 pub mod viewport;
 
@@ -70,6 +71,8 @@ pub enum ModeTab {
     Setup,
     /// Operations, contours and toolpaths.
     Operations,
+    /// Playback, G-code listing, time estimate and pre-flight checks.
+    Simulate,
     /// Model pose on the build plate or bed.
     Orient,
     /// Resin supports. Not offered for FDM in this preview.
@@ -641,7 +644,7 @@ impl Workspace {
     pub fn tabs(self) -> &'static [ModeTab] {
         match self {
             Workspace::MillRoute | Workspace::Turning | Workspace::ThermalJet | Workspace::WireCutting => {
-                &[ModeTab::Process, ModeTab::Setup, ModeTab::Operations, ModeTab::Export, ModeTab::Run]
+                &[ModeTab::Process, ModeTab::Setup, ModeTab::Operations, ModeTab::Simulate, ModeTab::Export, ModeTab::Run]
             }
             Workspace::Resin => &[ModeTab::Orient, ModeTab::Supports, ModeTab::Slice, ModeTab::Export, ModeTab::Run],
             Workspace::Fdm => &[ModeTab::Orient, ModeTab::Slice, ModeTab::Export, ModeTab::Run],
@@ -681,6 +684,7 @@ impl ModeTab {
             ModeTab::Process => "Job",
             ModeTab::Setup => "Setup",
             ModeTab::Operations => "Operations",
+            ModeTab::Simulate => "Simulate",
             ModeTab::Orient => "Orient",
             ModeTab::Supports => "Supports",
             ModeTab::Slice => "Slice",
@@ -842,6 +846,7 @@ mod tests {
         for workspace in [Workspace::MillRoute, Workspace::Turning, Workspace::ThermalJet, Workspace::WireCutting] {
             assert_eq!(first_tab(workspace), ModeTab::Process);
             assert_eq!(workspace.tabs()[0], ModeTab::Process);
+            assert_eq!(workspace.tabs(), &[ModeTab::Process, ModeTab::Setup, ModeTab::Operations, ModeTab::Simulate, ModeTab::Export, ModeTab::Run]);
             assert!(workspace.has_tab(ModeTab::Export));
             assert!(workspace.has_tab(ModeTab::Run));
             assert!(!workspace.has_tab(ModeTab::Orient));

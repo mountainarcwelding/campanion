@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## 0.25.0 — 2026-11-19
+
+Simulate and Export for the graphical cutting workspace, so a first-time user can go from a new
+machine profile to saved G-code that matches the CLI. **Not physically tested.** CAMpanion is
+still primarily command-line driven; this release does not talk to a machine.
+
+### Added
+
+- A **Simulate** tab on cutting workspaces, between Operations and Export. Playback, play/pause,
+  preview-speed, and the existing scrubber are linked to a G-code listing: the current line is
+  highlighted, and clicking a line jumps the playhead. Cuts and rapids stay visually distinct.
+- A run-time estimate that uses only feeds and delays already on the planned IR (values you
+  entered). Rapids with no entered rate are omitted from the total; the UI does not invent a
+  rapid rate. Preview speed on the tab is not a machine rate.
+- Pre-flight checks on Simulate and Export: off-bed and empty operations (or missing cut feeds)
+  block export; unused contours, crossing lead-ins, off-sheet parts, missing material values,
+  and a laser operation with no power are warnings. Preview G-code stays available when export
+  is blocked; writing the file still uses the same off-bed refusal as `campanion run --post`.
+- The Export post chooser lists posts documented for the selected head (for a laser,
+  `grbl_laser`), plus a post already named on the machine profile.
+- A short graphical-workspace Quick start in the README, after the CLI Quick start. The
+  CLI-first notice is unchanged: the GUI is still in development and does not talk to a
+  machine.
+
+### Fixed
+
+- Saving or exporting after an operation is selected no longer writes stale Setup placement
+  fields onto the first part. A part dragged or typed off the bed still blocks export.
+
+### Known limits
+
+- Movable start-point markers in the viewport, visual height planes, and applying colour
+  selectors are not in this slice. Laser fill still needs a raster source. A laser post may
+  omit Z when it does not emit height words; planned IR Z still follows `z_zero`.
+- 3D place-on-face is not in the job format. Off-sheet is a warning, not an export refusal.
+  Off-bed export is still refused. The Run tab, including serial streaming to a controller, and
+  resin Orient/Supports, remain later milestones.
+- This release has not been physically tested.
+
 ## 0.24.1 — 2026-11-19
 
 Operations review fixes for the graphical workspace. **Not physically tested.** CAMpanion is still

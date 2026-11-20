@@ -18,11 +18,12 @@ use crate::machines::{self, MachinesUi};
 use crate::operations::{self, RegenState};
 use crate::session::{
     GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, ToolDraft, ToolKind, TreeSelection, add_imported_part, all_part_ids,
-    all_part_layers, export_destination, format_number, generate_toolpaths, import_part_file, layer_parts_label, list_posts, open_job_file,
-    operation_match_warning, parse_placement_mm, placed_scene_parts, post_session, scene_from_drawing, suggested_post_for_process, write_gcode,
-    write_job,
+    all_part_layers, export_destination, format_number, generate_toolpaths, import_part_file, layer_parts_label, list_posts, list_posts_for_process,
+    open_job_file, operation_match_warning, parse_placement_mm, placed_scene_parts, post_session, scene_from_drawing, suggested_post_for_process,
+    write_gcode, write_job,
 };
 use crate::setup::{self, AlignMode, ArraySpec};
+use crate::simulate::{PlayIndex, blocks_export, estimate_time, play_index, session_checks};
 use crate::theme;
 use crate::viewport::{self, Viewport, ViewportGuides};
 use crate::{
@@ -66,8 +67,6 @@ pub fn run(launch: Launch) -> Result<(), String> {
                 if launch.screenshot_dir.is_some() {
                     app.prepare_opened_file_for_screenshot();
                 }
-            } else if launch.screenshot_dir.is_some() {
-                app.open_sample_for_screenshot();
             }
             if let Some(dir) = launch.screenshot_dir {
                 app.begin_screenshots(dir);
@@ -143,6 +142,8 @@ struct App {
     reveal_sheet_fields: bool,
     reveal_material_fields: bool,
     operations_tree_open: bool,
+    play_index: Option<PlayIndex>,
+    preview_speed_mult: f32,
 }
 
 struct ScreenshotJob {
@@ -186,6 +187,8 @@ impl App {
             reveal_sheet_fields: false,
             reveal_material_fields: false,
             operations_tree_open: true,
+            play_index: None,
+            preview_speed_mult: 1.0,
         }
     }
 
@@ -562,6 +565,13 @@ impl App {
             (self.session.source_drawing.is_some() || self.session.parts.iter().any(|part| part.drawing.is_some())) && self.document.is_none();
         let guides = self.viewport_guides();
         if let Some(viewport) = self.viewport.as_mut() {
+            let want_content = self.document.is_some() && matches!(self.state.tab, ModeTab::Operations | ModeTab::Simulate | ModeTab::Export);
+            if viewport.fit_content != want_content {
+                viewport.fit_content = want_content;
+                if !viewport.user_adjusted {
+                    viewport.fitted = false;
+                }
+            }
             let output = viewport::show_with(ui, viewport, self.scene.as_ref(), allow_drag, Some(&guides));
             if let Some(delta) = output.part_delta {
                 self.apply_part_delta(delta);
@@ -660,6 +670,7 @@ impl App {
                     } else {
                         self.merge_session_messages();
                     }
+                    self.refresh_gcode_preview();
                 }
                 Err(err) if err.contains("cancelled") => {}
                 Err(err) => {
@@ -672,7 +683,7 @@ impl App {
         }
     }
 
-    fn generate_paths(&mut self) {
+    fn generate_paths(&mut self) -> bool {
         match generate_toolpaths(&self.session) {
             Ok(planned) => {
                 self.regen.stale = false;
@@ -686,17 +697,21 @@ impl App {
                 } else {
                     self.merge_session_messages();
                 }
+                self.refresh_gcode_preview();
+                true
             }
             Err(err) => {
                 self.session.messages = vec![crate::session::SessionMessage { kind: MessageKind::Error, text: err.clone() }];
+                self.state.gcode.clear();
+                self.play_index = None;
                 self.state.status = err;
+                false
             }
         }
     }
 
     fn generate_and_post(&mut self) {
-        self.generate_paths();
-        if self.document.is_some() {
+        if self.generate_paths() {
             self.preview_gcode();
         }
     }
@@ -726,8 +741,10 @@ impl App {
                 } else {
                     self.state.status = "G-code preview updated".to_string();
                 }
+                self.rebuild_play_index();
             }
             Err(err) => {
+                self.play_index = None;
                 self.state.status = err;
             }
         }
@@ -739,6 +756,9 @@ impl App {
                 self.session.job_path = Some(path.to_path_buf());
                 self.session.dirty = false;
                 self.state.remember_open(path.to_path_buf());
+                if self.document.is_some() {
+                    self.generate_and_post();
+                }
                 self.state.status = format!("Saved {}", path.display());
             }
             Err(err) => {
@@ -758,6 +778,14 @@ impl App {
     }
 
     fn export_gcode_to(&mut self, path: &Path) {
+        let checks = session_checks(&self.session, self.document.as_ref(), Some(&self.profile_store), self.current_process_id());
+        if blocks_export(&checks) {
+            if let Some(item) = checks.iter().find(|item| item.blocks_export()) {
+                self.state.status = format!("Export blocked: {}", item.message);
+            }
+            self.file_dialog = None;
+            return;
+        }
         if self.state.gcode.is_empty() {
             self.preview_gcode();
         }
@@ -791,6 +819,7 @@ impl App {
         self.document = None;
         self.scene = None;
         self.viewport = None;
+        self.play_index = None;
         self.state.new_job();
     }
 
@@ -803,6 +832,7 @@ impl App {
         self.regen.note_edit(self.document.is_some());
     }
 
+    #[allow(dead_code)]
     fn open_sample_for_screenshot(&mut self) {
         for candidate in screenshot_job_candidates() {
             if candidate.is_file() {
@@ -829,28 +859,15 @@ impl App {
         self.screenshot = Some(ScreenshotJob {
             dir,
             plan: vec![
-                (Workspace::ThermalJet, ModeTab::Process, "cutting-process.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "cutting-setup.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "cutting-operations.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Export, "cutting-export.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Run, "cutting-run.png".to_string()),
-                (Workspace::Resin, ModeTab::Orient, "resin-orient.png".to_string()),
-                (Workspace::Resin, ModeTab::Supports, "resin-supports.png".to_string()),
-                (Workspace::Resin, ModeTab::Slice, "resin-slice.png".to_string()),
-                (Workspace::Resin, ModeTab::Export, "resin-export.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "machines-manager.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "job-machine-picker.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Process, "g1-job-new.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-bed.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-parts.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-array.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-arrange.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-origin.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Setup, "g1-setup-off-bed.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "g2-operations.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "g2-cut-order.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "g2-material-override.png".to_string()),
-                (Workspace::ThermalJet, ModeTab::Operations, "g2-stale-toolpaths.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Process, "g3-machines-empty.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Process, "g3-machines-new.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Process, "g3-job-new.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Setup, "g3-setup-import.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Operations, "g3-operations.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Simulate, "g3-simulate.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Simulate, "g3-simulate-scrub.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Export, "g3-export.png".to_string()),
+                (Workspace::ThermalJet, ModeTab::Export, "g3-export-blocked.png".to_string()),
             ],
             index: 0,
             frames_waited: 0,
@@ -876,6 +893,10 @@ impl App {
         self.reveal_sheet_fields = name == Some("g1-setup-origin.png");
         self.reveal_material_fields = name == Some("g2-material-override.png");
         self.operations_tree_open = true;
+        if name.is_some_and(|name| name.starts_with("g3-")) {
+            self.prepare_g3_screenshot(name);
+            return;
+        }
         let g1 = name.is_some_and(|name| name.starts_with("g1-"));
         let Some(job) = self.screenshot.as_ref() else {
             return;
@@ -909,6 +930,103 @@ impl App {
         }
         if name.is_some_and(|name| name.starts_with("g2-")) {
             self.prepare_g2_screenshot(name);
+        }
+    }
+
+    fn prepare_g3_screenshot(&mut self, name: Option<&str>) {
+        let Some(job) = self.screenshot.as_ref() else {
+            return;
+        };
+        let store = campanion_cli::ProfileStore::from_dir(job.dir.join("config"));
+        self.profile_store = store.clone();
+        self.machine_menu_open = false;
+        self.layout_tool = None;
+        self.job_section_open = false;
+        self.parts_tree_open = true;
+        self.operations_tree_open = true;
+        self.state.set_workspace(Workspace::ThermalJet);
+        let _ = self.state.set_process(SubProcess::Laser);
+
+        if name == Some("g3-machines-empty.png") {
+            self.machines = Some(MachinesUi::open(store));
+            return;
+        }
+
+        let profile = machines::first_user_laser_profile();
+        let _ = store.save("my-laser", &profile);
+        self.profile_store = store.clone();
+
+        if name == Some("g3-machines-new.png") {
+            let mut manager = MachinesUi::open(store);
+            manager.select_profile("my-laser");
+            self.machines = Some(manager);
+            return;
+        }
+        self.machines = None;
+
+        self.session.machine_profile = "my-laser".to_string();
+        self.session.machine_head = "laser".to_string();
+        self.apply_machine_selection();
+
+        if name == Some("g3-job-new.png") {
+            self.machine_menu_open = true;
+            self.refresh_placed_scene();
+            return;
+        }
+
+        if self.session.parts.is_empty()
+            && let Some(path) = screenshot_part_path("laser_rect.svg")
+        {
+            match import_part_file(&path) {
+                Ok(part) => add_imported_part(&mut self.session, &part),
+                Err(err) => self.state.status = err,
+            }
+        }
+        if let Some(instance) = self.session.parts.first_mut().and_then(|part| part.instances.first_mut()) {
+            instance.x = "20".to_string();
+            instance.y = "20".to_string();
+        }
+
+        if name == Some("g3-setup-import.png") {
+            self.refresh_placed_scene();
+            return;
+        }
+
+        if self.session.operations.is_empty() {
+            if self.session.tools.is_empty() {
+                self.session.tools = vec![ToolDraft { id: 1, name: String::new(), kind: ToolKind::Kerf, size: String::new() }];
+            }
+            self.add_session_operation("profile");
+            if let Some(op) = self.session.operations.last_mut() {
+                op.name = "outline".to_string();
+                op.side = "outside".to_string();
+            }
+            self.session.selected = Some(TreeSelection::Operation(0));
+            if let Some(entry) = profile.heads.first().and_then(|head| head.materials.first()) {
+                let _ = machines::apply_material(&mut self.session, entry);
+            }
+        }
+
+        if name == Some("g3-export-blocked.png") {
+            if let Some(instance) = self.session.parts.first_mut().and_then(|part| part.instances.first_mut()) {
+                instance.x = "700".to_string();
+                instance.y = "20".to_string();
+            }
+            self.session.placement_x = "700".to_string();
+            self.session.placement_y = "20".to_string();
+            self.generate_and_post();
+            // Planning may refuse a toolpath outside the entered work area; show the part
+            // against the bed so the off-bed pre-flight error is visible.
+            self.refresh_placed_scene();
+            return;
+        }
+
+        self.generate_and_post();
+        if name == Some("g3-simulate.png") {
+            self.seek_playhead_fraction(0.4);
+        }
+        if name == Some("g3-simulate-scrub.png") {
+            self.seek_playhead_fraction(0.72);
         }
     }
 
@@ -1751,6 +1869,7 @@ impl App {
                     }
                 });
             }
+            ModeTab::Simulate => self.simulate_ribbon(ui),
             ModeTab::Orient => {
                 ribbon_group(ui, "Orient", |ui| {
                     if ribbon_command(ui, "Lay flat on face", false).clicked() {
@@ -1848,6 +1967,197 @@ impl App {
         self.session.tools.push(ToolDraft { id, name: String::new(), kind, size: String::new() });
         self.session.selected = Some(TreeSelection::Tool(self.session.tools.len() - 1));
         self.mark_dirty();
+    }
+
+    fn current_process_id(&self) -> Option<&str> {
+        match self.state.process {
+            Some(SubProcess::Laser) => Some("laser"),
+            Some(SubProcess::Plasma) => Some("plasma"),
+            Some(SubProcess::Waterjet) => Some("waterjet"),
+            Some(SubProcess::OxyFuel) => Some("oxyfuel"),
+            Some(SubProcess::WireEdm) => Some("wire_edm"),
+            Some(SubProcess::Milling) => Some("milling"),
+            Some(SubProcess::Routing) => Some("routing"),
+            Some(SubProcess::Turning) => Some("turning"),
+            Some(SubProcess::Sla | SubProcess::Fdm) | None => None,
+        }
+    }
+
+    fn refresh_gcode_preview(&mut self) {
+        if self.session.post_id.trim().is_empty() || self.document.is_none() {
+            self.play_index = None;
+            return;
+        }
+        self.preview_gcode();
+    }
+
+    fn rebuild_play_index(&mut self) {
+        let (Some(scene), post) = (self.scene.as_ref(), self.session.post_id.trim()) else {
+            self.play_index = None;
+            return;
+        };
+        if post.is_empty() || self.state.gcode.is_empty() {
+            self.play_index = None;
+            return;
+        }
+        match play_index(scene, &self.state.gcode, post) {
+            Ok(index) => self.play_index = Some(index),
+            Err(_) => self.play_index = None,
+        }
+        self.apply_preview_speed();
+    }
+
+    fn apply_preview_speed(&mut self) {
+        let Some(viewport) = self.viewport.as_mut() else {
+            return;
+        };
+        let total = self.scene.as_ref().map(|scene| scene.total_length).unwrap_or(0.0);
+        let base = (total / 10.0).max(1.0);
+        viewport.playback.speed = base * f64::from(self.preview_speed_mult);
+    }
+
+    fn seek_playhead_fraction(&mut self, fraction: f64) {
+        let Some(total) = self.scene.as_ref().map(|scene| scene.total_length) else {
+            return;
+        };
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.playback.playing = false;
+            viewport.playback.position = (total * fraction).clamp(0.0, total);
+        }
+    }
+
+    fn seek_gcode_line(&mut self, line: usize) {
+        let Some(position) = self.play_index.as_ref().and_then(|index| index.position_for_line(line)) else {
+            return;
+        };
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.playback.playing = false;
+            viewport.playback.position = position;
+        }
+    }
+
+    fn current_gcode_line(&self) -> Option<usize> {
+        let position = self.viewport.as_ref()?.playback.position;
+        self.play_index.as_ref()?.line_at(position)
+    }
+
+    fn simulate_ribbon(&mut self, ui: &mut egui::Ui) {
+        ribbon_group(ui, "Playback", |ui| {
+            let playing = self.viewport.as_ref().is_some_and(|viewport| viewport.playback.playing);
+            let label = if playing { "Pause" } else { "Play" };
+            if ribbon_command(ui, label, playing).clicked() {
+                let total = self.scene.as_ref().map(|scene| scene.total_length).unwrap_or(0.0);
+                if let Some(viewport) = self.viewport.as_mut() {
+                    if playing {
+                        viewport.playback.playing = false;
+                    } else {
+                        if viewport.playback.position >= total {
+                            viewport.playback.restart();
+                        } else {
+                            viewport.playback.playing = true;
+                        }
+                    }
+                }
+            }
+            if ribbon_command(ui, "Restart", false).clicked()
+                && let Some(viewport) = self.viewport.as_mut()
+            {
+                viewport.playback.restart();
+            }
+        });
+        ribbon_group_separator(ui);
+        ribbon_group(ui, "Preview speed", |ui| {
+            ui.horizontal(|ui| {
+                for speed in [0.25_f32, 0.5, 1.0, 2.0, 4.0] {
+                    let selected = (self.preview_speed_mult - speed).abs() < 1e-6;
+                    let label = if (speed - 1.0).abs() < 1e-6 { "1x".to_string() } else { format!("{speed}x") };
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.preview_speed_mult = speed;
+                        self.apply_preview_speed();
+                    }
+                }
+            });
+            ui.label(RichText::new("Preview only, not a machine rate.").color(theme::MUTED).size(10.0));
+        });
+        ribbon_group_separator(ui);
+        ribbon_group(ui, "G-code", |ui| {
+            if ribbon_command(ui, "Preview G-code", false).clicked() {
+                self.preview_gcode();
+            }
+        });
+    }
+
+    fn simulate_right(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Simulate").strong().size(14.0));
+        ui.add_space(4.0);
+        if self.regen.stale {
+            ui.label(RichText::new("Toolpaths are stale until regenerate finishes.").color(theme::OVERRIDE).size(12.0));
+            ui.add_space(4.0);
+        }
+        if let Some(document) = self.document.as_ref() {
+            ui.label(RichText::new(estimate_time(document).label()).size(12.0));
+        } else {
+            ui.label(RichText::new("Generate toolpaths to estimate time from entered feeds.").color(theme::MUTED).size(12.0));
+        }
+        ui.label(RichText::new("Cuts are cyan; rapids are grey. Time uses only feeds you entered.").color(theme::MUTED).size(11.0));
+        ui.add_space(8.0);
+        self.show_preflight_checks(ui);
+        ui.add_space(8.0);
+        ui.label(RichText::new("G-code").strong().size(13.0));
+        ui.label(RichText::new("The current line follows the playhead. Click a line to jump.").color(theme::MUTED).size(11.0));
+        ui.add_space(4.0);
+        self.show_gcode_listing(ui);
+    }
+
+    fn show_preflight_checks(&mut self, ui: &mut egui::Ui) {
+        let checks = session_checks(&self.session, self.document.as_ref(), Some(&self.profile_store), self.current_process_id());
+        ui.label(RichText::new("Pre-flight checks").strong().size(13.0));
+        if checks.is_empty() {
+            ui.label(RichText::new("No issues. Export is allowed.").color(theme::START).size(12.0));
+            return;
+        }
+        for item in &checks {
+            let color = if item.blocks_export() { theme::OFF_BED } else { theme::OFF_SHEET };
+            let prefix = if item.blocks_export() { "Error" } else { "Warning" };
+            ui.label(RichText::new(format!("{prefix}: {}", item.message)).color(color).size(12.0));
+        }
+    }
+
+    fn show_gcode_listing(&mut self, ui: &mut egui::Ui) {
+        if self.state.gcode.is_empty() {
+            ui.label(RichText::new("Preview G-code to link the listing to the playhead.").color(theme::MUTED).size(12.0));
+            return;
+        }
+        let lines: Vec<String> =
+            if let Some(index) = &self.play_index { index.lines.clone() } else { self.state.gcode.lines().map(str::to_string).collect() };
+        let current = self.current_gcode_line();
+        let mut clicked = None;
+        egui::ScrollArea::vertical().id_salt("simulate-gcode").auto_shrink([false, false]).max_height(420.0).show(ui, |ui| {
+            for (index, line) in lines.iter().enumerate() {
+                let is_current = current == Some(index);
+                let shown = if line.is_empty() { " ".to_string() } else { line.clone() };
+                let text = format!("{:>4}  {shown}", index + 1);
+                let mut rich = RichText::new(text).monospace().size(11.0);
+                let rapid = self.play_index.as_ref().and_then(|play| play.spans.iter().find(|span| span.line == index).map(|span| span.rapid));
+                if is_current {
+                    rich = rich.color(Color32::WHITE).background_color(theme::ACCENT);
+                } else if rapid == Some(true) {
+                    rich = rich.color(theme::RAPID);
+                } else if rapid == Some(false) {
+                    rich = rich.color(theme::CUT);
+                }
+                let response = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                if is_current {
+                    response.scroll_to_me(Some(Align::Center));
+                }
+                if response.clicked() {
+                    clicked = Some(index);
+                }
+            }
+        });
+        if let Some(line) = clicked {
+            self.seek_gcode_line(line);
+        }
     }
 
     fn add_session_operation(&mut self, kind: &str) {
@@ -1948,7 +2258,8 @@ impl App {
     }
 
     fn body(&mut self, ui: &mut egui::Ui) {
-        let show_tree = self.state.show_tree && self.state.tab != ModeTab::Run && self.state.tab != ModeTab::Slice;
+        let show_tree =
+            self.state.show_tree && self.state.tab != ModeTab::Run && self.state.tab != ModeTab::Slice && self.state.tab != ModeTab::Simulate;
         let show_props = self.state.show_properties && self.state.tab != ModeTab::Slice;
         if show_tree {
             egui::Panel::left("tree").resizable(true).default_size(240.0).frame(panel_frame()).show(ui, |ui| {
@@ -1956,10 +2267,12 @@ impl App {
             });
         }
         if show_props {
-            egui::Panel::right("props").resizable(true).default_size(280.0).frame(panel_frame()).show(ui, |ui| {
+            let props_width = if self.state.tab == ModeTab::Simulate { 340.0 } else { 280.0 };
+            egui::Panel::right("props").resizable(true).default_size(props_width).frame(panel_frame()).show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.state.tab {
                     ModeTab::Run => self.run_right(ui),
                     ModeTab::Export => self.export_form(ui),
+                    ModeTab::Simulate => self.simulate_right(ui),
                     ModeTab::Orient => self.orient_properties(ui),
                     ModeTab::Supports => self.supports_properties(ui),
                     _ => self.default_properties(ui),
@@ -1976,6 +2289,7 @@ impl App {
             ModeTab::Slice if self.state.workspace == Workspace::Resin || self.state.workspace == Workspace::Fdm => self.slice_tab(ui),
             ModeTab::Export if self.state.workspace == Workspace::Resin => self.resin_export_center(ui),
             ModeTab::Export => self.cutting_export_center(ui),
+            ModeTab::Simulate => self.viewport_panel(ui, "Simulate"),
             ModeTab::Supports => self.supports_center(ui),
             ModeTab::Orient if self.state.workspace == Workspace::Resin || self.state.workspace == Workspace::Fdm => self.orient_center(ui),
             ModeTab::Run => self.viewport_panel(ui, "Simulation / Run View"),
@@ -3143,13 +3457,20 @@ impl App {
         ui.add_space(6.0);
         ui.label("Post");
         let current = if self.session.post_id.is_empty() { "Choose a post".to_string() } else { self.session.post_id.clone() };
+        let process = self.current_process_id().unwrap_or("").to_string();
+        let include = self.session.post_id.clone();
+        let posts = if process.is_empty() { list_posts() } else { list_posts_for_process(&process, Some(include.as_str())) };
         egui::ComboBox::from_id_salt("post-id").selected_text(current).width(200.0).show_ui(ui, |ui| {
-            for (id, name, _) in list_posts() {
+            for (id, name, _) in posts {
                 if ui.selectable_label(self.session.post_id == id, format!("{id} ({name})")).clicked() {
                     self.session.post_id = id;
+                    self.rebuild_play_index();
                 }
             }
         });
+        if !process.is_empty() {
+            ui.label(RichText::new("Posts shown are those documented for this head.").color(theme::MUTED).size(11.0));
+        }
         if ui.button("Preview G-code").clicked() {
             self.preview_gcode();
         }
@@ -3163,9 +3484,16 @@ impl App {
         ui.checkbox(&mut self.state.embed_thumbnail, "Embed thumbnail preview");
         ui.label(RichText::new("Thumbnail embedding is not written for G-code.").color(theme::MUTED).size(11.0));
         ui.add_space(8.0);
+        self.show_preflight_checks(ui);
+        ui.add_space(8.0);
+        let checks = session_checks(&self.session, self.document.as_ref(), Some(&self.profile_store), self.current_process_id());
+        let blocked = blocks_export(&checks);
         let export = egui::Button::new(RichText::new("Export File").color(Color32::WHITE)).fill(theme::ACCENT).min_size(Vec2::new(200.0, 28.0));
-        if ui.add(export).clicked() {
+        if ui.add_enabled(!blocked, export).clicked() {
             self.export_gcode();
+        }
+        if blocked {
+            ui.label(RichText::new("Export is blocked until the errors above are fixed.").color(theme::OFF_BED).size(11.0));
         }
         ui.add_space(6.0);
         ui.add_enabled(false, egui::Button::new("Send to printer").min_size(Vec2::new(200.0, 28.0)));
@@ -3461,6 +3789,7 @@ fn save_screenshot(path: &Path, image: &egui::ColorImage) -> Result<(), String> 
     buffer.save(path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
+#[allow(dead_code)]
 fn screenshot_job_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
@@ -3494,6 +3823,7 @@ fn tool_kind_label(kind: ToolKind) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn screenshot_ir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {

@@ -198,10 +198,19 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parse `text` with the same post that produced it.
+/// A parsed block together with the 0-based source line that produced it.
+#[derive(Debug, Clone)]
+pub struct IndexedMove {
+    /// 0-based index into `text.lines()`.
+    pub line: usize,
+    /// The motion, dwell, or other block on that line.
+    pub motion: ReadMove,
+}
+
+/// Parse `text` with the same post that produced it, keeping the source line of each block.
 /// Lengths are returned in millimetres and G94 feeds in millimetres per minute.
 /// G93 inverse-time feeds remain reciprocal minutes.
-pub fn read_back(text: &str, post: &PostDef) -> Result<Vec<ReadMove>> {
+pub fn read_back_indexed(text: &str, post: &PostDef) -> Result<Vec<IndexedMove>> {
     if text.len() > 64 * 1024 * 1024 {
         return Err(invalid("g-code is too large"));
     }
@@ -216,10 +225,17 @@ pub fn read_back(text: &str, post: &PostDef) -> Result<Vec<ReadMove>> {
             return Err(invalid(format!("line {}: line is too long", index + 1)));
         }
         if let Some(move_) = parser.line(line).map_err(|err| annotate(index + 1, err))? {
-            moves.push(move_);
+            moves.push(IndexedMove { line: index, motion: move_ });
         }
     }
     Ok(moves)
+}
+
+/// Parse `text` with the same post that produced it.
+/// Lengths are returned in millimetres and G94 feeds in millimetres per minute.
+/// G93 inverse-time feeds remain reciprocal minutes.
+pub fn read_back(text: &str, post: &PostDef) -> Result<Vec<ReadMove>> {
+    Ok(read_back_indexed(text, post)?.into_iter().map(|item| item.motion).collect())
 }
 
 impl<'a> Parser<'a> {

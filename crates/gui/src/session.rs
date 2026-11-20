@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use campanion_cli::{
     FORMAT_TAG, FORMAT_TAG_V2, ImportedPart, JobFile, LayerSummary, PlanCancel, PlanOptions, SourceKind, builtin_posts, import_part, parse_job,
-    plan_job, plan_job_cancellable, post_job, suggested_post,
+    plan_job, plan_job_cancellable, post_job_preview, posts_for_process, suggested_post,
 };
 use campanion_geom::Segment;
 use campanion_import::Drawing;
@@ -379,14 +379,9 @@ impl JobSession {
 
     /// Write the typed placement fields back onto the selected instance, when there is one.
     pub fn commit_placement(&mut self) {
+        // Only write editor fields back onto the selected instance. If an operation is selected,
+        // the stored instance coordinates stay as last edited (viewport drag or Setup fields).
         let Some(TreeSelection::Instance(part, _) | TreeSelection::Part(part)) = self.selected else {
-            if let Some(part) = self.parts.first_mut().and_then(|part| part.instances.first_mut()) {
-                part.x = self.placement_x.clone();
-                part.y = self.placement_y.clone();
-                part.rotate = self.placement_rotate.clone();
-                part.scale = self.placement_scale.clone();
-                part.mirror = self.placement_mirror;
-            }
             return;
         };
         let inst = match self.selected {
@@ -1748,7 +1743,7 @@ pub fn post_session(session: &JobSession, document: &Document) -> Result<(String
         return Err("choose a post before previewing or exporting G-code".to_string());
     }
     let job = planning_job(session)?;
-    let posted = post_job(&job, document, session.post_id.trim()).map_err(|err| err.to_string())?;
+    let posted = post_job_preview(&job, document, session.post_id.trim()).map_err(|err| err.to_string())?;
     let mut messages: Vec<SessionMessage> = posted.warnings.into_iter().map(warning).collect();
     if session.operations.iter().any(|op| !op.small_hole_max.trim().is_empty()) {
         messages.push(warning("small-hole rules are recorded as entered; this post does not emit uncited THC or pierce codes for them".to_string()));
@@ -1786,6 +1781,22 @@ pub fn suggested_post_for_process(label: &str) -> Option<&'static str> {
 /// Built-in posts for the Export chooser.
 pub fn list_posts() -> Vec<(String, String, String)> {
     builtin_posts().into_iter().map(|post| (post.id, post.name, post.description)).collect()
+}
+
+/// Built-in posts that are documented for `process`, plus `include` when a profile already names one.
+pub fn list_posts_for_process(process: &str, include: Option<&str>) -> Vec<(String, String, String)> {
+    let mut posts: Vec<(String, String, String)> =
+        posts_for_process(process).into_iter().map(|post| (post.id, post.name, post.description)).collect();
+    if let Some(id) = include.map(str::trim).filter(|id| !id.is_empty())
+        && !posts.iter().any(|(existing, _, _)| existing == id)
+    {
+        if let Some(post) = builtin_posts().into_iter().find(|post| post.id == id) {
+            posts.push((post.id, post.name, post.description));
+        } else {
+            posts.push((id.to_string(), id.to_string(), "Post named on the machine profile".to_string()));
+        }
+    }
+    posts
 }
 
 /// Preview scene for imported 2D geometry, before toolpaths exist.

@@ -196,10 +196,23 @@ pub fn plan_job_with_cancel(job: &JobFile, options: PlanOptions, cancel: Option<
 ///
 /// The text is read back and compared at the job chord tolerance, matching `campanion run`.
 pub fn post_job(job: &JobFile, document: &Document, post_spec: &str) -> Result<Posted, CliError> {
+    post_job_inner(job, document, post_spec, true)
+}
+
+/// Post G-code for a GUI preview without refusing an off-bed job.
+///
+/// `campanion run --post` and file export still use [`post_job`], which refuses off-bed parts.
+pub fn post_job_preview(job: &JobFile, document: &Document, post_spec: &str) -> Result<Posted, CliError> {
+    post_job_inner(job, document, post_spec, false)
+}
+
+fn post_job_inner(job: &JobFile, document: &Document, post_spec: &str, refuse_off_bed: bool) -> Result<Posted, CliError> {
     if post_spec.is_empty() {
         return Err(CliError::run("choose a post before exporting G-code"));
     }
-    crate::job_plan::refuse_off_bed_for_export(job)?;
+    if refuse_off_bed {
+        crate::job_plan::refuse_off_bed_for_export(job)?;
+    }
     let post_def = post::load_spec(Path::new(post_spec))?;
     run::require_spindle_speeds(job, &post_def)?;
     let text = post::render(document.program(), &post_def, job.tolerance().chord())?;
@@ -234,6 +247,30 @@ pub fn suggested_post(process: &str) -> Option<&'static str> {
         "wireedm" | "wire-edm" | "wire_edm" => Some("wire_edm"),
         _ => None,
     }
+}
+
+/// Built-in posts documented for `process`.
+///
+/// The list is an allow-list taken from the post descriptions in the README, not a guess at
+/// compatibility. Milling and routing share the mill posts. An unrecognized process returns the
+/// full built-in list so the chooser does not hide a post the user already knows.
+/// The GUI should also keep a machine or head post that the profile already names.
+pub fn posts_for_process(process: &str) -> Vec<PostInfo> {
+    let key = process.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    let allowed: Option<&[&str]> = match key.as_str() {
+        "laser" => Some(&["grbl_laser"]),
+        "plasma" => Some(&["plasma"]),
+        "waterjet" => Some(&["waterjet"]),
+        "oxyfuel" | "oxy_fuel" => Some(&["oxyfuel"]),
+        "wireedm" | "wire_edm" => Some(&["wire_edm"]),
+        "milling" | "mill" | "routing" | "router" => Some(&["linuxcnc", "linuxcnc_router", "grbl", "mach3", "mach4", "fanuc", "haas"]),
+        "turning" | "lathe" => Some(&["linuxcnc_lathe", "fanuc_lathe", "haas_lathe", "grbl_lathe", "generic_lathe_2ch"]),
+        _ => None,
+    };
+    let Some(allowed) = allowed else {
+        return builtin_posts();
+    };
+    builtin_posts().into_iter().filter(|post| allowed.contains(&post.id.as_str())).collect()
 }
 
 fn default_tolerance() -> Tolerance {

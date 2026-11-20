@@ -5,8 +5,8 @@ It can import STEP parts through [SolidCraft](https://github.com/tangency-labs/s
 `solidcraft-cli`, but it is not part of SolidCraft.
 
 CAMpanion is primarily command-line driven. The graphical workspace (`campanion-gui`) can start
-a job, import and lay out parts, and save a `campanion-job/2` file, but it is still in
-development and does not talk to a machine.
+a job, import and lay out parts, add operations, simulate posted G-code, and export a file the
+CLI would also produce, but it is still in development and does not talk to a machine.
 
 Status: early. Start with 2D path processing, then work up to multi-axis machines
 (the toolpath format is designed for up to 13 axes from the start).
@@ -55,6 +55,28 @@ cargo run -p campanion-cli -- lathe examples/shaft.lathe.json -o out.ngc --ir ou
 `campanion lathe` loads a `campanion-lathe/1` file. Without `--post`, `-o` is the RS274/NGC test sink and ZX arcs are `G18`. `--post linuxcnc_lathe` writes diameter mode (`G7`), the ZX plane (`G18`) and constant surface speed (`G96`). Posted text is read back at the job chord tolerance. A mismatch exits 1 and writes nothing. Verify errors are printed and the status is 1. A face, rough or finish gouge is printed and the status is 1.
 
 A `.step` or `.stp` lathe source is sectioned through the spindle by `solidcraft-cli` (`--up-axis`, default `z`); `examples/shaft_fillet.lathe.json` reads `examples/shaft_fillet.step` that way.
+
+### Graphical workspace
+
+`campanion-gui` is a preview of the same planning and posting path as the CLI. It does not talk
+to a machine. From an empty config directory:
+
+1. Open **Machines…**, click **New**, and enter the bed, head, post, and material values you
+   have measured. CAMpanion does not ship machine defaults.
+2. Start a **New job**, select that profile, and import an SVG or DXF on **Setup**.
+3. On **Operations**, add a profile (or other) operation and apply a material, or type a cut
+   feed yourself. Toolpaths regenerate automatically.
+4. On **Simulate**, play or scrub the path. The G-code listing highlights the current line;
+   clicking a line jumps the playhead. The run-time estimate uses only feeds you entered.
+   Rapids with no entered rate are omitted from the total, not invented.
+5. On **Export**, pick a post valid for the selected head (for a laser, `grbl_laser`). Pre-flight
+   checks block on errors such as a part off the bed or an empty operation, and warn on
+   unused contours or a part off the sheet. Export writes the same G-code as
+   `campanion run JOB.json -o OUT.nc --post POST`.
+
+```sh
+cargo run -p campanion-gui
+```
 
 ## Usage
 
