@@ -7,7 +7,8 @@ Orient tab can translate a part (typed X/Y/Z with snap, left-drag in the viewpor
 Center on plate, Drop to plate). The Supports tab can detect and colour islands, edit
 support points in the shared 3D viewport (orbit, pan, zoom; click a surface to add a
 tip in any view), and load a calibration profile. Generate supports runs in the
-background with progress and cancel. Mouse bindings follow SolidCraft's documented default: right-drag
+background with a progress bar and cancel. Vertical self-support rays use an XY
+hit grid so a many-triangle part finishes in a fraction of a second rather than minutes. Mouse bindings follow SolidCraft's documented default: right-drag
 orbits, middle-drag pans, the wheel zooms at the pointer. The build volume is drawn
 only from the selected machine profile. Optimize stays disabled until that profile is
 complete. The Slice tab runs the same slicer as this command, and Export writes a

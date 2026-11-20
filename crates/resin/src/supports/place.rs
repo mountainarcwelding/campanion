@@ -3,7 +3,9 @@
 use campanion_mesh::{Mesh, Triangle, Vec3};
 
 use crate::error::{ResinError, Result};
+use crate::supports::grid::VerticalHitGrid;
 use crate::supports::params::SupportParams;
+use crate::supports::profile;
 
 /// Most auto-generated plus explicit support points accepted in one run.
 pub const MAX_SUPPORT_POINTS: usize = 20_000;
@@ -81,7 +83,9 @@ pub fn first_hit(mesh: &Mesh, origin: Vec3, dir: Vec3, skip: Option<usize>) -> O
         return None;
     }
     let mut best: Option<(f64, usize)> = None;
+    let mut tested = 0u64;
     for (index, triangle) in mesh.triangles().iter().enumerate() {
+        tested += 1;
         if skip == Some(index) {
             continue;
         }
@@ -96,11 +100,12 @@ pub fn first_hit(mesh: &Mesh, origin: Vec3, dir: Vec3, skip: Option<usize>) -> O
             _ => best = Some((t, index)),
         }
     }
+    profile::record_hit(tested);
     best
 }
 
 /// Möller–Trumbore. Returns `t` along `dir` when the hit is in the triangle and `t >= 0`.
-fn ray_triangle(origin: Vec3, dir: Vec3, tri: &Triangle) -> Option<f64> {
+pub(crate) fn ray_triangle(origin: Vec3, dir: Vec3, tri: &Triangle) -> Option<f64> {
     let eps = 1e-12;
     let edge1 = tri.b.sub(tri.a);
     let edge2 = tri.c.sub(tri.a);
@@ -126,21 +131,39 @@ fn ray_triangle(origin: Vec3, dir: Vec3, tri: &Triangle) -> Option<f64> {
 
 /// Lowest downward face of `mesh` at `(x, y)` with `z` strictly above `z_min`.
 pub fn lowest_hit_above(mesh: &Mesh, x: f64, y: f64, z_min: f64) -> Option<(Vec3, usize)> {
-    let origin = Vec3::new(x, y, z_min);
-    let dir = Vec3::new(0.0, 0.0, 1.0);
-    let (t, index) = first_hit(mesh, origin, dir, None)?;
-    let z = z_min + t;
-    if !z.is_finite() {
-        return None;
+    lowest_hit_above_with(mesh, None, x, y, z_min)
+}
+
+fn lowest_hit_above_with(mesh: &Mesh, grid: Option<&VerticalHitGrid>, x: f64, y: f64, z_min: f64) -> Option<(Vec3, usize)> {
+    match grid {
+        Some(grid) => grid.lowest_hit_above(mesh, x, y, z_min),
+        None => {
+            let origin = Vec3::new(x, y, z_min);
+            let dir = Vec3::new(0.0, 0.0, 1.0);
+            let (t, index) = first_hit(mesh, origin, dir, None)?;
+            let z = z_min + t;
+            if !z.is_finite() {
+                return None;
+            }
+            Some((Vec3::new(x, y, z), index))
+        }
     }
-    Some((Vec3::new(x, y, z), index))
 }
 
 /// The part already occupies the column below `point` when a downward ray hits another triangle.
 pub fn is_self_supported(mesh: &Mesh, point: Vec3, source: Option<usize>) -> bool {
-    // Start a short way below the surface so the source face and its neighbours are skipped.
-    let origin = Vec3::new(point.x, point.y, point.z - 0.05);
-    matches!(first_hit(mesh, origin, Vec3::new(0.0, 0.0, -1.0), source), Some((t, _)) if t > 1e-6)
+    is_self_supported_with(mesh, None, point, source)
+}
+
+fn is_self_supported_with(mesh: &Mesh, grid: Option<&VerticalHitGrid>, point: Vec3, source: Option<usize>) -> bool {
+    match grid {
+        Some(grid) => grid.is_self_supported(mesh, point, source),
+        None => {
+            // Start a short way below the surface so the source face and its neighbours are skipped.
+            let origin = Vec3::new(point.x, point.y, point.z - 0.05);
+            matches!(first_hit(mesh, origin, Vec3::new(0.0, 0.0, -1.0), source), Some((t, _)) if t > 1e-6)
+        }
+    }
 }
 
 fn sample_triangle(triangle: Triangle, spacing: f64, out: &mut Vec<(Vec3, usize)>, index: usize) -> Result<()> {
@@ -168,22 +191,48 @@ fn sample_triangle(triangle: Triangle, spacing: f64, out: &mut Vec<(Vec3, usize)
 
 /// Auto-generate contact points on overhangs, then add any explicit points, thinned to `spacing`.
 pub fn place_supports(mesh: &Mesh, params: &SupportParams, extra: &[InputPoint], auto: bool, z_min: f64) -> Result<Vec<SupportPoint>> {
+    let grid = VerticalHitGrid::build(mesh)?;
+    place_supports_with(mesh, Some(&grid), params, extra, auto, z_min)
+}
+
+/// Linear-scan placement used as the correctness reference for the XY hit grid.
+#[cfg(test)]
+pub(crate) fn place_supports_linear(mesh: &Mesh, params: &SupportParams, extra: &[InputPoint], auto: bool, z_min: f64) -> Result<Vec<SupportPoint>> {
+    place_supports_with(mesh, None, params, extra, auto, z_min)
+}
+
+fn place_supports_with(
+    mesh: &Mesh,
+    grid: Option<&VerticalHitGrid>,
+    params: &SupportParams,
+    extra: &[InputPoint],
+    auto: bool,
+    z_min: f64,
+) -> Result<Vec<SupportPoint>> {
+    profile::reset_hits();
+    let t_place = std::time::Instant::now();
     let mut samples: Vec<(Vec3, usize)> = Vec::new();
     if auto {
+        let t_sample = std::time::Instant::now();
         for (index, triangle) in mesh.triangles().iter().enumerate() {
             if !is_overhang(triangle, params.overhang_angle_deg) {
                 continue;
             }
             sample_triangle(*triangle, params.support_spacing_mm, &mut samples, index)?;
         }
+        profile::log("place sample overhangs", t_sample);
+        profile::log_count("place overhang samples", samples.len() as u64);
     }
     let mut needed: Vec<SupportPoint> = Vec::new();
+    let t_self = std::time::Instant::now();
     for (point, index) in samples {
-        if is_self_supported(mesh, point, Some(index)) {
+        if is_self_supported_with(mesh, grid, point, Some(index)) {
             continue;
         }
         needed.push(SupportPoint::new(point.x, point.y, point.z));
     }
+    profile::log("place self-support rays", t_self);
+    profile::log_count("place needed before extras", needed.len() as u64);
     for point in extra {
         if !point.x.is_finite() || !point.y.is_finite() {
             return Err(ResinError::invalid("a support point is not finite"));
@@ -200,7 +249,7 @@ pub fn place_supports(mesh: &Mesh, params: &SupportParams, extra: &[InputPoint],
                     contact
                 }
             }
-            None => match lowest_hit_above(mesh, point.x, point.y, z_min) {
+            None => match lowest_hit_above_with(mesh, grid, point.x, point.y, z_min) {
                 Some((hit, _)) => {
                     let mut contact = SupportPoint::manual(hit.x, hit.y, hit.z);
                     contact.source = point.source;
@@ -220,10 +269,15 @@ pub fn place_supports(mesh: &Mesh, params: &SupportParams, extra: &[InputPoint],
     if needed.is_empty() {
         return Err(ResinError::invalid("no support points were placed; give --points or enable auto generation"));
     }
+    let t_thin = std::time::Instant::now();
     let thinned = thin_points(&needed, params.support_spacing_mm)?;
+    profile::log("place thin", t_thin);
+    profile::log_hits();
+    profile::log("place total", t_place);
     if thinned.len() > MAX_SUPPORT_POINTS {
         return Err(ResinError::invalid(format!("too many supports: {} > {MAX_SUPPORT_POINTS}; increase --support-spacing", thinned.len())));
     }
+    profile::log_count("place kept", thinned.len() as u64);
     Ok(thinned)
 }
 
@@ -295,6 +349,7 @@ fn thin_against(points: &mut [SupportPoint], spacing: f64, existing: &[SupportPo
 /// Every needed overhang sample is within `spacing` of a placed support, or is self-supported.
 pub fn overhangs_are_covered(mesh: &Mesh, params: &SupportParams, points: &[SupportPoint], z_min: f64) -> Result<bool> {
     let _ = z_min;
+    let grid = VerticalHitGrid::build(mesh)?;
     let spacing_sq = params.support_spacing_mm * params.support_spacing_mm;
     for (index, triangle) in mesh.triangles().iter().enumerate() {
         if !is_overhang(triangle, params.overhang_angle_deg) {
@@ -303,7 +358,7 @@ pub fn overhangs_are_covered(mesh: &Mesh, params: &SupportParams, points: &[Supp
         let mut samples = Vec::new();
         sample_triangle(*triangle, params.support_spacing_mm, &mut samples, index)?;
         for (point, source) in samples {
-            if is_self_supported(mesh, point, Some(source)) {
+            if is_self_supported_with(mesh, Some(&grid), point, Some(source)) {
                 continue;
             }
             let covered = points.iter().any(|s| {

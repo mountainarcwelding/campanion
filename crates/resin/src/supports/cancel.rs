@@ -95,3 +95,17 @@ pub(crate) fn check_cancel(cancel: Option<&CancelFlag>) -> Result<()> {
         None => Ok(()),
     }
 }
+
+/// Optional pause for the GUI screenshot harness. Cap is 5 s; ignored when the env is unset.
+pub(crate) fn screenshot_hold() {
+    let Ok(raw) = std::env::var("CAMPANION_GUI_SCREENSHOT_HOLD_MS") else {
+        return;
+    };
+    let Ok(ms) = raw.parse::<u64>() else {
+        return;
+    };
+    if ms == 0 || ms > 5_000 {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}

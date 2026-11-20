@@ -1332,12 +1332,39 @@ impl ResinGenerateJob {
         let layer = progress.layer();
         let layers = progress.layers();
         if layers > 0 {
-            Some(format!("{stage} — layer {layer} / {layers}. Cancel stops at the next layer."))
+            Some(format!("{stage} — layer {layer} / {layers}"))
         } else if stage.is_empty() {
             Some("Generating supports…".to_string())
         } else {
             Some(format!("{stage}…"))
         }
+    }
+
+    /// 0..=1 while a run is in flight, based on the current stage and layer.
+    #[must_use]
+    pub fn progress_fraction(&self) -> Option<f32> {
+        let progress = self.progress.as_ref()?;
+        let stage = progress.stage();
+        let layer = progress.layer();
+        let layers = progress.layers();
+        let frac = if stage.to_ascii_lowercase().contains("plac") {
+            0.85
+        } else if stage.to_ascii_lowercase().contains("build") {
+            0.95
+        } else if layers > 0 {
+            (layer as f32 / layers as f32).clamp(0.0, 1.0) * 0.8
+        } else {
+            0.05
+        };
+        Some(frac.clamp(0.0, 1.0))
+    }
+
+    /// Drop an in-flight worker without applying its result. Used when a screenshot frame changes.
+    pub fn abandon(&mut self) {
+        self.cancel();
+        self.receiver = None;
+        self.cancel = None;
+        self.progress = None;
     }
 }
 

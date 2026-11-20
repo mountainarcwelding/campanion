@@ -914,7 +914,13 @@ impl App {
         let resin_set = set == Some("resin") || dir_name == Some("gui-shots-g4") || dir_name == Some("gui-shots-g4b");
         let three_d_set = set == Some("3d") || dir_name == Some("gui-shots-3d");
         let fix281_set = set == Some("fix281") || dir_name == Some("gui-shots-fix281");
-        let plan = if fix281_set {
+        let fix282_set = set == Some("fix282") || dir_name == Some("gui-shots-fix282");
+        let plan = if fix282_set {
+            vec![
+                (Workspace::Resin, ModeTab::Supports, "resin-fix282-progress.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-fix282-supports.png".to_string()),
+            ]
+        } else if fix281_set {
             vec![
                 (Workspace::Resin, ModeTab::Orient, "resin-fix281-offcenter.png".to_string()),
                 (Workspace::Resin, ModeTab::Orient, "resin-fix281-centered.png".to_string()),
@@ -1021,6 +1027,7 @@ impl App {
 
     fn prepare_resin_screenshot(&mut self, name: Option<&str>) {
         // Values typed here are screenshot stand-ins only. They are not shipped defaults.
+        self.resin_generate.abandon();
         self.state.set_workspace(Workspace::Resin);
         if let Some(job) = self.screenshot.as_ref() {
             let store = campanion_cli::ProfileStore::from_dir(job.dir.join("config"));
@@ -1029,7 +1036,8 @@ impl App {
             // `.pm7m` writer. They are not shipped defaults and are not written into user profiles.
             let three_d = name.unwrap_or("").contains("3d")
                 || name.unwrap_or("").contains("fix281")
-                || job.dir.file_name().is_some_and(|n| n == "gui-shots-3d" || n == "gui-shots-fix281");
+                || name.unwrap_or("").contains("fix282")
+                || job.dir.file_name().is_some_and(|n| n == "gui-shots-3d" || n == "gui-shots-fix281" || n == "gui-shots-fix282");
             if three_d {
                 let spec = &campanion_resin::M7_MAX;
                 resin_example.bed = Some(campanion_cli::BedSize { x: spec.bed_x_mm, y: spec.bed_y_mm, z: Some(spec.bed_z_mm) });
@@ -1043,22 +1051,34 @@ impl App {
         }
         let name = name.unwrap_or("");
         let is_fix281 = name.contains("fix281");
-        let mesh = if is_fix281 { screenshot_offcenter_resin_part() } else { screenshot_resin_part() };
+        let is_fix282 = name.contains("fix282");
+        let mesh = if is_fix282 && name.contains("progress") {
+            screenshot_dense_resin_part()
+        } else if is_fix281 {
+            screenshot_offcenter_resin_part()
+        } else {
+            screenshot_resin_part()
+        };
         self.resin = ResinSession::default();
         self.resin.mesh = Some(mesh);
         self.resin.mesh_path = Some(PathBuf::from("screenshot-part.stl"));
         fill_screenshot_support_fields(&mut self.state);
-        let is_3d = name.contains("3d") || is_fix281;
+        let is_3d = name.contains("3d") || is_fix281 || is_fix282;
         if name.contains("calibration-missing") {
             self.resin.calibration = Some(resin_ui::load_calibration_text(
                 PathBuf::from("partial-calibration.json"),
                 r#"{"schema":"campanion-resin-calibration/1","name":"partial-screenshot"}"#,
             ));
             let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false, None, None);
+        } else if is_fix282 && name.contains("progress") {
+            // Start generate here so the mid-run hold can be captured on the first frames.
+            self.state.support.layer_height_mm.value = "0.05".to_string();
+            self.state.support.detect_cell_mm.value = "0.50".to_string();
+            self.generate_resin_supports(false);
         } else if name.contains("supports")
             || name.contains("slice")
             || name.contains("export")
-            || (is_3d && !name.contains("offcenter") && !name.contains("centered"))
+            || (is_3d && !name.contains("offcenter") && !name.contains("centered") && !name.contains("progress"))
         {
             if is_fix281 && (name.contains("centered") || name.contains("generate")) {
                 let _ = resin_ui::center_session_on_plate(&mut self.resin, &mut self.state.position_mm, &mut self.state.rotation_deg);
@@ -3805,9 +3825,13 @@ impl App {
                 self.generate_resin_supports(true);
             }
         });
-        resin_ui::show_disabled_reason(ui, opt_reason.as_deref().or(gen_reason.as_deref()));
-        if let Some(text) = self.resin_generate.progress_text() {
-            ui.label(RichText::new(text).size(12.0));
+        if self.resin_generate.is_running() {
+            if let Some(text) = self.resin_generate.progress_text() {
+                let frac = self.resin_generate.progress_fraction().unwrap_or(0.0);
+                ui.add(egui::ProgressBar::new(frac).text(text).desired_width(ui.available_width()));
+            }
+        } else {
+            resin_ui::show_disabled_reason(ui, opt_reason.as_deref().or(gen_reason.as_deref()));
         }
         if let Some(note) = &self.resin.last_generate_note {
             ui.label(RichText::new(note).size(12.0));
@@ -5050,28 +5074,56 @@ impl App {
             let _ = self.state.set_tab(tab);
             self.prepare_screenshot_frame(shot_name.as_deref());
         }
+        let (progress_shot, frames_waited, should_return) = {
+            let Some(job) = self.screenshot.as_mut() else {
+                return;
+            };
+            if job.index >= job.plan.len() {
+                if !job.finished {
+                    for path in &job.written {
+                        eprintln!("campanion-gui: wrote {}", path.display());
+                    }
+                    job.finished = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                return;
+            }
+            if job.awaiting {
+                ctx.request_repaint();
+                return;
+            }
+            job.frames_waited = job.frames_waited.saturating_add(1);
+            let progress_shot = job.plan.get(job.index).is_some_and(|(_, _, name)| name.contains("progress"));
+            (progress_shot, job.frames_waited, false)
+        };
+        let _ = should_return;
+        if progress_shot {
+            // Start the real generate on a background thread, then capture once its progress is visible.
+            if !self.resin_generate.is_running() {
+                if self.screenshot.as_ref().is_some_and(|job| job.frames_waited <= 2) {
+                    self.generate_resin_supports(false);
+                    ctx.request_repaint();
+                    return;
+                }
+                if let Some(job) = self.screenshot.as_mut() {
+                    job.error = Some("progress screenshot finished before a frame could be captured".to_string());
+                }
+                ctx.request_repaint();
+                return;
+            }
+            let mid_run = self.resin_generate.progress_fraction().is_some_and(|frac| frac > 0.05 && frac < 0.95);
+            let ready = mid_run && self.screenshot.as_ref().is_some_and(|job| job.frames_waited >= 2);
+            if !ready {
+                ctx.request_repaint();
+                return;
+            }
+        } else if frames_waited < 8 {
+            ctx.request_repaint();
+            return;
+        }
         let Some(job) = self.screenshot.as_mut() else {
             return;
         };
-        if job.index >= job.plan.len() {
-            if !job.finished {
-                for path in &job.written {
-                    eprintln!("campanion-gui: wrote {}", path.display());
-                }
-                job.finished = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            return;
-        }
-        if job.awaiting {
-            ctx.request_repaint();
-            return;
-        }
-        job.frames_waited = job.frames_waited.saturating_add(1);
-        if job.frames_waited < 8 {
-            ctx.request_repaint();
-            return;
-        }
         let sender = job.sender.clone();
         job.awaiting = true;
         ctx.request_screenshot(move |image| {
@@ -5114,6 +5166,32 @@ fn screenshot_resin_part() -> campanion_mesh::Mesh {
                 Err(_) => screenshot_resin_part(),
             },
         },
+    }
+}
+
+fn screenshot_dense_resin_part() -> campanion_mesh::Mesh {
+    // Screenshot stand-in only. Dense enough that generate stays mid-run for a progress frame.
+    use campanion_mesh::{Aabb, Mesh, Triangle, Vec3};
+    let mut tris = Vec::new();
+    if let Ok(floor) = Mesh::new(Aabb::from_corners(Vec3::new(-20.0, -20.0, 0.0), Vec3::new(20.0, 20.0, 2.0)).face_triangles().to_vec()) {
+        tris.extend_from_slice(floor.triangles());
+    }
+    let div = 48usize;
+    for iy in 0..div {
+        for ix in 0..div {
+            let x0 = -22.0 + 44.0 * ix as f64 / div as f64;
+            let x1 = -22.0 + 44.0 * (ix + 1) as f64 / div as f64;
+            let y0 = -22.0 + 44.0 * iy as f64 / div as f64;
+            let y1 = -22.0 + 44.0 * (iy + 1) as f64 / div as f64;
+            tris.push(Triangle { a: Vec3::new(x0, y0, 16.0), b: Vec3::new(x1, y1, 16.0), c: Vec3::new(x1, y0, 16.0) });
+            tris.push(Triangle { a: Vec3::new(x0, y0, 16.0), b: Vec3::new(x0, y1, 16.0), c: Vec3::new(x1, y1, 16.0) });
+            tris.push(Triangle { a: Vec3::new(x0, y0, 17.0), b: Vec3::new(x1, y0, 17.0), c: Vec3::new(x1, y1, 17.0) });
+            tris.push(Triangle { a: Vec3::new(x0, y0, 17.0), b: Vec3::new(x1, y1, 17.0), c: Vec3::new(x0, y1, 17.0) });
+        }
+    }
+    match Mesh::new(tris) {
+        Ok(mesh) => mesh,
+        Err(_) => screenshot_resin_part(),
     }
 }
 
