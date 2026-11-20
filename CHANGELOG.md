@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## 0.23.1 — 2026-11-19
+
+Setup review fixes for the graphical workspace. **Not physically tested.** CAMpanion is still
+primarily command-line driven; this release does not talk to a machine.
+
+### Changed
+
+- The top-left ribbon card is the machine selector: it shows the selected machine name and
+  type, a dropdown of machine profiles, and Manage…. The workspace family is no longer chosen
+  in the UI; the process comes from the selected machine head.
+- Setup properties show placement for the selected part. Origin and sheet live in a
+  collapsible Job section. Array, Arrange, and Rotate parameters are in those tools' panels.
+- Until Operations auto-regenerate ships, a temporary regenerate action lives only on the
+  Operations tab. Generate buttons were removed from Setup, the process tree, and Export.
+- The viewport draws the machine-profile bed at its stored size, with the sheet inside it,
+  and fits the view to the bed when a job or machine is opened.
+
+### Fixed
+
+- Multi-part import, linked copies, and Array now have a GUI path that populates the Parts
+  list with instances. Array and Arrange no longer depend on hidden fields in the properties
+  panel.
+
+### Known limits
+
+- Limits listed under 0.23.0 still apply. This release has not been physically tested.
+
 ## 0.23.0 — 2026-11-19
 
 Setup milestone for the graphical workspace: a New Job flow, a drawn bed, multi-part import,

@@ -40,9 +40,17 @@ pub const PLUNGE: Color32 = Color32::from_rgb(255, 150, 40);
 /// Playhead and tool mark.
 pub const TOOL: Color32 = Color32::from_rgb(255, 255, 255);
 /// Machine bed outline.
-pub const BED: Color32 = Color32::from_rgb(80, 110, 150);
+pub const BED: Color32 = Color32::from_rgb(110, 160, 210);
+/// Translucent fill for the machine bed, so the profile size is visible.
+pub fn bed_fill() -> Color32 {
+    Color32::from_rgba_unmultiplied(50, 80, 120, 70)
+}
 /// Job sheet outline.
-pub const SHEET: Color32 = Color32::from_rgb(180, 140, 70);
+pub const SHEET: Color32 = Color32::from_rgb(220, 180, 90);
+/// Translucent fill for the sheet, drawn inside the bed.
+pub fn sheet_fill() -> Color32 {
+    Color32::from_rgba_unmultiplied(180, 140, 70, 50)
+}
 /// Part geometry that sits off the bed.
 pub const OFF_BED: Color32 = Color32::from_rgb(230, 70, 70);
 /// Part geometry that sits off the sheet but on the bed.

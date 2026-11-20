@@ -538,6 +538,31 @@ mod tests {
         assert!(sheet_bounds(&session).expect("sheet").is_none());
     }
 
+    fn example_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
+    }
+
+    #[test]
+    fn import_three_parts_array_and_linked_copy_populate_the_list() {
+        let mut session = JobSession::new();
+        for name in ["sample.svg", "curves.svg", "nest.dxf"] {
+            let imported = crate::session::import_part_file(&example_path(name)).unwrap_or_else(|err| panic!("{name}: {err}"));
+            crate::session::add_imported_part(&mut session, &imported);
+        }
+        assert_eq!(session.parts.len(), 3);
+        session.select_instance(0, 0);
+        array_copies(&mut session, ArraySpec::parse("3", "2", "110", "70").expect("spec")).expect("array");
+        session.select_instance(2, 0);
+        linked_copy(&mut session).expect("copy");
+        assert_eq!(session.parts[0].instances.len(), 6, "3x2 array of the first part");
+        assert_eq!(session.parts[1].instances.len(), 1);
+        assert_eq!(session.parts[2].instances.len(), 2, "linked copy of the third part");
+        let scene = crate::session::placed_scene_parts(&session, 0.05).expect("scene").expect("geometry");
+        let (min, max) = scene.bounds.expect("bounds");
+        assert!(max[0] - min[0] > 200.0, "array should span X {min:?} {max:?}");
+        assert!(max[1] - min[1] > 70.0, "array should span Y {min:?} {max:?}");
+    }
+
     #[test]
     fn source_kind_is_used_for_place_on_face_message() {
         let mut session = JobSession::new();

@@ -248,8 +248,10 @@ pub struct GuiState {
     pub array_x: UserField,
     /// Array count along Y. Starts empty.
     pub array_y: UserField,
-    /// Array spacing, millimetres. Starts empty.
+    /// Array spacing along X, millimetres. Starts empty.
     pub array_spacing_mm: UserField,
+    /// Array spacing along Y, millimetres. Starts empty.
+    pub array_spacing_y_mm: UserField,
     /// Minimum gap for Arrange, millimetres. Starts empty.
     pub arrange_gap_mm: UserField,
     /// Support settings. Every field starts empty; the program ships no default sizes.
@@ -323,6 +325,7 @@ impl GuiState {
             array_x: UserField::empty(),
             array_y: UserField::empty(),
             array_spacing_mm: UserField::empty(),
+            array_spacing_y_mm: UserField::empty(),
             arrange_gap_mm: UserField::empty(),
             support: SupportFields::default(),
             layer: 0,

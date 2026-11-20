@@ -1,7 +1,7 @@
 //! Toolpath painting that reuses [`campanion_view`] scene data.
 
 use campanion_view::{Playback, Projection, Scene, Stroke, StrokeKind, View, project, projected_bounds, tool_position, visible};
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke as UiStroke};
+use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke as UiStroke, Vec2};
 
 use crate::theme;
 
@@ -60,10 +60,20 @@ impl Viewport {
 
     /// Fit the path into `rect`.
     pub fn fit(&mut self, scene: &Scene, rect: Rect) {
+        self.fit_with_guides(Some(scene), rect, None);
+    }
+
+    /// Fit the view to the machine bed when one is known, otherwise to the scene.
+    pub fn fit_with_guides(&mut self, scene: Option<&Scene>, rect: Rect, guides: Option<&ViewportGuides>) {
+        let bed = guides.and_then(|guides| guides.bed).map(|bounds| ([bounds[0], bounds[1]], [bounds[2], bounds[3]]));
+        let scene_bounds = scene.and_then(|scene| scene.bounds.or(projected_bounds(scene, self.projection)));
+        self.fit_world(bed.or(scene_bounds), rect);
+    }
+
+    fn fit_world(&mut self, bounds: Option<([f64; 2], [f64; 2])>, rect: Rect) {
         if rect.width() < 32.0 || rect.height() < 32.0 {
             return;
         }
-        let bounds = projected_bounds(scene, self.projection).or(scene.bounds);
         if let Some(bounds) = bounds {
             self.view = View::fit(bounds, f64::from(rect.width()), f64::from(rect.height()), FIT_MARGIN_PX);
         } else {
@@ -94,15 +104,16 @@ pub fn show_with(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::VIEWPORT);
     let mut part_delta = None;
+    let has_guides = guides.is_some_and(|guides| guides.bed.is_some() || guides.sheet.is_some());
 
-    if let Some(scene) = scene {
+    if scene.is_some() || has_guides {
         let size = [rect.width(), rect.height()];
         let size_changed = viewport.last_size.is_none_or(|prev| (prev[0] - size[0]).abs() > 0.5 || (prev[1] - size[1]).abs() > 0.5);
         if response.double_clicked() {
             viewport.user_adjusted = false;
-            viewport.fit(scene, rect);
+            viewport.fit_with_guides(scene, rect, guides);
         } else if !viewport.fitted || (size_changed && !viewport.user_adjusted) {
-            viewport.fit(scene, rect);
+            viewport.fit_with_guides(scene, rect, guides);
         }
         if response.hovered() {
             let zoom = ui.input(|input| input.smooth_scroll_delta.y);
@@ -135,32 +146,52 @@ pub fn show_with(
         }
         if ui.input(|input| input.key_pressed(egui::Key::F)) {
             viewport.user_adjusted = false;
-            viewport.fit(scene, rect);
+            viewport.fit_with_guides(scene, rect, guides);
         }
         draw_grid(&painter, &viewport.view, rect, viewport.projection);
         if let Some(guides) = guides {
             if let Some(bed) = guides.bed {
-                draw_rect(&painter, &viewport.view, rect, bed, viewport.projection, UiStroke::new(1.4, theme::BED));
+                draw_guide(
+                    &painter,
+                    &viewport.view,
+                    rect,
+                    bed,
+                    viewport.projection,
+                    UiStroke::new(2.2, theme::BED),
+                    theme::bed_fill(),
+                    &format!("Bed {} × {} mm", format_mm(bed[2] - bed[0]), format_mm(bed[3] - bed[1])),
+                );
             }
             if let Some(sheet) = guides.sheet {
-                draw_rect(&painter, &viewport.view, rect, sheet, viewport.projection, UiStroke::new(1.4, theme::SHEET));
+                draw_guide(
+                    &painter,
+                    &viewport.view,
+                    rect,
+                    sheet,
+                    viewport.projection,
+                    UiStroke::new(2.0, theme::SHEET),
+                    theme::sheet_fill(),
+                    &format!("Sheet {} × {} mm", format_mm(sheet[2] - sheet[0]), format_mm(sheet[3] - sheet[1])),
+                );
             }
         }
-        let shown = visible(scene, viewport.playback.position);
-        for stroke in &shown {
-            let color = stroke_color(stroke, guides);
-            draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color);
-        }
-        if let Some(tool) = tool_position(scene, viewport.playback.position) {
-            let z = scene.z_range.map(|(lo, _)| lo).unwrap_or(0.0);
-            let point = to_screen(&viewport.view, rect, project(tool, z, viewport.projection));
-            let size = 6.0;
-            painter.line_segment([Pos2::new(point.x - size, point.y), Pos2::new(point.x + size, point.y)], UiStroke::new(1.2, theme::TOOL));
-            painter.line_segment([Pos2::new(point.x, point.y - size), Pos2::new(point.x, point.y + size)], UiStroke::new(1.2, theme::TOOL));
-        }
-        for label in &scene.labels {
-            let pos = to_screen(&viewport.view, rect, project(label.at, 0.0, viewport.projection));
-            painter.text(pos, egui::Align2::CENTER_BOTTOM, &label.text, egui::FontId::proportional(11.0), theme::TEXT);
+        if let Some(scene) = scene {
+            let shown = visible(scene, viewport.playback.position);
+            for stroke in &shown {
+                let color = stroke_color(stroke, guides);
+                draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color);
+            }
+            if let Some(tool) = tool_position(scene, viewport.playback.position) {
+                let z = scene.z_range.map(|(lo, _)| lo).unwrap_or(0.0);
+                let point = to_screen(&viewport.view, rect, project(tool, z, viewport.projection));
+                let size = 6.0;
+                painter.line_segment([Pos2::new(point.x - size, point.y), Pos2::new(point.x + size, point.y)], UiStroke::new(1.2, theme::TOOL));
+                painter.line_segment([Pos2::new(point.x, point.y - size), Pos2::new(point.x, point.y + size)], UiStroke::new(1.2, theme::TOOL));
+            }
+            for label in &scene.labels {
+                let pos = to_screen(&viewport.view, rect, project(label.at, 0.0, viewport.projection));
+                painter.text(pos, Align2::CENTER_BOTTOM, &label.text, FontId::proportional(11.0), theme::TEXT);
+            }
         }
     } else {
         painter.text(
@@ -214,6 +245,34 @@ fn draw_rect(painter: &egui::Painter, view: &View, rect: Rect, bounds: [f64; 4],
     draw_segment(painter, view, rect, [x1, y0], [x1, y1], projection, stroke);
     draw_segment(painter, view, rect, [x1, y1], [x0, y1], projection, stroke);
     draw_segment(painter, view, rect, [x0, y1], [x0, y0], projection, stroke);
+}
+
+fn draw_guide(
+    painter: &egui::Painter,
+    view: &View,
+    rect: Rect,
+    bounds: [f64; 4],
+    projection: Projection,
+    stroke: UiStroke,
+    fill: Color32,
+    label: &str,
+) {
+    let [x0, y0, x1, y1] = bounds;
+    let a = to_screen(view, rect, project([x0, y0], 0.0, projection));
+    let b = to_screen(view, rect, project([x1, y1], 0.0, projection));
+    let area = Rect::from_two_pos(a, b);
+    if area.width().abs() > 1.0 && area.height().abs() > 1.0 {
+        painter.rect_filled(area, 0.0, fill);
+    }
+    draw_rect(painter, view, rect, bounds, projection, stroke);
+    if !label.is_empty() {
+        painter.text(area.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, label, FontId::proportional(12.0), stroke.color);
+    }
+}
+
+fn format_mm(value: f64) -> String {
+    let rounded = (value * 100.0).round() / 100.0;
+    if (rounded - rounded.round()).abs() < 1e-9 { format!("{:.0}", rounded) } else { format!("{rounded}") }
 }
 
 fn draw_stroke_colored(painter: &egui::Painter, view: &View, rect: Rect, stroke: &Stroke, show_rapids: bool, projection: Projection, color: Color32) {
@@ -326,4 +385,48 @@ fn grid_start(min: f64) -> Option<f64> {
     }
     let start = (min / GRID_MM).floor() * GRID_MM;
     if start.is_finite() { Some(start) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use campanion_view::{Stroke, StrokeKind};
+
+    fn cut_scene(points: Vec<[f64; 2]>) -> Scene {
+        let mut min = [f64::INFINITY, f64::INFINITY];
+        let mut max = [f64::NEG_INFINITY, f64::NEG_INFINITY];
+        for point in &points {
+            min[0] = min[0].min(point[0]);
+            min[1] = min[1].min(point[1]);
+            max[0] = max[0].max(point[0]);
+            max[1] = max[1].max(point[1]);
+        }
+        let zs = vec![0.0; points.len()];
+        Scene {
+            strokes: vec![Stroke { kind: StrokeKind::Cut, toolpath: 0, points, zs, z_start: 0.0, z_end: 0.0, angles: Vec::new(), length: 1.0 }],
+            pierces: Vec::new(),
+            labels: Vec::new(),
+            bounds: Some((min, max)),
+            z_range: None,
+            total_length: 1.0,
+            names: vec!["part".into()],
+            rotary: None,
+            lathe: None,
+            timeline: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fit_uses_the_bed_when_guides_are_present() {
+        let scene = cut_scene(vec![[0.0, 0.0], [20.0, 10.0]]);
+        let mut viewport = Viewport::new(&scene);
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let guides = ViewportGuides { bed: Some([0.0, 0.0, 600.0, 400.0]), sheet: Some([0.0, 0.0, 300.0, 200.0]) };
+        viewport.fit_with_guides(Some(&scene), rect, Some(&guides));
+        // A fit to the 20×10 part would use a much larger scale than a fit to the 600×400 bed.
+        let bed_fit = View::fit(([0.0, 0.0], [600.0, 400.0]), 400.0, 300.0, FIT_MARGIN_PX);
+        assert!((viewport.view.scale - bed_fit.scale).abs() < 1e-9);
+        assert!((viewport.view.center[0] - 300.0).abs() < 1e-6);
+        assert!((viewport.view.center[1] - 200.0).abs() < 1e-6);
+    }
 }
