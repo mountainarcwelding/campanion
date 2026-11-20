@@ -26,9 +26,16 @@ pub mod zip;
 
 pub use build::{BuildReport, build_pm7m};
 pub use error::ResinError;
-pub use pm7m::{LayerParams, LayerRecord, M7_MAX, MachineSpec, Pm7mFile, ResinSettings, WriteInput, make_previews, read_pm7m, write_pm7m};
+pub use pm7m::{
+    LayerParams, LayerRecord, M7_MAX, MachineSpec, Pm7mFile, ResinSettings, WriteInput, load_print_settings, make_previews, read_pm7m,
+    settings_from_pm7m_bytes, write_pm7m,
+};
 pub use slice::{Placement, PreparedMesh, SliceGrid, Span, encode_spans};
 pub use supports::{
-    InputPoint, REQUIRED_FLAGS, SupportParams, SupportParamsOverlay, SupportPoint, SupportedMesh, generate_supports, is_watertight,
-    parse_points_text, parse_support_params_json, render_supported_png,
+    CALIBRATION_SCHEMA, CalibratedTip, CalibrationMeasurement, CalibrationProfile, ClassifiedRegion, DetectedFeatures, FeatureClass, ForceBreakdown,
+    GenerateOptions, InputPoint, Island, IslandDetectParams, MissingConstant, OptimizeInput, OptimizeResult, PointSource, REQUIRED_CONSTANTS,
+    REQUIRED_FLAGS, REQUIRED_TIP_FIELDS, STANDARD_GRAVITY_M_S2, SupportParams, SupportParamsOverlay, SupportPoint, SupportedMesh, add_support_point,
+    classify_features, constant_label, delete_support_point, detect_islands, generate_supports, generate_supports_with, import_calibration,
+    is_watertight, load_calibration, missing_constants_in, move_support_point, optimize_supports, parse_calibration, parse_points_text,
+    parse_support_params_json, rebuild_supported, render_supported_png, write_points_text,
 };

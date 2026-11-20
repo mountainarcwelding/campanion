@@ -179,10 +179,10 @@ fn support_params_json_and_points_file_round_trip() {
 
     let text = "# comments allowed\n1.5 2.5\n0 0 9.5\n";
     let pts = parse_points_text(text).expect("points");
-    assert_eq!(pts, vec![InputPoint { x: 1.5, y: 2.5, z: None }, InputPoint { x: 0.0, y: 0.0, z: Some(9.5) }]);
+    assert_eq!(pts, vec![InputPoint::new(1.5, 2.5, None), InputPoint::new(0.0, 0.0, Some(9.5))]);
 
     let part = box_mesh(Vec3::new(-5.0, -5.0, 0.0), Vec3::new(5.0, 5.0, 3.0));
-    let only = generate_supports(&part, &params(), &[InputPoint { x: 0.0, y: 0.0, z: None }], false).expect("explicit");
+    let only = generate_supports(&part, &params(), &[InputPoint::new(0.0, 0.0, None)], false).expect("explicit");
     assert_eq!(only.points.len(), 1);
     assert!((only.points[0].x).abs() < 1e-9 && (only.points[0].y).abs() < 1e-9);
 }

@@ -7,8 +7,8 @@ use std::process::ExitCode;
 
 use campanion_mesh::write_stl_binary;
 use campanion_resin::{
-    InputPoint, SupportParams, SupportParamsOverlay, SupportedMesh, generate_supports, parse_points_text, parse_support_params_json,
-    render_supported_png,
+    CalibrationProfile, GenerateOptions, InputPoint, IslandDetectParams, SupportParams, SupportParamsOverlay, SupportedMesh, generate_supports_with,
+    load_calibration, parse_points_text, parse_support_params_json, render_supported_png, write_points_text,
 };
 
 use crate::error::CliError;
@@ -25,6 +25,14 @@ pub(crate) struct SupportCli {
     pub points_only: bool,
     pub preview: Option<PathBuf>,
     pub supports_out: Option<PathBuf>,
+    pub layer_height_mm: Option<f64>,
+    pub detect_cell_mm: Option<f64>,
+    pub island_ignore_area_mm2: Option<f64>,
+    pub lowest_band_height_mm: Option<f64>,
+    pub lowest_band_spacing_mm: Option<f64>,
+    pub calibration: Option<PathBuf>,
+    pub optimize: bool,
+    pub points_out: Option<PathBuf>,
 }
 
 pub(crate) fn value<'a>(args: &'a [OsString], index: &mut usize, flag: &str) -> Result<&'a str, CliError> {
@@ -95,6 +103,53 @@ pub(crate) fn apply_flag(flag: &str, args: &[OsString], index: &mut usize, a: &m
             a.enabled = true;
             Ok(true)
         }
+        "--layer-height" => {
+            dup(a.layer_height_mm.is_some())?;
+            a.layer_height_mm = Some(number(value(args, index, flag)?, flag)?);
+            a.enabled = true;
+            Ok(true)
+        }
+        "--detect-cell" => {
+            dup(a.detect_cell_mm.is_some())?;
+            a.detect_cell_mm = Some(number(value(args, index, flag)?, flag)?);
+            a.enabled = true;
+            Ok(true)
+        }
+        "--island-ignore-area" => {
+            dup(a.island_ignore_area_mm2.is_some())?;
+            a.island_ignore_area_mm2 = Some(number(value(args, index, flag)?, flag)?);
+            a.enabled = true;
+            Ok(true)
+        }
+        "--lowest-band-height" => {
+            dup(a.lowest_band_height_mm.is_some())?;
+            a.lowest_band_height_mm = Some(number(value(args, index, flag)?, flag)?);
+            a.enabled = true;
+            Ok(true)
+        }
+        "--lowest-band-spacing" => {
+            dup(a.lowest_band_spacing_mm.is_some())?;
+            a.lowest_band_spacing_mm = Some(number(value(args, index, flag)?, flag)?);
+            a.enabled = true;
+            Ok(true)
+        }
+        "--calibration" => {
+            dup(a.calibration.is_some())?;
+            a.calibration = Some(PathBuf::from(value(args, index, flag)?));
+            a.enabled = true;
+            Ok(true)
+        }
+        "--optimize" => {
+            a.optimize = true;
+            a.enabled = true;
+            Ok(true)
+        }
+        "--points-out" => {
+            dup(a.points_out.is_some())?;
+            a.points_out = Some(PathBuf::from(value(args, index, flag)?));
+            a.enabled = true;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -156,14 +211,49 @@ pub(crate) fn generate(model: &Path, a: &SupportCli) -> Result<(SupportedMesh, S
     if a.points_only && extra.is_empty() {
         return Err(CliError::usage("--points-only needs --points FILE"));
     }
+    if a.optimize && a.calibration.is_none() {
+        return Err(CliError::usage(
+            "--optimize requires --calibration FILE.json with a complete profile; uniform and manual supports work without one",
+        ));
+    }
+    match (a.lowest_band_height_mm, a.lowest_band_spacing_mm) {
+        (None, None) | (Some(_), Some(_)) => {}
+        _ => return Err(CliError::usage("--lowest-band-height and --lowest-band-spacing must be supplied together")),
+    }
     let is_stl = model.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("stl"));
     if !is_stl {
         return Err(CliError::usage("supports reads .stl files"));
     }
     let bytes = read_bytes(model)?;
     let mesh = campanion_mesh::parse_stl(&bytes).map_err(|err| CliError::run(format!("STL: {err}")))?;
-    let result = generate_supports(&mesh, &params, &extra, auto).map_err(|err| CliError::run(err.to_string()))?;
+    let profile: Option<CalibrationProfile> = match &a.calibration {
+        Some(path) => Some(load_calibration(path).map_err(|err| CliError::run(err.to_string()))?),
+        None => None,
+    };
+    let detect = detect_params(a, &params)?;
+    if a.optimize && detect.is_none() {
+        return Err(CliError::usage("--optimize requires --layer-height (and --detect-cell, or --support-spacing as the cell size)"));
+    }
+    let mut options = if auto { GenerateOptions::auto(&extra) } else { GenerateOptions::manual(&extra) };
+    options.detect = detect;
+    options.island_ignore_area_mm2 = a.island_ignore_area_mm2;
+    options.lowest_band_height_mm = a.lowest_band_height_mm;
+    options.lowest_band_spacing_mm = a.lowest_band_spacing_mm;
+    options.optimize = a.optimize;
+    options.calibration = profile.as_ref();
+    let result = generate_supports_with(&mesh, &params, options).map_err(|err| CliError::run(err.to_string()))?;
     Ok((result, params))
+}
+
+fn detect_params(a: &SupportCli, params: &SupportParams) -> Result<Option<IslandDetectParams>, CliError> {
+    let Some(layer_height_mm) = a.layer_height_mm else {
+        if a.detect_cell_mm.is_some() || a.island_ignore_area_mm2.is_some() {
+            return Err(CliError::usage("island detection needs --layer-height"));
+        }
+        return Ok(None);
+    };
+    let cell_mm = a.detect_cell_mm.unwrap_or(params.support_spacing_mm);
+    Ok(Some(IslandDetectParams { layer_height_mm, cell_mm }))
 }
 
 pub(crate) fn write_outputs(result: &SupportedMesh, params: &SupportParams, stl_out: Option<&Path>, preview: Option<&Path>) -> Result<(), CliError> {
@@ -189,6 +279,31 @@ pub(crate) fn write_outputs(result: &SupportedMesh, params: &SupportParams, stl_
     }
     if let Some(path) = preview {
         writeln!(err, "wrote preview {}", path.display())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_points_and_report(result: &SupportedMesh, a: &SupportCli) -> Result<(), CliError> {
+    if let Some(path) = &a.points_out {
+        let names: Option<Vec<String>> = result.optimize.as_ref().map(|forces| vec![forces.preset_name.clone()]);
+        let text = write_points_text(&result.points, names.as_deref());
+        std::fs::write(path, text)?;
+        let mut err = io::stderr().lock();
+        writeln!(err, "wrote points {}", path.display())?;
+    }
+    let mut err = io::stderr().lock();
+    if let Some(features) = &result.features {
+        writeln!(err, "detected {} island(s) and {} cup(s) over {} layers", features.islands.len(), features.cups.len(), features.layers.len())?;
+    }
+    if let Some(forces) = &result.optimize {
+        writeln!(
+            err,
+            "optimizer preset `{}`: demand {:.6} N, capacity {:.6} N, scar {:.6} mm², {} tips, sufficient={}",
+            forces.preset_name, forces.demand_n, forces.capacity_n, forces.scar_area_mm2, forces.tip_count, forces.sufficient
+        )?;
+    }
+    for warning in &result.warnings {
+        writeln!(err, "{warning}")?;
     }
     Ok(())
 }
@@ -248,8 +363,12 @@ pub(crate) fn supports_command(args: &[OsString]) -> Result<ExitCode, CliError> 
     if a.support.preview.as_ref() == Some(&model) {
         return Err(CliError::usage("--preview must differ from the input files"));
     }
+    if a.support.points_out.as_ref() == Some(&out) || a.support.points_out.as_ref() == Some(&model) {
+        return Err(CliError::usage("--points-out must differ from the input and from -o"));
+    }
     let (result, params) = generate(&model, &a.support)?;
     write_outputs(&result, &params, Some(&out), a.support.preview.as_deref())?;
+    write_points_and_report(&result, &a.support)?;
     let mut err = io::stderr().lock();
     writeln!(err, "NOT printer-tested: these supports and the chamfered raft have not been printed or physically tested")?;
     Ok(ExitCode::SUCCESS)

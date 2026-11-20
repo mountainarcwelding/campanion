@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-cli"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-geom"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "cavalier_contours",
  "proptest",
@@ -238,14 +238,16 @@ dependencies = [
 
 [[package]]
 name = "campanion-gui"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-cli",
  "campanion-geom",
  "campanion-import",
  "campanion-ir",
+ "campanion-mesh",
  "campanion-path",
  "campanion-post",
+ "campanion-resin",
  "campanion-stream",
  "campanion-view",
  "eframe",
@@ -257,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-import"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-geom",
  "kurbo",
@@ -269,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-ir"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-geom",
  "campanion-path",
@@ -283,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-mesh"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-geom",
  "proptest",
@@ -293,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-path"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-geom",
  "proptest",
@@ -302,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-post"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -317,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-resin"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-mesh",
  "miniz_oxide 0.8.9",
@@ -329,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-stream"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "nix",
  "thiserror 2.0.21",
@@ -337,14 +339,14 @@ dependencies = [
 
 [[package]]
 name = "campanion-testsupport"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "campanion-turn"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-geom",
  "campanion-import",
@@ -357,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "campanion-view"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "campanion-ir",
  "campanion-mesh",

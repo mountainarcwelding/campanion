@@ -34,7 +34,7 @@ This file is only the GUI sequence and the data-model hooks it needs.
    behaviour has been physically tested. A code-generation error is fixed, with a
    regression test, before the next feature.
 
-## Current baseline (v0.26.1)
+## Current baseline (v0.27.0)
 
 The backend and CLI already carry the v0.4 data model:
 
@@ -55,8 +55,13 @@ The backend and CLI already carry the v0.4 data model:
 The GUI already compiles against that model, but the editor is still a preview:
 
 - Cutting workspaces show Process (labelled Job), Setup, Operations, Simulate, Export, and Run.
-- Resin shows Orient, Supports, Slice, Export, and Run. Most Orient and Supports ribbon
-  actions are placeholders.
+- Resin shows Orient, Supports, Slice, Export, and Run. Supports P0 is wired: island
+  detection and colouring, manual add/move/delete in the viewport with undo, a tip palette
+  that stays empty until the user saves a preset, and a Calibration panel that loads a
+  profile and keeps Optimize disabled (with the reason and any missing constants) until
+  the profile is complete. Uniform generate works without a profile. Slice and `.pm7m`
+  export in the GUI run the same slicer and writer as `campanion resin`, with print settings from a user-chosen sample `.pm7m`. Paint-on zones, trees, hollowing,
+  and auto-orient are not in this slice.
 - FDM shows Orient, Slice, Export, and Run.
 - A 2D cutting job can be opened, a part imported and placed, profile operations edited,
   toolpaths generated with an explicit Generate button, G-code previewed, and a file
@@ -198,6 +203,12 @@ sheet versus bed.
 - GUI tests: layout actions write the expected placements; empty numeric fields stay
   empty; a profile without a bed does not invent one.
 
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
+
 **Acceptance**
 
 - A new job can pick a user machine and head, import several parts, make linked copies
@@ -261,6 +272,12 @@ overrides, and auto-regenerate.
 - Override styling: a changed field is marked; Reset restores the library value.
 - Planner refuses raw 0..1 power; watts without head `max_power` still refuse.
 
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
+
 **Acceptance**
 
 - Editing an operation updates the toolpaths after a short pause, without a Generate
@@ -301,6 +318,12 @@ overrides, and auto-regenerate.
 - Pre-flight refuses off-bed export and allows a job that only has warnings, as
   documented.
 - Screenshot set updated for the Simulate tab.
+
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -353,6 +376,12 @@ raft, on the existing resin tabs.
 - Hollow with a drain hole produces a void and a through hole in layer images.
 - No silent default for exposure or lift: omitted values refuse.
 
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
+
 **Acceptance**
 
 - A part can be oriented, supported with the undercut raft, inspected for islands,
@@ -391,6 +420,12 @@ raft, on the existing resin tabs.
   provides) is replayed: Frame, Start, Pause, Resume, STOP.
 - Lockout tests: no jog while running; STOP always enabled.
 - Disconnect and error paths refuse to claim success.
+
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -432,6 +467,12 @@ MMU-style).
 - A fixture with a head and two child tools emits head change, then child change, then
   the path, then the reverse on the way back, with user-supplied sequence text.
 - A missing sequence is a refusal, not a guessed M-code.
+
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -482,6 +523,12 @@ the library, not only in the editor.
 - Mill and laser goldens stay unchanged (optional deposited length omitted).
 - Omitted temperatures or layer height refuse, rather than default.
 
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
+
 **Acceptance**
 
 - A user can place a part, enable wave bridging for a 90° overhang with user-entered
@@ -515,6 +562,12 @@ the library, not only in the editor.
 - Existing `examples/nest.job.json` placements stay exact.
 - A part that does not fit still fails with the same error.
 - Off-sheet after a nest is visible in Setup and blocked at Export as documented.
+
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
@@ -551,6 +604,12 @@ exist or are in progress, not a new engine.
 - Round-trip of kinematics path and plane.
 - A 3-axis job still writes identical G-code.
 - Unreachable poses and limit violations surface in the GUI as planner errors.
+
+**P0 progress.** The library and CLI detect first-appearance islands (including mid-air
+bodies), optional lowest-band spacing, points-file round-trip, and an optimizer that
+refuses to run without a complete user calibration profile. The Supports tab exposes that
+work. Paint-on supports, no-support zones, hollowing, drain holes, and GUI `.pm7m` writing
+remain later work, except that GUI Slice and Export now write a real `.pm7m`. The undercut raft is unchanged. Nothing has been printer-tested. Image orientation is unverified until an asymmetric test part is printed.
 
 **Acceptance**
 
