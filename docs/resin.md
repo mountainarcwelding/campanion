@@ -3,8 +3,11 @@
 **Status: not printer-tested.** Nothing written by `campanion resin` or `campanion supports` has
 been printed or physically tested. The format was derived from one file, so some fields are copied
 rather than understood. CAMpanion is primarily command-line driven; the GUI is still in development. The resin
-Supports tab can detect and colour islands, edit support points in the viewport with
-undo, and load a calibration profile. Optimize stays disabled until that profile is
+Supports tab can detect and colour islands, edit support points in the shared 3D
+viewport (orbit, pan, zoom; click a surface to add a tip in any view), and load a
+calibration profile. Mouse bindings follow SolidCraft's documented default: right-drag
+orbits, middle-drag pans, the wheel zooms at the pointer. The build volume is drawn
+only from the selected machine profile. Optimize stays disabled until that profile is
 complete. The Slice tab runs the same slicer as this command, and Export writes a
 `.pm7m` (supports and raft included when they were generated). Print settings come from
 a user-chosen sample `.pm7m`, the same file `--params-from` uses; missing settings are
