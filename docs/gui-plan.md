@@ -34,7 +34,7 @@ This file is only the GUI sequence and the data-model hooks it needs.
    behaviour has been physically tested. A code-generation error is fixed, with a
    regression test, before the next feature.
 
-## Current baseline (v0.26.0)
+## Current baseline (v0.26.1)
 
 The backend and CLI already carry the v0.4 data model:
 
@@ -67,8 +67,10 @@ The GUI already compiles against that model, but the editor is still a preview:
   saving from the current Setup editor is refused so instances are not overwritten.
 - The Run tab can connect to a Grbl-class controller over USB serial (character-counting
   or send-response), with status polling, a DRO, Frame, Start, Pause/Resume, STOP, and
-  `$X` after confirm. This path is not hardware-tested. First run: low power, hand on the
-  power switch. Home and Set Origin are not sent in this slice.
+  `$X` after confirm. The Run view draws the planned toolpath fitted to the job, highlights
+  the completed prefix from acknowledged lines, and marks the live head from DRO/status
+  reports. This path is not hardware-tested. First run: low power, hand on the power
+  switch. Home and Set Origin are not sent in this slice.
 
 ## Layout mapping (no new chrome)
 
