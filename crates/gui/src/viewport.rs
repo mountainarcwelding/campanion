@@ -213,13 +213,14 @@ pub fn show_with(
             if viewport.show_planned_path {
                 for stroke in &scene.strokes {
                     let color = stroke_color(stroke, guides).gamma_multiply(0.35);
-                    draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color);
+                    draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color, 1.4);
                 }
             }
             let shown = visible(scene, viewport.playback.position);
+            let width = if viewport.show_planned_path { 2.8 } else { 1.6 };
             for stroke in &shown {
                 let color = stroke_color(stroke, guides);
-                draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color);
+                draw_stroke_colored(&painter, &viewport.view, rect, stroke, viewport.show_rapids, viewport.projection, color, width);
             }
             let head = live_or_playhead(scene, viewport);
             if let Some((xy, z)) = head {
@@ -318,7 +319,16 @@ fn format_mm(value: f64) -> String {
     if (rounded - rounded.round()).abs() < 1e-9 { format!("{:.0}", rounded) } else { format!("{rounded}") }
 }
 
-fn draw_stroke_colored(painter: &egui::Painter, view: &View, rect: Rect, stroke: &Stroke, show_rapids: bool, projection: Projection, color: Color32) {
+fn draw_stroke_colored(
+    painter: &egui::Painter,
+    view: &View,
+    rect: Rect,
+    stroke: &Stroke,
+    show_rapids: bool,
+    projection: Projection,
+    color: Color32,
+    width: f32,
+) {
     let points = screen_points(view, rect, stroke, projection);
     if points.len() < 2 {
         return;
@@ -326,14 +336,14 @@ fn draw_stroke_colored(painter: &egui::Painter, view: &View, rect: Rect, stroke:
     match stroke.kind {
         StrokeKind::Rapid => {
             if show_rapids {
-                painter.extend(egui::Shape::dashed_line(&points, UiStroke::new(1.0, color), 6.0, 4.0));
+                painter.extend(egui::Shape::dashed_line(&points, UiStroke::new(width.max(1.0), color), 6.0, 4.0));
             }
         }
         StrokeKind::Cut => {
-            let _ = painter.add(egui::Shape::line(points, UiStroke::new(1.6, color)));
+            let _ = painter.add(egui::Shape::line(points, UiStroke::new(width, color)));
         }
         StrokeKind::Plunge => {
-            let _ = painter.add(egui::Shape::line(points, UiStroke::new(1.4, color)));
+            let _ = painter.add(egui::Shape::line(points, UiStroke::new((width * 0.9).max(1.0), color)));
         }
     }
 }

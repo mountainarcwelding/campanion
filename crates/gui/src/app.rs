@@ -1022,7 +1022,7 @@ impl App {
         if let Some(conn) = self.run_conn.as_mut()
             && let Some(mock) = conn.mock_mut()
         {
-            mock.release_ok(4);
+            mock.release_ok(10);
         }
         let _ = self.tick_stream_once(true);
         if let Some(line) = self.run_conn.as_ref().and_then(|conn| conn.last_acked_program_line()) {
@@ -2406,7 +2406,9 @@ impl App {
         }
         if self.state.tab == ModeTab::Run {
             egui::Panel::left("run-left").resizable(true).default_size(230.0).frame(panel_frame()).show(ui, |ui| {
-                self.run_left(ui);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    self.run_left(ui);
+                });
             });
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WINDOW).inner_margin(8.0)).show(ui, |ui| match self.state.tab {
@@ -3855,8 +3857,7 @@ impl App {
 
     fn run_left(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Machine").strong().size(14.0));
-        ui.add_space(4.0);
-        ui.label(RichText::new(STREAM_HARDWARE_NOTICE).color(theme::OVERRIDE).size(11.0));
+        ui.label(RichText::new(STREAM_HARDWARE_NOTICE).color(theme::OVERRIDE).size(10.0));
         ui.label("Port");
         let ports = run_stream::available_ports(self.screenshot.is_some());
         let current_port = self.state.port.clone();
@@ -3874,9 +3875,7 @@ impl App {
             self.state.status = format!("{} port(s) found", run_stream::available_ports(self.screenshot.is_some()).len());
         }
         ui.label(
-            RichText::new("On Linux, membership in the dialout group is typically required to open a USB serial device.")
-                .color(theme::MUTED)
-                .size(11.0),
+            RichText::new("Linux: membership in the dialout group is typically required to open a USB serial device.").color(theme::MUTED).size(10.0),
         );
         ui.label("Baud");
         let baud_choices = ["115200 (Grbl documented)", "57600", "38400", "19200", "9600"];
@@ -3891,11 +3890,9 @@ impl App {
         ui.add(egui::TextEdit::singleline(&mut self.state.baud).desired_width(180.0).hint_text("baud rate"));
         ui.checkbox(&mut self.state.safe_mode, "Send-response safe mode (no RX buffer required)");
         ui.label(
-            RichText::new(
-                "Character-counting needs a serial RX buffer entered on the machine profile. Safe mode waits for ok or error after each line.",
-            )
-            .color(theme::MUTED)
-            .size(11.0),
+            RichText::new("Character-counting needs an RX buffer on the machine profile. Safe mode waits for ok or error after each line.")
+                .color(theme::MUTED)
+                .size(10.0),
         );
         ui.horizontal(|ui| {
             if self.state.connected {
@@ -3928,7 +3925,7 @@ impl App {
         if !self.state.connected {
             ui.label(RichText::new("Connect a controller to jog, frame, start, or use STOP.").color(theme::MUTED).size(11.0));
         } else if !enabled {
-            ui.label(RichText::new("Jog is locked while running or in hold.").color(theme::MUTED).size(11.0));
+            ui.label(RichText::new("Jog is locked while running, in hold, or in alarm.").color(theme::MUTED).size(11.0));
         }
         ui.label("Jog feed (mm/min)");
         ui.add_enabled_ui(enabled, |ui| {
@@ -3968,8 +3965,8 @@ impl App {
                 }
             });
         });
-        ui.label("Step size");
         ui.horizontal(|ui| {
+            ui.label("Step");
             for step in JOG_STEPS_MM {
                 let selected = (self.state.jog_step_mm - step).abs() < 1e-12;
                 if ui.selectable_label(selected, format!("{step}")).clicked() {
