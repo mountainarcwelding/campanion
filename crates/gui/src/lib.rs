@@ -12,6 +12,7 @@ pub mod fields;
 pub mod files;
 pub mod machines;
 pub mod operations;
+pub mod resin_ui;
 pub mod run_stream;
 pub mod session;
 pub mod setup;
@@ -281,17 +282,26 @@ pub struct GuiState {
     pub selection: Option<String>,
 }
 
-/// Placeholder support parameters. All start empty.
+/// Resin support parameters. All start empty; the program ships no default sizes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SupportFields {
     pub tip_diameter_mm: UserField,
-    pub contact_depth_mm: UserField,
-    pub shaft_diameter_mm: UserField,
-    pub max_angle_deg: UserField,
-    pub density_pct: UserField,
-    pub scaffold_spacing_mm: UserField,
+    pub tip_length_mm: UserField,
+    pub pillar_diameter_mm: UserField,
+    pub foot_diameter_mm: UserField,
+    pub foot_height_mm: UserField,
+    pub overhang_angle_deg: UserField,
+    pub support_spacing_mm: UserField,
     pub raft_thickness_mm: UserField,
-    /// How many supports are selected in the preview tree. Always zero until generation exists.
+    pub raft_chamfer_angle_deg: UserField,
+    pub raft_margin_mm: UserField,
+    pub raft_corner_relief_mm: UserField,
+    pub layer_height_mm: UserField,
+    pub detect_cell_mm: UserField,
+    pub island_ignore_area_mm2: UserField,
+    pub lowest_band_height_mm: UserField,
+    pub lowest_band_spacing_mm: UserField,
+    /// How many supports are selected. Zero until a point is selected.
     pub selected_count: u32,
 }
 
@@ -1036,7 +1046,9 @@ mod tests {
         assert!(!field.is_overridden());
         let state = GuiState::new();
         assert!(state.support.tip_diameter_mm.value.is_empty());
-        assert!(state.support.density_pct.value.is_empty());
+        assert!(state.support.support_spacing_mm.value.is_empty());
+        assert!(state.support.layer_height_mm.value.is_empty());
+        assert!(state.support.raft_chamfer_angle_deg.value.is_empty());
         assert!(state.lift_mm.value.is_empty());
         assert!(state.port.is_empty());
         assert!(state.baud.is_empty());

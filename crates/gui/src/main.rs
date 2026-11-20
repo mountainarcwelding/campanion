@@ -39,6 +39,7 @@ fn try_main() -> Result<(), String> {
 fn parse_args(args: &[OsString]) -> Result<Launch, String> {
     let mut open: Option<PathBuf> = None;
     let mut screenshot_dir: Option<PathBuf> = None;
+    let mut screenshot_set: Option<String> = None;
     let mut index = 0usize;
     while index < args.len() {
         let Some(arg) = args.get(index) else {
@@ -57,6 +58,19 @@ fn parse_args(args: &[OsString]) -> Result<Launch, String> {
                 return Err("--screenshot is already set".to_string());
             }
             screenshot_dir = Some(PathBuf::from(value));
+        } else if is_flag(arg, "--screenshot-set") {
+            let Some(value) = args.get(index) else {
+                return Err("--screenshot-set needs a name".to_string());
+            };
+            index += 1;
+            let name = value.to_string_lossy().to_string();
+            if name.is_empty() {
+                return Err("--screenshot-set needs a name".to_string());
+            }
+            if screenshot_set.is_some() {
+                return Err("--screenshot-set is already set".to_string());
+            }
+            screenshot_set = Some(name);
         } else if arg.to_string_lossy().starts_with('-') {
             return Err(format!("unknown argument {}", arg.to_string_lossy()));
         } else if open.is_some() {
@@ -67,7 +81,7 @@ fn parse_args(args: &[OsString]) -> Result<Launch, String> {
             open = Some(PathBuf::from(arg));
         }
     }
-    Ok(Launch { open, screenshot_dir })
+    Ok(Launch { open, screenshot_dir, screenshot_set })
 }
 
 fn is_flag(arg: &OsStr, flag: &str) -> bool {
@@ -76,13 +90,15 @@ fn is_flag(arg: &OsStr, flag: &str) -> bool {
 
 const HELP: &str = "\
 Usage:
-  campanion-gui [FILE] [--screenshot DIR]
+  campanion-gui [FILE] [--screenshot DIR] [--screenshot-set resin]
   campanion-gui --help
   campanion-gui --version
 
   FILE            Optional job, part (DXF/SVG/STEP/STL), IR JSON, or G-code to open.
   --screenshot DIR
                   Write PNG previews of the main views into DIR and exit.
+  --screenshot-set resin
+                  With --screenshot, capture the resin Orient/Supports/Slice/Export flow.
 
 CAMpanion is primarily command-line driven. This GUI is still in development.
 It can open a part or job, generate toolpaths, export G-code, and stream to a

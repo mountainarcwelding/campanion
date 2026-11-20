@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+Resin island detection, a calibration-backed support optimizer, and a first Supports tab.
+**NOT printer-tested.** CAMpanion is still primarily command-line driven; the GUI is in
+development. No v0.27.0 release has been cut.
+
+### Added
+
+- First-appearance island detection (including mid-air bodies) at a user-entered layer
+  height and cell size. Auto placement can cover every detected island, with an optional
+  ignore-area and optional denser spacing in a lowest band (height and spacing must be
+  given together).
+- A versioned calibration profile (`campanion-resin-calibration/1`). Every optimizer
+  constant comes from that file. Missing values are errors. There are no shipped numeric
+  defaults. Fitting measurements to constants is not implemented; enter fitted constants
+  directly. The geometry of a calibration test print is not defined in this work.
+- An automated optimized-supports backend: feature classification (islands, lowest band,
+  area jumps, overhangs, cups/suction, thin features) and the holding-force check
+  `sum(tip capacity) ≥ safety factor × (peel + suction + weight)`. The optimizer tightens
+  spacing or upgrades within the user's tip palette to meet the check while preferring
+  smaller scar area. It refuses to run without a complete profile. Uniform and manual
+  modes still work without one.
+- `campanion supports` / `campanion resin --supports` flags: `--layer-height` (on
+  `supports`; `resin` reuses its slice layer height), `--detect-cell`,
+  `--island-ignore-area`, `--lowest-band-height` / `--lowest-band-spacing`,
+  `--calibration`, `--optimize`, and `--points-out`. Points files also accept an optional
+  preset column.
+- Resin GUI (v0.4 theme): Orient, Supports, Slice, and Export with a clear primary action
+  on each tab. The Supports tab lists and colours islands, edits tips by click and drag
+  with undo, has a palette editor that stays empty until a preset is saved, and a
+  Calibration panel that lists missing constants and keeps Optimize disabled with a
+  reason until the profile is complete. Disabled controls say why and what to enter.
+  Fields have units and tooltips. No numeric defaults are shipped.
+
+### Known limits
+
+- GUI Slice does not write layer images yet; GUI Export does not write a `.pm7m`. Use
+  `campanion resin` for a printable file.
+- Paint-on supports, no-support zones, branching trees, hollowing, auto-orient, and
+  calibration-print geometry are not included.
+- The undercut chamfered raft is unchanged and still unprinted.
+
 ## 0.26.1 — 2026-11-19
 
 Run-tab viewport follows the planned job while streaming. **NOT hardware-tested. First run: low

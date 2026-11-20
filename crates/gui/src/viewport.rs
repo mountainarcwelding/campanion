@@ -41,6 +41,12 @@ pub struct ViewportOutput {
     pub response: egui::Response,
     /// World-space delta, millimetres, from a left-drag that should move the part.
     pub part_delta: Option<[f64; 2]>,
+    /// Pointer position in world millimetres, when it is over the viewport.
+    pub hover_world: Option<[f64; 2]>,
+    /// World position of a primary-button click that started this frame.
+    pub click_world: Option<[f64; 2]>,
+    /// The viewport rectangle, for overlay painting.
+    pub rect: egui::Rect,
 }
 
 /// Optional bed and sheet rectangles drawn in the viewport, millimetres, `[min_x, min_y, max_x, max_y]`.
@@ -97,6 +103,11 @@ impl Viewport {
         }
         self.fitted = true;
         self.last_size = Some([rect.width(), rect.height()]);
+    }
+
+    /// Map a world-space XY point, millimetres, into the current viewport rectangle.
+    pub fn world_to_screen(&self, rect: Rect, world: [f64; 2]) -> Pos2 {
+        to_screen(&self.view, rect, world)
     }
 }
 
@@ -241,7 +252,13 @@ pub fn show_with(
         );
     }
 
-    ViewportOutput { response, part_delta }
+    let pointer_world = response.hover_pos().or(response.interact_pointer_pos()).map(|pos| {
+        let width = f64::from(rect.width());
+        let height = f64::from(rect.height());
+        viewport.view.to_world([f64::from(pos.x - rect.left()), f64::from(pos.y - rect.top())], width, height)
+    });
+    let click_world = if response.clicked_by(egui::PointerButton::Primary) { pointer_world } else { None };
+    ViewportOutput { response, part_delta, hover_world: pointer_world, click_world, rect }
 }
 
 fn stroke_color(stroke: &Stroke, guides: Option<&ViewportGuides>) -> Color32 {

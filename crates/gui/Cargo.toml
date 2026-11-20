@@ -26,6 +26,8 @@ campanion-import.workspace = true
 campanion-path.workspace = true
 campanion-view = { path = "../view" }
 campanion-cli = { path = "../cli" }
+campanion-mesh.workspace = true
+campanion-resin.workspace = true
 campanion-post.workspace = true
 campanion-stream = { path = "../stream", features = ["serial"] }
 thiserror.workspace = true

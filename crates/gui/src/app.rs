@@ -16,6 +16,7 @@ use crate::fields::{self, ProcessFields};
 use crate::files::{self, DialogKind, DialogResult, current_dir_display, export_stem, resolve_user_path};
 use crate::machines::{self, MachinesUi};
 use crate::operations::{self, RegenState};
+use crate::resin_ui::{self, ResinSession, ResinSnapshot, SupportEditTool};
 use crate::run_stream::{self, RunConnection, STREAM_HARDWARE_NOTICE};
 use crate::session::{
     GUI_PREVIEW_NOTICE, GUI_PREVIEW_NOTICE_SHORT, JobSession, MessageKind, ToolDraft, ToolKind, TreeSelection, add_imported_part, all_part_ids,
@@ -47,6 +48,8 @@ pub struct Launch {
     pub open: Option<PathBuf>,
     /// When set, capture the main views into this directory and exit.
     pub screenshot_dir: Option<PathBuf>,
+    /// Optional screenshot set, for example `resin`. When omitted, a directory named `gui-shots-g4` still uses the resin set.
+    pub screenshot_set: Option<String>,
 }
 
 /// Native window entry used by the `campanion-gui` binary.
@@ -72,7 +75,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
                 }
             }
             if let Some(dir) = launch.screenshot_dir {
-                app.begin_screenshots(dir);
+                app.begin_screenshots(dir, launch.screenshot_set.as_deref());
             }
             Ok(Box::new(app))
         }),
@@ -148,6 +151,8 @@ struct App {
     play_index: Option<PlayIndex>,
     preview_speed_mult: f32,
     run_conn: Option<RunConnection>,
+    resin: ResinSession,
+    resin_undo: Vec<ResinSnapshot>,
 }
 
 struct ScreenshotJob {
@@ -194,6 +199,8 @@ impl App {
             play_index: None,
             preview_speed_mult: 1.0,
             run_conn: None,
+            resin: ResinSession::default(),
+            resin_undo: Vec::new(),
         }
     }
 
@@ -281,6 +288,11 @@ impl App {
     }
 
     fn import_part(&mut self, path: &Path) {
+        if self.state.workspace == Workspace::Resin {
+            self.load_resin_part(path);
+            self.file_dialog = None;
+            return;
+        }
         match import_part_file(path) {
             Ok(part) => {
                 self.push_undo();
@@ -869,16 +881,29 @@ impl App {
         }
     }
 
-    fn begin_screenshots(&mut self, dir: PathBuf) {
+    fn begin_screenshots(&mut self, dir: PathBuf, set: Option<&str>) {
         let (sender, receiver) = mpsc::channel();
-        self.screenshot = Some(ScreenshotJob {
-            dir,
-            plan: vec![
+        let resin_set = set == Some("resin") || dir.file_name().is_some_and(|name| name == "gui-shots-g4");
+        let plan = if resin_set {
+            vec![
+                (Workspace::Resin, ModeTab::Orient, "resin-flow-orient.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-supports-islands.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-supports-edit.png".to_string()),
+                (Workspace::Resin, ModeTab::Supports, "resin-supports-calibration-missing.png".to_string()),
+                (Workspace::Resin, ModeTab::Slice, "resin-flow-slice.png".to_string()),
+                (Workspace::Resin, ModeTab::Export, "resin-flow-export.png".to_string()),
+            ]
+        } else {
+            vec![
                 (Workspace::ThermalJet, ModeTab::Run, "g5-run-connected.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Run, "g5-run-streaming.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Run, "g5-run-paused.png".to_string()),
                 (Workspace::ThermalJet, ModeTab::Run, "g5-run-alarm.png".to_string()),
-            ],
+            ]
+        };
+        self.screenshot = Some(ScreenshotJob {
+            dir,
+            plan,
             index: 0,
             frames_waited: 0,
             awaiting: false,
@@ -909,6 +934,10 @@ impl App {
         }
         if name.is_some_and(|name| name.starts_with("g3-")) {
             self.prepare_g3_screenshot(name);
+            return;
+        }
+        if name.is_some_and(|name| name.starts_with("resin-")) {
+            self.prepare_resin_screenshot(name);
             return;
         }
         let g1 = name.is_some_and(|name| name.starts_with("g1-"));
@@ -945,6 +974,45 @@ impl App {
         if name.is_some_and(|name| name.starts_with("g2-")) {
             self.prepare_g2_screenshot(name);
         }
+    }
+
+    fn prepare_resin_screenshot(&mut self, name: Option<&str>) {
+        // Values typed here are screenshot stand-ins only. They are not shipped defaults.
+        self.state.set_workspace(Workspace::Resin);
+        let mesh = screenshot_resin_part();
+        let scene = resin_ui::mesh_xy_scene(&mesh);
+        self.viewport = Some(Viewport::new(&scene));
+        self.scene = Some(scene);
+        self.state.has_scene = true;
+        self.resin = ResinSession::default();
+        self.resin.mesh = Some(mesh);
+        self.resin.mesh_path = Some(PathBuf::from("screenshot-part.stl"));
+        fill_screenshot_support_fields(&mut self.state);
+        let name = name.unwrap_or("");
+        if name.contains("calibration-missing") {
+            self.resin.calibration = Some(resin_ui::load_calibration_text(
+                PathBuf::from("partial-calibration.json"),
+                r#"{"schema":"campanion-resin-calibration/1","name":"partial-screenshot"}"#,
+            ));
+            let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false);
+        } else if name.contains("supports") || name.contains("slice") || name.contains("export") {
+            let _ = resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, false);
+        }
+        if name.contains("edit") && !self.resin.points.is_empty() {
+            self.resin.selected_point = Some(0);
+            self.resin.tool = SupportEditTool::Direct;
+        }
+        if name.contains("islands")
+            && let Some(features) = &self.resin.features
+        {
+            self.resin.selected_island = features.islands.last().map(|island| island.id);
+        }
+        if name.contains("slice") || name.contains("export") {
+            self.resin.sliced = true;
+            self.state.layer_count = 40;
+            self.state.set_layer(12);
+        }
+        self.state.status = "Screenshot values are examples typed for this preview, not program defaults.".to_string();
     }
 
     fn prepare_g5_screenshot(&mut self, name: Option<&str>) {
@@ -1543,10 +1611,18 @@ impl App {
             self.duplicate_selection();
         }
         if delete {
-            self.delete_selection();
+            if self.state.workspace == Workspace::Resin && self.state.tab == ModeTab::Supports {
+                self.delete_resin_point();
+            } else {
+                self.delete_selection();
+            }
         }
         if undo {
-            self.undo_last();
+            if self.state.workspace == Workspace::Resin && !self.resin_undo.is_empty() {
+                self.undo_resin();
+            } else {
+                self.undo_last();
+            }
         }
         if next {
             self.state.next_tab();
@@ -1995,44 +2071,67 @@ impl App {
             ModeTab::Simulate => self.simulate_ribbon(ui),
             ModeTab::Orient => {
                 ribbon_group(ui, "Orient", |ui| {
-                    if ribbon_command(ui, "Lay flat on face", false).clicked() {
-                        self.state.status = "Lay flat is a placeholder in this preview".to_string();
-                    }
-                    if ribbon_command(ui, "Auto orient", false).clicked() {
-                        self.state.status = "Auto orient is a placeholder in this preview".to_string();
-                    }
-                    if ribbon_command(ui, "Reset", false).clicked() {
+                    if ribbon_command(ui, "Reset orientation", false)
+                        .on_hover_text("Clear typed position, rotation and lift. No values are filled in.")
+                        .clicked()
+                    {
                         self.state.reset_orient();
                     }
+                    let _ = ui.add_enabled(false, ribbon_command_widget("Lay flat on face", false)).on_hover_text("Lay flat is not in this release.");
+                    let _ = ui.add_enabled(false, ribbon_command_widget("Auto orient", false)).on_hover_text("Auto orient is not in this release.");
                 });
             }
             ModeTab::Supports => {
                 ribbon_group(ui, "Generate", |ui| {
-                    if ribbon_command(ui, "Auto Generate", false).clicked() {
-                        self.state.status = "Auto Generate is a placeholder in this preview".to_string();
+                    if ribbon_command(ui, "Generate supports", false)
+                        .on_hover_text("Place supports on islands and overhangs using the values on the right. No sizes are assumed.")
+                        .clicked()
+                    {
+                        self.generate_resin_supports(false);
                     }
-                    if ribbon_command(ui, "Scaffold", false).clicked() {
-                        self.state.status = "Scaffold generation is a placeholder in this preview".to_string();
+                    if ribbon_command(ui, "Optimize supports", false)
+                        .on_hover_text("Run the holding-force optimizer. Requires a complete calibration profile.")
+                        .clicked()
+                    {
+                        self.generate_resin_supports(true);
                     }
                 });
                 ribbon_group_separator(ui);
-                ribbon_group(ui, "Supports", |ui| {
-                    if ribbon_command(ui, "Add Support", false).clicked() {
-                        self.state.status = "Add Support is a placeholder in this preview".to_string();
+                ribbon_group(ui, "Edit", |ui| {
+                    if ribbon_command(ui, "Direct edit", self.resin.tool == SupportEditTool::Direct)
+                        .on_hover_text("Click empty space to add a support, drag a point to move it, press Delete to remove the selection.")
+                        .clicked()
+                    {
+                        self.resin.tool = SupportEditTool::Direct;
                     }
-                    if ribbon_command(ui, "Delete", false).clicked() {
-                        self.state.status = "Delete is a placeholder in this preview".to_string();
+                    if ribbon_command(ui, "Add", self.resin.tool == SupportEditTool::Add)
+                        .on_hover_text("Clicks in the viewport add a support at the pointer.")
+                        .clicked()
+                    {
+                        self.resin.tool = SupportEditTool::Add;
                     }
-                    if ribbon_command(ui, "Select Region", false).clicked() {
-                        self.state.status = "Select Region is a placeholder in this preview".to_string();
+                    if ribbon_command(ui, "Move", self.resin.tool == SupportEditTool::Move)
+                        .on_hover_text("Drag a support in the viewport to move it.")
+                        .clicked()
+                    {
+                        self.resin.tool = SupportEditTool::Move;
                     }
-                    if ribbon_command(ui, "No-Support Zone", false).clicked() {
-                        self.state.status = "No-support zones are a placeholder in this preview".to_string();
+                    if ribbon_command(ui, "Delete", self.resin.tool == SupportEditTool::Delete)
+                        .on_hover_text("Click a support to delete it, or press Delete with a selection.")
+                        .clicked()
+                    {
+                        self.resin.tool = SupportEditTool::Delete;
+                    }
+                    if ribbon_command(ui, "Undo", false).on_hover_text("Undo the last add, move, or delete. Ctrl+Z also works.").clicked() {
+                        self.undo_resin();
                     }
                 });
             }
             ModeTab::Slice => {
-                ribbon_group(ui, "Layers", |ui| {
+                ribbon_group(ui, "Slice", |ui| {
+                    if ribbon_command(ui, "Slice", false).on_hover_text("Slice the part into LCD layers. Enter layer height (mm) first.").clicked() {
+                        self.slice_resin();
+                    }
                     if ribbon_command(ui, "Layer up", false).clicked() {
                         let _ = self.state.step_layer(1);
                     }
@@ -2392,10 +2491,16 @@ impl App {
             });
         }
         if show_props {
-            let props_width = if self.state.tab == ModeTab::Simulate { 340.0 } else { 280.0 };
+            let props_width =
+                if self.state.tab == ModeTab::Simulate || (self.state.workspace == Workspace::Resin && self.state.tab == ModeTab::Supports) {
+                    340.0
+                } else {
+                    280.0
+                };
             egui::Panel::right("props").resizable(true).default_size(props_width).frame(panel_frame()).show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.state.tab {
                     ModeTab::Run => self.run_right(ui),
+                    ModeTab::Export if self.state.workspace == Workspace::Resin => self.resin_export_properties(ui),
                     ModeTab::Export => self.export_form(ui),
                     ModeTab::Simulate => self.simulate_right(ui),
                     ModeTab::Orient => self.orient_properties(ui),
@@ -2560,13 +2665,23 @@ impl App {
         if matches!(self.state.workspace, Workspace::Resin | Workspace::Fdm) {
             ui.separator();
             ui.collapsing("Models", |ui| {
-                ui.label(RichText::new("No model imported").color(theme::MUTED).size(12.0));
+                if let Some(path) = &self.resin.mesh_path {
+                    ui.label(RichText::new(path.display().to_string()).size(12.0));
+                } else {
+                    ui.label(RichText::new("No model imported").color(theme::MUTED).size(12.0));
+                }
             });
             if self.state.workspace == Workspace::Resin {
+                ui.collapsing("Model", |ui| {
+                    match &self.resin.mesh_path {
+                        Some(path) => ui.label(RichText::new(path.display().to_string()).size(12.0)),
+                        None => ui.label(RichText::new("No model imported. File → Import part…").color(theme::MUTED).size(12.0)),
+                    };
+                });
                 ui.collapsing("Supports", |ui| {
-                    ui.label(RichText::new("Support generation is not wired in this preview").color(theme::MUTED).size(12.0));
-                    ui.label(RichText::new("Scaffold: off").color(theme::MUTED).size(12.0));
-                    ui.label(RichText::new("No-support zones: 0").color(theme::MUTED).size(12.0));
+                    ui.label(RichText::new(format!("{} support(s)", self.resin.points.len())).size(12.0));
+                    let islands = self.resin.features.as_ref().map(|f| f.islands.len()).unwrap_or(0);
+                    ui.label(RichText::new(format!("{islands} island(s) detected")).size(12.0));
                 });
             }
             return;
@@ -3397,7 +3512,9 @@ impl App {
 
     fn orient_center(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
-            self.viewport_panel(ui, "Build volume (placeholder)");
+            let caption =
+                if self.resin.has_part() { "Build plate, top view" } else { "Build plate — import an STL to begin (File → Import part…)" };
+            self.viewport_panel(ui, caption);
         });
     }
 
@@ -3426,69 +3543,92 @@ impl App {
         });
         field_row(ui, "Lift from plate (mm)", &mut self.state.lift_mm, self.state.dark_theme);
         ui.add_space(8.0);
-        if ui.button("Lay flat on face").clicked() {
-            self.state.status = "Lay flat is a placeholder in this preview".to_string();
-        }
-        if ui.button("Auto orient").clicked() {
-            self.state.status = "Auto orient is a placeholder in this preview".to_string();
-        }
-        if ui.button("Reset").clicked() {
+        let _ = ui.add_enabled(false, egui::Button::new("Lay flat on face")).on_hover_text("Lay flat is not in this release.");
+        let _ = ui.add_enabled(false, egui::Button::new("Auto orient")).on_hover_text("Auto orient is not in this release.");
+        if ui.button("Reset").on_hover_text("Clear typed position, rotation and lift. No values are filled in.").clicked() {
             self.state.reset_orient();
         }
-        ui.separator();
-        ui.label(RichText::new("Array").strong().size(13.0));
-        field_row(ui, "Count X", &mut self.state.array_x, self.state.dark_theme);
-        field_row(ui, "Count Y", &mut self.state.array_y, self.state.dark_theme);
-        field_row(ui, "Spacing (mm)", &mut self.state.array_spacing_mm, self.state.dark_theme);
-        ui.separator();
-        ui.label(RichText::new("Arrange  (A)").strong().size(13.0));
-        field_row(ui, "Minimum gap (mm)", &mut self.state.arrange_gap_mm, self.state.dark_theme);
-        if ui.button("Arrange").clicked() {
-            self.state.status = "Arrange is a placeholder in this preview".to_string();
+        ui.add_space(10.0);
+        if resin_ui::primary_button(ui, "Continue to Supports", None) {
+            let _ = self.state.set_tab(ModeTab::Supports);
         }
         ui.separator();
+        let advanced = egui::CollapsingHeader::new("Array and arrange").id_salt("orient-advanced").default_open(false).show(ui, |ui| {
+            ui.label(
+                RichText::new("Array and automatic arrange are not in this release. The fields stay visible here so they are not hidden later.")
+                    .color(theme::MUTED)
+                    .size(11.0),
+            );
+            field_row(ui, "Count X", &mut self.state.array_x, self.state.dark_theme);
+            field_row(ui, "Count Y", &mut self.state.array_y, self.state.dark_theme);
+            field_row(ui, "Spacing (mm)", &mut self.state.array_spacing_mm, self.state.dark_theme);
+            field_row(ui, "Minimum gap (mm)", &mut self.state.arrange_gap_mm, self.state.dark_theme);
+            let _ = ui.add_enabled(false, egui::Button::new("Arrange")).on_hover_text("Arrange is not in this release.");
+        });
+        let _ = advanced;
+        ui.separator();
         ui.label(RichText::new("Info").strong().size(13.0));
-        ui.label(RichText::new("Volume: —").color(theme::MUTED).size(12.0));
-        ui.label(RichText::new("Bounding box: —").color(theme::MUTED).size(12.0));
-        ui.label(RichText::new("Overhang area: —").color(theme::MUTED).size(12.0));
+        if let Some(mesh) = &self.resin.mesh {
+            if let Ok(bounds) = mesh.bounds() {
+                let (min, max) = (bounds.min(), bounds.max());
+                ui.label(RichText::new(format!("Bounding box: {:.2} × {:.2} × {:.2} mm", max.x - min.x, max.y - min.y, max.z - min.z)).size(12.0));
+            }
+            let volume = campanion_resin::supports::signed_volume(mesh).abs();
+            ui.label(RichText::new(format!("Volume: {:.3} mm³", volume)).size(12.0));
+        } else {
+            ui.label(RichText::new("Volume: — (import a part)").color(theme::MUTED).size(12.0));
+            ui.label(RichText::new("Bounding box: —").color(theme::MUTED).size(12.0));
+        }
     }
 
     fn supports_center(&mut self, ui: &mut egui::Ui) {
+        let gen_reason = resin_ui::generate_disabled_reason(&self.resin, &self.state.support, &self.state.lift_mm);
+        let opt_reason = resin_ui::optimize_disabled_reason(&self.resin, &self.state.support, &self.state.lift_mm);
         ui.horizontal(|ui| {
-            for (label, message) in [
-                ("Auto Generate", "Auto Generate is a placeholder in this preview"),
-                ("Add Support", "Add Support is a placeholder in this preview"),
-                ("Delete", "Delete is a placeholder in this preview"),
-                ("Select Region", "Select Region is a placeholder in this preview"),
-                ("No-Support Zone", "No-support zones are a placeholder in this preview"),
-                ("Scaffold", "Scaffold generation is a placeholder in this preview"),
-            ] {
-                if ui.button(label).clicked() {
-                    self.state.status = message.to_string();
-                }
+            if resin_ui::primary_button(ui, "Generate supports", gen_reason.as_deref()) {
+                self.generate_resin_supports(false);
+            }
+            ui.add_space(8.0);
+            if resin_ui::primary_button(ui, "Optimize supports", opt_reason.as_deref()) {
+                self.generate_resin_supports(true);
             }
         });
-        ui.add_space(6.0);
-        self.viewport_panel(ui, "Build plate (placeholder)");
+        if let Some(note) = &self.resin.last_generate_note {
+            ui.label(RichText::new(note).size(12.0));
+        }
+        if let Some(summary) = &self.resin.optimize_summary {
+            ui.label(RichText::new(summary).size(12.0));
+        }
+        for warning in &self.resin.warnings {
+            ui.label(RichText::new(warning).color(theme::OFF_BED).size(11.0));
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Click empty space to add a support. Drag a tip to move it. Press Delete (or use the Delete tool) to remove the selection. Ctrl+Z undoes an edit.").color(theme::MUTED).size(11.0));
+        self.show_resin_viewport(ui, "Build plate, top view — supports and islands");
     }
 
     fn supports_properties(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Support Settings").strong().size(14.0));
-        ui.add_space(4.0);
-        ui.label(RichText::new("Fields start empty. The program ships no default sizes.").color(theme::MUTED).size(11.0));
-        field_row(ui, "Tip diameter (mm)", &mut self.state.support.tip_diameter_mm, self.state.dark_theme);
-        field_row(ui, "Contact depth (mm)", &mut self.state.support.contact_depth_mm, self.state.dark_theme);
-        field_row(ui, "Shaft diameter (mm)", &mut self.state.support.shaft_diameter_mm, self.state.dark_theme);
-        field_row(ui, "Max angle (deg)", &mut self.state.support.max_angle_deg, self.state.dark_theme);
-        field_row(ui, "Density (%)", &mut self.state.support.density_pct, self.state.dark_theme);
-        field_row(ui, "Scaffold spacing (mm)", &mut self.state.support.scaffold_spacing_mm, self.state.dark_theme);
-        field_row(ui, "Raft thickness (mm)", &mut self.state.support.raft_thickness_mm, self.state.dark_theme);
+        let dark = self.state.dark_theme;
+        resin_ui::show_supports_properties(ui, &mut self.resin, &mut self.state.support, &mut self.state.lift_mm, dark);
+        self.state.support.selected_count = resin_ui::selected_count(&self.resin);
         ui.separator();
-        ui.label(RichText::new(format!("Selected: {} supports", self.state.support.selected_count)).strong().size(13.0));
-        ui.label(RichText::new("Select supports after generation is wired.").color(theme::MUTED).size(11.0));
+        ui.label(RichText::new(format!("Selected: {} support(s)", self.state.support.selected_count)).strong().size(13.0));
+        if let Some(index) = self.resin.selected_point
+            && let Some(point) = self.resin.points.get(index)
+        {
+            ui.label(RichText::new(format!("#{index}: ({:.3}, {:.3}, {:.3}) mm", point.x, point.y, point.contact_z)).size(12.0));
+        }
     }
 
     fn slice_tab(&mut self, ui: &mut egui::Ui) {
+        let reason = resin_ui::slice_disabled_reason(&self.resin, &self.state.support.layer_height_mm);
+        if resin_ui::primary_button(ui, "Slice", reason.as_deref()) {
+            self.slice_resin();
+        }
+        if self.resin.sliced {
+            ui.label(RichText::new(format!("Sliced {} layer(s). NOT printer-tested.", self.state.layer_count)).size(12.0));
+        }
+        ui.add_space(6.0);
         ui.columns(3, |columns| {
             if let Some(left) = columns.get_mut(0) {
                 left.label(RichText::new("3D Layer View").strong().size(14.0));
@@ -3529,7 +3669,13 @@ impl App {
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Layer height: —").color(theme::MUTED));
+            let height = self.state.support.layer_height_mm.value.trim();
+            let height_label = if height.is_empty() {
+                "Layer height: — (enter on the Supports tab, mm)".to_string()
+            } else {
+                format!("Layer height: {height} mm")
+            };
+            ui.label(RichText::new(height_label).color(theme::MUTED));
             ui.separator();
             ui.label(RichText::new("Z height: —").color(theme::MUTED));
             ui.separator();
@@ -3558,25 +3704,66 @@ impl App {
         });
     }
 
+    fn resin_export_properties(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Export").strong().size(14.0));
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(
+                "Write the .pm7m with `campanion resin` in this release. The button in the centre records that a GUI export is still in development.",
+            )
+            .color(theme::MUTED)
+            .size(11.0),
+        );
+        ui.add_space(8.0);
+        ui.label(RichText::new("Status").strong().size(13.0));
+        ui.label(if self.resin.has_part() { "Part loaded".to_string() } else { "Part — import an STL first".to_string() });
+        ui.label(if self.resin.points.is_empty() {
+            "Supports — not generated yet".to_string()
+        } else {
+            format!("{} support(s) generated", self.resin.points.len())
+        });
+        ui.label(if self.resin.sliced {
+            format!("Slice recorded ({} layers). Full layer images are written by the CLI.", self.state.layer_count)
+        } else {
+            "Slice — not sliced yet".to_string()
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("NOT printer-tested.").color(theme::MUTED).size(11.0));
+    }
+
     fn resin_export_center(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Job Summary").strong().size(16.0));
         ui.add_space(8.0);
-        placeholder_pane(ui, "Thumbnail appears here after a slice exists.");
+        let reason = resin_ui::export_disabled_reason(&self.resin);
+        if resin_ui::primary_button(ui, "Export .pm7m", reason.as_deref()) {
+            self.state.status = "Export .pm7m from the GUI is still in development; use `campanion resin` to write a file.".to_string();
+        }
         ui.add_space(8.0);
-        for label in ["Layers", "Layer height (mm)", "Print time estimate", "Resin volume (ml)", "Bottom layers", "Exposure profile"] {
+        let height = self.state.support.layer_height_mm.value.trim();
+        let height_value = if height.is_empty() { "—".to_string() } else { format!("{height} mm") };
+        let layers = if self.state.layer_count == 0 { "—".to_string() } else { self.state.layer_count.to_string() };
+        let supports = if self.resin.points.is_empty() { "not generated".to_string() } else { format!("{} tip(s)", self.resin.points.len()) };
+        for (label, value) in [
+            ("Layers", layers),
+            ("Layer height (mm)", height_value),
+            ("Print time estimate", "— (not estimated in this preview)".to_string()),
+            ("Supports", supports),
+        ] {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(label).color(theme::MUTED));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label("—");
+                    ui.label(value);
                 });
             });
         }
         ui.separator();
         ui.label(RichText::new("Pre-flight checks").strong().size(13.0));
-        ui.label(RichText::new("Pending: this preview does not run checks yet.").color(theme::MUTED).size(12.0));
-        ui.label("Parts inside the build volume — not checked");
-        ui.label("Slice up to date — not sliced");
-        ui.label("Supports generated — not generated");
+        ui.label(if self.resin.has_part() { "Part loaded" } else { "Part — import an STL on Orient or via File → Import part…" });
+        ui.label(if self.resin.sliced { "Slice up to date" } else { "Slice — not sliced yet (Slice tab)" });
+        ui.label(if self.resin.points.is_empty() { "Supports — not generated yet (Supports tab)" } else { "Supports generated" });
+        ui.label(
+            RichText::new("NOT printer-tested. Use `campanion resin` to write a .pm7m until GUI export is finished.").color(theme::MUTED).size(11.0),
+        );
     }
 
     fn export_form(&mut self, ui: &mut egui::Ui) {
@@ -4045,6 +4232,192 @@ impl App {
         });
     }
 
+    fn load_resin_part(&mut self, path: &Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => match campanion_mesh::parse_stl(&bytes) {
+                Ok(mesh) => {
+                    let scene = resin_ui::mesh_xy_scene(&mesh);
+                    self.viewport = Some(Viewport::new(&scene));
+                    self.scene = Some(scene);
+                    self.state.has_scene = true;
+                    self.resin.mesh = Some(mesh);
+                    self.resin.mesh_path = Some(path.to_path_buf());
+                    self.resin.points.clear();
+                    self.resin.features = None;
+                    self.resin.sliced = false;
+                    self.state.remember_open(path.to_path_buf());
+                    if self.state.export_name.is_empty()
+                        && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                    {
+                        self.state.export_name = stem.to_string();
+                    }
+                    self.state.status = format!("Opened {} for resin. Continue on Orient, then Supports.", path.display());
+                }
+                Err(err) => self.state.status = format!("STL: {err}"),
+            },
+            Err(err) => self.state.status = format!("open {}: {err}", path.display()),
+        }
+    }
+
+    fn push_resin_undo(&mut self) {
+        const LIMIT: usize = 32;
+        self.resin_undo.push(self.resin.snapshot());
+        if self.resin_undo.len() > LIMIT {
+            self.resin_undo.remove(0);
+        }
+    }
+
+    fn undo_resin(&mut self) {
+        let Some(snapshot) = self.resin_undo.pop() else {
+            self.state.status = "Nothing to undo".to_string();
+            return;
+        };
+        self.resin.restore(snapshot);
+        self.state.status = "Undo".to_string();
+    }
+
+    fn delete_resin_point(&mut self) {
+        let Some(index) = self.resin.selected_point else {
+            self.state.status = "Select a support in the viewport first, or use the Delete tool and click one.".to_string();
+            return;
+        };
+        self.push_resin_undo();
+        match campanion_resin::delete_support_point(&mut self.resin.points, index) {
+            Ok(_) => {
+                self.resin.selected_point = None;
+                self.state.status = "Deleted support".to_string();
+            }
+            Err(err) => self.state.status = err.to_string(),
+        }
+    }
+
+    fn generate_resin_supports(&mut self, optimize: bool) {
+        match resin_ui::apply_generate(&mut self.resin, &self.state.support, &self.state.lift_mm, optimize) {
+            Ok(_) => {
+                if let Some(note) = &self.resin.last_generate_note {
+                    self.state.status = note.clone();
+                }
+            }
+            Err(err) => self.state.status = err,
+        }
+    }
+
+    fn slice_resin(&mut self) {
+        if let Some(reason) = resin_ui::slice_disabled_reason(&self.resin, &self.state.support.layer_height_mm) {
+            self.state.status = reason;
+            return;
+        }
+        // Full .pm7m slicing stays on the CLI in this release. The tab records that a slice was requested
+        // so Export can explain what is still missing.
+        self.resin.sliced = true;
+        if let (Some(mesh), Ok(height)) = (self.resin.mesh.as_ref(), self.state.support.layer_height_mm.value.trim().parse::<f64>())
+            && height > 0.0
+            && let Ok(bounds) = mesh.bounds()
+        {
+            let layers = ((bounds.max().z - bounds.min().z) / height).ceil() as u32;
+            self.state.layer_count = layers.max(1);
+            self.state.set_layer(1);
+        }
+        self.state.status = format!("Slice preview: {} layer(s). Write a .pm7m with `campanion resin`. NOT printer-tested.", self.state.layer_count);
+        let _ = self.state.set_tab(ModeTab::Export);
+    }
+
+    fn show_resin_viewport(&mut self, ui: &mut egui::Ui, caption: &str) {
+        ui.label(RichText::new(caption).color(theme::MUTED).size(11.0));
+        if self.viewport.is_none() {
+            placeholder_pane(ui, "Import a part to place supports.\nFile → Import part… (STL, millimetres)");
+            return;
+        }
+        let guides = self.viewport_guides();
+        let Some(viewport) = self.viewport.as_mut() else {
+            return;
+        };
+        let output = viewport::show_with(ui, viewport, self.scene.as_ref(), false, Some(&guides));
+        if let Some(viewport) = self.viewport.as_ref() {
+            let to_screen = |world: [f64; 2]| viewport.world_to_screen(output.rect, world);
+            resin_ui::paint_support_overlay(
+                ui.painter(),
+                self.resin.features.as_ref(),
+                &self.resin.points,
+                self.resin.selected_point,
+                self.resin.selected_island,
+                to_screen,
+            );
+        }
+        self.handle_resin_pointer(&output);
+    }
+
+    fn handle_resin_pointer(&mut self, output: &viewport::ViewportOutput) {
+        if self.resin.mesh.is_none() {
+            return;
+        }
+        let raft_top = self.state.support.raft_thickness_mm.value.trim().parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
+        let hover = output.hover_world;
+        let click = output.click_world;
+        let dragging = output.response.dragged_by(egui::PointerButton::Primary);
+        if output.response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(world) = hover.or(click)
+            && let Some(index) = resin_ui::hit_point(&self.resin.points, world[0], world[1], 1.5)
+            && self.resin.tool != SupportEditTool::Add
+        {
+            self.push_resin_undo();
+            self.resin.selected_point = Some(index);
+            self.resin.dragging = Some(index);
+        }
+        if dragging
+            && let Some(index) = self.resin.dragging
+            && let Some(world) = hover
+            && (self.resin.tool == SupportEditTool::Direct || self.resin.tool == SupportEditTool::Move)
+            && let Some(mesh) = self.resin.mesh.as_ref()
+        {
+            let _ = campanion_resin::move_support_point(&mut self.resin.points, index, mesh, world[0], world[1], None, raft_top);
+        }
+        if output.response.drag_stopped() {
+            self.resin.dragging = None;
+        }
+        if let Some(world) = click
+            && self.resin.dragging.is_none()
+        {
+            let hit = resin_ui::hit_point(&self.resin.points, world[0], world[1], 1.5);
+            match self.resin.tool {
+                SupportEditTool::Delete => {
+                    if let Some(index) = hit {
+                        self.push_resin_undo();
+                        let _ = campanion_resin::delete_support_point(&mut self.resin.points, index);
+                        self.resin.selected_point = None;
+                        self.state.status = "Deleted support".to_string();
+                    }
+                }
+                SupportEditTool::Move => {
+                    self.resin.selected_point = hit;
+                }
+                SupportEditTool::Add | SupportEditTool::Direct => {
+                    if let Some(index) = hit {
+                        self.resin.selected_point = Some(index);
+                    } else {
+                        self.push_resin_undo();
+                        if let Some(mesh) = self.resin.mesh.as_ref() {
+                            match campanion_resin::add_support_point(&mut self.resin.points, mesh, world[0], world[1], None, raft_top) {
+                                Ok(index) => {
+                                    self.resin.selected_point = Some(index);
+                                    self.state.status = format!("Added support at ({:.3}, {:.3}) mm", world[0], world[1]);
+                                }
+                                Err(err) => self.state.status = err.to_string(),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if output.response.hovered()
+            && let Some(world) = hover
+            && let Some(index) = resin_ui::hit_point(&self.resin.points, world[0], world[1], 1.5)
+            && let Some(point) = self.resin.points.get(index)
+        {
+            output.response.clone().on_hover_text(format!("Support {index}: ({:.3}, {:.3}, {:.3}) mm", point.x, point.y, point.contact_z));
+        }
+    }
+
     fn viewport_panel(&mut self, ui: &mut egui::Ui, caption: &str) {
         self.show_viewport(ui, caption);
     }
@@ -4187,6 +4560,46 @@ fn empty_scene_with_bounds(bounds: [f64; 4]) -> Scene {
         lathe: None,
         timeline: Vec::new(),
     }
+}
+
+fn screenshot_resin_part() -> campanion_mesh::Mesh {
+    use campanion_mesh::{Aabb, Mesh, Vec3};
+    let mut tris = Vec::new();
+    if let Ok(base) = Mesh::new(Aabb::from_corners(Vec3::new(-8.0, -8.0, 0.0), Vec3::new(8.0, 8.0, 4.0)).face_triangles().to_vec()) {
+        tris.extend_from_slice(base.triangles());
+    }
+    if let Ok(island) = Mesh::new(Aabb::from_corners(Vec3::new(16.0, 16.0, 12.0), Vec3::new(22.0, 22.0, 16.0)).face_triangles().to_vec()) {
+        tris.extend_from_slice(island.triangles());
+    }
+    match Mesh::new(tris) {
+        Ok(mesh) => mesh,
+        Err(_) => match Mesh::new(Aabb::from_corners(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)).face_triangles().to_vec()) {
+            Ok(mesh) => mesh,
+            Err(_) => match Mesh::new(Vec::new()) {
+                Ok(mesh) => mesh,
+                Err(_) => screenshot_resin_part(),
+            },
+        },
+    }
+}
+
+fn fill_screenshot_support_fields(state: &mut GuiState) {
+    // Screenshot-only typed values, not shipped defaults.
+    let set = |field: &mut UserField, value: &str| field.value = value.to_string();
+    set(&mut state.support.layer_height_mm, "0.50");
+    set(&mut state.support.detect_cell_mm, "0.50");
+    set(&mut state.support.support_spacing_mm, "4.00");
+    set(&mut state.support.overhang_angle_deg, "45");
+    set(&mut state.support.tip_diameter_mm, "0.60");
+    set(&mut state.support.tip_length_mm, "1.20");
+    set(&mut state.support.pillar_diameter_mm, "1.20");
+    set(&mut state.support.foot_diameter_mm, "3.00");
+    set(&mut state.support.foot_height_mm, "0.80");
+    set(&mut state.lift_mm, "5.00");
+    set(&mut state.support.raft_thickness_mm, "1.50");
+    set(&mut state.support.raft_chamfer_angle_deg, "30");
+    set(&mut state.support.raft_margin_mm, "3.00");
+    set(&mut state.support.raft_corner_relief_mm, "0");
 }
 
 fn screenshot_part_path(name: &str) -> Option<PathBuf> {

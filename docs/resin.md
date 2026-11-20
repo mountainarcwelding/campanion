@@ -2,7 +2,10 @@
 
 **Status: not printer-tested.** Nothing written by `campanion resin` or `campanion supports` has
 been printed or physically tested. The format was derived from one file, so some fields are copied
-rather than understood. CAMpanion is primarily command-line driven; the GUI is still in development.
+rather than understood. CAMpanion is primarily command-line driven; the GUI is still in development. The resin
+Supports tab can detect and colour islands, edit support points in the viewport with
+undo, and load a calibration profile. Optimize stays disabled until that profile is
+complete. Slice images and `.pm7m` export are still written by this CLI, not by the GUI.
 
 ## Commands
 
