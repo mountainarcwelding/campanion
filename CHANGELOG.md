@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## 0.28.0 — 2026-11-20
+
+**NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.
+Check any `.pm7m` on the printer screen and print a test before a real job. CAMpanion is still
+primarily command-line driven; the GUI is in development.
+
+A shared 3D viewport for resin (and later FDM and other processes): orbit, pan, zoom, fit-all,
+and Top / Front / Side / Iso. Support tips can be added on the part surface, dragged, deleted,
+and undone in any view, not only Top. Cutting workspaces keep the existing 2D viewport.
+
+### Added
+
+- A reusable orthographic 3D viewport (Z-up, machine millimetres). Mouse bindings follow
+  SolidCraft's documented default (https://docs.solidcraft.io/guide/ui-tour.html): right-drag
+  orbits, middle-drag pans, and the wheel zooms at the pointer. Shaded meshes are drawn with
+  a software z-buffer so depth reads correctly and the image appears in screenshots. The
+  scene API accepts polylines for later FDM and toolpath drawing.
+- The resin Orient, Supports, and Slice solid panes use this viewport. Part, raft, pillars,
+  and islands are coloured as before. The build volume is drawn only when the selected
+  machine profile has a bed or screen size; otherwise the control explains that those fields
+  must be entered. Fit all frames the volume when it is known.
+- Direct support editing in 3D: click the part surface (ray pick) to add a tip, drag a tip
+  along the surface, Delete removes the selection, Ctrl+Z undoes. Disabled controls still
+  say why and what to enter.
+
+### Known limits
+
+- Nothing in this release has been printer-tested. Image orientation is unverified until
+  an asymmetric test part is printed.
+- Paint-on supports, no-support zones, branching trees, hollowing, auto-orient, and
+  calibration-print geometry are not included. Fitting measurements to constants is not
+  implemented.
+- The undercut chamfered raft is unchanged and still unprinted. The only `.pm7m` format
+  written is the Anycubic Photon Mono M7 Max layout derived from the sample file.
+- The GUI is still in development. CAMpanion remains primarily command-line driven.
+
 ## 0.27.0 — 2026-11-20
 
 **NOT printer-tested.** Image orientation is unverified until an asymmetric test part is printed.

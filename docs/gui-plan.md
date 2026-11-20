@@ -34,7 +34,17 @@ This file is only the GUI sequence and the data-model hooks it needs.
    behaviour has been physically tested. A code-generation error is fixed, with a
    regression test, before the next feature.
 
-## Current baseline (v0.27.0)
+## Current baseline (v0.28.0, in progress)
+
+A shared 3D viewport (orbit, pan, zoom, fit-all, Top/Front/Side/Iso) is used on the resin
+Orient, Supports, and Slice solid panes. Mouse bindings follow SolidCraft's documented
+default (https://docs.solidcraft.io/guide/ui-tour.html): right-drag orbits, middle-drag
+pans, the wheel zooms at the pointer. Meshes are shaded with depth. The build volume is
+drawn only from the selected machine profile. Support tips can be edited in 3D, not only
+in Top view. Cutting workspaces keep the 2D viewport. The scene API accepts polylines
+for later FDM and toolpath drawing.
+
+## Previous baseline (v0.27.0)
 
 The backend and CLI already carry the v0.4 data model:
 
